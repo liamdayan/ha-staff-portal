@@ -349,6 +349,11 @@
   function render(data) {
     lastData = data;
     const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
+    // Settle which page is open before comparing shapes, so a remembered page that's gone
+    // (or the first load) doesn't cause an extra full redraw on the next poll.
+    if (data.layout?.pages.length && !data.layout.pages.some((p) => p.id === view.pageId)) {
+      view.pageId = data.layout.pages[0].id;
+    }
     const shape = JSON.stringify(data.layout
       ? [data.layout, view.pageId, view.detail]
       : data.entities.map((e) => [e.entity_id, e.area]));

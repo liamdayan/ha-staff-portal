@@ -76,6 +76,8 @@
   // Makes the .sort-row children of `container` reorderable by dragging their grip (mouse,
   // touch or pen) or by focusing the grip and pressing the arrow keys. onMove(from, to) updates
   // the data and redraws; it may return a promise.
+  let activeDrag = false; // only one reorder at a time, across all lists
+
   function sortable(container, key, onMove) {
     container.dataset.sortable = key;
     const rows = () => [...container.children].filter((el) => el.classList.contains("sort-row"));
@@ -87,7 +89,7 @@
 
     container.addEventListener("keydown", async (ev) => {
       const handle = ev.target.closest?.(".drag-handle");
-      if (!handle || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+      if (!handle || activeDrag || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
       const from = rows().indexOf(handle.closest(".sort-row"));
       const to = from + (ev.key === "ArrowUp" ? -1 : 1);
       if (from < 0 || to < 0 || to >= rows().length) return;
@@ -99,17 +101,19 @@
     container.addEventListener("pointerdown", (ev) => {
       const handle = ev.target.closest?.(".drag-handle");
       const row = handle?.closest(".sort-row");
-      if (!row || row.parentElement !== container || ev.button > 0) return;
+      if (!row || row.parentElement !== container || ev.button > 0 || !ev.isPrimary || activeDrag) return;
       ev.preventDefault();
+      activeDrag = true;
       const from = rows().indexOf(row);
       const grabOffset = ev.clientY - row.getBoundingClientRect().top;
       const scroller = scrollParent(container);
       let pointerY = ev.clientY;
+      // Nothing moves until the pointer has travelled a few pixels, so a click or tap on a grip
+      // (even one near the edge of the window, where auto-scroll would kick in) changes nothing.
+      let dragging = false;
       // Capture on the list, not the grip: the row (and its grip) are moved around the page
       // while dragging, and moving an element drops any pointer capture it holds.
       container.setPointerCapture(ev.pointerId);
-      row.classList.add("dragging");
-      document.body.classList.add("sorting");
 
       const middle = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
       const place = () => {
@@ -137,7 +141,7 @@
         let dy = 0;
         if (pointerY < box.top + edge) dy = -Math.min(18, Math.ceil((box.top + edge - pointerY) / 3));
         else if (pointerY > box.bottom - edge) dy = Math.min(18, Math.ceil((pointerY - box.bottom + edge) / 3));
-        if (dy) {
+        if (dy && dragging) {
           scroller.scrollTop += dy;
           place();
         }
@@ -147,12 +151,19 @@
       const move = (e) => {
         if (e.pointerId !== ev.pointerId) return;
         pointerY = e.clientY;
+        if (!dragging) {
+          if (Math.abs(pointerY - ev.clientY) < 5) return;
+          dragging = true;
+          row.classList.add("dragging");
+          document.body.classList.add("sorting");
+        }
         place();
       };
       let finished = false;
-      const end = () => {
-        if (finished) return;
+      const end = (e) => {
+        if (finished || (e && e.pointerId !== ev.pointerId)) return;
         finished = true;
+        activeDrag = false;
         cancelAnimationFrame(frame);
         for (const [type, fn] of listeners) container.removeEventListener(type, fn);
         if (container.hasPointerCapture(ev.pointerId)) container.releasePointerCapture(ev.pointerId);
@@ -160,7 +171,7 @@
         row.style.transform = "";
         document.body.classList.remove("sorting");
         const to = rows().indexOf(row);
-        if (to !== from && to >= 0) onMove(from, to);
+        if (dragging && to !== from && to >= 0) onMove(from, to);
       };
       const listeners = [["pointermove", move], ["pointerup", end], ["pointercancel", end],
         ["lostpointercapture", end]];
@@ -964,12 +975,22 @@
         }, "Area deleted.") }, "Delete")))));
   }
 
-  sortable($("#area-list"), "areas", (from, to) => run(async () => {
-    const ids = state.areas.map((a) => a.id);
-    moveItem(ids, from, to);
-    await api("PUT", "api/areas/order", { order: ids });
-    await load();
-  }));
+  // Area order is saved straight away. Update the list locally first so a quick second move
+  // starts from what's on screen, save one change at a time, and always reload afterwards so
+  // a failed save puts the list back to what the server has.
+  let areaSaves = Promise.resolve();
+  sortable($("#area-list"), "areas", (from, to) => {
+    moveItem(state.areas, from, to);
+    renderAreaSettings();
+    const order = state.areas.map((a) => a.id);
+    areaSaves = areaSaves.then(() => run(async () => {
+      try {
+        await api("PUT", "api/areas/order", { order });
+      } finally {
+        await load();
+      }
+    }));
+  });
 
   async function editArea(a) {
     if (!entities) await loadEntities();
