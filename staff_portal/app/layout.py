@@ -31,10 +31,13 @@ def clean_layout(data) -> dict:
     """Validate a layout sent from the admin dashboard. Unknown fields are dropped."""
     if not isinstance(data, dict):
         raise ValueError("layout must be an object")
+    raw_pages = [p for p in (data.get("pages") or [])[:MAX_PAGES] if isinstance(p, dict)]
+    # IDs the admin sent explicitly. A page whose ID is missing, "more" or a repeat gets a new
+    # one that clashes with none of these, so no other page's ID (or a phone's choice) moves.
+    explicit = {str(p.get("id")) for p in raw_pages if ID_RE.match(str(p.get("id") or ""))}
+    used: set[str] = set()
     pages = []
-    for p_index, page in enumerate((data.get("pages") or [])[:MAX_PAGES]):
-        if not isinstance(page, dict):
-            continue
+    for p_index, page in enumerate(raw_pages):
         items = []
         for i_index, item in enumerate((page.get("items") or [])[:MAX_ITEMS]):
             if not isinstance(item, dict) or item.get("type") not in ITEM_TYPES:
@@ -67,9 +70,10 @@ def clean_layout(data) -> dict:
                 title = _text(item.get("title"), 60)
                 if title and members:
                     items.append({**base, "title": title, "entities": members})
-        page_id = _id(page.get("id"), f"p{p_index}")
-        if page_id == MORE_PAGE_ID or any(p["id"] == page_id for p in pages):
-            page_id = f"p{p_index}"
+        page_id = str(page.get("id") or "")
+        if not ID_RE.match(page_id) or page_id == MORE_PAGE_ID or page_id in used:
+            page_id = _free_id(f"p{p_index}", used | explicit | {MORE_PAGE_ID})
+        used.add(page_id)
         pages.append({"id": page_id,
                       "name": _text(page.get("name"), 30) or f"Page {p_index + 1}",
                       "items": items})
@@ -83,9 +87,11 @@ def clean_phone_pages(value) -> list[str] | None:
     if not isinstance(value, list):
         raise ValueError("layout_pages must be a list of page IDs or null")
     ids: list[str] = []
-    for item in value[:MAX_PHONE_PAGES]:
+    for item in value:
         if isinstance(item, str) and ID_RE.match(item) and item not in ids:
             ids.append(item)
+    if len(ids) > MAX_PHONE_PAGES:
+        raise ValueError(f"a phone can be given at most {MAX_PHONE_PAGES} pages")
     return ids
 
 
@@ -141,6 +147,13 @@ def visible_layout(layout: dict, access: dict[str, str], areas,
                               "title": heading or "Other", "entity_ids": sorted(ids)})
             pages.append({"id": MORE_PAGE_ID, "name": "More", "items": items})
     return {"pages": pages}
+
+
+def _free_id(base: str, taken: set[str]) -> str:
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate, n = f"{base}-{n}", n + 1
+    return candidate
 
 
 def _drop_empty_headings(items: list[dict]) -> list[dict]:

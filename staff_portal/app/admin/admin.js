@@ -47,6 +47,127 @@
     return el;
   }
 
+  // ---------------------------------------------------------------- drag to reorder
+
+  const GRIP_ICON = '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">' +
+    '<path d="M4 6h12M4 10h12M4 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+
+  // The \u2261 grip at the start of a row that can be reordered.
+  function dragHandle(label) {
+    const handle = h("button", { type: "button", class: "drag-handle", "aria-label": label,
+      title: "Drag to reorder, or use the arrow keys" });
+    handle.innerHTML = GRIP_ICON;
+    return handle;
+  }
+
+  function moveItem(list, from, to) {
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
+  }
+
+  function scrollParent(el) {
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node;
+    }
+    return document.scrollingElement;
+  }
+
+  // Makes the .sort-row children of `container` reorderable by dragging their grip (mouse,
+  // touch or pen) or by focusing the grip and pressing the arrow keys. onMove(from, to) updates
+  // the data and redraws; it may return a promise.
+  function sortable(container, key, onMove) {
+    container.dataset.sortable = key;
+    const rows = () => [...container.children].filter((el) => el.classList.contains("sort-row"));
+    const refocus = (index) => {
+      const list = document.querySelector(`[data-sortable="${key}"]`);
+      const row = list && [...list.children].filter((el) => el.classList.contains("sort-row"))[index];
+      row?.querySelector(".drag-handle")?.focus();
+    };
+
+    container.addEventListener("keydown", async (ev) => {
+      const handle = ev.target.closest?.(".drag-handle");
+      if (!handle || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+      const from = rows().indexOf(handle.closest(".sort-row"));
+      const to = from + (ev.key === "ArrowUp" ? -1 : 1);
+      if (from < 0 || to < 0 || to >= rows().length) return;
+      ev.preventDefault();
+      await onMove(from, to);
+      refocus(to); // right away, so a quick second key press still moves the same row
+    });
+
+    container.addEventListener("pointerdown", (ev) => {
+      const handle = ev.target.closest?.(".drag-handle");
+      const row = handle?.closest(".sort-row");
+      if (!row || row.parentElement !== container || ev.button > 0) return;
+      ev.preventDefault();
+      const from = rows().indexOf(row);
+      const grabOffset = ev.clientY - row.getBoundingClientRect().top;
+      const scroller = scrollParent(container);
+      let pointerY = ev.clientY;
+      // Capture on the list, not the grip: the row (and its grip) are moved around the page
+      // while dragging, and moving an element drops any pointer capture it holds.
+      container.setPointerCapture(ev.pointerId);
+      row.classList.add("dragging");
+      document.body.classList.add("sorting");
+
+      const middle = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const place = () => {
+        // Move past any neighbour whose middle the pointer has crossed...
+        let prev = row.previousElementSibling;
+        while (prev?.classList.contains("sort-row") && pointerY < middle(prev)) {
+          container.insertBefore(row, prev);
+          prev = row.previousElementSibling;
+        }
+        let next = row.nextElementSibling;
+        while (next?.classList.contains("sort-row") && pointerY > middle(next)) {
+          container.insertBefore(row, next.nextElementSibling);
+          next = row.nextElementSibling;
+        }
+        // ...and keep the row under the pointer.
+        row.style.transform = "";
+        row.style.transform = `translateY(${pointerY - grabOffset - row.getBoundingClientRect().top}px)`;
+      };
+
+      // Scroll when dragging near the top or bottom edge of the list's scroll area.
+      let frame = requestAnimationFrame(function autoScroll() {
+        const box = scroller === document.scrollingElement
+          ? { top: 0, bottom: window.innerHeight } : scroller.getBoundingClientRect();
+        const edge = 48;
+        let dy = 0;
+        if (pointerY < box.top + edge) dy = -Math.min(18, Math.ceil((box.top + edge - pointerY) / 3));
+        else if (pointerY > box.bottom - edge) dy = Math.min(18, Math.ceil((pointerY - box.bottom + edge) / 3));
+        if (dy) {
+          scroller.scrollTop += dy;
+          place();
+        }
+        frame = requestAnimationFrame(autoScroll);
+      });
+
+      const move = (e) => {
+        if (e.pointerId !== ev.pointerId) return;
+        pointerY = e.clientY;
+        place();
+      };
+      let finished = false;
+      const end = () => {
+        if (finished) return;
+        finished = true;
+        cancelAnimationFrame(frame);
+        for (const [type, fn] of listeners) container.removeEventListener(type, fn);
+        if (container.hasPointerCapture(ev.pointerId)) container.releasePointerCapture(ev.pointerId);
+        row.classList.remove("dragging");
+        row.style.transform = "";
+        document.body.classList.remove("sorting");
+        const to = rows().indexOf(row);
+        if (to !== from && to >= 0) onMove(from, to);
+      };
+      const listeners = [["pointermove", move], ["pointerup", end], ["pointercancel", end],
+        ["lostpointercapture", end]];
+      for (const [type, fn] of listeners) container.addEventListener(type, fn);
+    });
+  }
+
   function toast(text, isError) {
     toastEl.textContent = text;
     toastEl.classList.toggle("error", !!isError);
@@ -296,6 +417,14 @@
     return options;
   }
 
+  // Page IDs a phone's list may refer to: saved pages, pages in the unsaved layout draft, and
+  // More. Anything else is a page that no longer exists.
+  function knownPageIds() {
+    const ids = new Set(["more", ...(state.layout?.pages || []).map((p) => p.id)]);
+    for (const p of layoutDraft?.pages || []) ids.add(p.id);
+    return ids;
+  }
+
   function phonePagesText(d) {
     if (!(state.layout?.pages || []).length) return null;
     if (d.layout_pages == null) return "All pages";
@@ -355,8 +484,19 @@
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
       body.signin_mode = mode.value;
       if (pageOptions.length) {
-        body.layout_pages = form.elements["pages_all"].checked ? null
-          : [...pagesList.querySelectorAll("input:checked")].map((i) => i.value);
+        const all = form.elements["pages_all"].checked;
+        const ticked = [...pagesList.querySelectorAll("input:checked")].map((i) => i.value);
+        const was = (id) => chosenPages === null || chosenPages.includes(id);
+        const changed = all !== (chosenPages === null) ||
+          (!all && pageOptions.some((o) => ticked.includes(o.id) !== was(o.id)));
+        if (changed) {
+          // Keep choices this dialog doesn't list (the More page while it's switched off, or a
+          // page that's only in the unsaved layout) so saving here doesn't quietly drop them.
+          const offered = new Set(pageOptions.map((o) => o.id));
+          const known = knownPageIds();
+          body.layout_pages = all ? null
+            : [...ticked, ...(chosenPages || []).filter((id) => !offered.has(id) && known.has(id))];
+        }
       }
       if (mode.value === "staff") {
         body.staff_all = form.elements["staff_all"].checked;
@@ -810,21 +950,12 @@
       list.replaceChildren(h("div", { class: "empty small" }, "No areas yet."));
       return;
     }
-    const move = (index, dir) => run(async () => {
-      const ids = state.areas.map((a) => a.id);
-      [ids[index], ids[index + dir]] = [ids[index + dir], ids[index]];
-      await api("PUT", "api/areas/order", { order: ids });
-      await load();
-    });
-    list.replaceChildren(...state.areas.map((a, i) => h("div", { class: "area-row" },
+    list.replaceChildren(...state.areas.map((a) => h("div", { class: "area-row sort-row" },
+      dragHandle(`Reorder area ${a.name}`),
       h("div", { class: "entity-text" },
         h("div", { class: "entity-name" }, a.name),
         h("div", { class: "entity-id" }, areaSummary(a))),
       h("div", { class: "area-actions" },
-        h("button", { type: "button", class: "btn subtle", "aria-label": `Move ${a.name} up`,
-          disabled: i === 0, onclick: () => move(i, -1) }, "\u2191"),
-        h("button", { type: "button", class: "btn subtle", "aria-label": `Move ${a.name} down`,
-          disabled: i === state.areas.length - 1, onclick: () => move(i, 1) }, "\u2193"),
         h("button", { type: "button", class: "btn", onclick: () => editArea(a) }, "Edit"),
         h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
           if (!await askConfirm(`Delete the ${a.name} area? Roles lose any access they had through it.`, "Delete area")) return false;
@@ -832,6 +963,13 @@
           await load();
         }, "Area deleted.") }, "Delete")))));
   }
+
+  sortable($("#area-list"), "areas", (from, to) => run(async () => {
+    const ids = state.areas.map((a) => a.id);
+    moveItem(ids, from, to);
+    await api("PUT", "api/areas/order", { order: ids });
+    await load();
+  }));
 
   async function editArea(a) {
     if (!entities) await loadEntities();
@@ -964,7 +1102,8 @@
     $("#save-layout").disabled = !d.dirty;
     $("#discard-layout").disabled = !d.dirty;
     if (pageIndex >= d.pages.length) pageIndex = Math.max(0, d.pages.length - 1);
-    $("#page-list").replaceChildren(...(d.pages.length ? d.pages.map((p, i) => h("li", null,
+    $("#page-list").replaceChildren(...(d.pages.length ? d.pages.map((p, i) => h("li", { class: "sort-row" },
+      dragHandle(`Reorder page ${p.name}`),
       h("button", { class: i === pageIndex ? "role-item active" : "role-item",
         onclick: () => { pageIndex = i; renderLayoutEditor(); } },
       h("span", { class: "role-name" }, p.name),
@@ -973,13 +1112,14 @@
     renderPageEditor();
   }
 
-  function moveIn(list, index, dir) {
-    const to = index + dir;
-    if (to < 0 || to >= list.length) return;
-    [list[index], list[to]] = [list[to], list[index]];
+  sortable($("#page-list"), "pages", (from, to) => {
+    const d = draft();
+    const selected = d.pages[pageIndex];
+    moveItem(d.pages, from, to);
+    pageIndex = d.pages.indexOf(selected);
     markLayoutDirty();
     renderLayoutEditor();
-  }
+  });
 
   function itemSummary(item) {
     if (item.type === "heading") return ["Heading", item.title, ""];
@@ -1016,10 +1156,6 @@
             if (btn) btn.textContent = page.name;
           } })),
         h("div", { class: "editor-actions" },
-          h("button", { class: "btn subtle", "aria-label": "Move page up", disabled: pageIndex === 0,
-            onclick: () => { moveIn(d.pages, pageIndex, -1); pageIndex -= 1; renderLayoutEditor(); } }, "\u2191"),
-          h("button", { class: "btn subtle", "aria-label": "Move page down", disabled: pageIndex === d.pages.length - 1,
-            onclick: () => { moveIn(d.pages, pageIndex, 1); pageIndex += 1; renderLayoutEditor(); } }, "\u2193"),
           h("button", { class: "btn danger", onclick: async () => {
             if (!await askConfirm(`Delete the ${page.name} page?`, "Delete page")) return;
             d.pages.splice(pageIndex, 1);
@@ -1035,26 +1171,34 @@
         h("button", { class: "btn", onclick: () => add("area") }, "Whole area"),
         h("button", { class: "btn", onclick: () => add("heading") }, "Heading")),
       page.items.length
-        ? h("div", { class: "item-list" }, page.items.map((item, i) => {
-          const [kind, title, sub] = itemSummary(item);
-          return h("div", { class: `item-row item-${item.type}` },
-            h("span", { class: "item-kind" }, kind),
-            h("div", { class: "entity-text" },
-              h("div", { class: "entity-name" }, title),
-              sub ? h("div", { class: "entity-id" }, sub) : null),
-            h("div", { class: "area-actions" },
-              h("button", { class: "btn subtle", "aria-label": "Move up", disabled: i === 0,
-                onclick: () => moveIn(page.items, i, -1) }, "\u2191"),
-              h("button", { class: "btn subtle", "aria-label": "Move down", disabled: i === page.items.length - 1,
-                onclick: () => moveIn(page.items, i, 1) }, "\u2193"),
-              h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
-              h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
-                page.items.splice(i, 1);
-                markLayoutDirty();
-                renderLayoutEditor();
-              } }, "Remove")));
-        }))
+        ? itemList(page)
         : h("div", { class: "empty" }, "This page is empty. Add a group card, device, area or heading."));
+  }
+
+  // The page's items as reorderable rows.
+  function itemList(page) {
+    const list = h("div", { class: "item-list" }, page.items.map((item, i) => {
+      const [kind, title, sub] = itemSummary(item);
+      return h("div", { class: `item-row item-${item.type} sort-row` },
+        dragHandle(`Reorder ${title}`),
+        h("span", { class: "item-kind" }, kind),
+        h("div", { class: "entity-text" },
+          h("div", { class: "entity-name" }, title),
+          sub ? h("div", { class: "entity-id" }, sub) : null),
+        h("div", { class: "area-actions" },
+          h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
+          h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
+            page.items.splice(i, 1);
+            markLayoutDirty();
+            renderLayoutEditor();
+          } }, "Remove")));
+    }));
+    sortable(list, "page-items", (from, to) => {
+      moveItem(page.items, from, to);
+      markLayoutDirty();
+      renderLayoutEditor();
+    });
+    return list;
   }
 
   function phonesShowing(pageId) {
@@ -1094,24 +1238,38 @@
             ` \u00b7 ${d.role_name || "no role"} \u00b7 ${d.layout_pages == null ? "all pages" : "chosen pages"}`))))))
       : h("p", { class: "hint" }, "Set up a phone on the Phones tab first."));
     const form = $("#item-form");
-    form.onkeydown = null;
+    // Enter on a checkbox would otherwise "click" the first button, which is Cancel.
+    form.onkeydown = (ev) => {
+      if (ev.key === "Enter" && ev.target.tagName === "INPUT") ev.preventDefault();
+    };
     form.onsubmit = (ev) => {
       if (ev.submitter?.value !== "save") return;
-      const allIds = layoutPageOptions(draft().pages, draft().show_unplaced !== false).map((o) => o.id);
+      // Every page that could still exist: saved, in the unsaved draft, and More. A phone that
+      // showed all pages keeps all of these except this one, so discarding the draft later
+      // can't take pages away from it. Pages that no longer exist are dropped from lists.
+      const known = knownPageIds();
       const changes = [];
       for (const { d, input } of boxes) {
         const shows = d.layout_pages == null || d.layout_pages.includes(page.id);
         if (input.checked === shows) continue;
-        const next = input.checked
-          ? [...d.layout_pages, page.id]
-          : (d.layout_pages ?? allIds).filter((id) => id !== page.id);
+        const current = (d.layout_pages ?? [...known]).filter((id) => known.has(id));
+        const next = input.checked ? [...current, page.id] : current.filter((id) => id !== page.id);
         changes.push([d, next]);
       }
       if (!changes.length) return;
       run(async () => {
-        for (const [d, next] of changes) await api("PATCH", `api/devices/${d.id}`, { layout_pages: next });
+        const failed = [];
+        for (const [d, next] of changes) {
+          try {
+            await api("PATCH", `api/devices/${d.id}`, { layout_pages: next });
+          } catch (err) {
+            failed.push(`${d.name} (${err.message})`);
+          }
+        }
+        // Always refresh, so the screen matches what was actually saved.
         await load();
         renderLayoutEditor();
+        if (failed.length) throw new Error(`Couldn't update ${failed.join(", ")}.`);
       }, "Phones updated.");
     };
     dialog.showModal();
@@ -1197,19 +1355,20 @@
           label.addEventListener("input", () => { m.label = label.value; });
           const summary = h("input", { type: "checkbox", checked: !!m.summary, disabled: !m.summary && onCard >= 4 });
           summary.addEventListener("change", () => { m.summary = summary.checked; drawMembers(); });
-          return h("div", { class: "member-row" },
+          return h("div", { class: "member-row sort-row" },
+            dragHandle(`Reorder ${m.label || entityName(m.entity_id)}`),
             h("div", { class: "member-main" }, label,
               h("div", { class: "entity-id", title: m.entity_id }, `${entityName(m.entity_id)} \u00b7 ${m.entity_id}`)),
             h("label", { class: "check on-card" }, summary, "On card"),
             h("div", { class: "area-actions" },
-              h("button", { type: "button", class: "btn subtle", "aria-label": "Move up", disabled: i === 0,
-                onclick: () => { [item.entities[i - 1], item.entities[i]] = [item.entities[i], item.entities[i - 1]]; drawMembers(); } }, "\u2191"),
-              h("button", { type: "button", class: "btn subtle", "aria-label": "Move down", disabled: i === item.entities.length - 1,
-                onclick: () => { [item.entities[i + 1], item.entities[i]] = [item.entities[i], item.entities[i + 1]]; drawMembers(); } }, "\u2193"),
               h("button", { type: "button", class: "btn subtle", "aria-label": "Remove",
                 onclick: () => { item.entities.splice(i, 1); drawMembers(); picker.redraw(); } }, "\u2715")));
         }) : [h("p", { class: "hint" }, "No devices yet. Add them from the list below.")]));
       };
+      sortable(members, "group-members", (from, to) => {
+        moveItem(item.entities, from, to);
+        drawMembers();
+      });
       picker = devicePicker((e) => {
         item.entities.push({ entity_id: e.entity_id, label: "", summary: item.entities.filter((m) => m.summary).length < 2 });
         drawMembers();

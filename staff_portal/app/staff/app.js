@@ -12,6 +12,9 @@
 
   let me = null;
   let tiles = new Map();
+  // True while the phone is showing its devices (or an empty-state message about them) and
+  // should keep checking for updates, including after the screen has been locked.
+  let live = false;
   let pollTimer = null;
   let installPrompt = null;
 
@@ -83,6 +86,7 @@
   }
 
   function message(title, body, retry) {
+    live = false;
     const node = fromTemplate("tpl-message");
     node.querySelector("[data-title]").textContent = title;
     node.querySelector("[data-body]").textContent = body;
@@ -165,6 +169,7 @@
   }
 
   function showInstall(code) {
+    live = false;
     const node = fromTemplate("tpl-install");
     const steps = node.querySelector("[data-steps]");
     const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
@@ -199,6 +204,7 @@
 
   // Shared phone: pick your name, then enter your own PIN.
   async function showWho() {
+    live = false;
     const res = await api("GET", "/api/me");
     if (res.status !== 200) {
       handleAuthError(res) || message("Something went wrong", "Please try again.", true);
@@ -221,6 +227,7 @@
   }
 
   function showPin(member) {
+    live = false;
     const node = fromTemplate("tpl-pin");
     const dots = node.querySelector("[data-dots]");
     const error = node.querySelector("[data-error]");
@@ -316,7 +323,7 @@
     const res = await api("GET", "/api/entities");
     if (res.status !== 200) {
       if (res.status === 503 || res.status === 0) {
-        if (!tiles.size) {
+        if (!live) {
           message("Can't reach the system", "It may be restarting. Try again in a minute.", true);
         } else {
           toast("Connection lost. Retrying…", true);
@@ -327,20 +334,23 @@
       handleAuthError(res) || message("Something went wrong", "Please try again.", true);
       return;
     }
+    live = true;
     setSubtitle(res.data.staff_name);
     render(res.data);
     if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
   }
 
   // view: which layout page is open, and which group card's detail screen (if any).
-  const view = { page: Number(session.get("page")) || 0, detail: null };
+  // The open page is remembered by its ID, so changing which pages a phone has doesn't
+  // silently switch staff to a different page.
+  const view = { pageId: session.get("page"), detail: null };
   let lastData = null;
 
   function render(data) {
     lastData = data;
     const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
     const shape = JSON.stringify(data.layout
-      ? [data.layout, view.page, view.detail]
+      ? [data.layout, view.pageId, view.detail]
       : data.entities.map((e) => [e.entity_id, e.area]));
     if (shape !== render.shape || !tiles.size) {
       render.shape = shape;
@@ -402,8 +412,10 @@
 
   function buildLayout(layout, byId, into) {
     const pages = layout.pages;
-    if (view.page >= pages.length) view.page = 0;
-    const page = pages[view.page];
+    let current = pages.findIndex((p) => p.id === view.pageId);
+    if (current < 0) current = 0;
+    const page = pages[current];
+    view.pageId = page.id;
     const detailItem = view.detail && page.items.find((i) => i.id === view.detail && i.type === "group");
     if (view.detail && !detailItem) view.detail = null;
 
@@ -412,9 +424,9 @@
     if (pages.length > 1) {
       root.append(h("nav", { class: "tabbar", "aria-label": "Pages" }, pages.map((p, i) =>
         h("button", {
-          class: i === view.page ? "tab active" : "tab",
-          "aria-current": i === view.page ? "page" : null,
-          onclick: () => openPage(i),
+          class: i === current ? "tab active" : "tab",
+          "aria-current": i === current ? "page" : null,
+          onclick: () => openPage(p.id),
         }, p.name))));
     }
     return root;
@@ -538,10 +550,10 @@
     if (!pollTimer && document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
   }
 
-  function openPage(index) {
-    view.page = index;
+  function openPage(id) {
+    view.pageId = id;
     view.detail = null;
-    session.set("page", String(index));
+    session.set("page", id);
     history.replaceState(null, "", "/");
     window.scrollTo(0, 0);
     rerender();
@@ -824,7 +836,7 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && tiles.size) refresh();
+    if (document.visibilityState === "visible" && live) refresh();
     else if (document.visibilityState === "hidden") clearTimeout(pollTimer);
   });
 

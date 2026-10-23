@@ -787,10 +787,13 @@ async def admin_create_device(request: web.Request):
     if not name:
         return bad_request("Give the phone a name.")
     shared = data.get("signin_mode") == "staff"
-    device_id = db.create_device(name, parse_role(data.get("role_id")),
-                                 None if shared else parse_pin(data.get("pin")))
-    if data.get("layout_pages") is not None:
-        db.update_device(device_id, layout_pages=json.dumps(clean_phone_pages(data["layout_pages"])))
+    # Check everything before creating the phone, so a rejected request creates nothing.
+    role_id = parse_role(data.get("role_id"))
+    pin = None if shared else parse_pin(data.get("pin"))
+    pages = clean_phone_pages(data.get("layout_pages"))
+    device_id = db.create_device(name, role_id, pin)
+    if pages is not None:
+        db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
         db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0)
         if isinstance(data.get("staff_ids"), list):

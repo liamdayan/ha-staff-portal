@@ -61,7 +61,7 @@ In **Settings → Areas**, click **Add area**, name it, and choose what's in it:
 - **Individual devices.** Search and tick any device, even one from a different area.
 
 A device can be in more than one area. The staff app lists devices under these headings in
-the order shown in Settings (use the arrows to reorder). A device shows under its first area;
+the order shown in Settings (drag the ≡ grip to reorder). A device shows under its first area;
 devices in no area show under their Home Assistant area.
 
 ## 4. Create roles
@@ -115,7 +115,8 @@ it yourself instead:
 - **Whole area.** Every device in one of your areas, kept up to date automatically.
 - **Heading.** A section title such as "Tubs".
 
-Use the arrows to reorder, then click **Save layout**.
+Reorder pages, page items and the devices in a group card by dragging their **≡** grip
+(with a mouse or a finger), or click the grip and use the arrow keys. Then click **Save layout**.
 
 **Which phones show which pages.** Every phone shows every page by default, including pages
 you add later. To change that for one phone, open **Phones → Edit** and use **Pages on this
