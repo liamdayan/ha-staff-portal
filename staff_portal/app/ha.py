@@ -28,8 +28,10 @@ AREA_TEMPLATE = (
 
 # Identifies this add-on to Home Assistant's login system. It appears under the linked user's
 # profile as the app their sign-in belongs to. It must stay the same, or refreshes stop working.
-CLIENT_ID = "https://github.com/xDayan907/ha-staff-portal"
+CLIENT_ID = "https://github.com/liamdayan/ha-staff-portal"
 REDIRECT_URI = CLIENT_ID + "/"
+# Earlier client IDs. Users linked under one of these can only refresh with that same ID.
+LEGACY_CLIENT_IDS = ("https://github.com/xDayan907/ha-staff-portal",)
 
 
 class HomeAssistantError(Exception):
@@ -204,16 +206,20 @@ class HomeAssistant:
         cached = self._user_tokens.get(refresh_token)
         if cached and cached[1] > time.monotonic():
             return cached[0]
-        try:
-            token = await self._core_request("POST", "/auth/token", data={
-                "grant_type": "refresh_token", "refresh_token": refresh_token,
-                "client_id": CLIENT_ID,
-            })
-        except HomeAssistantError as err:
-            if str(err).startswith(("400", "401", "403")):
-                raise LinkError("The linked Home Assistant user's sign-in no longer works.") \
-                    from err
-            raise
+        for client_id in (CLIENT_ID, *LEGACY_CLIENT_IDS):
+            try:
+                token = await self._core_request("POST", "/auth/token", data={
+                    "grant_type": "refresh_token", "refresh_token": refresh_token,
+                    "client_id": client_id,
+                })
+                break
+            except HomeAssistantError as err:
+                if not str(err).startswith(("400", "401", "403")):
+                    raise
+                last_error = err
+        else:
+            raise LinkError("The linked Home Assistant user's sign-in no longer works.") \
+                from last_error
         self._user_tokens[refresh_token] = (token["access_token"],
                                             time.monotonic() + token.get("expires_in", 1800) - 60)
         return token["access_token"]
