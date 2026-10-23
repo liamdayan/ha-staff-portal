@@ -2,7 +2,7 @@
   "use strict";
 
   // All URLs are relative: Home Assistant serves this page under an ingress path.
-  const state = { settings: {}, roles: [], devices: [], hasLogo: false };
+  const state = { settings: {}, roles: [], devices: [], staff: [], hasLogo: false };
   let entities = null;
   let editing = null; // { id, name, entities: {entity_id: level}, dirty }
   let oldestActivity = null;
@@ -75,10 +75,12 @@
     const data = await api("GET", "api/state");
     state.settings = data.settings;
     state.roles = data.roles;
+    state.staff = data.staff;
     state.devices = data.devices;
     state.hasLogo = data.has_logo;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
+    renderStaff();
     renderRoleList();
   }
 
@@ -156,7 +158,7 @@
           await api("DELETE", `api/devices/${d.id}/link`);
           await load();
         }, "Unlinked.") }, "Unlink"));
-      } else {
+      } else if (d.signin_mode !== "staff") {
         actions.push(h("button", { class: "btn", onclick: () => linkUser(d) }, "Link HA user"));
       }
       if (d.status !== "revoked") {
@@ -177,7 +179,9 @@
             h("h3", null, d.name),
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
-              d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
+              d.signin_mode === "staff"
+                ? h("span", { class: "badge shared" }, "Shared \u00b7 staff sign in")
+                : d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
               d.ha_user ? h("span", {
                 class: d.ha_link_error ? "badge locked" : "badge linked",
                 title: d.ha_link_error || "Actions show in Home Assistant as this user",
@@ -203,7 +207,7 @@
   function fillRoleOptions(select, selected) {
     select.replaceChildren(
       h("option", { value: "" }, "No role (sees nothing)"),
-      state.roles.map((r) => h("option", { value: r.id, selected: r.id === selected }, r.name)));
+      ...state.roles.map((r) => h("option", { value: r.id, selected: r.id === selected }, r.name)));
   }
 
   function editPhone(d) {
@@ -217,18 +221,42 @@
       ? (d.has_pin ? "Enter a new PIN to change it, or leave blank and tick below to remove it."
         : "Optional, 4 to 8 digits.")
       : "Optional, 4 to 8 digits. Staff enter it when opening the app.";
+    const mode = form.elements["signin_mode"];
+    mode.value = d?.signin_mode || "phone";
+    form.elements["staff_all"].checked = d ? !!d.staff_all : true;
+    const pick = $("[data-staff-list]", dialog);
+    pick.replaceChildren(...state.staff.map((m) => h("label", { class: "check" },
+      h("input", { type: "checkbox", value: m.id, checked: !!d?.staff_ids.includes(m.id) }),
+      m.status === "disabled" ? `${m.name} (inactive)` : m.name)));
+    $("[data-no-staff]", dialog).hidden = state.staff.length > 0;
+    const syncMode = () => {
+      const shared = mode.value === "staff";
+      form.elements["pin"].closest("label").hidden = shared;
+      $("#clear-pin")?.closest("label").toggleAttribute("hidden", shared);
+      $("[data-staff-pick]", dialog).hidden = !shared;
+      pick.hidden = form.elements["staff_all"].checked;
+    };
+    mode.onchange = syncMode;
+    form.elements["staff_all"].onchange = syncMode;
     let clear = $("#clear-pin");
     if (clear) clear.closest("label").remove();
     if (d?.has_pin) {
       form.elements["pin"].closest("label").after(h("label", { class: "check" },
         h("input", { type: "checkbox", id: "clear-pin" }), "Remove PIN"));
     }
+    syncMode();
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
-      const pin = form.elements["pin"].value.trim();
-      if (pin) body.pin = pin;
-      else if ($("#clear-pin")?.checked) body.pin = "";
+      body.signin_mode = mode.value;
+      if (mode.value === "staff") {
+        body.staff_all = form.elements["staff_all"].checked;
+        body.staff_ids = [...pick.querySelectorAll("input:checked")].map((i) => Number(i.value));
+      } else {
+        const pin = form.elements["pin"].value.trim();
+        if (pin) body.pin = pin;
+        else if ($("#clear-pin")?.checked) body.pin = "";
+      }
       run(async () => {
         if (d) {
           await api("PATCH", `api/devices/${d.id}`, body);
@@ -262,7 +290,7 @@
 
   $("#add-phone").addEventListener("click", () => editPhone(null));
 
-  function linkUser(d) {
+  function linkUser(d, kind = "devices") {
     const dialog = $("#link-dialog");
     const form = $("#link-form");
     form.reset();
@@ -274,14 +302,14 @@
       e.preventDefault();
       submit.disabled = true;
       try {
-        await api("POST", `api/devices/${d.id}/link`, {
+        await api("POST", `api/${kind}/${d.id}/link`, {
           username: form.elements["username"].value,
           password: form.elements["password"].value,
         });
         form.elements["password"].value = "";
         dialog.close();
         await load();
-        toast(`${d.name} is now linked. Its actions show in Home Assistant as that user.`);
+        toast(`${d.name} is now linked. Actions show in Home Assistant as that user.`);
       } catch (err) {
         $("[data-error]", dialog).textContent = err.message;
       } finally {
@@ -294,6 +322,95 @@
     };
     dialog.showModal();
   }
+
+  // ---------------------------------------------------------------- staff
+
+  function phonesFor(m) {
+    return state.devices.filter((d) => d.signin_mode === "staff" && d.status !== "revoked" &&
+      (d.staff_all || d.staff_ids.includes(m.id))).map((d) => d.name);
+  }
+
+  function renderStaff() {
+    const list = $("#staff-list");
+    if (!state.staff.length) {
+      list.replaceChildren(h("div", { class: "empty" },
+        "No staff yet. Add the people who share phones, each with their own PIN. Then set a ",
+        "phone to \u201cShared\u201d (Phones \u2192 Edit) so they can sign in on it."));
+      return;
+    }
+    list.replaceChildren(...state.staff.map((m) => {
+      const status = { active: ["Active", "active"], locked: ["Locked (wrong PINs)", "locked"],
+        disabled: ["Inactive", "revoked"] }[m.status] || [m.status, ""];
+      const phones = phonesFor(m);
+      const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit")];
+      if (m.status === "locked") {
+        actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
+          await api("POST", `api/staff/${m.id}/unlock`);
+          await load();
+        }, `${m.name} can sign in again.`) }, "Unlock"));
+      }
+      if (m.ha_user) {
+        actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") },
+          m.ha_link_error ? "Relink HA user" : "Change HA user"));
+        actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
+          if (!confirm(`Unlink ${m.name} from Home Assistant user ${m.ha_user}?`)) return;
+          await api("DELETE", `api/staff/${m.id}/link`);
+          await load();
+        }, "Unlinked.") }, "Unlink"));
+      } else {
+        actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
+      }
+      actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
+        if (!confirm(`Delete ${m.name}? Their past activity stays in the log.`)) return;
+        await api("DELETE", `api/staff/${m.id}`);
+        await load();
+      }, "Deleted.") }, "Delete"));
+      return h("article", { class: `card phone ${m.status === "disabled" ? "revoked" : ""}` },
+        h("div", { class: "phone-head" },
+          h("div", null,
+            h("h3", null, m.name),
+            h("div", { class: "meta" },
+              h("span", { class: `badge ${status[1]}` }, status[0]),
+              m.ha_user ? h("span", {
+                class: m.ha_link_error ? "badge locked" : "badge linked",
+                title: m.ha_link_error || "Actions show in Home Assistant as this user",
+              }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
+              h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
+            h("div", { class: "meta" }, phones.length
+              ? `Can sign in on: ${phones.join(", ")}`
+              : "Not on any shared phone yet"))),
+        h("div", { class: "card-actions" }, actions));
+    }));
+  }
+
+  function editStaff(m) {
+    const dialog = $("#staff-dialog");
+    const form = $("#staff-form");
+    form.reset();
+    $("[data-title]", dialog).textContent = m ? `Edit ${m.name}` : "Add staff member";
+    form.elements["name"].value = m ? m.name : "";
+    form.elements["pin"].required = !m;
+    $("[data-pin-hint]", dialog).textContent = m
+      ? "Leave blank to keep their current PIN."
+      : "4 to 8 digits. They enter it after tapping their name.";
+    form.elements["active"].checked = !m || m.status !== "disabled";
+    form.elements["active"].closest("label").hidden = !m;
+    dialog.onclose = () => {
+      if (dialog.returnValue !== "save") return;
+      const body = { name: form.elements["name"].value };
+      const pin = form.elements["pin"].value.trim();
+      if (pin) body.pin = pin;
+      if (m) body.active = form.elements["active"].checked;
+      run(async () => {
+        if (m) await api("PATCH", `api/staff/${m.id}`, body);
+        else await api("POST", "api/staff", body);
+        await load();
+      }, m ? "Saved." : `${body.name} added.`);
+    };
+    dialog.showModal();
+  }
+
+  $("#add-staff").addEventListener("click", () => editStaff(null));
 
   // ---------------------------------------------------------------- roles
 

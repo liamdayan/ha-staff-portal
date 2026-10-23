@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 
 import segno
@@ -39,7 +40,7 @@ ha = HomeAssistant()
 branding = Branding(DATA_DIR)
 
 # PIN unlock sessions live in memory: an add-on restart just asks for the PIN again.
-pin_sessions: dict[str, tuple[int, float]] = {}
+pin_sessions: dict[str, tuple[int, float, int | None]] = {}  # device, last used, staff
 failures: dict[str, tuple[int, float]] = {}
 
 
@@ -69,8 +70,8 @@ def record_failure(ip: str) -> None:
     failures[ip] = (count + 1, since)
 
 
-def bad_request(message: str, status: int = 400) -> web.Response:
-    return web.json_response({"error": message}, status=status)
+def bad_request(message: str, status: int = 400, **extra) -> web.Response:
+    return web.json_response({"error": message, **extra}, status=status)
 
 
 async def read_json(request: web.Request) -> dict:
@@ -186,28 +187,49 @@ async def service_worker(request: web.Request):
     )
 
 
-def authenticate(request: web.Request, need_unlock: bool = True) -> dict:
-    """Return the calling phone's record or raise the right error for the app to show."""
+def json_error(exc_class, error: str, **extra):
+    return exc_class(text=json.dumps({"error": error, **extra}), content_type="application/json")
+
+
+def authenticate(request: web.Request, need_unlock: bool = True) -> tuple[dict, dict | None]:
+    """Return (phone, signed-in staff member or None), or raise the error the app should show."""
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
     device = db.device_by_token(token) if token else None
     if not device or device["status"] in ("revoked", "pending"):
-        raise web.HTTPUnauthorized(
-            text=json.dumps({"error": "signed_out"}), content_type="application/json"
-        )
+        raise json_error(web.HTTPUnauthorized, "signed_out")
     if device["status"] == "locked":
-        raise HTTPLocked(text=json.dumps({"error": "locked"}), content_type="application/json")
-    if need_unlock and device["pin_hash"]:
-        session = pin_sessions.get(request.headers.get("X-Session", ""))
-        timeout = db.setting_int("pin_timeout_minutes") * 60
-        if not session or session[0] != device["id"] or time.time() - session[1] > timeout:
-            raise web.HTTPForbidden(
-                text=json.dumps({"error": "pin_required"}), content_type="application/json"
-            )
-        pin_sessions[request.headers["X-Session"]] = (device["id"], time.time())
+        raise json_error(HTTPLocked, "locked")
     if not device["last_seen"] or time.time() - device["last_seen"] > 60:
         db.touch_device(device["id"])
-    return device
+    shared = device["signin_mode"] == "staff"
+    if not need_unlock or not (shared or device["pin_hash"]):
+        return device, None
+
+    key = request.headers.get("X-Session", "")
+    session = pin_sessions.get(key)
+    timeout = db.setting_int("pin_timeout_minutes") * 60
+    if not session or session[0] != device["id"] or time.time() - session[1] > timeout:
+        pin_sessions.pop(key, None)
+        raise json_error(web.HTTPForbidden, "pin_required")
+    member = None
+    if shared:
+        member = db.staff(session[2]) if session[2] else None
+        if not member or member["status"] != "active" or not db.staff_allowed_on(member["id"], device):
+            pin_sessions.pop(key, None)
+            raise json_error(web.HTTPForbidden, "pin_required")
+        if not member["last_seen"] or time.time() - member["last_seen"] > 60:
+            db.update_staff(member["id"], last_seen=time.time())
+    elif session[2] is not None:
+        # Phone was switched out of shared mode while someone was signed in.
+        pin_sessions.pop(key, None)
+        raise json_error(web.HTTPForbidden, "pin_required")
+    pin_sessions[key] = (device["id"], time.time(), session[2])
+    return device, member
+
+
+def actor_name(device: dict, member: dict | None) -> str:
+    return f"{member['name']} on {device['name']}" if member else device["name"]
 
 
 async def api_enroll(request: web.Request):
@@ -221,16 +243,19 @@ async def api_enroll(request: web.Request):
         return bad_request("This setup code is invalid, already used, or expired.", 404)
     device, token = claimed
     db.log(device["name"], "Phone set up", ip=ip)
-    return web.json_response({"token": token, "pin_required": bool(device["pin_hash"])})
+    return web.json_response({"token": token})
 
 
 async def api_me(request: web.Request):
-    device = authenticate(request, need_unlock=False)
+    device, _ = authenticate(request, need_unlock=False)
     s = db.settings()
+    shared = device["signin_mode"] == "staff"
     return web.json_response({
         "device": device["name"],
         "role": device["role_name"],
-        "pin_required": bool(device["pin_hash"]),
+        "shared": shared,
+        "staff": db.staff_for_device(device) if shared else [],
+        "pin_required": shared or bool(device["pin_hash"]),
         "property_name": s["property_name"],
         "app_name": s["app_name"],
         "accent_color": s["accent_color"],
@@ -240,32 +265,82 @@ async def api_me(request: web.Request):
 
 
 async def api_unlock(request: web.Request):
-    device = authenticate(request, need_unlock=False)
+    device, _ = authenticate(request, need_unlock=False)
     data = await read_json(request)
     pin = str(data.get("pin", ""))
-    if not device["pin_hash"]:
-        return web.json_response({"session": ""})
-    if check_pin(pin, device["pin_hash"]):
-        db.update_device(device["id"], failed_pins=0)
-        session = secrets.token_urlsafe(24)
-        pin_sessions[session] = (device["id"], time.time())
-        return web.json_response({"session": session})
-    attempts = device["failed_pins"] + 1
+    ip = client_ip(request)
     max_attempts = db.setting_int("max_pin_attempts")
-    if attempts >= max_attempts:
-        db.update_device(device["id"], failed_pins=attempts, status="locked")
+
+    if device["signin_mode"] != "staff":
+        if not device["pin_hash"]:
+            return web.json_response({"session": ""})
+        if check_pin(pin, device["pin_hash"]):
+            db.update_device(device["id"], failed_pins=0)
+            return web.json_response({"session": new_session(device, None)})
+        attempts = device["failed_pins"] + 1
+        if attempts >= max_attempts:
+            db.update_device(device["id"], failed_pins=attempts, status="locked")
+            db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
+                   ok=False, ip=ip)
+            return bad_request("locked", 423)
+        db.update_device(device["id"], failed_pins=attempts)
+        return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
+
+    # Shared phone: a staff member signs in with their own PIN.
+    try:
+        member = db.staff(int(data.get("staff_id")))
+    except (TypeError, ValueError):
+        member = None
+    if not member or member["status"] == "disabled" or not db.staff_allowed_on(member["id"], device):
+        return bad_request("Pick your name again.", 404)
+    if member["status"] == "locked":
+        return bad_request(f"{member['name']} is locked after too many wrong PINs. "
+                           "Ask your manager to unlock you.", 403, staff_locked=True)
+    if check_pin(pin, member["pin_hash"]):
+        db.update_staff(member["id"], failed_pins=0, last_seen=time.time())
+        db.update_device(device["id"], failed_pins=0)
+        db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
+        return web.json_response({"session": new_session(device, member),
+                                  "staff_name": member["name"]})
+
+    attempts = member["failed_pins"] + 1
+    # Also count per phone, so cycling through names can't be used to guess PINs.
+    phone_attempts = device["failed_pins"] + 1
+    if phone_attempts >= max_attempts * 3:
+        db.update_device(device["id"], failed_pins=phone_attempts, status="locked")
         db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
-               ok=False, ip=client_ip(request))
+               ok=False, ip=ip)
         return bad_request("locked", 423)
-    db.update_device(device["id"], failed_pins=attempts)
+    db.update_device(device["id"], failed_pins=phone_attempts)
+    if attempts >= max_attempts:
+        db.update_staff(member["id"], failed_pins=attempts, status="locked")
+        db.log(actor_name(device, member), "Locked after wrong PINs", role=device["role_name"],
+               ok=False, ip=ip)
+        return bad_request(f"{member['name']} is locked after too many wrong PINs. "
+                           "Ask your manager to unlock you.", 403, staff_locked=True)
+    db.update_staff(member["id"], failed_pins=attempts)
     return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
 
 
+def new_session(device: dict, member: dict | None) -> str:
+    session = secrets.token_urlsafe(24)
+    pin_sessions[session] = (device["id"], time.time(), member["id"] if member else None)
+    return session
+
+
+async def api_signout(request: web.Request):
+    device, member = authenticate(request)
+    pin_sessions.pop(request.headers.get("X-Session", ""), None)
+    if member:
+        db.log(actor_name(device, member), "Signed out", role=device["role_name"])
+    return web.json_response({"ok": True})
+
+
 async def api_entities(request: web.Request):
-    device = authenticate(request)
+    device, member = authenticate(request)
     allowed = db.role_entities(device["role_id"]) if device["role_id"] else {}
     if not allowed:
-        return web.json_response({"entities": []})
+        return web.json_response({"entities": [], "staff_name": member and member["name"]})
     try:
         states, areas = await ha.states(), await ha.areas()
     except HomeAssistantError as err:
@@ -273,60 +348,67 @@ async def api_entities(request: web.Request):
         return bad_request("Can't reach the system right now.", 503)
     entities = [entity_view(eid, states.get(eid), areas, lvl) for eid, lvl in allowed.items()]
     entities.sort(key=lambda e: (e["area"] or "~", e["name"].lower()))
-    return web.json_response({"entities": entities})
+    return web.json_response({"entities": entities, "staff_name": member and member["name"]})
 
 
 async def api_action(request: web.Request):
-    device = authenticate(request)
+    device, member = authenticate(request)
     data = await read_json(request)
     entity_id = str(data.get("entity_id", ""))
     action = str(data.get("action", ""))
     params = data.get("params") or {}
     ip = client_ip(request)
+    actor = actor_name(device, member)
     allowed = db.role_entities(device["role_id"]) if device["role_id"] else {}
     if allowed.get(entity_id) != "control" or not isinstance(params, dict):
-        db.log(device["name"], f"Blocked: {action}", role=device["role_name"],
+        db.log(actor, f"Blocked: {action}", role=device["role_name"],
                entity_id=entity_id, ok=False, ip=ip)
         return bad_request("You don't have access to control that.", 403)
     try:
         states = await ha.states()
         domain, service, call = build_service_call(entity_id, action, params, states.get(entity_id))
-        as_user = await send_command(device, domain, service, call)
+        as_user = await send_command(device, member, domain, service, call)
     except ActionRejected as err:
         return bad_request(str(err))
     except HomeAssistantError as err:
         log.warning("Service call failed: %s", err)
-        db.log(device["name"], action, role=device["role_name"], entity_id=entity_id,
+        db.log(actor, action, role=device["role_name"], entity_id=entity_id,
                detail=str(err)[:200], ok=False, ip=ip)
         return bad_request("The system didn't accept that. Try again.", 502)
     detail = ", ".join(f"{k}={v}" for k, v in params.items()) or None
-    db.log(device["name"], action, role=device["role_name"], entity_id=entity_id,
-           detail=detail, ip=ip)
+    db.log(actor, action, role=device["role_name"], entity_id=entity_id, detail=detail, ip=ip)
     # Commands sent as a linked user are already credited to them in Home Assistant's logbook.
     if not as_user and db.settings().get("ha_logbook") == "1":
         name = (states.get(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
+        who = f"{member['name']} ({device['name']})" if member else device["name"]
         try:
-            await ha.logbook(name, f"{describe_action(entity_id, action, call)} by "
-                                   f"{device['name']} (Staff Portal)", entity_id)
+            await ha.logbook(name, f"{describe_action(entity_id, action, call)} by {who} "
+                                   "via Staff Portal", entity_id)
         except HomeAssistantError as err:
             log.warning("Couldn't write logbook entry: %s", err)
     return web.json_response({"ok": True})
 
 
-async def send_command(device: dict, domain: str, service: str, call: dict) -> bool:
-    """Send as the phone's linked HA user when it has one. Returns True if it did."""
-    if device.get("ha_refresh_token"):
+async def send_command(device: dict, member: dict | None, domain: str, service: str,
+                       call: dict) -> bool:
+    """Send as the linked HA user when there is one. Returns True if it did.
+
+    On a shared phone the signed-in staff member's own link is used. The phone's link is
+    ignored there, so Home Assistant never credits the wrong person.
+    """
+    linked, update = (member, db.update_staff) if member else (device, db.update_device)
+    if linked.get("ha_refresh_token"):
         try:
-            await ha.call_service(domain, service, call, refresh_token=device["ha_refresh_token"])
-            if device.get("ha_link_error"):
-                db.update_device(device["id"], ha_link_error=None)
+            await ha.call_service(domain, service, call, refresh_token=linked["ha_refresh_token"])
+            if linked.get("ha_link_error"):
+                update(linked["id"], ha_link_error=None)
             return True
         except LinkError as err:
             # Keep staff working: fall back to the add-on's own access and flag it for the admin.
-            log.warning("Linked user for %s failed: %s", device["name"], err)
-            if device.get("ha_link_error") != str(err):
-                db.update_device(device["id"], ha_link_error=str(err))
-                db.log(device["name"], "Home Assistant user link stopped working",
+            log.warning("Linked user for %s failed: %s", linked["name"], err)
+            if linked.get("ha_link_error") != str(err):
+                update(linked["id"], ha_link_error=str(err))
+                db.log(actor_name(device, member), "Home Assistant user link stopped working",
                        role=device["role_name"], detail=str(err), ok=False)
     await ha.call_service(domain, service, call)
     return False
@@ -359,6 +441,7 @@ def staff_app() -> web.Application:
     app.router.add_post("/api/enroll", api_enroll)
     app.router.add_get("/api/me", api_me)
     app.router.add_post("/api/unlock", api_unlock)
+    app.router.add_post("/api/signout", api_signout)
     app.router.add_get("/api/entities", api_entities)
     app.router.add_post("/api/action", api_action)
     return app
@@ -379,6 +462,7 @@ def device_payload() -> list[dict]:
     devices = db.devices()
     for d in devices:
         d["setup_url"] = setup_url(d["enroll_code"])
+        d["staff_ids"] = db.device_staff_ids(d["id"])
     return devices
 
 
@@ -392,6 +476,7 @@ async def admin_state(request: web.Request):
         "settings": db.settings(),
         "roles": db.roles(),
         "devices": device_payload(),
+        "staff": db.staff_list(),
         "has_logo": branding.has_logo(),
     })
 
@@ -474,7 +559,14 @@ async def admin_create_device(request: web.Request):
     name = clean_name(data.get("name"))
     if not name:
         return bad_request("Give the phone a name.")
-    device_id = db.create_device(name, parse_role(data.get("role_id")), parse_pin(data.get("pin")))
+    shared = data.get("signin_mode") == "staff"
+    device_id = db.create_device(name, parse_role(data.get("role_id")),
+                                 None if shared else parse_pin(data.get("pin")))
+    if shared:
+        db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0)
+        if isinstance(data.get("staff_ids"), list):
+            known = {m["id"] for m in db.staff_list()}
+            db.set_device_staff(device_id, [int(i) for i in data["staff_ids"] if int(i) in known])
     db.log(admin_name(request), f"Added phone {name}")
     return web.json_response({"id": device_id})
 
@@ -485,6 +577,7 @@ async def admin_update_device(request: web.Request):
         raise web.HTTPNotFound()
     data = await read_json(request)
     fields = {}
+    end_sessions = False
     if "name" in data and clean_name(data["name"]):
         fields["name"] = clean_name(data["name"])
     if "role_id" in data:
@@ -492,7 +585,17 @@ async def admin_update_device(request: web.Request):
     if "pin" in data:
         pin = parse_pin(data["pin"])
         fields["pin_hash"] = hash_pin(pin) if pin else None
-        for token, (dev_id, _) in list(pin_sessions.items()):
+        end_sessions = True
+    if data.get("signin_mode") in ("phone", "staff"):
+        fields["signin_mode"] = data["signin_mode"]
+        end_sessions = end_sessions or fields["signin_mode"] != device["signin_mode"]
+    if "staff_all" in data:
+        fields["staff_all"] = 1 if data["staff_all"] else 0
+    if isinstance(data.get("staff_ids"), list):
+        known = {m["id"] for m in db.staff_list()}
+        db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known])
+    if end_sessions:
+        for token, (dev_id, *_) in list(pin_sessions.items()):
             if dev_id == device["id"]:
                 pin_sessions.pop(token, None)
     db.update_device(device["id"], **fields)
@@ -534,9 +637,17 @@ async def admin_delete_device(request: web.Request):
     return web.json_response({"ok": True})
 
 
+def link_target(request: web.Request):
+    """Phone or staff member whose Home Assistant user link is being changed."""
+    item_id = int(request.match_info["id"])
+    if request.match_info["kind"] == "staff":
+        return db.staff(item_id), db.update_staff
+    return db.device(item_id), db.update_device
+
+
 async def admin_link_user(request: web.Request):
-    device = db.device(int(request.match_info["id"]))
-    if not device:
+    target, update = link_target(request)
+    if not target:
         raise web.HTTPNotFound()
     data = await read_json(request)
     username = str(data.get("username", "")).strip()
@@ -550,22 +661,97 @@ async def admin_link_user(request: web.Request):
     except HomeAssistantError as err:
         log.warning("Linking %s failed: %s", username, err)
         return bad_request("Couldn't reach Home Assistant's login. Try again in a moment.", 502)
-    if device["ha_refresh_token"]:
-        await ha.unlink_user(device["ha_refresh_token"])
-    db.update_device(device["id"], ha_user=username, ha_refresh_token=refresh, ha_link_error=None)
-    db.log(admin_name(request), f"Linked {device['name']} to Home Assistant user {username}")
+    if target["ha_refresh_token"]:
+        await ha.unlink_user(target["ha_refresh_token"])
+    update(target["id"], ha_user=username, ha_refresh_token=refresh, ha_link_error=None)
+    db.log(admin_name(request), f"Linked {target['name']} to Home Assistant user {username}")
     return web.json_response({"ok": True})
 
 
 async def admin_unlink_user(request: web.Request):
-    device = db.device(int(request.match_info["id"]))
-    if not device:
+    target, update = link_target(request)
+    if not target:
         raise web.HTTPNotFound()
-    if device["ha_refresh_token"]:
-        await ha.unlink_user(device["ha_refresh_token"])
-    db.update_device(device["id"], ha_user=None, ha_refresh_token=None, ha_link_error=None)
-    db.log(admin_name(request), f"Unlinked {device['name']} from Home Assistant user "
-                                f"{device['ha_user']}")
+    if target["ha_refresh_token"]:
+        await ha.unlink_user(target["ha_refresh_token"])
+    update(target["id"], ha_user=None, ha_refresh_token=None, ha_link_error=None)
+    db.log(admin_name(request), f"Unlinked {target['name']} from Home Assistant user "
+                                f"{target['ha_user']}")
+    return web.json_response({"ok": True})
+
+
+# Staff members
+
+def staff_sessions_end(staff_id: int) -> None:
+    for token, (_, _, sid) in list(pin_sessions.items()):
+        if sid == staff_id:
+            pin_sessions.pop(token, None)
+
+
+def require_pin(value) -> str:
+    pin = parse_pin(value)
+    if not pin:
+        raise web.HTTPBadRequest(text="Each staff member needs a PIN of 4 to 8 digits.")
+    return pin
+
+
+async def admin_create_staff(request: web.Request):
+    data = await read_json(request)
+    name = clean_name(data.get("name"), 40)
+    if not name:
+        return bad_request("Enter the staff member's name.")
+    try:
+        staff_id = db.create_staff(name, require_pin(data.get("pin")))
+    except sqlite3.IntegrityError:
+        return bad_request("Someone with that name already exists.")
+    db.log(admin_name(request), f"Added staff member {name}")
+    return web.json_response({"id": staff_id})
+
+
+async def admin_update_staff(request: web.Request):
+    member = db.staff(int(request.match_info["id"]))
+    if not member:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    fields = {}
+    if "name" in data and clean_name(data["name"], 40):
+        fields["name"] = clean_name(data["name"], 40)
+    if data.get("pin"):
+        fields["pin_hash"] = hash_pin(require_pin(data["pin"]))
+        fields["failed_pins"] = 0
+    if "active" in data:
+        if not data["active"]:
+            fields["status"] = "disabled"
+        elif member["status"] == "disabled":
+            fields["status"] = "active"
+    try:
+        db.update_staff(member["id"], **fields)
+    except sqlite3.IntegrityError:
+        return bad_request("Someone with that name already exists.")
+    if "pin_hash" in fields or fields.get("status") == "disabled":
+        staff_sessions_end(member["id"])
+    db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}")
+    return web.json_response({"ok": True})
+
+
+async def admin_unlock_staff(request: web.Request):
+    member = db.staff(int(request.match_info["id"]))
+    if not member:
+        raise web.HTTPNotFound()
+    db.update_staff(member["id"], status="active", failed_pins=0)
+    db.log(admin_name(request), f"Unlocked staff member {member['name']}")
+    return web.json_response({"ok": True})
+
+
+async def admin_delete_staff(request: web.Request):
+    member = db.staff(int(request.match_info["id"]))
+    if not member:
+        raise web.HTTPNotFound()
+    if member["ha_refresh_token"]:
+        await ha.unlink_user(member["ha_refresh_token"])
+    staff_sessions_end(member["id"])
+    db.delete_staff(member["id"])
+    db.log(admin_name(request), f"Deleted staff member {member['name']}")
     return web.json_response({"ok": True})
 
 
@@ -660,8 +846,12 @@ def admin_app() -> web.Application:
     app.router.add_patch(r"/api/devices/{id:\d+}", admin_update_device)
     app.router.add_delete(r"/api/devices/{id:\d+}", admin_delete_device)
     app.router.add_post(r"/api/devices/{id:\d+}/{action:revoke|reenroll|unlock}", admin_device_action)
-    app.router.add_post(r"/api/devices/{id:\d+}/link", admin_link_user)
-    app.router.add_delete(r"/api/devices/{id:\d+}/link", admin_unlink_user)
+    app.router.add_post(r"/api/{kind:devices|staff}/{id:\d+}/link", admin_link_user)
+    app.router.add_delete(r"/api/{kind:devices|staff}/{id:\d+}/link", admin_unlink_user)
+    app.router.add_post("/api/staff", admin_create_staff)
+    app.router.add_patch(r"/api/staff/{id:\d+}", admin_update_staff)
+    app.router.add_delete(r"/api/staff/{id:\d+}", admin_delete_staff)
+    app.router.add_post(r"/api/staff/{id:\d+}/unlock", admin_unlock_staff)
     app.router.add_get(r"/api/devices/{id:\d+}/qr.svg", admin_device_qr)
     app.router.add_get("/api/activity", admin_activity)
     app.router.add_put("/api/settings", admin_update_settings)

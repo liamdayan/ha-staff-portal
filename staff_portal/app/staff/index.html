@@ -23,6 +23,7 @@
     <div class="bar-sub" id="bar-sub"></div>
   </div>
   <button class="icon-btn" id="lock-btn" hidden aria-label="Lock app">
+    <span data-label hidden>Sign out</span>
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg>
   </button>
 </header>
@@ -55,9 +56,20 @@
   <div class="center pin">
     <img class="hero-logo" src="/icon-192.png" alt="">
     <h1>Enter PIN</h1>
+    <p class="muted" data-sub></p>
     <div class="pin-dots" data-dots></div>
     <p class="pin-error" data-error></p>
     <div class="pinpad" data-pad></div>
+    <button class="link-btn" data-back hidden></button>
+  </div>
+</template>
+
+<template id="tpl-who">
+  <div class="center who-screen">
+    <img class="hero-logo" src="/icon-192.png" alt="">
+    <h1>Who's using this phone?</h1>
+    <p class="muted">Tap your name, then enter your PIN.</p>
+    <div class="who-list" data-names></div>
   </div>
 </template>
 

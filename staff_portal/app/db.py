@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS activity (
     ip TEXT
 );
 CREATE INDEX IF NOT EXISTS activity_ts ON activity (ts DESC);
+CREATE TABLE IF NOT EXISTS staff (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    pin_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    failed_pins INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    last_seen REAL,
+    ha_user TEXT,
+    ha_refresh_token TEXT,
+    ha_link_error TEXT
+);
+CREATE TABLE IF NOT EXISTS staff_devices (
+    staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    PRIMARY KEY (staff_id, device_id)
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -55,6 +72,11 @@ MIGRATIONS = {
         "ha_user": "TEXT",
         "ha_refresh_token": "TEXT",
         "ha_link_error": "TEXT",
+        # 'phone': the phone itself is the user (optional phone PIN).
+        # 'staff': shared phone, each staff member signs in with their own PIN.
+        "signin_mode": "TEXT NOT NULL DEFAULT 'phone'",
+        # In 'staff' mode: 1 = every active staff member may sign in, 0 = only staff_devices.
+        "staff_all": "INTEGER NOT NULL DEFAULT 1",
     },
 }
 
@@ -207,12 +229,77 @@ class Database:
 
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins",
-                   "ha_user", "ha_refresh_token", "ha_link_error"}
+                   "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
         cols = ", ".join(f"{k} = ?" for k in sets)
         self.conn.execute(f"UPDATE devices SET {cols} WHERE id = ?", (*sets.values(), device_id))
+        self.conn.commit()
+
+    def set_device_staff(self, device_id: int, staff_ids: list[int]) -> None:
+        self.conn.execute("DELETE FROM staff_devices WHERE device_id = ?", (device_id,))
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO staff_devices (staff_id, device_id) VALUES (?, ?)",
+            [(sid, device_id) for sid in staff_ids],
+        )
+        self.conn.commit()
+
+    def device_staff_ids(self, device_id: int) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT staff_id FROM staff_devices WHERE device_id = ?", (device_id,))
+        return [r[0] for r in rows]
+
+    # Staff members (people who sign in on shared phones)
+
+    def staff_list(self) -> list[dict]:
+        result = []
+        for r in self.conn.execute("SELECT * FROM staff ORDER BY name COLLATE NOCASE"):
+            m = dict(r)
+            m.pop("pin_hash")
+            m.pop("ha_refresh_token")
+            result.append(m)
+        return result
+
+    def staff(self, staff_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM staff WHERE id = ?", (staff_id,)).fetchone()
+        return dict(row) if row else None
+
+    def staff_for_device(self, device: dict) -> list[dict]:
+        """Active staff members allowed to sign in on a shared phone."""
+        if device["staff_all"]:
+            rows = self.conn.execute(
+                "SELECT id, name FROM staff WHERE status != 'disabled' ORDER BY name COLLATE NOCASE")
+        else:
+            rows = self.conn.execute(
+                """SELECT s.id, s.name FROM staff s JOIN staff_devices sd ON sd.staff_id = s.id
+                   WHERE sd.device_id = ? AND s.status != 'disabled'
+                   ORDER BY s.name COLLATE NOCASE""", (device["id"],))
+        return [dict(r) for r in rows]
+
+    def staff_allowed_on(self, staff_id: int, device: dict) -> bool:
+        return any(m["id"] == staff_id for m in self.staff_for_device(device))
+
+    def create_staff(self, name: str, pin: str) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO staff (name, pin_hash, created_at) VALUES (?, ?, ?)",
+            (name, hash_pin(pin), time.time()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_staff(self, staff_id: int, **fields) -> None:
+        allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen",
+                   "ha_user", "ha_refresh_token", "ha_link_error"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        self.conn.execute(f"UPDATE staff SET {cols} WHERE id = ?", (*sets.values(), staff_id))
+        self.conn.commit()
+
+    def delete_staff(self, staff_id: int) -> None:
+        self.conn.execute("DELETE FROM staff WHERE id = ?", (staff_id,))
         self.conn.commit()
 
     def new_enroll_code(self, device_id: int) -> str:

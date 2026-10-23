@@ -92,6 +92,27 @@ Each QR code works once and expires (72 hours by default, changeable in Settings
 - **Unlock** clears a lock after too many wrong PINs.
 - Changing a phone's role takes effect within a few seconds.
 
+## Shared phones: each person signs in
+
+If several people share one phone (a maintenance phone passed between shifts, say), you can have
+each person sign in with their own PIN so every action is recorded under their name.
+
+1. In **Staff**, click **Add staff member** for each person, with a name and a 4- to 8-digit PIN.
+2. In **Phones**, click **Edit** on the shared phone and set **Who uses it** to
+   **Shared: each person signs in with their own PIN**. Leave **Everyone on the Staff tab**
+   ticked, or untick it and pick who may use that phone.
+
+On the phone, the app now asks **"Who's using this phone?"**. The person taps their name,
+enters their PIN, and the header shows who's signed in. **Sign out** returns to the name list,
+and they're signed out automatically after the idle time set in **Settings**.
+
+- What they can control still comes from the **phone's role**.
+- The Activity tab shows entries like "Bob on Maintenance phone", and Home Assistant logbook
+  entries read "set to 140° by Bob (Maintenance phone) via Staff Portal".
+- Too many wrong PINs locks that **person** (unlock them on the Staff tab). Wrong PINs across
+  several names in a row lock the **phone**, so PINs can't be guessed by switching names.
+- Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
+
 ## Seeing staff actions in Home Assistant
 
 Every staff action is always recorded in **Staff Access → Activity**. You can also have them show
@@ -101,14 +122,17 @@ up in Home Assistant's own **Logbook**, in one of two ways.
 "Main Boiler set to 140° by Maintenance phone (Staff Portal)". Turn this off under
 **Settings → Home Assistant logbook**.
 
-**Link a phone to a Home Assistant user.** Home Assistant then credits that user directly,
+**Link a phone or a staff member to a Home Assistant user.** Home Assistant then credits that
+user directly,
 the same as if they had tapped it in the Home Assistant app: "Porch Light turned off triggered
 by action light.turn_off by Maintenance." Linked phones don't get the extra logbook entry.
 
 1. In Home Assistant, create a user for it under **Settings → People → Users → Add user**
    (for a shared phone, something like *Maintenance*). Leave **Administrator** off.
 2. In **Staff Access → Phones**, click **Link HA user** on the phone and enter that user's
-   username and password.
+   username and password. On shared phones, link each person on the **Staff** tab instead.
+   A shared phone always uses the signed-in person's link and never the phone's, so Home
+   Assistant can't credit the wrong person.
 
 How it works and what to know:
 

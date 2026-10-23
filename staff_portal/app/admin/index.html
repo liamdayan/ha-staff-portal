@@ -17,6 +17,7 @@
 
 <nav class="tabs" role="tablist">
   <button role="tab" data-tab="phones" aria-selected="true">Phones</button>
+  <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
@@ -33,6 +34,16 @@
       <button class="btn primary" id="add-phone">Add phone</button>
     </div>
     <div id="phone-list" class="cards"></div>
+  </section>
+
+  <section id="tab-staff" class="tab" hidden>
+    <div class="section-head">
+      <h2>Staff members</h2>
+      <button class="btn primary" id="add-staff">Add staff member</button>
+    </div>
+    <p class="hint">For shared phones: each person taps their name and enters their own PIN, so
+      every action is recorded under their name. What they can control comes from the phone's role.</p>
+    <div id="staff-list" class="cards"></div>
   </section>
 
   <section id="tab-roles" class="tab" hidden>
@@ -115,8 +126,32 @@
     <h2 data-title>Add phone</h2>
     <label>Name<input name="name" maxlength="60" placeholder="Maintenance phone" required></label>
     <label>Role<select name="role_id"></select></label>
+    <label>Who uses it
+      <select name="signin_mode">
+        <option value="phone">One person or team (optional phone PIN)</option>
+        <option value="staff">Shared: each person signs in with their own PIN</option>
+      </select></label>
+    <div class="staff-pick" data-staff-pick hidden>
+      <label class="check"><input type="checkbox" name="staff_all"> Everyone on the Staff tab</label>
+      <div class="staff-checks" data-staff-list></div>
+      <p class="hint" data-no-staff>Add people on the Staff tab first.</p>
+    </div>
     <label>PIN <small data-pin-hint>Optional, 4 to 8 digits. Staff enter it when opening the app.</small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="staff-dialog">
+  <form method="dialog" id="staff-form">
+    <h2 data-title>Add staff member</h2>
+    <label>Name<input name="name" maxlength="40" placeholder="Bob" required></label>
+    <label>PIN <small data-pin-hint></small>
+      <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
+    <label class="check"><input type="checkbox" name="active"> Can sign in</label>
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="save">Save</button>

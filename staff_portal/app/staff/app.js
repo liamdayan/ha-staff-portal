@@ -10,6 +10,7 @@
   const screen = document.getElementById("screen");
   const toastEl = document.getElementById("toast");
 
+  let me = null;
   let tiles = new Map();
   let pollTimer = null;
   let installPrompt = null;
@@ -115,7 +116,7 @@
     }
     if (res.status === 403 && res.data.error === "pin_required") {
       session.del(SESSION_KEY);
-      showPin();
+      askForPin();
       return true;
     }
     if (res.status === 0) {
@@ -191,11 +192,47 @@
     show(node);
   }
 
-  function showPin() {
+  function askForPin() {
+    if (me?.shared) showWho();
+    else showPin(null);
+  }
+
+  // Shared phone: pick your name, then enter your own PIN.
+  async function showWho() {
+    const res = await api("GET", "/api/me");
+    if (res.status !== 200) {
+      handleAuthError(res) || message("Something went wrong", "Please try again.", true);
+      return;
+    }
+    me = res.data;
+    if (!me.shared) return showPin(null);
+    if (!me.staff.length) {
+      return message("No one can sign in yet",
+        "Ask your manager to add you as a staff member for this phone.", true);
+    }
+    const node = fromTemplate("tpl-who");
+    const list = node.querySelector("[data-names]");
+    for (const member of me.staff) {
+      list.append(h("button", { class: "who", onclick: () => showPin(member) },
+        h("span", { class: "who-initial" }, member.name.charAt(0).toUpperCase()), member.name));
+    }
+    document.getElementById("bar").hidden = true;
+    show(node);
+  }
+
+  function showPin(member) {
     const node = fromTemplate("tpl-pin");
     const dots = node.querySelector("[data-dots]");
     const error = node.querySelector("[data-error]");
     const pad = node.querySelector("[data-pad]");
+    if (member) {
+      node.querySelector("h1").textContent = `Hi, ${member.name}`;
+      node.querySelector("[data-sub]").textContent = "Enter your PIN";
+      const back = node.querySelector("[data-back]");
+      back.hidden = false;
+      back.textContent = `Not ${member.name}?`;
+      back.addEventListener("click", () => showWho());
+    }
     let pin = "";
     let busy = false;
 
@@ -206,13 +243,15 @@
     const submit = async () => {
       if (busy || pin.length < 4) return;
       busy = true;
-      const res = await api("POST", "/api/unlock", { pin });
+      const res = await api("POST", "/api/unlock",
+        member ? { pin, staff_id: member.id } : { pin });
       busy = false;
       if (res.status === 200) {
         session.set(SESSION_KEY, res.data.session);
         return boot();
       }
       if (res.status === 423 || res.status === 401 || res.status === 0) return handleAuthError(res);
+      if (res.status === 404 && member) return showWho();
       pin = "";
       draw();
       error.textContent = res.data.error || "Wrong PIN.";
@@ -237,18 +276,30 @@
     show(node);
   }
 
+  function setSubtitle(staffName) {
+    const parts = me.shared && staffName
+      ? [staffName, me.role || "No role assigned"]
+      : [me.role || "No role assigned", me.device];
+    document.getElementById("bar-sub").textContent = parts.filter(Boolean).join(" · ");
+  }
+
   function start(info) {
+    me = info;
     document.documentElement.style.setProperty("--accent", info.accent_color);
     document.getElementById("bar-title").textContent = info.property_name;
-    document.getElementById("bar-sub").textContent =
-      [info.role || "No role assigned", info.device].filter(Boolean).join(" · ");
+    setSubtitle(null);
     const logo = document.getElementById("bar-logo");
     logo.hidden = !info.has_logo;
     if (info.has_logo) logo.src = "/logo.png";
-    document.getElementById("lock-btn").hidden = !info.pin_required;
+    const lockBtn = document.getElementById("lock-btn");
+    lockBtn.hidden = !info.pin_required;
+    lockBtn.classList.toggle("text", !!info.shared);
+    lockBtn.setAttribute("aria-label", info.shared ? "Sign out" : "Lock app");
+    lockBtn.querySelector("svg").toggleAttribute("hidden", !!info.shared);
+    lockBtn.querySelector("[data-label]").hidden = !info.shared;
     document.getElementById("bar").hidden = false;
 
-    if (info.pin_required && !session.get(SESSION_KEY)) return showPin();
+    if (info.pin_required && !session.get(SESSION_KEY)) return askForPin();
     show(h("div", { class: "center" }, h("div", { class: "spinner", "aria-label": "Loading" })));
     refresh();
   }
@@ -276,6 +327,7 @@
       handleAuthError(res) || message("Something went wrong", "Please try again.", true);
       return;
     }
+    setSubtitle(res.data.staff_name);
     render(res.data.entities);
     if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
   }
@@ -532,9 +584,10 @@
 
   // ---------------------------------------------------------------- wiring
 
-  document.getElementById("lock-btn").addEventListener("click", () => {
+  document.getElementById("lock-btn").addEventListener("click", async () => {
+    if (me?.shared) await api("POST", "/api/signout");
     session.del(SESSION_KEY);
-    showPin();
+    askForPin();
   });
 
   document.addEventListener("visibilitychange", () => {
