@@ -18,6 +18,8 @@ import aiohttp
 
 log = logging.getLogger("staff_portal")
 
+WS_MAX_MESSAGE = 64 * 1024 * 1024  # aiohttp's default (4 MB) is too small for big registries
+
 # Rendered as JSON so Home Assistant's template whitespace handling can't change the layout.
 # Lists line up by position: "areas"[i] is the area ID (or null) of "ids"[i].
 AREA_TEMPLATE = (
@@ -116,10 +118,7 @@ class HomeAssistant:
             except (HomeAssistantError, KeyError, TypeError, ValueError, SyntaxError) as err:
                 log.warning("Couldn't read Home Assistant areas: %s", err)
             try:
-                registry = await self.ws_command({"type": "config/entity_registry/list"})
-                self._tucked_away = {
-                    e["entity_id"] for e in registry
-                    if isinstance(e, dict) and (e.get("entity_category") or e.get("hidden_by"))}
+                self._tucked_away = await self._read_tucked_away()
             except (HomeAssistantError, KeyError, TypeError) as err:
                 log.warning("Couldn't read the entity registry: %s", err)
             self._areas_at = time.monotonic()
@@ -134,7 +133,9 @@ class HomeAssistant:
     async def ws_command(self, payload: dict, timeout: float = 10.0):
         """Run one Home Assistant WebSocket command with the add-on's own token."""
         try:
-            async with self.session.ws_connect(self.ws_url, timeout=timeout) as ws:
+            # Large systems send big replies (a full entity registry can be several MB).
+            async with self.session.ws_connect(self.ws_url, timeout=timeout,
+                                               max_msg_size=WS_MAX_MESSAGE) as ws:
                 async def receive():
                     return await asyncio.wait_for(ws.receive_json(), timeout)
                 if (await receive()).get("type") != "auth_required":
@@ -149,6 +150,27 @@ class HomeAssistant:
         if not reply.get("success"):
             raise HomeAssistantError(f"websocket: {reply.get('error')}")
         return reply.get("result")
+
+    async def _read_tucked_away(self) -> set[str]:
+        """Entities Home Assistant marks as configuration/diagnostic or hidden, so whole-area
+        grants can leave them out.
+
+        Uses the compact listing Home Assistant's own frontend uses (a fraction of the size on
+        big systems), and falls back to the full registry if that isn't available."""
+        try:
+            data = await self.ws_command({"type": "config/entity_registry/list_for_display"})
+            entries = data["entities"]
+            if not isinstance(entries, list):
+                raise TypeError("unexpected entity list")
+            # Compact keys: "ei" entity ID, "ec" category index (present only when set, and
+            # 0 is a real category), "hb" true when hidden.
+            return {e["ei"] for e in entries
+                    if isinstance(e, dict) and isinstance(e.get("ei"), str) and ("ec" in e or e.get("hb"))}
+        except (HomeAssistantError, KeyError, TypeError) as err:
+            log.info("Compact entity registry not available (%s); reading the full one", err)
+        registry = await self.ws_command({"type": "config/entity_registry/list"})
+        return {e["entity_id"] for e in registry
+                if isinstance(e, dict) and (e.get("entity_category") or e.get("hidden_by"))}
 
     async def is_admin(self, user_id: str) -> bool:
         """Whether a Home Assistant user is an active administrator. Cached for a minute;

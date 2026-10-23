@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.14
+
+- **Fixed:** on systems with many entities, Staff Access couldn't read Home Assistant's entity
+  registry ("Message size … exceeds limit" in the log). Until it could, whole-area access also
+  included the configuration and hidden controls it should leave out, such as "Restart
+  controller" or "Child lock". It now reads Home Assistant's compact entity list (much smaller),
+  and falls back to the full list with a much higher size limit.
+
 ## 0.6.13
 
 Fixes from a bug and security review.
