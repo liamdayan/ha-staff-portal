@@ -59,10 +59,10 @@ class HomeAssistant:
         self.headers = {"Authorization": f"Bearer {token}"}
         self.session: aiohttp.ClientSession | None = None
         self._states: dict[str, dict] = {}
-        self._states_at = 0.0
+        self._states_at = float("-inf")  # never fetched; uptime can be under max_age
         self._entity_area: dict[str, str] = {}  # entity_id -> Home Assistant area ID
         self._area_names: dict[str, str] = {}   # Home Assistant area ID -> name
-        self._areas_at = 0.0
+        self._areas_at = float("-inf")
         self._core: str | None = None
         self._user_tokens: dict[str, tuple[str, float]] = {}  # refresh token -> (access, expiry)
 
@@ -137,7 +137,7 @@ class HomeAssistant:
                     raise
         else:
             await self._request("POST", f"/services/{domain}/{service}", json=data)
-        self._states_at = 0.0  # force a fresh read so the phone sees the result
+        self._states_at = float("-inf")  # force a fresh read so the phone sees the result
 
     async def logbook(self, name: str, message: str, entity_id: str | None = None) -> None:
         data = {"name": name, "message": message}

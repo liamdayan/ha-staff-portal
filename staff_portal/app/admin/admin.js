@@ -10,6 +10,9 @@
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
+  // Filled in by the add-on when it serves the page. The header shows it once the script runs,
+  // so "loading…" staying there means the dashboard script didn't start.
+  const SCRIPT_VERSION = "{{SCRIPT_VERSION}}";
 
   // Never fail silently: unexpected errors stay on screen and are written to the add-on's log.
   function reportError(message, error, where) {
@@ -1181,6 +1184,8 @@
   });
 
   // ---------------------------------------------------------------- start
+
+  $("#version").textContent = `v${SCRIPT_VERSION}`;
 
   load().then(() => {
     let tab = "phones";

@@ -228,9 +228,22 @@ def render_staff_index(enroll_code: str | None = None) -> web.Response:
     }
     for key, value in replacements.items():
         html = html.replace(key, _esc(value))
-    for asset in ("/static/app.css", "/static/app.js"):
-        html = html.replace(f'"{asset}"', f'"{asset}?v={STAFF_ASSETS}"')
-    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+    # Script and styles are built into the page (which is never cached) so a phone can't end up
+    # running an old script after an update. A per-response nonce lets only these run.
+    nonce = secrets.token_urlsafe(16)
+    with open(os.path.join(HERE, "staff", "app.css"), encoding="utf-8") as f:
+        css = f.read()
+    with open(os.path.join(HERE, "staff", "app.js"), encoding="utf-8") as f:
+        script = f.read()
+    html = html.replace('<link rel="stylesheet" href="/static/app.css">',
+                        f'<style nonce="{nonce}">\n{css}\n</style>')
+    html = html.replace('<script src="/static/app.js"></script>',
+                        f'<script nonce="{nonce}">\n{script}\n</script>')
+    csp = (f"default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-{nonce}'; "
+           f"script-src 'self' 'nonce-{nonce}'; connect-src 'self'; frame-ancestors 'none'; "
+           "base-uri 'none'; form-action 'none'")
+    return web.Response(text=html, content_type="text/html",
+                        headers={"Cache-Control": "no-store", "Content-Security-Policy": csp})
 
 
 def _esc(value: str) -> str:
@@ -583,11 +596,16 @@ def device_payload() -> list[dict]:
 
 
 async def admin_index(request: web.Request):
-    with open(os.path.join(HERE, "admin", "index.html"), encoding="utf-8") as f:
-        html = f.read()
-    for asset in ("static/admin.css", "static/admin.js"):
-        html = html.replace(f'"{asset}"', f'"{asset}?v={ADMIN_ASSETS}"')
-    html = html.replace("{{VERSION}}", _esc(VERSION))
+    # The script and styles are built into the page rather than linked. The page is never
+    # cached, so a browser or proxy (such as Cloudflare) can't pair it with an old script.
+    def read(name: str) -> str:
+        with open(os.path.join(HERE, "admin", name), encoding="utf-8") as f:
+            return f.read()
+    html = read("index.html").replace("{{VERSION}}", _esc(VERSION))
+    script = read("admin.js").replace("{{SCRIPT_VERSION}}", VERSION)
+    html = html.replace('<link rel="stylesheet" href="static/admin.css">',
+                        f"<style>\n{read('admin.css')}\n</style>")
+    html = html.replace('<script src="static/admin.js"></script>', f"<script>\n{script}\n</script>")
     return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
