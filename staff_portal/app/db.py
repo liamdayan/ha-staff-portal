@@ -102,6 +102,9 @@ MIGRATIONS = {
         "signin_mode": "TEXT NOT NULL DEFAULT 'phone'",
         # In 'staff' mode: 1 = every active staff member may sign in, 0 = only staff_devices.
         "staff_all": "INTEGER NOT NULL DEFAULT 1",
+        # JSON list of layout page IDs this phone shows ("more" = the More page).
+        # NULL means every page, including pages added later.
+        "layout_pages": "TEXT",
     },
 }
 
@@ -325,7 +328,8 @@ class Database:
 
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins",
-                   "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all"}
+                   "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
+                   "layout_pages"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return

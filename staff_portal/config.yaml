@@ -1,5 +1,5 @@
 name: Staff Portal
-version: "0.5.4"
+version: "0.5.5"
 slug: staff_portal
 description: Branded, locked-down staff web app with per-role access to your devices.
 arch:

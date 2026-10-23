@@ -351,6 +351,14 @@
         render.shape = null;
         return;
       }
+      if (data.layout && !data.layout.pages.length) {
+        show(h("div", { class: "center message" },
+          h("h1", null, "Nothing on this phone yet"),
+          h("p", null, "None of this phone's pages have anything it's allowed to see. " +
+            "Ask your manager to check the phone's pages and role.")));
+        render.shape = null;
+        return;
+      }
       const next = new Map();
       const root = data.layout ? buildLayout(data.layout, byId, next) : buildAutomatic(data.entities, next);
       show(root);

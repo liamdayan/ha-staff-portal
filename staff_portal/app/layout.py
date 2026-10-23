@@ -12,8 +12,10 @@ MAX_PAGES = 20
 MAX_ITEMS = 200
 MAX_GROUP_ENTITIES = 40
 MAX_SUMMARY = 4
+MAX_PHONE_PAGES = 60
 ITEM_TYPES = ("heading", "device", "area", "group")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+MORE_PAGE_ID = "more"  # the automatic page for allowed devices that aren't on any page
 
 
 def _text(value, limit: int) -> str:
@@ -65,19 +67,40 @@ def clean_layout(data) -> dict:
                 title = _text(item.get("title"), 60)
                 if title and members:
                     items.append({**base, "title": title, "entities": members})
-        pages.append({"id": _id(page.get("id"), f"p{p_index}"),
+        page_id = _id(page.get("id"), f"p{p_index}")
+        if page_id == MORE_PAGE_ID or any(p["id"] == page_id for p in pages):
+            page_id = f"p{p_index}"
+        pages.append({"id": page_id,
                       "name": _text(page.get("name"), 30) or f"Page {p_index + 1}",
                       "items": items})
     return {"pages": pages, "show_unplaced": bool(data.get("show_unplaced", True))}
 
 
-def visible_layout(layout: dict, access: dict[str, str], areas) -> dict | None:
+def clean_phone_pages(value) -> list[str] | None:
+    """A phone's page choice from the admin dashboard: None (all pages) or a list of page IDs."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("layout_pages must be a list of page IDs or null")
+    ids: list[str] = []
+    for item in value[:MAX_PHONE_PAGES]:
+        if isinstance(item, str) and ID_RE.match(item) and item not in ids:
+            ids.append(item)
+    return ids
+
+
+def visible_layout(layout: dict, access: dict[str, str], areas,
+                   page_ids: list[str] | None = None) -> dict | None:
     """The layout as one phone should see it, or None to use the automatic layout.
 
     `access` is the phone's {entity_id: level}; `areas` is the current AreaLayout.
+    `page_ids` limits which pages this phone shows (None = all). The More page only holds
+    devices that aren't on *any* page, so leaving a page off one phone doesn't move its
+    devices to that phone's More page.
     """
     if not layout or not layout.get("pages"):
         return None
+    wanted = None if page_ids is None else set(page_ids)
     placed: set[str] = set()
     pages = []
     for page in layout["pages"]:
@@ -103,10 +126,10 @@ def visible_layout(layout: dict, access: dict[str, str], areas) -> dict | None:
                     items.append({**item, "title": title, "entity_ids": ids})
                     placed.update(ids)
         items = _drop_empty_headings(items)
-        if items:
+        if items and (wanted is None or page["id"] in wanted):
             pages.append({**page, "items": items})
 
-    if layout.get("show_unplaced", True):
+    if layout.get("show_unplaced", True) and (wanted is None or MORE_PAGE_ID in wanted):
         rest = [eid for eid in access if eid not in placed]
         if rest:
             items = []
@@ -116,7 +139,7 @@ def visible_layout(layout: dict, access: dict[str, str], areas) -> dict | None:
             for (_, heading), ids in sorted(by_group.items()):
                 items.append({"id": f"more-{len(items)}", "type": "area", "area_id": None,
                               "title": heading or "Other", "entity_ids": sorted(ids)})
-            pages.append({"id": "more", "name": "More", "items": items})
+            pages.append({"id": MORE_PAGE_ID, "name": "More", "items": items})
     return {"pages": pages}
 
 

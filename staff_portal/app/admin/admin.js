@@ -263,7 +263,8 @@
                 class: d.ha_link_error ? "badge locked" : "badge linked",
                 title: d.ha_link_error || "Actions show in Home Assistant as this user",
               }, d.ha_link_error ? `HA user ${d.ha_user}: link broken` : `HA user: ${d.ha_user}`) : null,
-              h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`))),
+              h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`)),
+            d.status !== "revoked" && phonePagesText(d) ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`) : null),
           h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
     }));
@@ -288,6 +289,21 @@
       ...state.roles.map((r) => h("option", { value: r.id, selected: r.id === selected }, r.name)));
   }
 
+  // Pages a phone can be given: layout pages plus the automatic More page.
+  function layoutPageOptions(pages = state.layout?.pages || [], showMore = state.layout?.show_unplaced !== false) {
+    const options = pages.map((p) => ({ id: p.id, name: p.name }));
+    if (pages.length && showMore) options.push({ id: "more", name: "More (allowed devices not on any page)" });
+    return options;
+  }
+
+  function phonePagesText(d) {
+    if (!(state.layout?.pages || []).length) return null;
+    if (d.layout_pages == null) return "All pages";
+    const names = layoutPageOptions().filter((o) => d.layout_pages.includes(o.id))
+      .map((o) => (o.id === "more" ? "More" : o.name));
+    return names.length ? names.join(", ") : "None";
+  }
+
   function editPhone(d) {
     const dialog = $("#phone-dialog");
     const form = $("#phone-form");
@@ -307,15 +323,26 @@
       h("input", { type: "checkbox", value: m.id, checked: !!d?.staff_ids.includes(m.id) }),
       m.status === "disabled" ? `${m.name} (inactive)` : m.name)));
     $("[data-no-staff]", dialog).hidden = state.staff.length > 0;
+    const pageOptions = layoutPageOptions();
+    const chosenPages = d?.layout_pages ?? null;
+    $("[data-pages-pick]", dialog).hidden = !pageOptions.length;
+    $("[data-pages-none]", dialog).hidden = pageOptions.length > 0;
+    form.elements["pages_all"].checked = chosenPages === null;
+    const pagesList = $("[data-pages-list]", dialog);
+    pagesList.replaceChildren(...pageOptions.map((o) => h("label", { class: "check" },
+      h("input", { type: "checkbox", value: o.id, checked: chosenPages === null || chosenPages.includes(o.id) }),
+      o.name)));
     const syncMode = () => {
       const shared = mode.value === "staff";
       form.elements["pin"].closest("label").hidden = shared;
       $("#clear-pin")?.closest("label").toggleAttribute("hidden", shared);
       $("[data-staff-pick]", dialog).hidden = !shared;
       pick.hidden = form.elements["staff_all"].checked;
+      pagesList.hidden = form.elements["pages_all"].checked;
     };
     mode.onchange = syncMode;
     form.elements["staff_all"].onchange = syncMode;
+    form.elements["pages_all"].onchange = syncMode;
     let clear = $("#clear-pin");
     if (clear) clear.closest("label").remove();
     if (d?.has_pin) {
@@ -327,6 +354,10 @@
       if (dialog.returnValue !== "save") return;
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
       body.signin_mode = mode.value;
+      if (pageOptions.length) {
+        body.layout_pages = form.elements["pages_all"].checked ? null
+          : [...pagesList.querySelectorAll("input:checked")].map((i) => i.value);
+      }
       if (mode.value === "staff") {
         body.staff_all = form.elements["staff_all"].checked;
         body.staff_ids = [...pick.querySelectorAll("input:checked")].map((i) => Number(i.value));
@@ -995,6 +1026,9 @@
             markLayoutDirty();
             renderLayoutEditor();
           } }, "Delete page"))),
+      h("div", { class: "shown-on" },
+        h("span", null, "Shown on: ", h("strong", null, shownOnText(page.id))),
+        h("button", { class: "btn", onclick: () => choosePhones(page) }, "Choose phones")),
       h("div", { class: "add-row" }, "Add:",
         h("button", { class: "btn", onclick: () => add("group") }, "Group card"),
         h("button", { class: "btn", onclick: () => add("device") }, "Device"),
@@ -1021,6 +1055,66 @@
               } }, "Remove")));
         }))
         : h("div", { class: "empty" }, "This page is empty. Add a group card, device, area or heading."));
+  }
+
+  function phonesShowing(pageId) {
+    return state.devices.filter((d) => d.status !== "revoked" &&
+      (d.layout_pages == null || d.layout_pages.includes(pageId)));
+  }
+
+  function shownOnText(pageId) {
+    const all = state.devices.filter((d) => d.status !== "revoked");
+    const on = phonesShowing(pageId);
+    if (!all.length) return "no phones set up yet";
+    if (on.length === all.length) return "all phones";
+    if (!on.length) return "no phones";
+    return on.map((d) => d.name).join(", ");
+  }
+
+  // Pick which phones show one page. Saved straight away (it's a phone setting, not part of
+  // the layout draft).
+  function choosePhones(page) {
+    const dialog = $("#item-dialog");
+    const body = $("[data-body]", dialog);
+    $("[data-error]", dialog).textContent = "";
+    $("[data-title]", dialog).textContent = `Phones that show \u201c${page.name}\u201d`;
+    const devices = state.devices.filter((d) => d.status !== "revoked");
+    const boxes = devices.map((d) => ({
+      d, input: h("input", { type: "checkbox", checked: d.layout_pages == null || d.layout_pages.includes(page.id) }),
+    }));
+    body.onclick = null;
+    body.oninput = null;
+    body.replaceChildren(devices.length
+      ? h("div", { class: "item-fields" },
+        h("p", { class: "hint" }, "Each phone still only sees what its role allows on this page. " +
+          "Unticking a phone that shows all pages switches it to a fixed list of pages, so it " +
+          "won't get new pages automatically. Changes here are saved straight away."),
+        h("div", { class: "member-list" }, boxes.map(({ d, input }) => h("label", { class: "check pick-row" },
+          input, h("span", null, d.name, h("small", null,
+            ` \u00b7 ${d.role_name || "no role"} \u00b7 ${d.layout_pages == null ? "all pages" : "chosen pages"}`))))))
+      : h("p", { class: "hint" }, "Set up a phone on the Phones tab first."));
+    const form = $("#item-form");
+    form.onkeydown = null;
+    form.onsubmit = (ev) => {
+      if (ev.submitter?.value !== "save") return;
+      const allIds = layoutPageOptions(draft().pages, draft().show_unplaced !== false).map((o) => o.id);
+      const changes = [];
+      for (const { d, input } of boxes) {
+        const shows = d.layout_pages == null || d.layout_pages.includes(page.id);
+        if (input.checked === shows) continue;
+        const next = input.checked
+          ? [...d.layout_pages, page.id]
+          : (d.layout_pages ?? allIds).filter((id) => id !== page.id);
+        changes.push([d, next]);
+      }
+      if (!changes.length) return;
+      run(async () => {
+        for (const [d, next] of changes) await api("PATCH", `api/devices/${d.id}`, { layout_pages: next });
+        await load();
+        renderLayoutEditor();
+      }, "Phones updated.");
+    };
+    dialog.showModal();
   }
 
   // Searchable device list used by the item dialogs.

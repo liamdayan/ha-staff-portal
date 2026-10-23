@@ -23,7 +23,7 @@ from aiohttp import web
 
 from branding import Branding
 from db import Database, check_pin, hash_pin
-from layout import clean_layout, visible_layout
+from layout import clean_layout, clean_phone_pages, visible_layout
 from ha import HomeAssistant, HomeAssistantError, LinkError
 from permissions import (ActionRejected, build_service_call, controllable, describe_action,
                          domain_of, offered)
@@ -469,7 +469,7 @@ async def api_entities(request: web.Request):
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
     return web.json_response({
         "entities": entities,
-        "layout": visible_layout(db.layout(), allowed, layout),
+        "layout": visible_layout(db.layout(), allowed, layout, device_pages(device)),
         "staff_name": member and member["name"],
     })
 
@@ -587,11 +587,24 @@ def setup_url(code: str | None) -> str | None:
     return f"{base}/e/{code}" if base and code else None
 
 
+def device_pages(device: dict) -> list[str] | None:
+    """Layout pages chosen for a phone, or None for every page."""
+    raw = device.get("layout_pages")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return [str(i) for i in value] if isinstance(value, list) else None
+
+
 def device_payload() -> list[dict]:
     devices = db.devices()
     for d in devices:
         d["setup_url"] = setup_url(d["enroll_code"])
         d["staff_ids"] = db.device_staff_ids(d["id"])
+        d["layout_pages"] = device_pages(d)
     return devices
 
 
@@ -776,6 +789,8 @@ async def admin_create_device(request: web.Request):
     shared = data.get("signin_mode") == "staff"
     device_id = db.create_device(name, parse_role(data.get("role_id")),
                                  None if shared else parse_pin(data.get("pin")))
+    if data.get("layout_pages") is not None:
+        db.update_device(device_id, layout_pages=json.dumps(clean_phone_pages(data["layout_pages"])))
     if shared:
         db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0)
         if isinstance(data.get("staff_ids"), list):
@@ -805,6 +820,9 @@ async def admin_update_device(request: web.Request):
         end_sessions = end_sessions or fields["signin_mode"] != device["signin_mode"]
     if "staff_all" in data:
         fields["staff_all"] = 1 if data["staff_all"] else 0
+    if "layout_pages" in data:
+        pages = clean_phone_pages(data["layout_pages"])
+        fields["layout_pages"] = None if pages is None else json.dumps(pages)
     if isinstance(data.get("staff_ids"), list):
         known = {m["id"] for m in db.staff_list()}
         db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known])

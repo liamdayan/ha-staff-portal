@@ -117,6 +117,13 @@ it yourself instead:
 
 Use the arrows to reorder, then click **Save layout**.
 
+**Which phones show which pages.** Every phone shows every page by default, including pages
+you add later. To change that for one phone, open **Phones → Edit** and use **Pages on this
+phone**: untick **All pages** and pick the pages it should show (including the **More** page).
+You can also do it from the Layout tab: each page shows **Shown on: …** with a **Choose phones**
+button. Phone cards show their pages as **Pages: …**. A phone set to specific pages won't pick
+up new pages automatically; tick **All pages** again for that.
+
 The layout only decides how things are arranged; **roles still decide what each phone can see
 and do**. A group card only shows the devices that phone's role allows (and disappears if it
 allows none of them), and controls appear only for devices the role has set to **Control**.
