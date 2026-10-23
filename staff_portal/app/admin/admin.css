@@ -305,3 +305,14 @@ dialog.ask { width: min(400px, calc(100vw - 32px)); }
 dialog.ask input { width: 100%; }
 .btn.primary.danger-fill { background: var(--danger); border-color: var(--danger); }
 .version { color: var(--muted); font-size: 12px; margin-left: 6px; opacity: 0.8; }
+
+.error-panel {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 200;
+  max-width: 760px; margin: 0 auto; padding: 14px 16px;
+  background: var(--card); color: var(--text);
+  border: 2px solid var(--danger); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.error-panel strong { color: var(--danger); }
+.error-panel p { margin: 4px 0 8px; color: var(--muted); font-size: 13px; }
+.error-panel pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 240px; overflow: auto; margin: 0 0 10px; }

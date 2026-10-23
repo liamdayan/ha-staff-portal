@@ -11,10 +11,24 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
 
-  // Never fail silently: show unexpected errors so they can be reported.
-  window.addEventListener("error", (e) => toast(`Something went wrong: ${e.message}`, true));
+  // Never fail silently: unexpected errors stay on screen and are written to the add-on's log.
+  function reportError(message, error, where) {
+    const detail = [message, where, error?.stack].filter(Boolean).join("\n");
+    const panel = $("#error-panel");
+    if (panel) {
+      $("[data-detail]", panel).textContent = detail;
+      panel.hidden = false;
+    }
+    fetch("api/client-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ detail: detail.slice(0, 4000), agent: navigator.userAgent }),
+    }).catch(() => { /* nothing more we can do */ });
+  }
+  window.addEventListener("error", (e) =>
+    reportError(e.message, e.error, e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : ""));
   window.addEventListener("unhandledrejection", (e) =>
-    toast(`Something went wrong: ${e.reason?.message || e.reason}`, true));
+    reportError(String(e.reason?.message || e.reason), e.reason, "in a background task"));
 
   function h(tag, attrs, ...children) {
     const el = document.createElement(tag);
@@ -141,10 +155,14 @@
     document.querySelectorAll("[role=tab]").forEach((b) =>
       b.setAttribute("aria-selected", String(b.dataset.tab === name)));
     document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== `tab-${name}`; });
-    if (name === "activity") loadActivity(true);
-    if (name === "settings") fillSettings();
-    if ((name === "roles" || name === "layout") && !entities) loadEntities();
-    if (name === "layout") renderLayoutEditor();
+    try {
+      if (name === "activity") loadActivity(true);
+      if (name === "settings") fillSettings();
+      if ((name === "roles" || name === "layout") && !entities) loadEntities();
+      if (name === "layout") renderLayoutEditor();
+    } catch (err) {
+      reportError(`Couldn't open the ${name} tab: ${err.message}`, err, "");
+    }
     try { sessionStorage.setItem("tab", name); } catch { /* ignore */ }
   }
 

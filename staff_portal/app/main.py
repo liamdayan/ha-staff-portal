@@ -658,6 +658,14 @@ async def admin_update_role(request: web.Request):
     return web.json_response({"ok": True})
 
 
+async def admin_client_error(request: web.Request):
+    """Errors from the admin dashboard, written to the add-on log for troubleshooting."""
+    data = await read_json(request)
+    log.warning("Dashboard error (%s): %s", str(data.get("agent", ""))[:200],
+                str(data.get("detail", ""))[:4000])
+    return web.json_response({"ok": True})
+
+
 async def admin_save_layout(request: web.Request):
     try:
         layout = clean_layout(await read_json(request))
@@ -1034,6 +1042,7 @@ def admin_app() -> web.Application:
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)
     app.router.add_delete(r"/api/roles/{id:\d+}", admin_delete_role)
     app.router.add_put("/api/layout", admin_save_layout)
+    app.router.add_post("/api/client-error", admin_client_error)
     app.router.add_post("/api/areas", admin_create_area)
     app.router.add_put("/api/areas/order", admin_reorder_areas)
     app.router.add_put(r"/api/areas/{id:\d+}", admin_update_area)
