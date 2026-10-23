@@ -28,6 +28,7 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
                     clean_phone_pages, layout_overrides, visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import transfer
+from connecteam import Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 
@@ -75,6 +76,36 @@ STAFF_ASSETS = asset_fingerprint("staff")
 db = Database(DATA_DIR)
 ha = HomeAssistant()
 branding = Branding(DATA_DIR)
+
+
+def connecteam_settings() -> tuple[bool, str, str]:
+    s = db.settings()
+    return (s.get("connecteam_enabled") == "1", s.get("connecteam_client_id", ""),
+            s.get("connecteam_client_secret", ""))
+
+
+connecteam = Connecteam(connecteam_settings)
+
+
+def needs_clock_in(member: dict | None) -> bool:
+    """Whether this person may only sign in while clocked in (and Connecteam is turned on)."""
+    return bool(member and member.get("connecteam_user_id") and member.get("require_clock_in")
+                and connecteam_settings()[0])
+
+
+def clock_block(member: dict | None) -> str | None:
+    """None if this person may be signed in now, else 'clocked_out' or 'clock_unknown'."""
+    if not needs_clock_in(member):
+        return None
+    status = connecteam.status(member["connecteam_user_id"])
+    return None if status == "in" else ("clocked_out" if status == "out" else "clock_unknown")
+
+
+CLOCK_MESSAGES = {
+    "clocked_out": "{name} isn't clocked in. Clock in on Connecteam, then sign in again.",
+    "clock_unknown": "Can't check the Connecteam time clock right now, so {name} can't sign in. "
+                     "Try again in a few minutes, or ask your manager.",
+}
 
 # PIN unlock sessions live in memory: an add-on restart just asks for the PIN again.
 pin_sessions: dict[str, tuple[int, float, int | None]] = {}  # device, last used, staff
@@ -443,6 +474,16 @@ def authenticate(request: web.Request, need_unlock: bool = True,
         if not member or member["status"] != "active" or not db.staff_allowed_on(member["id"], device):
             pin_sessions.pop(key, None)
             raise json_error(web.HTTPForbidden, "pin_required")
+        blocked = clock_block(member)
+        if blocked:
+            # Clocked out (or the time clock can't be checked): this person's session ends.
+            pin_sessions.pop(key, None)
+            db.log(actor_name(device, member),
+                   "Signed out: clocked out in Connecteam" if blocked == "clocked_out"
+                   else "Signed out: Connecteam time clock unavailable",
+                   role=device["role_name"], ok=False)
+            raise json_error(web.HTTPForbidden, blocked,
+                             message=CLOCK_MESSAGES[blocked].format(name=member["name"]))
         if not member["last_seen"] or time.time() - member["last_seen"] > 60:
             db.update_staff(member["id"], last_seen=time.time())
     elif session[2] is not None:
@@ -508,7 +549,9 @@ async def api_me(request: web.Request):
         "kind": device["kind"],
         "role": device["role_name"],
         "shared": shared,
-        "staff": db.staff_for_device(device) if shared else [],
+        "staff": [{"id": m["id"], "name": m["name"],
+                   "off_clock": clock_block(m) is not None}
+                  for m in db.staff_for_device(device)] if shared else [],
         "pin_required": shared or bool(device["pin_hash"]),
         "property_name": s["property_name"],
         "app_name": s["app_name"],
@@ -523,6 +566,14 @@ async def api_unlock(request: web.Request):
     # latest wrong-PIN count and lock state; reading the device before awaiting the body let
     # thousands of held-open requests share one stale count and never trigger the lock.
     data = await read_json(request)
+    # Someone who must be clocked in and looks clocked out may have just clocked in: ask
+    # Connecteam now, before the device is read, so the rest stays synchronous (see above).
+    try:
+        candidate = db.staff(int(data.get("staff_id")))
+    except (TypeError, ValueError):
+        candidate = None
+    if needs_clock_in(candidate) and clock_block(candidate) and not connecteam.fresh(15):
+        await connecteam.check(force=True)
     device, _ = authenticate(request, need_unlock=False)
     pin = str(data.get("pin", ""))
     ip = client_ip(request)
@@ -558,6 +609,14 @@ async def api_unlock(request: web.Request):
     if check_pin(pin, member["pin_hash"]):
         # Only this person's own count is cleared. The phone's count isn't, so signing in as
         # yourself can't be used to keep guessing other people's PINs.
+        blocked = clock_block(member)
+        if blocked:
+            db.update_staff(member["id"], failed_pins=0)
+            db.log(actor_name(device, member), "Blocked sign-in: not clocked in"
+                   if blocked == "clocked_out" else "Blocked sign-in: time clock unavailable",
+                   role=device["role_name"], ok=False, ip=ip)
+            return bad_request(CLOCK_MESSAGES[blocked].format(name=member["name"]), 403,
+                               clock=blocked)
         db.update_staff(member["id"], failed_pins=0, locked_until=None, last_seen=now)
         db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
         return web.json_response({"session": new_session(device, member),
@@ -850,17 +909,92 @@ async def admin_index(request: web.Request):
 async def admin_state(request: web.Request):
     owners = db.phone_order_owners()
     return web.json_response({
-        "settings": db.settings(),
+        "settings": public_settings(),
+        "connecteam": connecteam_state(),
         "tunnel_sources": tunnel_sources(),
         "roles": db.roles(),
         "devices": device_payload(),
         "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
-                   "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time()}
+                   "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time(),
+                   "clock": connecteam.status(m["connecteam_user_id"]) if needs_clock_in(m) else None}
                   for m in db.staff_list()],
         "areas": db.areas(),
         "layout": db.layout(),
         "has_logo": branding.has_logo(),
     })
+
+
+def public_settings() -> dict:
+    """Settings as the dashboard may see them: the Connecteam secret is only ever "set or not"."""
+    s = db.settings()
+    s["connecteam_secret_set"] = "1" if s.pop("connecteam_client_secret", "") else "0"
+    return s
+
+
+def connecteam_state() -> dict:
+    return {"enabled": connecteam_settings()[0], "checked_at": connecteam.checked_at,
+            "last_error": connecteam.last_error, "clocked_in": len(connecteam.clocked_in)}
+
+
+async def admin_connecteam_users(request: web.Request):
+    try:
+        users = await connecteam.users()
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    linked = {r["connecteam_user_id"]: r["name"] for r in db.conn.execute(
+        "SELECT name, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
+    # Kiosk codes stay on the server: the dashboard only learns whether there is one.
+    return web.json_response({"users": [
+        {"id": u["id"], "name": u["name"], "has_kiosk_code": bool(u["kiosk_code"]),
+         "linked_to": linked.get(u["id"])} for u in users]})
+
+
+async def admin_connecteam_test(request: web.Request):
+    try:
+        users = await connecteam.users()
+        clocks = await connecteam.time_clock_ids()
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    await connecteam.check()
+    if connecteam.last_error:
+        return bad_request(connecteam.last_error, 502)
+    db.log(admin_name(request), "Tested the Connecteam connection")
+    return web.json_response({"users": len(users), "time_clocks": len(clocks),
+                              "clocked_in": len(connecteam.clocked_in)})
+
+
+async def kiosk_pin(uid: str | None) -> str:
+    """A linked person's Connecteam kiosk code, to use as their PIN."""
+    if not uid:
+        raise web.HTTPBadRequest(text="Only people linked to Connecteam have a kiosk code.")
+    try:
+        code = await connecteam.kiosk_code(uid)
+    except ConnecteamError as err:
+        raise web.HTTPBadRequest(text=str(err))
+    if not code:
+        raise web.HTTPBadRequest(text="Connecteam has no kiosk code of 4 to 8 digits for them. "
+                                      "Type a PIN instead.")
+    return code
+
+
+def parse_connecteam_link(data: dict, staff_id: int | None = None) -> dict:
+    """connecteam_user_id / require_clock_in from a staff form, validated."""
+    fields = {}
+    if "connecteam_user_id" in data:
+        uid = data["connecteam_user_id"]
+        if uid in (None, ""):
+            fields["connecteam_user_id"] = None
+        else:
+            uid = str(uid).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", uid):
+                raise web.HTTPBadRequest(text="That Connecteam user ID doesn't look right.")
+            owner = db.staff_by_connecteam(uid)
+            if owner and owner["id"] != staff_id:
+                raise web.HTTPBadRequest(text=f"That Connecteam user is already linked to {owner['name']}.")
+            fields["connecteam_user_id"] = uid
+    if "require_clock_in" in data:
+        fields["require_clock_in"] = 1 if data["require_clock_in"] in (True, "1", 1, "on") else 0
+    return fields
 
 
 async def admin_entities(request: web.Request):
@@ -1219,11 +1353,19 @@ async def admin_create_staff(request: web.Request):
         return bad_request("Enter the staff member's name.")
     if db.name_taken("staff", name):
         return bad_request("Someone with that name already exists.")
+    link = parse_connecteam_link(data)
+    if link.get("connecteam_user_id") and "require_clock_in" not in link:
+        link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
+    pin = (await kiosk_pin(link.get("connecteam_user_id")) if data.get("use_kiosk_code")
+           else data.get("pin"))
     try:
-        staff_id = db.create_staff(name, require_pin(data.get("pin")))
+        staff_id = db.create_staff(name, require_pin(pin))
     except sqlite3.IntegrityError:
         return bad_request("Someone with that name already exists.")
-    db.log(admin_name(request), f"Added staff member {name}")
+    if link:
+        db.update_staff(staff_id, **link)
+    db.log(admin_name(request), f"Added staff member {name}" +
+           (" from Connecteam" if link.get("connecteam_user_id") else ""))
     return web.json_response({"id": staff_id})
 
 
@@ -1235,14 +1377,18 @@ async def admin_update_staff(request: web.Request):
     fields = {}
     if "name" in data and clean_name(data["name"], 40):
         fields["name"] = clean_name(data["name"], 40)
-    if data.get("pin"):
-        fields["pin_hash"] = hash_pin(require_pin(data["pin"]))
+    link = parse_connecteam_link(data, member["id"])
+    pin = (await kiosk_pin(link.get("connecteam_user_id", member["connecteam_user_id"]))
+           if data.get("use_kiosk_code") else data.get("pin"))
+    if pin:
+        fields["pin_hash"] = hash_pin(require_pin(pin))
         fields["failed_pins"] = 0
     if "active" in data:
         if not data["active"]:
             fields["status"] = "disabled"
         elif member["status"] == "disabled":
             fields["status"] = "active"
+    fields.update(link)
     if "name" in fields and db.name_taken("staff", fields["name"], member["id"]):
         return bad_request("Someone with that name already exists.")
     try:
@@ -1293,7 +1439,7 @@ async def admin_activity(request: web.Request):
 
 
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
-                 "control_lock")
+                 "control_lock", "connecteam_enabled")
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
                    ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120))
 
@@ -1320,6 +1466,19 @@ def clean_settings(data: dict, current: dict) -> dict:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     if "tunnel_addresses" in data:
         values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
+    if "connecteam_client_id" in data:
+        client_id = str(data["connecteam_client_id"] or "").strip()
+        if len(client_id) > 200 or not re.fullmatch(r"[\x21-\x7e]*", client_id):
+            raise ValueError("The Connecteam Client ID doesn't look right.")
+        values["connecteam_client_id"] = client_id
+    # The secret is write-only: blank keeps the saved one, "clear" removes it.
+    secret = str(data.get("connecteam_client_secret") or "").strip()
+    if secret:
+        if len(secret) > 500 or not re.fullmatch(r"[\x21-\x7e]+", secret):
+            raise ValueError("The Connecteam Client Secret doesn't look right.")
+        values["connecteam_client_secret"] = secret
+    if data.get("connecteam_clear_secret") in (True, "1", "true", "on"):
+        values["connecteam_client_secret"] = ""
     for key, lo, hi in NUMBER_SETTINGS:
         if key in data:
             try:
@@ -1351,8 +1510,13 @@ async def admin_update_settings(request: web.Request):
                     "browser), then try again.")
             return bad_request("Staff Access hasn't seen any traffic from your tunnel yet, so "
                                "turning this on would block every phone." + hint)
+    ct_before = connecteam_settings()
     db.update_settings(values)
     branding.invalidate()
+    if connecteam_settings() != ct_before:
+        connecteam.forget()
+        if connecteam_settings()[0]:
+            background(connecteam.check(), "check the Connecteam time clock")
     db.log(admin_name(request), "Updated settings")
     return web.json_response({"ok": True})
 
@@ -1429,6 +1593,9 @@ async def admin_restore(request: web.Request):
     else:
         branding.remove_logo()
     pin_sessions.clear()  # everyone with a PIN signs in again
+    connecteam.forget()   # the restored settings may point somewhere else
+    if connecteam_settings()[0]:
+        background(connecteam.check(), "check the Connecteam time clock")
     made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))
     db.log(admin_name(request), "Restored a backup",
            detail=f"Backup from {made}. What it replaced was saved as {safety}." +
@@ -1518,6 +1685,8 @@ def admin_app() -> web.Application:
     app.router.add_get(r"/api/export/{kind:layout|roles|staff}", admin_export)
     app.router.add_post(r"/api/import/{kind:roles|staff}", admin_import)
     app.router.add_get("/api/backup", admin_backup)
+    app.router.add_get("/api/connecteam/users", admin_connecteam_users)
+    app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_post("/api/restore/preview", admin_restore_preview)
     app.router.add_post("/api/restore", admin_restore)
     app.router.add_get("/api/safety-backups", admin_safety_backups)
@@ -1555,6 +1724,8 @@ def admin_app() -> web.Application:
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     await ha.start()
+    await connecteam.start()
+    clock_task = asyncio.create_task(connecteam.run())
     runners = []
     for app, port in ((admin_app(), ADMIN_PORT), (staff_app(), STAFF_PORT)):
         runner = web.AppRunner(app, access_log=None)
@@ -1566,8 +1737,10 @@ async def main():
     try:
         await asyncio.Event().wait()
     finally:
+        clock_task.cancel()
         for runner in runners:
             await runner.cleanup()
+        await connecteam.close()
         await ha.close()
 
 

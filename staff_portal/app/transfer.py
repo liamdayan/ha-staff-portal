@@ -93,6 +93,11 @@ def _unique(name: str, taken: set[str], limit: int) -> str:
         n += 1
 
 
+def _connecteam_id(value) -> str | None:
+    value = str(value).strip() if value not in (None, "") else ""
+    return value if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value) else None
+
+
 def _all_or_nothing(db, work) -> dict:
     """Run an import in one transaction: either every row lands or none does."""
     try:
@@ -144,8 +149,10 @@ def export_staff(db, version: str) -> dict:
             allowed.setdefault(staff_id, []).append(phones[device_id])
     return _envelope("staff", version, staff=[
         {"name": r["name"], "pin_hash": r["pin_hash"], "enabled": r["status"] != "disabled",
-         "phones": sorted(allowed.get(r["id"], []))}
-        for r in db.conn.execute("SELECT id, name, pin_hash, status FROM staff ORDER BY name")])
+         "phones": sorted(allowed.get(r["id"], [])),
+         "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"])}
+        for r in db.conn.execute("""SELECT id, name, pin_hash, status, connecteam_user_id,
+                                    require_clock_in FROM staff ORDER BY name""")])
 
 
 # ---------------------------------------------------------------- imports (merge into what's here)
@@ -238,6 +245,11 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             staff_id = db.conn.execute(
                 "INSERT INTO staff (name, pin_hash, status, created_at) VALUES (?, ?, ?, ?)",
                 (name, pin_hash, status, time.time())).lastrowid
+            link = _connecteam_id(raw.get("connecteam_user_id"))
+            if link and not db.conn.execute("SELECT 1 FROM staff WHERE connecteam_user_id = ?",
+                                            (link,)).fetchone():
+                db.conn.execute("UPDATE staff SET connecteam_user_id = ?, require_clock_in = ? WHERE id = ?",
+                                (link, 0 if raw.get("require_clock_in") is False else 1, staff_id))
             existing[name.lower()] = staff_id
             result["added"] += 1
         db.conn.executemany(
@@ -254,7 +266,9 @@ def make_backup(db, branding, version: str) -> dict:
     logo = branding.logo_png()
     return _envelope(
         "backup", version, schema=BACKUP_SCHEMA,
-        settings=db.settings(),
+        # The Connecteam secret is a credential: it never goes into a file (a restore keeps the
+        # one already saved).
+        settings={k: v for k, v in db.settings().items() if k != "connecteam_client_secret"},
         layout=db.layout(),
         logo=base64.b64encode(logo).decode() if logo else None,
         areas=rows("SELECT id, name, sort_order, created_at FROM areas"),
@@ -266,7 +280,8 @@ def make_backup(db, branding, version: str) -> dict:
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, layout_pages, created_at, last_seen
                         FROM devices WHERE status != 'deleted'"""),
-        staff=rows("SELECT id, name, pin_hash, status, created_at, last_seen FROM staff"),
+        staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
+                      require_clock_in FROM staff"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
     )
@@ -340,10 +355,15 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
         if not PIN_HASH_RE.match(pin_hash):
             raise ValueError(f"The backup has a damaged PIN for {name}.")
         names.add(name)
+        link = _connecteam_id(row.get("connecteam_user_id"))
+        if link and any(m["connecteam_user_id"] == link for m in staff):
+            raise ValueError(f"The backup links two staff members to the same Connecteam user ({name}).")
         staff.append({"id": staff_id, "name": name, "pin_hash": pin_hash,
                       "status": row.get("status") if row.get("status") in STAFF_STATUSES else "active",
                       "created_at": _time(row.get("created_at"), time.time()),
-                      "last_seen": _time(row.get("last_seen"))})
+                      "last_seen": _time(row.get("last_seen")),
+                      "connecteam_user_id": link,
+                      "require_clock_in": 1 if link and row.get("require_clock_in") in (1, True) else 0})
     staff_ids = {m["id"] for m in staff}
 
     devices = []

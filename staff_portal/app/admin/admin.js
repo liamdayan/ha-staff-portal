@@ -285,6 +285,8 @@
     state.devices = data.devices;
     state.hasLogo = data.has_logo;
     state.tunnelSources = data.tunnel_sources;
+    state.connecteam = data.connecteam;
+    $("#add-from-connecteam").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
     renderStaff();
@@ -682,12 +684,30 @@
                 class: m.ha_link_error ? "badge locked" : "badge linked",
                 title: m.ha_link_error || "Actions show in Home Assistant as this user",
               }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
+              clockBadge(m),
               h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
             h("div", { class: "meta" }, phones.length
               ? `Can sign in on: ${phones.join(", ")}`
               : "Not on any shared phone yet"))),
         h("div", { class: "card-actions" }, actions));
     }));
+  }
+
+  // Connecteam link and, for clocked-in-only people, whether they're on the clock right now.
+  function clockBadge(m) {
+    if (!m.connecteam_user_id) return null;
+    if (!m.clock) {
+      return h("span", { class: "badge linked", title: m.require_clock_in
+        ? "Connecteam is turned off in Settings, so the clock isn't checked"
+        : "Can sign in whether or not they're clocked in" }, "Connecteam");
+    }
+    const [text, cls, tip] = {
+      in: ["Clocked in", "active", "Can sign in now"],
+      out: ["Not clocked in", "pending", "Can't sign in until they clock in on Connecteam"],
+      unknown: ["Clock status unknown", "locked", state.connecteam?.last_error
+        || "Connecteam hasn't answered lately, so they can't sign in"],
+    }[m.clock];
+    return h("span", { class: `badge ${cls}`, title: tip }, `Connecteam: ${text}`);
   }
 
   // "Reset to your layout" for a phone or person that rearranged things on the phone.
@@ -702,18 +722,48 @@
     }, "Back to your layout. The phone updates within a few seconds.");
   }
 
-  function editStaff(m) {
+  // ctUser: a Connecteam user picked in "Add from Connecteam" ({id, name}).
+  function editStaff(m, ctUser) {
     const dialog = $("#staff-dialog");
     const form = $("#staff-form");
     form.reset();
-    $("[data-title]", dialog).textContent = m ? `Edit ${m.name}` : "Add staff member";
-    form.elements["name"].value = m ? m.name : "";
+    $("[data-title]", dialog).textContent = m ? `Edit ${m.name}`
+      : ctUser ? "Add from Connecteam" : "Add staff member";
+    form.elements["name"].value = m ? m.name : ctUser ? ctUser.name.slice(0, 40) : "";
     form.elements["pin"].required = !m;
     $("[data-pin-hint]", dialog).textContent = m
       ? "Leave blank to keep their current PIN."
+      : ctUser ? "Connecteam has no kiosk code for them that works as a PIN, so choose 4 to 8 digits."
       : "4 to 8 digits. They enter it after tapping their name.";
     form.elements["active"].checked = !m || m.status !== "disabled";
     form.elements["active"].closest("label").hidden = !m;
+    // Connecteam: shown for people who are (or are being) linked.
+    let ctId = m ? m.connecteam_user_id : ctUser?.id;
+    const ctBox = $("[data-ct]", dialog);
+    ctBox.hidden = !ctId;
+    $("[data-ct-label]", dialog).textContent = ctUser ? `Connecteam: ${ctUser.name}` : "Linked to Connecteam";
+    form.elements["require_clock_in"].checked = m ? !!m.require_clock_in : true;
+    // Their Connecteam kiosk code as the PIN: fetched by the add-on, never shown here.
+    const kiosk = form.elements["use_kiosk_code"];
+    kiosk.closest("label").hidden = ctUser ? !ctUser.has_kiosk_code : !m?.connecteam_user_id;
+    $("[data-kiosk-label]", dialog).textContent = m
+      ? "Change their PIN to their current Connecteam kiosk code" : "Use their Connecteam kiosk code as their PIN";
+    kiosk.checked = !!ctUser?.has_kiosk_code;
+    const pinRow = $("[data-pin-row]", dialog);
+    kiosk.onchange = () => {
+      pinRow.hidden = kiosk.checked;
+      form.elements["pin"].required = !m && !kiosk.checked;
+    };
+    kiosk.onchange();
+    const unlink = $("[data-ct-unlink]", dialog);
+    unlink.hidden = !m;
+    unlink.onclick = () => {
+      ctId = null;
+      kiosk.checked = false;
+      kiosk.onchange();
+      ctBox.hidden = true;
+      toast("Click Save to unlink them from Connecteam.");
+    };
     orderResetRow(dialog, m, "staff");
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
@@ -721,6 +771,16 @@
       const pin = form.elements["pin"].value.trim();
       if (pin) body.pin = pin;
       if (m) body.active = form.elements["active"].checked;
+      if (ctId) {
+        body.connecteam_user_id = ctId;
+        body.require_clock_in = form.elements["require_clock_in"].checked;
+        if (kiosk.checked) {
+          body.use_kiosk_code = true;
+          delete body.pin;
+        }
+      } else if (m?.connecteam_user_id) {
+        body.connecteam_user_id = null;
+      }
       run(async () => {
         if (m) await api("PATCH", `api/staff/${m.id}`, body);
         else await api("POST", "api/staff", body);
@@ -731,6 +791,39 @@
   }
 
   $("#add-staff").addEventListener("click", () => editStaff(null));
+
+  // Pick someone from the Connecteam user list, then finish adding them in the staff dialog.
+  $("#add-from-connecteam").addEventListener("click", () => {
+    const dialog = $("#ct-dialog");
+    const msg = $("[data-ct-msg]", dialog);
+    const search = $("[data-ct-search]", dialog);
+    const list = $("[data-ct-users]", dialog);
+    msg.textContent = "Loading your Connecteam users\u2026";
+    search.hidden = true;
+    search.value = "";
+    list.replaceChildren();
+    let users = [];
+    const draw = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = users.filter((u) => u.name.toLowerCase().includes(q));
+      list.replaceChildren(...shown.map((u) => h("button", {
+        type: "button", class: "ct-user", disabled: !!u.linked_to,
+        onclick: () => { dialog.close(); editStaff(null, u); },
+      }, h("span", null, u.name),
+        h("small", null, u.linked_to ? `Already added as ${u.linked_to}`
+          : u.has_kiosk_code ? "Add" : "Add (no kiosk code)"))));
+      if (!shown.length) list.replaceChildren(h("p", { class: "hint" }, users.length ? "No one matches." : "No active users in Connecteam."));
+    };
+    search.oninput = draw;
+    dialog.showModal();
+    api("GET", "api/connecteam/users").then((data) => {
+      users = data.users;
+      msg.textContent = "Choose who to add. Their Connecteam kiosk code becomes their PIN.";
+      search.hidden = false;
+      draw();
+      search.focus();
+    }, (err) => { msg.textContent = err.message; });
+  });
 
   // ---------------------------------------------------------------- roles
 
@@ -1138,8 +1231,35 @@
       else if (field) field.value = v;
     }
     renderTunnelSources();
+    renderConnecteam();
     refreshIcon();
   }
+
+  function renderConnecteam() {
+    const form = $("#settings-form");
+    const saved = state.settings.connecteam_secret_set === "1";
+    const secret = form.elements["connecteam_client_secret"];
+    secret.value = "";
+    secret.placeholder = saved ? "Saved — leave blank to keep" : "";
+    $("#ct-clear-row").hidden = !saved;
+    const ct = state.connecteam || {};
+    $("#ct-status").textContent = !ct.enabled ? "Turned off."
+      : ct.last_error ? `Problem: ${ct.last_error}`
+      : ct.checked_at ? `Connected. Checked ${ago(ct.checked_at).toLowerCase()}; ${ct.clocked_in} clocked in.`
+      : "Not checked yet.";
+  }
+
+  // Tests the saved keys, so Save settings first.
+  $("#ct-test").addEventListener("click", () => run(async () => {
+    try {
+      const r = await api("POST", "api/connecteam/test");
+      toast(`Connected: ${r.users} users, ${r.time_clocks} time clock${r.time_clocks === 1 ? "" : "s"}, ` +
+        `${r.clocked_in} clocked in now.`);
+    } finally {
+      await load();
+      renderConnecteam();
+    }
+  }));
 
   // Where Cloudflare traffic has arrived from lately, so the tunnel address can be filled in.
   function renderTunnelSources() {
@@ -1167,7 +1287,8 @@
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
-    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock"]) {
+    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock",
+      "connecteam_enabled", "connecteam_clear_secret"]) {
       body[name] = e.target.elements[name].checked ? "1" : "0";
     }
     run(async () => {

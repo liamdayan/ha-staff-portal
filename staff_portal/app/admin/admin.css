@@ -482,3 +482,18 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .copy-row { display: flex; gap: 8px; margin: 10px 0 4px; }
 .copy-row input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .badge.computer { color: var(--view); }
+
+/* Connecteam */
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ct-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ct-link { display: grid; gap: 8px; padding: 10px 12px; border-radius: 12px; background: var(--card-2); }
+.ct-link[hidden] { display: none; }
+.ct-link-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 14px; }
+.ct-users { display: grid; gap: 6px; max-height: min(50vh, 420px); overflow-y: auto; }
+.ct-user { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; }
+.ct-user:hover:not(:disabled) { border-color: var(--accent); }
+.ct-user:disabled { opacity: 0.55; cursor: default; }
+.ct-user small { color: var(--muted); }
+#ct-dialog input[type="search"][hidden] { display: none; }

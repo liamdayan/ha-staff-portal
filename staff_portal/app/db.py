@@ -122,6 +122,10 @@ MIGRATIONS = {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
         # colleague can't lock everyone out. An admin can unlock sooner.
         "locked_until": "REAL",
+        # Linked Connecteam user (their user ID there), and whether they may only sign in while
+        # clocked in on Connecteam's time clock.
+        "connecteam_user_id": "TEXT",
+        "require_clock_in": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -140,6 +144,9 @@ DEFAULT_SETTINGS = {
     "control_lock_minutes": "10",
     "phones_via_tunnel_only": "0",
     "tunnel_addresses": "",  # where cloudflared connects from, when it isn't the add-on
+    "connecteam_enabled": "0",
+    "connecteam_client_id": "",
+    "connecteam_client_secret": "",  # never sent to the browser or put in backups
     "require_pin": "0",
 }
 
@@ -407,12 +414,13 @@ class Database:
 
     def staff_for_device(self, device: dict) -> list[dict]:
         """Active staff members allowed to sign in on a shared phone."""
+        cols = "s.id, s.name, s.connecteam_user_id, s.require_clock_in"
         if device["staff_all"]:
             rows = self.conn.execute(
-                "SELECT id, name FROM staff WHERE status != 'disabled' ORDER BY name COLLATE NOCASE")
+                f"SELECT {cols} FROM staff s WHERE status != 'disabled' ORDER BY name COLLATE NOCASE")
         else:
             rows = self.conn.execute(
-                """SELECT s.id, s.name FROM staff s JOIN staff_devices sd ON sd.staff_id = s.id
+                f"""SELECT {cols} FROM staff s JOIN staff_devices sd ON sd.staff_id = s.id
                    WHERE sd.device_id = ? AND s.status != 'disabled'
                    ORDER BY s.name COLLATE NOCASE""", (device["id"],))
         return [dict(r) for r in rows]
@@ -428,9 +436,15 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
+    def staff_by_connecteam(self, user_id: str) -> dict | None:
+        row = self.conn.execute("SELECT id, name FROM staff WHERE connecteam_user_id = ?",
+                                (str(user_id),)).fetchone()
+        return dict(row) if row else None
+
     def update_staff(self, staff_id: int, **fields) -> None:
         allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
-                   "ha_user", "ha_refresh_token", "ha_link_error"}
+                   "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
+                   "require_clock_in"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -515,10 +529,10 @@ class Database:
             c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_areas"].items()])
             c.executemany(
-                """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"])
-                 for m in snap["staff"]])
+                """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
+                   connecteam_user_id, require_clock_in) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
+                  m["connecteam_user_id"], m["require_clock_in"]) for m in snap["staff"]])
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
                    staff_all, layout_pages, created_at, last_seen, kind)

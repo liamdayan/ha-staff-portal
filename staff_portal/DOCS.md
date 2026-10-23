@@ -286,6 +286,50 @@ and they're signed out automatically after the idle time set in **Settings**.
   so PINs can't be guessed by switching names.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
 
+## Connecteam: add staff and require clocking in (optional)
+
+If you use [Connecteam](https://connecteam.com) for time tracking, Staff Access can add staff from
+your Connecteam user list, use their **kiosk code** as their PIN, and only let them sign in while
+they're **clocked in**. Staff you add by hand keep working exactly as before.
+
+API access needs Connecteam's **Expert plan or higher** (with the Operations hub for the time clock).
+
+1. In Connecteam, open **your name → Integration Center → OAuth 2.0** and click **Create app**.
+   Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later.
+2. Copy the **Client ID** and **Client Secret**. Connecteam only shows the secret once.
+3. In Staff Access, open **Settings → Connecteam**, tick **Link staff to Connecteam**, paste both
+   keys and click **Save settings**, then **Test connection**. It reports how many users and time
+   clocks it found and how many people are clocked in now.
+4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
+   greyed out.
+   - **Use their Connecteam kiosk code as their PIN** is ticked when Connecteam has a kiosk code
+     of 4 to 8 digits for them. The add-on reads it straight from Connecteam; it's never shown
+     in the dashboard. Otherwise, type a PIN.
+   - **Only allow sign-in while clocked in** is ticked by default. Untick it for someone who should
+     be able to sign in at any time.
+5. Make sure they're allowed on the shared phone or computer (**Phones & computers → Edit → Who
+   uses it**), the same as for any staff member.
+
+How clocked-in sign-in works:
+
+- Staff Access checks Connecteam's time clocks every minute. A shift that has started and not
+  ended means "clocked in" (a shift left open for more than 24 hours doesn't count).
+- When someone who looks clocked out enters their PIN, it checks again straight away, so they
+  can sign in right after clocking in.
+- When they clock out, they're signed out within about a minute, with a message saying why.
+  The sign-in list shows **Not clocked in** under their name.
+- If Connecteam can't be reached, the last answer is kept for **15 minutes**. After that,
+  clocked-in-only people can't sign in until Connecteam answers again. The Settings page and the
+  add-on log show what went wrong.
+- The Staff tab shows each linked person's clock status. **Edit** lets you turn clocked-in-only
+  on or off, change their PIN to their current kiosk code (if it changed in Connecteam), or
+  **Unlink** them.
+- Turning off **Link staff to Connecteam** lets everyone sign in with their PIN again, without
+  removing the links.
+
+The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
+included in backups. After restoring a backup on a new system, enter it again.
+
 ## Seeing staff actions in Home Assistant
 
 Every staff action is always recorded in **Staff Access → Activity**. You can also have them show

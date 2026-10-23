@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.15
+
+- **Connecteam** (optional, **Settings → Connecteam**):
+  - Paste the Client ID and Secret of a Connecteam OAuth 2.0 app (scopes users.read and
+    time_clock.read), then use **Test connection**.
+  - **Staff → Add from Connecteam** lists your Connecteam users. Picking someone fills in their
+    name and uses their Connecteam kiosk code as their PIN. The code goes straight from Connecteam
+    to the add-on and is never shown in the dashboard. Without a usable kiosk code, type a PIN.
+  - **Only allow sign-in while clocked in** is on by default for people added from Connecteam and
+    can be turned off per person. They can't sign in while clocked out, and are signed out
+    within about a minute of clocking out. The sign-in list shows **Not clocked in**.
+  - Clock status is checked every minute, and again right away when someone who looks clocked
+    out enters their PIN. If Connecteam can't be reached, the last status is kept for 15 minutes.
+  - The Staff tab shows each linked person's clock status. **Edit** can turn clocked-in-only
+    on or off, switch their PIN to their current kiosk code, or unlink them.
+  - Staff added by hand work as before.
+- The Client Secret is never sent back to the dashboard and isn't included in backups. Backups
+  and staff exports keep each person's Connecteam link.
+
 ## 0.6.14
 
 - **Fixed:** on systems with many entities, Staff Access couldn't read Home Assistant's entity

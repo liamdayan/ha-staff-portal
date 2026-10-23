@@ -50,6 +50,8 @@ system.
 - **The add-on enforces all access, not just the screen.** Every action is checked against the
   device's role and validated, with sensible ranges for setpoints and the entity's own options
   for dropdowns.
+- **Connecteam (optional):** add staff from your Connecteam user list with their kiosk code as
+  their PIN, and only let them sign in while they're clocked in.
 - **Activity log** of every action and every blocked attempt. Actions can also show in Home
   Assistant's logbook, or be credited to a linked Home Assistant user.
 
@@ -141,6 +143,7 @@ staff_portal/
     permissions.py           What each device type allows, and validation of every action
     layout.py                Pages, group cards, per-item access, per-device arrangement
     transfer.py              Export, import, backup and restore
+    connecteam.py            Connecteam users and time clock (OAuth 2.0)
     db.py                    SQLite storage
     ha.py                    Home Assistant REST and WebSocket client
     branding.py              Logo handling and home-screen icons

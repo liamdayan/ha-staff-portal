@@ -123,7 +123,7 @@
     stopPolling();
   }
 
-  function message(title, body, retry) {
+  function message(title, body, retry, retryLabel = "Try again") {
     live = false;
     leaveDashboard();
     const node = fromTemplate("tpl-message");
@@ -131,7 +131,7 @@
     node.querySelector("[data-body]").textContent = body;
     if (retry) {
       node.querySelector(".message").append(
-        h("button", { class: "btn primary", onclick: () => boot() }, "Try again"));
+        h("button", { class: "btn primary", onclick: () => boot() }, retryLabel));
     }
     document.getElementById("bar").hidden = true;
     show(node);
@@ -161,6 +161,13 @@
     if (res.status === 403 && res.data.error === "pin_not_set") {
       message(`This ${word()} needs a PIN`,
         `Ask your manager to set a PIN for this ${word()} before it can be used.`, true);
+      return true;
+    }
+    if (res.status === 403 && (res.data.error === "clocked_out" || res.data.error === "clock_unknown")) {
+      // Only allowed on while clocked in on Connecteam: this person's session has ended.
+      session.del(SESSION_KEY);
+      message(res.data.error === "clocked_out" ? "Signed out" : "Signed out for now",
+        res.data.message || "You're not clocked in.", true, "OK");
       return true;
     }
     if (res.status === 403 && res.data.error === "pin_required") {
@@ -272,7 +279,10 @@
     const list = node.querySelector("[data-names]");
     for (const member of me.staff) {
       list.append(h("button", { class: "who", onclick: () => showPin(member) },
-        h("span", { class: "who-initial" }, member.name.charAt(0).toUpperCase()), member.name));
+        h("span", { class: "who-initial" }, member.name.charAt(0).toUpperCase()),
+        member.off_clock
+          ? h("span", { class: "who-name" }, member.name, h("small", null, "Not clocked in"))
+          : member.name));
     }
     document.getElementById("bar").hidden = true;
     show(node);

@@ -901,3 +901,5 @@ body.desk-shell .lock-now { margin: 0; min-height: 32px; font-size: 13px; border
 body.desk-shell .lock-bar.nudge { animation-name: lock-nudge-side; }
 body.desk-shell.with-lock .screen { padding-bottom: 0; }
 body.desk-shell .toast { left: calc(50% + 126px); bottom: 24px; }
+.who-name { display: grid; gap: 1px; }
+.who-name small { font-size: 13px; font-weight: 500; color: var(--muted); }

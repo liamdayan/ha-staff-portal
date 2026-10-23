@@ -44,7 +44,10 @@
   <section id="tab-staff" class="tab" hidden>
     <div class="section-head">
       <h2>Staff members</h2>
-      <button class="btn primary" id="add-staff">Add staff member</button>
+      <div class="head-actions">
+        <button class="btn" id="add-from-connecteam" hidden>Add from Connecteam</button>
+        <button class="btn primary" id="add-staff">Add staff member</button>
+      </div>
     </div>
     <p class="hint">For shared phones: each person taps their name and enters their own PIN, so
       every action is recorded under their name. What they can control comes from the phone's role.</p>
@@ -226,6 +229,29 @@
           <input name="control_lock_minutes" type="number" min="1" max="120"></label>
       </fieldset>
       <fieldset>
+        <legend>Connecteam</legend>
+        <label class="check-row"><input type="checkbox" name="connecteam_enabled">
+          <span>Link staff to Connecteam
+          <small>Add staff from your Connecteam user list, and only let them sign in while they're
+          clocked in on a Connecteam time clock (you can turn that off per person). Staff you add by
+          hand aren't affected.</small></span></label>
+        <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
+          <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
+          changed later). Copy the Client Secret straight away: Connecteam only shows it once, then paste its keys
+          here. API access needs Connecteam's Expert plan or higher.</p>
+        <div class="row">
+          <label>Client ID<input name="connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+          <label>Client Secret<input name="connecteam_client_secret" type="password" maxlength="200"
+            autocomplete="new-password" spellcheck="false"></label>
+        </div>
+        <label class="check-row" id="ct-clear-row" hidden><input type="checkbox" name="connecteam_clear_secret">
+          <span>Remove the saved Client Secret</span></label>
+        <div class="ct-status">
+          <span id="ct-status" class="hint"></span>
+          <button class="btn" type="button" id="ct-test">Test connection</button>
+        </div>
+      </fieldset>
+      <fieldset>
         <legend>Home Assistant logbook</legend>
         <label class="check-row"><input type="checkbox" name="ha_logbook">
           <span>Add staff actions to Home Assistant's logbook
@@ -291,9 +317,15 @@
   <form method="dialog" id="staff-form">
     <h2 data-title>Add staff member</h2>
     <label>Name<input name="name" maxlength="40" placeholder="Bob" required></label>
-    <label>PIN <small data-pin-hint></small>
+    <label data-pin-row>PIN <small data-pin-hint></small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <label class="check"><input type="checkbox" name="active"> Can sign in</label>
+    <div class="ct-link" data-ct hidden>
+      <div class="ct-link-head"><span data-ct-label></span>
+        <button class="btn subtle" type="button" data-ct-unlink>Unlink</button></div>
+      <label class="check"><input type="checkbox" name="use_kiosk_code"> <span data-kiosk-label>Use their kiosk code as their PIN</span></label>
+      <label class="check"><input type="checkbox" name="require_clock_in"> Only allow sign-in while clocked in</label>
+    </div>
     <div class="order-reset" data-order-reset hidden>
       <span>They've rearranged their phone screens.</span>
       <button class="btn" type="button">Reset to your layout</button>
@@ -301,6 +333,18 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ct-dialog" class="wide">
+  <form method="dialog" id="ct-form">
+    <h2>Add from Connecteam</h2>
+    <p class="hint" data-ct-msg>Loading your Connecteam users…</p>
+    <input type="search" data-ct-search placeholder="Search names" autocomplete="off" hidden>
+    <div class="ct-users" data-ct-users></div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
     </div>
   </form>
 </dialog>
