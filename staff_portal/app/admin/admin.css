@@ -162,7 +162,8 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input {
 .entity-name { font-weight: 500; overflow-wrap: anywhere; }
 .entity-id { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: none; }
-.seg button { border: 0; background: none; padding: 5px 11px; font-size: 13px; color: var(--muted); }
+.seg button { border: 0; background: none; padding: 5px 0; width: 72px; font-size: 13px; color: var(--muted); text-align: center; }
+.seg button:disabled { opacity: 0.35; cursor: not-allowed; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button[aria-checked="true"] { color: #fff; font-weight: 600; }
 .seg .seg-none[aria-checked="true"] { background: var(--muted); }
@@ -260,3 +261,4 @@ dialog.wide { width: min(640px, calc(100vw - 32px)); }
 /* Never let a long name or ID push the page sideways. */
 .area-head h4, .entity-name, .role-name { overflow-wrap: anywhere; min-width: 0; }
 .filters select { max-width: 100%; }
+@media (max-width: 520px) { .seg button { width: 64px; } }

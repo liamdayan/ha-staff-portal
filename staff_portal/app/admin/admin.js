@@ -486,11 +486,15 @@
     return best;
   }
 
+  // Always three equal-width buttons so the choices line up down the page. Options a device
+  // can't have (Control on a sensor) are shown greyed out instead of being left out.
   function segmented(options, current, label, onPick) {
     const wrap = h("div", { class: "seg", role: "radiogroup", "aria-label": label });
-    for (const opt of options) {
+    for (const opt of ["none", "view", "control"]) {
+      const allowed = options.includes(opt);
       const btn = h("button", {
         type: "button", role: "radio", "aria-checked": String(current === opt), class: `seg-${opt}`,
+        disabled: !allowed, title: allowed ? null : "This kind of device can only be viewed",
       }, LABELS[opt]);
       btn.addEventListener("click", () => {
         wrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-checked", String(b === btn)));
@@ -502,22 +506,12 @@
   }
 
   function levelControl(e) {
-    const current = editing.entities[e.entity_id] || "none";
     const options = e.controllable ? ["none", "view", "control"] : ["none", "view"];
-    const labels = { none: "Hidden", view: "View", control: "Control" };
-    const wrap = h("div", { class: "seg", role: "radiogroup", "aria-label": `Access to ${e.name}` });
-    for (const opt of options) {
-      const btn = h("button", {
-        type: "button", role: "radio", "aria-checked": String(current === opt), class: `seg-${opt}`,
-      }, labels[opt]);
-      btn.addEventListener("click", () => {
-        setLevel(e.entity_id, opt);
-        wrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-checked", String(b === btn)));
+    return segmented(options, editing.entities[e.entity_id] || "none", `Access to ${e.name}`,
+      (level) => {
+        setLevel(e.entity_id, level);
         updateCount();
       });
-      wrap.append(btn);
-    }
-    return wrap;
   }
 
   function updateCount() {
