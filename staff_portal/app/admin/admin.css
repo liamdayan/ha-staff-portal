@@ -350,3 +350,8 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .inline-note { font-weight: 400; color: var(--muted); }
 .inline-number { display: flex; align-items: center; gap: 10px; margin: 4px 0 0 30px; font-weight: 400; }
 .inline-number input { width: 90px; }
+.divider-row { background: var(--warn-bg); margin: 0 -10px; padding-left: 10px; padding-right: 10px; border-radius: 10px; }
+.divider-tag { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warn); }
+.divider-row input { font-weight: 600; }
+.divider-add { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.divider-add .hint { margin: 0; }

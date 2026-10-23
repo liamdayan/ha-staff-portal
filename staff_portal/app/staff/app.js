@@ -519,7 +519,7 @@
         card.classList.toggle("alert", members.some(isAlert));
         card.classList.toggle("off", members.length > 0 && members.every((e) => e.state === "unavailable"));
         // Key readings, plus anything raising an alert so the card says why it's highlighted.
-        const base = summary.length ? summary : item.entities.slice(0, 2);
+        const base = summary.length ? summary : item.entities.filter((m) => m.entity_id).slice(0, 2);
         const alerting = item.entities.filter((m) => !base.includes(m) && byId.has(m.entity_id) &&
           isAlert(byId.get(m.entity_id)));
         const shown = [...base, ...alerting];
@@ -536,17 +536,39 @@
 
   // Detail screen for a group card: key readings, the readings, then the controls allowed.
   // A device this phone can operate appears once, as a control (its tile shows its state too).
+  // Named dividers split the screen into sections, each with its own readings and controls.
   function buildDetail(item, page, byId, into) {
-    const readings = h("div", { class: "readings" });
     const hero = h("div", { class: "hero-values" });
-    const controlsGrid = h("div", { class: "grid" });
-    const controllable = item.entities.filter((m) => {
-      const e = byId.get(m.entity_id);
-      return e && e.level === "control" && e.controllable;
-    });
-    for (const m of controllable) controlsGrid.append(deviceTile(byId.get(m.entity_id), memberName(m, byId), into));
-    const readOnly = item.entities.filter((m) => !controllable.includes(m));
-    const readingsSection = h("section", { class: "group" }, h("h2", null, "Readings"), readings);
+    const sections = [{ title: null, members: [] }];
+    for (const m of item.entities) {
+      if (m.type === "divider") sections.push({ title: m.title, members: [] });
+      else if (byId.has(m.entity_id)) sections[sections.length - 1].members.push(m);
+    }
+    const divided = sections.length > 1;
+    const lists = []; // reading lists to refresh: { box, wrap, members }
+    const body = [];
+    for (const section of sections) {
+      if (!section.members.length) continue;
+      const controllable = section.members.filter((m) => {
+        const e = byId.get(m.entity_id);
+        return e.level === "control" && e.controllable;
+      });
+      const readOnly = section.members.filter((m) => !controllable.includes(m));
+      const box = h("div", { class: "readings" });
+      const grid = controllable.length
+        ? h("div", { class: "grid" }, controllable.map((m) => deviceTile(byId.get(m.entity_id), memberName(m, byId), into)))
+        : null;
+      if (divided) {
+        const wrap = h("section", { class: "group detail-section" },
+          section.title ? h("h2", null, section.title) : null, box, grid);
+        lists.push({ box, wrap: grid ? null : wrap, hide: box, members: readOnly });
+        body.push(wrap);
+      } else {
+        const wrap = h("section", { class: "group" }, h("h2", null, "Readings"), box);
+        lists.push({ box, wrap, hide: wrap, members: readOnly });
+        body.push(wrap, grid ? h("section", { class: "group" }, h("h2", null, "Controls"), grid) : null);
+      }
+    }
     into.set(`${into.size}:detail:${item.id}`, {
       refresh: (byId2) => {
         const summary = item.entities.filter((m) => m.summary && byId2.has(m.entity_id));
@@ -556,14 +578,17 @@
             h("div", { class: "hero-number" }, valueText(e)),
             h("div", { class: "hero-label" }, memberName(m, byId2)));
         }));
-        const shown = readOnly.filter((m) => byId2.has(m.entity_id));
-        readingsSection.hidden = !shown.length;
-        readings.replaceChildren(...shown.map((m) => {
-          const e = byId2.get(m.entity_id);
-          return h("div", { class: isAlert(e) ? "reading-row alert" : "reading-row" },
-            h("span", null, memberName(m, byId2)),
-            h("span", { class: "reading-value" }, valueText(e)));
-        }));
+        for (const list of lists) {
+          const shown = list.members.filter((m) => byId2.has(m.entity_id));
+          list.hide.hidden = !shown.length;
+          if (list.wrap && list.wrap !== list.hide) list.wrap.hidden = !shown.length;
+          list.box.replaceChildren(...shown.map((m) => {
+            const e = byId2.get(m.entity_id);
+            return h("div", { class: isAlert(e) ? "reading-row alert" : "reading-row" },
+              h("span", null, memberName(m, byId2)),
+              h("span", { class: "reading-value" }, valueText(e)));
+          }));
+        }
       },
     });
     return h("div", { class: "detail" },
@@ -571,10 +596,7 @@
         h("button", { class: "back-btn", onclick: () => history.back() }, `\u2039 ${page.name}`),
         h("h1", null, item.title)),
       hero,
-      readingsSection,
-      controllable.length
-        ? h("section", { class: "group" }, h("h2", null, "Controls"), controlsGrid)
-        : null);
+      ...body);
   }
 
   // Redraw from the last data without waiting for the next poll, and keep polling going.

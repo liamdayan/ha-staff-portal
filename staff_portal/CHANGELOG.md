@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- Group cards can have named dividers (**+ Add divider** in the card editor) to split the card's
+  phone screen into sections, each with its own readings and controls. Sections with nothing
+  the phone can see are hidden.
+
 ## 0.6.5
 
 - Redesigned phone app: frosted-glass header, large page titles, a floating tab bar, and rounded

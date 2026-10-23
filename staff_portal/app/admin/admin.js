@@ -1237,8 +1237,11 @@
       return ["Area", item.title || area?.name || "Deleted area", "Every device in the area the role allows"];
     }
     const onCard = item.entities.filter((m) => m.summary).map((m) => m.label || entityName(m.entity_id));
+    const devices = item.entities.filter((m) => m.entity_id).length;
+    const sections = item.entities.filter((m) => m.type === "divider").length;
     return ["Group card", item.title,
-      `${item.entities.length} device${item.entities.length === 1 ? "" : "s"}` +
+      `${devices} device${devices === 1 ? "" : "s"}` +
+      (sections ? ` \u00b7 ${sections} divider${sections === 1 ? "" : "s"}` : "") +
       (onCard.length ? ` \u00b7 card shows ${onCard.join(", ")}` : "")];
   }
 
@@ -1490,6 +1493,18 @@
       const drawMembers = () => {
         const onCard = item.entities.filter((m) => m.summary).length;
         members.replaceChildren(...(item.entities.length ? item.entities.map((m, i) => {
+          if (m.type === "divider") {
+            const name = h("input", { value: m.title || "", maxlength: "40", placeholder: "Section name, such as Cold plunge",
+              "aria-label": "Divider name", "data-divider": "" });
+            name.addEventListener("input", () => { m.title = name.value; });
+            return h("div", { class: "member-row divider-row sort-row" },
+              dragHandle(`Reorder divider ${m.title || ""}`.trim()),
+              h("span", { class: "divider-tag" }, "Divider"),
+              h("div", { class: "member-main" }, name),
+              h("div", { class: "area-actions" },
+                h("button", { type: "button", class: "btn subtle", "aria-label": "Remove divider",
+                  onclick: () => { item.entities.splice(i, 1); drawMembers(); } }, "\u2715")));
+          }
           const label = h("input", { value: m.label || "", maxlength: "40", placeholder: entityName(m.entity_id),
             "aria-label": `Label for ${entityName(m.entity_id)}` });
           label.addEventListener("input", () => { m.label = label.value; });
@@ -1529,10 +1544,20 @@
           "Tick up to 4 to show on the card; tapping the card shows all of them, plus controls where the phone has Control. " +
           "Each device can also have its own access, which wins over the card\u2019s."),
         members,
+        h("div", { class: "divider-add" },
+          h("button", { type: "button", class: "btn", onclick: () => {
+            item.entities.push({ type: "divider", title: "" });
+            drawMembers();
+            [...members.querySelectorAll("[data-divider]")].pop()?.focus();
+          } }, "+ Add divider"),
+          h("span", { class: "hint" }, "Splits the card\u2019s screen on the phone into named sections. " +
+            "Drag it by \u2261 to where the section starts.")),
         h("div", { class: "pick-head" }, "Add devices"),
         picker.el));
       validate = () => (!item.title?.trim() ? "Give the card a title."
-        : !item.entities.length ? "Add at least one device." : null);
+        : !item.entities.some((m) => m.entity_id) ? "Add at least one device."
+        : item.entities.some((m) => m.type === "divider" && !m.title?.trim())
+          ? "Name every divider, or remove the empty one." : null);
     }
 
     const form = $("#item-form");

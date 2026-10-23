@@ -12,6 +12,7 @@ from permissions import offered
 MAX_PAGES = 20
 MAX_ITEMS = 200
 MAX_GROUP_ENTITIES = 40
+MAX_GROUP_DIVIDERS = 20  # named dividers that split a group card's detail screen into sections
 MAX_SUMMARY = 4
 MAX_PHONE_PAGES = 60
 ITEM_TYPES = ("heading", "device", "area", "group")
@@ -70,17 +71,26 @@ def clean_layout(data) -> dict:
                 items.append({**base, "area_id": area_id, "title": _text(item.get("title"), 60),
                               **_access(item)})
             elif kind == "group":
-                members, summary_count = [], 0
-                for member in (item.get("entities") or [])[:MAX_GROUP_ENTITIES]:
-                    if not isinstance(member, dict) or not offered(str(member.get("entity_id") or "")):
+                members, summary_count, devices, dividers = [], 0, 0, 0
+                for member in (item.get("entities") or [])[:MAX_GROUP_ENTITIES + MAX_GROUP_DIVIDERS]:
+                    if not isinstance(member, dict):
                         continue
+                    if member.get("type") == "divider":
+                        title = _text(member.get("title"), 40)
+                        if title and dividers < MAX_GROUP_DIVIDERS:
+                            dividers += 1
+                            members.append({"type": "divider", "title": title})
+                        continue
+                    if devices >= MAX_GROUP_ENTITIES or not offered(str(member.get("entity_id") or "")):
+                        continue
+                    devices += 1
                     summary = bool(member.get("summary")) and summary_count < MAX_SUMMARY
                     summary_count += summary
                     members.append({"entity_id": member["entity_id"],
                                     "label": _text(member.get("label"), 40), "summary": summary,
                                     **_access(member)})
                 title = _text(item.get("title"), 60)
-                if title and members:
+                if title and devices:
                     items.append({**base, "title": title, "entities": members, **_access(item)})
         page_id = str(page.get("id") or "")
         if not ID_RE.match(page_id) or page_id == MORE_PAGE_ID or page_id in used:
@@ -129,7 +139,8 @@ def layout_overrides(layout: dict, areas, page_ids: list[str] | None = None) -> 
                 put(item["entity_id"], item.get("access"))
             elif kind == "group":
                 for member in item["entities"]:
-                    put(member["entity_id"], member.get("access") or item.get("access"))
+                    if "entity_id" in member:
+                        put(member["entity_id"], member.get("access") or item.get("access"))
             elif kind == "area" and item.get("access"):
                 for eid, area_ids in areas.membership.items():
                     if item["area_id"] in area_ids:
@@ -162,10 +173,11 @@ def visible_layout(layout: dict, access: dict[str, str], areas,
                     items.append(item)
                     placed.add(item["entity_id"])
             elif kind == "group":
-                members = [m for m in item["entities"] if m["entity_id"] in access]
-                if members:
+                members = _drop_empty_dividers(
+                    [m for m in item["entities"] if "entity_id" not in m or m["entity_id"] in access])
+                if any("entity_id" in m for m in members):
                     items.append({**item, "entities": members})
-                    placed.update(m["entity_id"] for m in members)
+                    placed.update(m["entity_id"] for m in members if "entity_id" in m)
             elif kind == "area":
                 ids = sorted((eid for eid in access
                               if item["area_id"] in areas.membership.get(eid, [])))
@@ -197,6 +209,18 @@ def _free_id(base: str, taken: set[str]) -> str:
     while candidate in taken:
         candidate, n = f"{base}-{n}", n + 1
     return candidate
+
+
+def _drop_empty_dividers(members: list[dict]) -> list[dict]:
+    """Remove group card dividers with no device under them (everything was filtered out)."""
+    result = []
+    for index, member in enumerate(members):
+        if "entity_id" not in member:
+            following = members[index + 1] if index + 1 < len(members) else None
+            if following is None or "entity_id" not in following:
+                continue
+        result.append(member)
+    return result
 
 
 def _drop_empty_headings(items: list[dict]) -> list[dict]:

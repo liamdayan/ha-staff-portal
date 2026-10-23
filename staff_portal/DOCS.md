@@ -124,6 +124,10 @@ it yourself instead:
   screen with the key readings at the top, then the readings, then the controls. Each device
   appears once: if the phone can operate it, it shows as a control (with its current state),
   otherwise in the readings list.
+  To split a big card into sections (say "Cold plunge" and "Fills"), click **+ Add divider**
+  under the device list, name it, and drag it by its **≡** grip to where that section starts.
+  On the phone, each section gets its name as a heading with its own readings and controls
+  underneath. A section whose devices the phone can't see is left out.
 - **Device.** A single device tile, with an optional label.
 - **Whole area.** Every device in one of your areas, kept up to date automatically.
 - **Heading.** A section title such as "Tubs".

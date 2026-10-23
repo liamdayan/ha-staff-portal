@@ -466,6 +466,7 @@ button { cursor: pointer; }
 .readings { background: var(--card); box-shadow: var(--shadow); border-radius: var(--radius); padding: 2px 16px; }
 .reading-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 50px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .reading-row:last-child { border-bottom: 0; }
+.detail-section .readings + .grid { margin-top: 12px; }
 .reading-value { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
 
 /* Rearrange (this phone only) */
