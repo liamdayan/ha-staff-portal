@@ -546,7 +546,7 @@
           list.map((e) => h("div", { class: "entity-row" },
             h("div", { class: "entity-text" },
               h("div", { class: "entity-name" }, e.name),
-              h("div", { class: "entity-id" }, `${e.entity_id} · ${e.state}`)),
+              h("div", { class: "entity-id", title: e.entity_id }, `${e.entity_id} · ${e.state}`)),
             levelControl(e))));
       }));
     };

@@ -116,8 +116,9 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input {
 .card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 
 /* Roles */
-.roles-layout { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
-@media (max-width: 760px) { .roles-layout { grid-template-columns: 1fr; } }
+/* minmax(0, ...) stops long device IDs from stretching the editor past the screen. */
+.roles-layout { display: grid; grid-template-columns: 260px minmax(0, 880px); gap: 20px; align-items: start; }
+@media (max-width: 760px) { .roles-layout { grid-template-columns: minmax(0, 1fr); } }
 .role-list ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .role-item {
   width: 100%;
@@ -131,10 +132,11 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input {
 .role-item.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .role-name { font-weight: 600; }
 .role-meta { font-size: 12px; color: var(--muted); }
-.role-editor { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-height: 200px; }
+.role-editor { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-height: 200px; min-width: 0; }
 .editor-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
 .role-name-field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-.role-name-field input { font-size: 17px; font-weight: 600; color: var(--text); min-width: 240px; }
+.role-name-field input { font-size: 17px; font-weight: 600; color: var(--text); width: min(320px, 100%); }
+.role-name-field { min-width: 0; flex: 1 1 220px; }
 .editor-actions { display: flex; gap: 8px; }
 .filters {
   display: flex;
@@ -156,8 +158,8 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input {
 .area-head h4 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .bulk { font-size: 12px; color: var(--muted); }
 .entity-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
-.entity-text { min-width: 0; }
-.entity-name { font-weight: 500; }
+.entity-text { min-width: 0; flex: 1; }
+.entity-name { font-weight: 500; overflow-wrap: anywhere; }
 .entity-id { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: none; }
 .seg button { border: 0; background: none; padding: 5px 11px; font-size: 13px; color: var(--muted); }
@@ -232,3 +234,7 @@ code { word-break: break-all; font-size: 12px; }
 .staff-checks { display: grid; gap: 6px; padding-left: 4px; }
 .staff-checks[hidden] { display: none; }
 dialog label[hidden] { display: none; }
+@media (max-width: 520px) {
+  .entity-row { flex-wrap: wrap; }
+  .area-head { flex-wrap: wrap; }
+}
