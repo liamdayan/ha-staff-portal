@@ -371,6 +371,7 @@ button { cursor: pointer; }
 
 .toast {
   position: fixed;
+  z-index: 50;
   left: 50%;
   bottom: calc(env(safe-area-inset-bottom) + 20px);
   transform: translateX(-50%);
@@ -615,9 +616,9 @@ body.with-tabs .lock-bar { bottom: calc(env(safe-area-inset-bottom) + 72px); }
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 
-/* ---------------------------------------------------------------- Desktop (front desk computers,
-   tablets in landscape): pages in a sidebar, wider grids, detail screens side by side. */
-@media (min-width: 900px) {
+/* ---------------------------------------------------------------- Tablets in landscape: pages in a
+   sidebar, wider grids, detail screens side by side. (Computers get the desktop app below.) */
+@media (min-width: 900px) and (pointer: coarse) {
   .bar { padding-left: max(24px, calc((100% - 1400px) / 2 + 24px)); padding-right: max(24px, calc((100% - 1400px) / 2 + 24px)); }
   .bar-logo { width: 40px; height: 40px; }
   .bar-title { font-size: 17px; }
@@ -711,3 +712,192 @@ body.with-tabs .lock-bar { bottom: calc(env(safe-area-inset-bottom) + 72px); }
   25% { transform: translateX(-8px); }
   75% { transform: translateX(8px); }
 }
+
+/* ---------------------------------------------------------------- Computers: a desktop app.
+   Full-height sidebar, page header, dense rows, and card details in a side panel. */
+body.desk-shell { font-size: 14px; }
+body.desk-shell .bar { display: none !important; }
+body.desk-shell .screen { max-width: none; margin: 0; padding: 0; }
+.desk-shell { --side: 252px; min-height: 100vh; }
+@media (prefers-color-scheme: light) { .desk-shell { --side-bg: #fbfbfd; } }
+@media (prefers-color-scheme: dark) { .desk-shell { --side-bg: #111114; } }
+
+.desk-side {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: var(--side);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px 14px;
+  background: var(--side-bg, var(--card));
+  border-right: 1px solid var(--line);
+  z-index: 6;
+}
+.desk-brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px 20px; min-width: 0; }
+.desk-brand img, .desk-mark {
+  width: 36px; height: 36px; border-radius: 9px; flex: none; object-fit: contain;
+  background: #fff; padding: 2px; box-shadow: 0 0 0 1px var(--line);
+}
+.desk-mark { display: grid; place-items: center; background: var(--accent); color: #fff; font-weight: 700; padding: 0; }
+.desk-brand-text { min-width: 0; }
+.desk-name { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desk-sub { font-size: 12px; color: var(--muted); }
+.desk-nav { flex: 1; display: grid; align-content: start; gap: 2px; overflow-y: auto; padding-bottom: 96px; }
+.desk-nav-label { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); padding: 6px 10px 6px; }
+.desk-nav button {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 0; background: none; text-align: left; padding: 8px 10px; border-radius: 8px;
+  font-size: 14px; font-weight: 550; color: var(--muted); position: relative;
+}
+.desk-nav button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-nav button:hover { background: var(--card-2); color: var(--text); }
+.desk-nav button.active { background: var(--accent-soft, color-mix(in srgb, var(--accent) 14%, transparent)); color: var(--text); font-weight: 650; }
+.desk-nav button.active::before {
+  content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.desk-nav kbd {
+  font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 5px; padding: 3px 5px; opacity: 0; transition: opacity 0.15s;
+}
+.desk-nav button:hover kbd { opacity: 1; }
+.desk-foot { display: flex; align-items: center; gap: 10px; padding: 12px 8px 0; border-top: 1px solid var(--line); }
+.desk-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+}
+.desk-who { flex: 1; min-width: 0; }
+.desk-who-name { font-weight: 650; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desk-who-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desk-foot-btn {
+  border: 0; background: var(--card-2); border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 650;
+}
+.desk-foot-btn:hover { background: var(--raised); }
+
+.desk-main { margin-left: var(--side); padding: 0 36px 56px; min-width: 0; }
+.desk-head {
+  position: sticky; top: 0; z-index: 4;
+  display: flex; align-items: center; gap: 16px;
+  padding: 20px 0 14px; margin-bottom: 6px;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(16px);
+  backdrop-filter: saturate(180%) blur(16px);
+  border-bottom: 1px solid var(--line);
+}
+.desk-title { font-size: 22px; font-weight: 750; letter-spacing: -0.02em; margin: 0; }
+.desk-live { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.desk-dot { width: 7px; height: 7px; border-radius: 50%; background: #34c759; box-shadow: 0 0 0 3px color-mix(in srgb, #34c759 22%, transparent); }
+.desk-live.stale .desk-dot { background: var(--alert); box-shadow: none; }
+.desk-actions { margin-left: auto; display: flex; gap: 8px; }
+.desk-action {
+  border: 0; background: var(--card-2); border-radius: 8px; padding: 7px 12px; font-size: 13px; font-weight: 600; color: var(--text);
+}
+.desk-action:hover { background: var(--raised); }
+body.desk-shell .page-title { display: none; }
+body.desk-shell .groups { padding-top: 6px; }
+
+/* Section headers: small, quiet and foldable */
+body.desk-shell .fold-head { padding: 22px 2px 10px; gap: 8px; }
+body.desk-shell .fold-title, body.desk-shell .fold-area > .fold-head .fold-title {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+}
+body.desk-shell .fold-count { font-size: 11px; padding: 1px 8px; }
+body.desk-shell .fold-chev { width: 22px; height: 22px; margin-left: 0; order: -1; background: none; }
+body.desk-shell .fold-head:hover .fold-title { color: var(--text); }
+body.desk-shell .fold.closed > .fold-head { padding-bottom: 10px; }
+body.desk-shell .group { margin-bottom: 10px; }
+
+/* Dense rows instead of phone squares */
+body.desk-shell .grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+body.desk-shell .tile { border-radius: 12px; padding: 11px 14px; }
+body.desk-shell .tile.wide, body.desk-shell .group-card { grid-column: auto; }
+body.desk-shell .tile.compact { min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; }
+body.desk-shell .tile.compact .tile-head { display: flex; align-items: center; gap: 12px; flex: 1 1 180px; min-width: 0; }
+body.desk-shell .tile.compact .tile-controls:not(:empty) { flex: 1 1 100%; margin-top: 8px; }
+/* One-button controls (Unlock, Run, Press) sit at the end of the row */
+body.desk-shell .tile.compact:is([data-domain="lock"], [data-domain="script"], [data-domain="scene"],
+  [data-domain="button"], [data-domain="input_button"]) .tile-controls:not(:empty) { flex: 0 0 auto; margin: 0 0 0 auto; }
+body.desk-shell .tile.compact:is([data-domain="lock"], [data-domain="script"], [data-domain="scene"],
+  [data-domain="button"], [data-domain="input_button"]) .tile-head { flex-basis: 120px; }
+body.desk-shell .tile-icon { width: 34px; height: 34px; }
+body.desk-shell .tile-icon svg { width: 18px; height: 18px; }
+body.desk-shell .tile-name { font-size: 14px; -webkit-line-clamp: 1; }
+body.desk-shell .tile-state { font-size: 13px; margin-top: 1px; }
+body.desk-shell .tile.compact:is([data-domain="sensor"], [data-domain="binary_sensor"]) .tile-text {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+body.desk-shell .tile.compact:is([data-domain="sensor"], [data-domain="binary_sensor"]) .tile-state {
+  font-size: 17px; margin: 0; flex: none;
+}
+body.desk-shell .tile.compact.controllable:active { transform: scale(0.99); }
+body.desk-shell .switch { width: 42px; height: 25px; }
+body.desk-shell .switch .knob { width: 21px; height: 21px; }
+body.desk-shell .switch[aria-checked="true"] .knob { transform: translateX(17px); }
+/* Full-width controls sit on the same row as the name when there's room */
+body.desk-shell .tile.wide { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+body.desk-shell .tile.wide .tile-head { flex: 1 1 160px; min-width: 0; }
+body.desk-shell .tile.wide .tile-controls { margin: 0; flex: 0 1 auto; justify-content: flex-end; }
+body.desk-shell .tile.wide .reading { width: auto; }
+body.desk-shell .stepper { padding: 3px; gap: 4px; }
+body.desk-shell .round { width: 32px; height: 32px; font-size: 18px; }
+body.desk-shell .target { font-size: 17px; min-width: 70px; }
+body.desk-shell .btn { min-height: 34px; border-radius: 8px; padding: 0 14px; font-size: 13px; }
+body.desk-shell .btn-row.segmented { padding: 3px; border-radius: 10px; min-width: 200px; }
+body.desk-shell .btn-row.segmented .btn { min-height: 30px; border-radius: 7px; }
+body.desk-shell .select { min-height: 34px; border-radius: 8px; font-size: 13px; }
+body.desk-shell .tile:is([data-domain="select"], [data-domain="input_select"]) .select { flex: 0 1 220px; }
+
+/* Group cards: a compact panel of key numbers; click opens the side panel */
+body.desk-shell .group-card { border-radius: 12px; padding: 13px 16px 14px; }
+body.desk-shell .group-card .tile-name { font-size: 15px; }
+body.desk-shell .chevron { width: 24px; height: 24px; font-size: 17px; }
+body.desk-shell .card-rows { margin-top: 10px; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); }
+body.desk-shell .card-value { font-size: 18px; }
+body.desk-shell .card-label { font-size: 12px; }
+
+/* Side panel with a card's details */
+.drawer-wrap { position: fixed; inset: 0; z-index: 30; }
+.drawer-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.3); animation: fade-in 0.2s; }
+.drawer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(620px, 92vw);
+  background: var(--bg); box-shadow: -24px 0 60px rgba(0, 0, 0, 0.28);
+  overflow-y: auto; padding: 0 26px 32px; animation: slide-in 0.24s var(--ease);
+}
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes slide-in { from { transform: translateX(40px); opacity: 0; } }
+body.desk-shell .drawer .detail { display: block; }
+.drawer-head {
+  position: sticky; top: 0; z-index: 2; display: flex !important; align-items: center; gap: 12px;
+  padding: 20px 0 14px; margin: 0 0 14px; background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.drawer-head h1 { font-size: 22px !important; flex: 1; }
+.drawer-close {
+  width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--card-2); color: var(--muted);
+  font-size: 14px; display: grid; place-items: center;
+}
+.drawer-close:hover { color: var(--text); background: var(--raised); }
+body.desk-shell .drawer .hero-values { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+body.desk-shell .drawer .hero-value { border-radius: 12px; padding: 12px 14px; }
+body.desk-shell .drawer .hero-number { font-size: 22px; }
+body.desk-shell .drawer .hero-label { font-size: 12px; }
+body.desk-shell .drawer .group h2 {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); margin: 18px 2px 8px;
+}
+body.desk-shell .drawer .readings { border-radius: 12px; padding: 0 14px; }
+body.desk-shell .drawer .reading-row { min-height: 40px; padding: 8px 0; }
+body.desk-shell .drawer .grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+
+/* The lock control lives at the bottom of the sidebar, above the panel's backdrop */
+body.desk-shell .lock-bar {
+  left: 12px; bottom: 70px; transform: none; width: calc(var(--side, 252px) - 24px); max-width: none;
+  border-radius: 12px; z-index: 35; background: var(--card);
+}
+body.desk-shell .lock-bar:not(.unlocked) { background: var(--accent); }
+body.desk-shell .lock-hold { min-height: 42px; font-size: 14px; padding: 0 12px; }
+body.desk-shell .lock-bar.unlocked { flex-direction: column; align-items: stretch; gap: 0; padding: 10px; }
+body.desk-shell .lock-bar.unlocked .lock-status { padding: 0 4px 8px; font-size: 13px; white-space: normal; }
+body.desk-shell .lock-bar.unlocked .lock-status small { display: block; font-size: 12px; }
+body.desk-shell .lock-bar .sep { display: none; }
+body.desk-shell .lock-now { margin: 0; min-height: 32px; font-size: 13px; border-radius: 8px; }
+body.desk-shell .lock-bar.nudge { animation-name: lock-nudge-side; }
+body.desk-shell.with-lock .screen { padding-bottom: 0; }
+body.desk-shell .toast { left: calc(50% + 126px); bottom: 24px; }

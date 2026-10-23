@@ -247,8 +247,17 @@ phones: a role, layout pages, PINs, per-person sign-in and locked controls all w
    to give it its own window and icon, or just bookmark it. It stays signed in in that browser
    until you revoke it.
 
-On a wide screen the app shows its pages in a sidebar, more tiles per row, and a group card's
-readings and controls side by side. The control lock button sits at the bottom of the sidebar.
+On a computer the staff app works like a desktop app rather than a big phone:
+
+- A sidebar lists the pages (press **1** to **9** to jump between them), shows who's signed in
+  with **Sign out**, and holds the control lock button.
+- Devices are compact rows (name, state and the control on one line), several to a row.
+- Clicking a group card opens its details in a panel on the right, with the page still visible
+  behind it. **Esc** or clicking outside closes it.
+- The page header shows when the readings were last updated, and turns orange if the connection
+  drops.
+
+A computer's browser window narrower than a tablet falls back to the phone layout.
 To give the front desk its own page (lobby lights, say), add a page in **Layout** and use
 **Choose phones** to show it only on the front desk computer.
 

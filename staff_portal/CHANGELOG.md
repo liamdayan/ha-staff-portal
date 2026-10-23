@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.11
+
+- Computers get a real desktop layout instead of a stretched phone one:
+  - A full-height sidebar with your logo, the pages, who's signed in with **Sign out**, and the
+    control lock.
+  - A page header showing when readings last updated.
+  - Compact device rows, with the control on the same line.
+  - Group card details open in a side panel over the page.
+  - Smaller, desktop-sized type and hover states.
+- Keyboard shortcuts on computers: **1** to **9** switch pages, **Esc** closes a card's panel.
+- Tablets keep the touch-friendly layout.
+
 ## 0.6.10
 
 - Headings on phone and computer pages fold away everything under them (up to the next heading)

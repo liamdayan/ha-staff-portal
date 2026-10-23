@@ -59,6 +59,7 @@
     tiles = new Map();
     // Keep pop-up messages above the bottom tab bar when there is one.
     document.body.classList.toggle("with-tabs", !!node.querySelector?.(".tabbar"));
+    document.body.classList.toggle("desk-shell", !!node.classList?.contains("desk-shell"));
     screen.replaceChildren(node);
     drawLock();
   }
@@ -369,6 +370,7 @@
           message("Can't reach the system", "It may be restarting. Try again in a minute.", true);
         } else {
           toast("Connection lost. Retrying…", true);
+          screen.querySelector(".desk-live")?.classList.add("stale");
           pollTimer = setTimeout(refresh, POLL_MS);
         }
         return;
@@ -398,9 +400,9 @@
     if (data.layout?.pages.length && !data.layout.pages.some((p) => p.id === view.pageId)) {
       view.pageId = data.layout.pages[0].id;
     }
-    const shape = JSON.stringify(data.layout
+    const shape = JSON.stringify([isDesk(), data.layout
       ? [data.layout, view.pageId, view.detail]
-      : data.entities.map((e) => [e.entity_id, e.area]));
+      : data.entities.map((e) => [e.entity_id, e.area])]);
     if (shape !== render.shape || !tiles.size) {
       render.shape = shape;
       if (!data.entities.length) {
@@ -419,13 +421,22 @@
         return;
       }
       const next = new Map();
+      // On a computer, opening or closing a card's panel redraws the page; keep its scroll position.
+      const keepScroll = isDesk() && render.pageId === view.pageId ? window.scrollY : null;
       const root = data.layout ? buildLayout(data.layout, byId, next) : buildAutomatic(data.entities, next);
       show(root);
       tiles = next;
+      render.pageId = view.pageId;
+      if (keepScroll) window.scrollTo(0, keepScroll);
     }
     for (const t of tiles.values()) t.refresh(byId);
     updateFolds();
     drawLock();
+    const updated = screen.querySelector("[data-updated]");
+    if (updated) {
+      updated.textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+      updated.closest(".desk-live").classList.remove("stale");
+    }
   }
 
   // A tile that follows one entity. Skips updates while the user is mid-change.
@@ -454,11 +465,20 @@
       groups.get(key).push(e);
     }
     const root = h("div", { class: "groups" });
+    const sections = [];
     for (const [area, list] of groups) {
       const fold = foldSection(`auto:${area}`, area, false, "fold-area");
       fold.body.append(h("section", { class: "group" },
         h("div", { class: "grid" }, list.map((e) => deviceTile(e, null, into)))));
       root.append(fold.el);
+      sections.push([area, fold.el]);
+    }
+    if (isDesk()) {
+      // No pages: the sidebar jumps to each area instead.
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Areas" }, h("div", { class: "desk-nav-label" }, "Areas"),
+        sections.map(([area, el]) => h("button", { type: "button",
+          onclick: () => el.scrollIntoView({ behavior: "smooth", block: "start" }) }, h("span", null, area))));
+      return deskShell({ nav, title: "All devices", content: root });
     }
     root.append(rearrangeButton());
     return root;
@@ -472,6 +492,23 @@
     view.pageId = page.id;
     const detailItem = view.detail && page.items.find((i) => i.id === view.detail && i.type === "group");
     if (view.detail && !detailItem) view.detail = null;
+
+    if (isDesk()) {
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" }, h("div", { class: "desk-nav-label" }, "Pages"),
+        pages.map((p, i) => h("button", {
+          type: "button",
+          class: i === current ? "active" : null,
+          "aria-current": i === current ? "page" : null,
+          title: i < 9 ? `${p.name} (press ${i + 1})` : p.name,
+          onclick: () => openPage(p.id),
+        }, h("span", null, p.name), i < 9 ? h("kbd", null, String(i + 1)) : null)));
+      // On a computer the card's details open in a panel beside the page instead of replacing it.
+      const drawer = detailItem ? h("div", { class: "drawer-wrap" },
+        h("div", { class: "drawer-backdrop", onclick: closeDetail }),
+        h("aside", { class: "drawer", role: "dialog", "aria-label": detailItem.title },
+          buildDetail(detailItem, page, byId, into, true))) : null;
+      return deskShell({ nav, title: page.name, content: buildPage(page, byId, into), drawer });
+    }
 
     const root = h("div", { class: pages.length > 1 ? "layout has-tabs" : "layout" });
     root.append(detailItem ? buildDetail(detailItem, page, byId, into) : buildPage(page, byId, into));
@@ -620,7 +657,7 @@
   // Detail screen for a group card: key readings, the readings, then the controls allowed.
   // A device this phone can operate appears once, as a control (its tile shows its state too).
   // Named dividers split the screen into sections, each with its own readings and controls.
-  function buildDetail(item, page, byId, into) {
+  function buildDetail(item, page, byId, into, inDrawer = false) {
     const hero = h("div", { class: "hero-values" });
     const sections = [{ title: null, members: [] }];
     for (const m of item.entities) {
@@ -675,9 +712,13 @@
       },
     });
     return h("div", { class: "detail" },
-      h("div", { class: "detail-head" },
-        h("button", { class: "back-btn", onclick: () => history.back() }, `\u2039 ${page.name}`),
-        h("h1", null, item.title)),
+      inDrawer
+        ? h("div", { class: "detail-head drawer-head" }, h("h1", null, item.title),
+          h("button", { class: "drawer-close", type: "button", "aria-label": "Close", title: "Close (Esc)",
+            onclick: closeDetail }, "\u2715"))
+        : h("div", { class: "detail-head" },
+          h("button", { class: "back-btn", onclick: () => history.back() }, `\u2039 ${page.name}`),
+          h("h1", null, item.title)),
       hero,
       ...body);
   }
@@ -701,8 +742,53 @@
   function openDetail(id) {
     view.detail = id;
     history.pushState({ detail: id }, "", "/");
-    window.scrollTo(0, 0);
+    if (!isDesk()) window.scrollTo(0, 0); // on a computer the page stays put behind the panel
     rerender();
+  }
+
+  function closeDetail() {
+    if (history.state?.detail) history.back();
+    else { view.detail = null; rerender(); }
+  }
+
+  // ---------------------------------------------------------------- computer layout
+
+  // A computer-sized screen with a mouse (or any wide screen on a device set up as a computer)
+  // gets a desktop app: sidebar, page header, dense rows and a side panel for card details.
+  const deskQuery = window.matchMedia("(min-width: 1024px)");
+  const finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+  function isDesk() {
+    return deskQuery.matches && (finePointer.matches || me?.kind === "computer");
+  }
+  deskQuery.addEventListener("change", () => { render.shape = null; rerender(); });
+
+  function deskShell({ nav, title, content, drawer = null }) {
+    const logo = me?.has_logo ? h("img", { src: "/logo.png", alt: "" }) :
+      h("span", { class: "desk-mark" }, (me?.property_name || "S").trim().charAt(0).toUpperCase());
+    const who = lastData?.staff_name || me?.device || "";
+    const lockBtn = me?.pin_required ? h("button", { class: "desk-foot-btn", type: "button",
+      onclick: () => document.getElementById("lock-btn").click() }, me.shared ? "Sign out" : "Lock") : null;
+    const side = h("aside", { class: "desk-side" },
+      h("div", { class: "desk-brand" }, logo,
+        h("div", { class: "desk-brand-text" },
+          h("div", { class: "desk-name" }, me?.property_name || "Staff Portal"),
+          h("div", { class: "desk-sub" }, me?.app_name || "Staff"))),
+      nav,
+      h("div", { class: "desk-foot" },
+        h("span", { class: "desk-avatar", "aria-hidden": "true" }, who.trim().charAt(0).toUpperCase() || "?"),
+        h("div", { class: "desk-who" }, h("div", { class: "desk-who-name" }, who),
+          h("div", { class: "desk-who-sub" }, [me?.shared ? me?.device : null, me?.role].filter(Boolean).join(" \u00b7 "))),
+        lockBtn));
+    const actions = lastData?.can_reorder
+      ? h("button", { class: "desk-action", type: "button", onclick: openRearrange }, "\u21c5 Rearrange") : null;
+    const main = h("main", { class: "desk-main" },
+      h("header", { class: "desk-head" },
+        h("h1", { class: "desk-title" }, title),
+        h("span", { class: "desk-live" }, h("span", { class: "desk-dot", "aria-hidden": "true" }),
+          h("span", { "data-updated": "" }, "Live")),
+        h("div", { class: "desk-actions" }, actions)),
+      content);
+    return h("div", { class: "desk-shell" }, side, main, drawer);
   }
 
   // ---------------------------------------------------------------- rearrange (this phone only)
@@ -1339,7 +1425,17 @@
 
   let screenKeys = null;
   document.addEventListener("keydown", (ev) => {
-    if (screenKeys && !ev.ctrlKey && !ev.metaKey && !ev.altKey) screenKeys(ev);
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    if (screenKeys) return screenKeys(ev);
+    // Computer shortcuts: 1-9 switch pages, Esc closes a card's panel.
+    if (!document.body.classList.contains("desk-shell") || /INPUT|SELECT|TEXTAREA/.test(ev.target.tagName)) return;
+    if (ev.key === "Escape" && view.detail) {
+      ev.preventDefault();
+      closeDetail();
+    } else if (/^[1-9]$/.test(ev.key)) {
+      const page = lastData?.layout?.pages?.[Number(ev.key) - 1];
+      if (page && page.id !== view.pageId) openPage(page.id);
+    }
   });
 
   document.addEventListener("visibilitychange", () => {
