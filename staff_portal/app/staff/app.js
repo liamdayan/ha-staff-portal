@@ -52,6 +52,8 @@
   function show(node) {
     stopPolling();
     tiles = new Map();
+    // Keep pop-up messages above the bottom tab bar when there is one.
+    document.body.classList.toggle("with-tabs", !!node.querySelector?.(".tabbar"));
     screen.replaceChildren(node);
   }
 
@@ -319,6 +321,7 @@
   }
 
   async function refresh() {
+    if (rearranging) return; // don't replace the Rearrange screen
     stopPolling();
     const res = await api("GET", "/api/entities");
     if (res.status !== 200) {
@@ -412,6 +415,7 @@
       root.append(h("section", { class: "group" }, h("h2", null, area),
         h("div", { class: "grid" }, list.map((e) => deviceTile(e, null, into)))));
     }
+    root.append(rearrangeButton());
     return root;
   }
 
@@ -426,6 +430,7 @@
 
     const root = h("div", { class: pages.length > 1 ? "layout has-tabs" : "layout" });
     root.append(detailItem ? buildDetail(detailItem, page, byId, into) : buildPage(page, byId, into));
+    if (!detailItem) root.append(rearrangeButton());
     if (pages.length > 1) {
       root.append(h("nav", { class: "tabbar", "aria-label": "Pages" }, pages.map((p, i) =>
         h("button", {
@@ -569,6 +574,179 @@
     history.pushState({ detail: id }, "", "/");
     window.scrollTo(0, 0);
     rerender();
+  }
+
+  // ---------------------------------------------------------------- rearrange (this phone only)
+
+  let rearranging = false;
+  let activeDrag = false;
+
+  function rearrangeButton() {
+    if (!lastData?.can_reorder) return null;
+    return h("div", { class: "rearrange-row" },
+      h("button", { class: "link-btn", onclick: openRearrange }, "\u21c5 Rearrange"));
+  }
+
+  function grip(label) {
+    const handle = h("button", { type: "button", class: "drag-handle", "aria-label": label });
+    handle.innerHTML = '<svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">' +
+      '<path d="M4 6h12M4 10h12M4 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    return handle;
+  }
+
+  // A list whose rows can be dragged by their grip (finger or mouse) or moved with arrow keys.
+  // Rows move in the page as you drag; read the final order from the DOM when done.
+  function sortableList(rows) {
+    const list = h("div", { class: "sort-list" }, rows.map(({ key, label }) =>
+      h("div", { class: "sort-row", "data-key": key }, grip(`Move ${label}`), h("span", null, label))));
+    const rowEls = () => [...list.children];
+
+    list.addEventListener("keydown", (ev) => {
+      const row = ev.target.closest?.(".drag-handle")?.closest(".sort-row");
+      if (!row || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+      const sibling = ev.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
+      if (!sibling) return;
+      ev.preventDefault();
+      list.insertBefore(row, ev.key === "ArrowUp" ? sibling : sibling.nextElementSibling);
+      row.querySelector(".drag-handle").focus();
+    });
+
+    list.addEventListener("pointerdown", (ev) => {
+      const handle = ev.target.closest?.(".drag-handle");
+      const row = handle?.closest(".sort-row");
+      if (!row || ev.button > 0 || !ev.isPrimary || activeDrag) return;
+      ev.preventDefault();
+      activeDrag = true;
+      const startY = ev.clientY;
+      const grabOffset = startY - row.getBoundingClientRect().top;
+      let pointerY = startY;
+      let dragging = false;
+      // Capture on the list: the row itself moves around while dragging.
+      list.setPointerCapture(ev.pointerId);
+      const middle = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const place = () => {
+        let prev = row.previousElementSibling;
+        while (prev && pointerY < middle(prev)) { list.insertBefore(row, prev); prev = row.previousElementSibling; }
+        let next = row.nextElementSibling;
+        while (next && pointerY > middle(next)) { list.insertBefore(row, next.nextElementSibling); next = row.nextElementSibling; }
+        row.style.transform = "";
+        row.style.transform = `translateY(${pointerY - grabOffset - row.getBoundingClientRect().top}px)`;
+      };
+      let frame = requestAnimationFrame(function autoScroll() {
+        if (dragging) {
+          const edge = 64;
+          let dy = 0;
+          if (pointerY < edge) dy = -Math.min(16, Math.ceil((edge - pointerY) / 4));
+          else if (pointerY > window.innerHeight - edge) dy = Math.min(16, Math.ceil((pointerY - window.innerHeight + edge) / 4));
+          if (dy) { window.scrollBy(0, dy); place(); }
+        }
+        frame = requestAnimationFrame(autoScroll);
+      });
+      const move = (e) => {
+        if (e.pointerId !== ev.pointerId) return;
+        pointerY = e.clientY;
+        if (!dragging) {
+          if (Math.abs(pointerY - startY) < 5) return;
+          dragging = true;
+          row.classList.add("dragging");
+        }
+        place();
+      };
+      let finished = false;
+      const end = (e) => {
+        if (finished || e.pointerId !== ev.pointerId) return;
+        finished = true;
+        activeDrag = false;
+        cancelAnimationFrame(frame);
+        for (const [type, fn] of listeners) list.removeEventListener(type, fn);
+        if (list.hasPointerCapture(ev.pointerId)) list.releasePointerCapture(ev.pointerId);
+        row.classList.remove("dragging");
+        row.style.transform = "";
+      };
+      const listeners = [["pointermove", move], ["pointerup", end], ["pointercancel", end], ["lostpointercapture", end]];
+      for (const [type, fn] of listeners) list.addEventListener(type, fn);
+    });
+    return { el: list, keys: () => rowEls().map((r) => r.dataset.key) };
+  }
+
+  function itemLabel(item, byId) {
+    if (item.type === "device") return item.label || byId.get(item.entity_id)?.name || item.entity_id;
+    if (item.type === "heading") return `Heading: ${item.title}`;
+    return item.title || "Section";
+  }
+
+  function openRearrange() {
+    if (!lastData) return;
+    const data = lastData;
+    const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
+    const lists = [];
+    let pageId = null;
+    let tabs = null;
+    let items;
+    if (data.layout) {
+      const pages = data.layout.pages;
+      const page = pages.find((p) => p.id === view.pageId) || pages[0];
+      pageId = page.id;
+      if (pages.length > 1) {
+        tabs = sortableList(pages.map((p) => ({ key: p.id, label: p.name })));
+        lists.push(h("section", { class: "group" }, h("h2", null, "Tabs"), tabs.el));
+      }
+      items = sortableList(page.items.map((i) => ({ key: i.id, label: itemLabel(i, byId) })));
+      lists.push(h("section", { class: "group" }, h("h2", null, `On \u201c${page.name}\u201d`), items.el));
+    } else {
+      pageId = "auto";
+      const sections = [...new Set(data.entities.map((e) => e.area || "Other"))];
+      items = sortableList(sections.map((name) => ({ key: name, label: name })));
+      lists.push(h("section", { class: "group" }, h("h2", null, "Sections"), items.el));
+    }
+    const startTabs = tabs?.keys().join("|");
+    const startItems = items.keys().join("|");
+
+    const close = () => {
+      rearranging = false;
+      refresh();
+    };
+    const save = async () => {
+      // Only what changed is saved, so the rest keeps following your manager's layout.
+      const order = { pages: data.order.pages, items: { ...data.order.items } };
+      if (tabs && tabs.keys().join("|") !== startTabs) order.pages = tabs.keys();
+      if (items.keys().join("|") !== startItems) order.items[pageId] = items.keys();
+      const res = await api("PUT", "/api/order", order);
+      if (res.status !== 200) {
+        // Sign-in or connection problems switch to another screen, so leave rearrange mode;
+        // anything else keeps the list on screen to try again.
+        if (handleAuthError(res)) rearranging = false;
+        else toast(res.data.error || "Couldn't save the new order.", true);
+        return;
+      }
+      toast("Saved on this phone.");
+      close();
+    };
+    const reset = async () => {
+      if (!window.confirm("Put this phone back to your manager's arrangement?")) return;
+      const res = await api("DELETE", "/api/order");
+      if (res.status !== 200) {
+        if (handleAuthError(res)) rearranging = false;
+        else toast("Couldn't reset. Try again.", true);
+        return;
+      }
+      toast("Back to the default arrangement.");
+      close();
+    };
+
+    rearranging = true;
+    show(h("div", { class: "rearrange" },
+      h("div", { class: "detail-head" }, h("h1", null, "Rearrange")),
+      h("p", { class: "muted" }, "Drag the \u2261 grips to change the order on this phone. " +
+        "It doesn't change anyone else's phone."),
+      lists,
+      h("div", { class: "rearrange-actions" },
+        h("button", { class: "btn", onclick: close }, "Cancel"),
+        h("button", { class: "btn primary", onclick: save }, "Done")),
+      data.custom_order
+        ? h("button", { class: "link-btn", onclick: reset }, "Reset to default")
+        : null));
+    window.scrollTo(0, 0);
   }
 
   // Phone back button / swipe closes the detail screen instead of leaving the app.

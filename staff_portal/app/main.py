@@ -23,7 +23,8 @@ from aiohttp import web
 
 from branding import Branding
 from db import Database, check_pin, hash_pin
-from layout import clean_layout, clean_phone_pages, visible_layout
+from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
+                    clean_phone_pages, visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 from permissions import (ActionRejected, build_service_call, controllable, describe_action,
                          domain_of, offered)
@@ -467,11 +468,46 @@ async def api_entities(request: web.Request):
         return bad_request("Can't reach the system right now.", 503)
     entities = [entity_view(eid, states.get(eid), layout, lvl) for eid, lvl in allowed.items()]
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
+    can_reorder = db.settings().get("allow_phone_reorder") == "1"
+    order = db.phone_order(order_owner(device, member)) if can_reorder else None
+    phone_layout = visible_layout(db.layout(), allowed, layout, device_pages(device))
+    if phone_layout:
+        phone_layout = apply_phone_order(phone_layout, order)
+    else:
+        entities = apply_auto_order(entities, order)
     return web.json_response({
         "entities": entities,
-        "layout": visible_layout(db.layout(), allowed, layout, device_pages(device)),
+        "layout": phone_layout,
         "staff_name": member and member["name"],
+        "can_reorder": can_reorder,
+        "custom_order": bool(order),
+        "order": order or {"pages": [], "items": {}},
     })
+
+
+def order_owner(device: dict, member: dict | None) -> str:
+    """Whose arrangement this is: the signed-in person on a shared phone, otherwise the phone."""
+    return f"s:{member['id']}" if member else f"d:{device['id']}"
+
+
+async def api_save_order(request: web.Request):
+    device, member = authenticate(request)
+    if db.settings().get("allow_phone_reorder") != "1":
+        return bad_request("Rearranging is turned off for this phone.", 403)
+    try:
+        order = clean_phone_order(await read_json(request))
+    except ValueError as err:
+        return bad_request(str(err))
+    db.set_phone_order(order_owner(device, member), order)
+    db.log(actor_name(device, member), "Rearranged the phone", role=device["role_name"])
+    return web.json_response({"ok": True})
+
+
+async def api_reset_order(request: web.Request):
+    device, member = authenticate(request)
+    db.set_phone_order(order_owner(device, member), None)
+    db.log(actor_name(device, member), "Reset the phone's arrangement", role=device["role_name"])
+    return web.json_response({"ok": True})
 
 
 async def api_action(request: web.Request):
@@ -571,6 +607,8 @@ def staff_app() -> web.Application:
     app.router.add_get("/api/me", api_me)
     app.router.add_post("/api/unlock", api_unlock)
     app.router.add_post("/api/signout", api_signout)
+    app.router.add_put("/api/order", api_save_order)
+    app.router.add_delete("/api/order", api_reset_order)
     app.router.add_get("/api/entities", api_entities)
     app.router.add_post("/api/action", api_action)
     return app
@@ -601,10 +639,12 @@ def device_pages(device: dict) -> list[str] | None:
 
 def device_payload() -> list[dict]:
     devices = db.devices()
+    owners = db.phone_order_owners()
     for d in devices:
         d["setup_url"] = setup_url(d["enroll_code"])
         d["staff_ids"] = db.device_staff_ids(d["id"])
         d["layout_pages"] = device_pages(d)
+        d["custom_order"] = f"d:{d['id']}" in owners
     return devices
 
 
@@ -623,11 +663,12 @@ async def admin_index(request: web.Request):
 
 
 async def admin_state(request: web.Request):
+    owners = db.phone_order_owners()
     return web.json_response({
         "settings": db.settings(),
         "roles": db.roles(),
         "devices": device_payload(),
-        "staff": db.staff_list(),
+        "staff": [{**m, "custom_order": f"s:{m['id']}" in owners} for m in db.staff_list()],
         "areas": db.areas(),
         "layout": db.layout(),
         "has_logo": branding.has_logo(),
@@ -930,6 +971,17 @@ def require_pin(value) -> str:
     return pin
 
 
+async def admin_reset_order(request: web.Request):
+    """Put a phone (or a staff member's) arrangement back to the admin's layout."""
+    kind, item_id = request.match_info["kind"], int(request.match_info["id"])
+    target = db.staff(item_id) if kind == "staff" else db.device(item_id)
+    if not target:
+        raise web.HTTPNotFound()
+    db.set_phone_order(f"{'s' if kind == 'staff' else 'd'}:{item_id}", None)
+    db.log(admin_name(request), f"Reset {target['name']}'s arrangement to the layout")
+    return web.json_response({"ok": True})
+
+
 async def admin_create_staff(request: web.Request):
     data = await read_json(request)
     name = clean_name(data.get("name"), 40)
@@ -1022,8 +1074,9 @@ async def admin_update_settings(request: web.Request):
         if url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", url):
             return bad_request("The staff app address must start with https:// (no path).")
         values["public_url"] = url
-    if "ha_logbook" in data:
-        values["ha_logbook"] = "1" if data["ha_logbook"] in (True, "1", "true", "on") else "0"
+    for key in ("ha_logbook", "allow_phone_reorder"):
+        if key in data:
+            values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
                         ("enroll_hours", 1, 720)):
         if key in data:
@@ -1092,6 +1145,7 @@ def admin_app() -> web.Application:
     app.router.add_post(r"/api/devices/{id:\d+}/{action:revoke|reenroll|unlock}", admin_device_action)
     app.router.add_post(r"/api/{kind:devices|staff}/{id:\d+}/link", admin_link_user)
     app.router.add_delete(r"/api/{kind:devices|staff}/{id:\d+}/link", admin_unlink_user)
+    app.router.add_delete(r"/api/{kind:devices|staff}/{id:\d+}/order", admin_reset_order)
     app.router.add_post("/api/staff", admin_create_staff)
     app.router.add_patch(r"/api/staff/{id:\d+}", admin_update_staff)
     app.router.add_delete(r"/api/staff/{id:\d+}", admin_delete_staff)

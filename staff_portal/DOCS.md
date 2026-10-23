@@ -134,6 +134,20 @@ page still shows up on a "More" page. Delete every page to go back to the automa
 Setpoints (number entities) and dropdowns (select entities) can be controlled too, always
 within the entity's own minimum, maximum and options.
 
+## Rearranging on the phone
+
+Staff can tap **⇅ Rearrange** at the bottom of the phone screen to drag their tabs and the items
+on the current page into the order that suits them (or, with no custom layout, the order of the
+area sections). It only changes that phone, or that person on a shared phone; your Layout tab
+and every other phone stay as they are. Items you add later appear at the end.
+
+- Turn it off under **Settings → Staff phones**. Every phone then goes back to your layout
+  (their own order is kept, and comes back if you turn it on again).
+- To put one phone back to your layout, open **Phones → Edit** and click **Reset to your
+  layout**. For a person on a shared phone, do the same on the **Staff** tab. Phones that have
+  been rearranged say so on their card.
+- Staff can also tap **Reset to default** on the Rearrange screen.
+
 ## 5. Add phones
 
 1. In **Phones**, click **Add phone**, name it (such as *Maintenance phone*), pick a role, and

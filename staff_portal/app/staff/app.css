@@ -331,3 +331,26 @@ button { cursor: pointer; }
 .reading-row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .reading-row:last-child { border-bottom: 0; }
 .reading-value { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Rearrange (this phone only) */
+.rearrange-row { display: flex; justify-content: center; margin: 8px 0 4px; }
+.rearrange-row .link-btn { color: var(--muted); text-decoration: none; font-weight: 600; }
+.rearrange .group h2 { margin-top: 18px; }
+.sort-list { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 2px 6px; }
+.sort-row {
+  display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 2px 4px;
+  border-bottom: 1px solid var(--line); background: var(--card);
+}
+.sort-row:last-child { border-bottom: 0; }
+.sort-row span { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.sort-row.dragging { position: relative; z-index: 10; border-radius: 10px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3); }
+.drag-handle {
+  flex: none; display: grid; place-items: center; width: 44px; height: 44px; padding: 0;
+  border: 0; border-radius: 10px; background: none; color: var(--muted); touch-action: none; cursor: grab;
+}
+.drag-handle:focus-visible { outline: 2px solid var(--accent); }
+.rearrange-actions { display: flex; gap: 10px; justify-content: flex-end; margin: 18px 0 6px; }
+.rearrange-actions .btn { min-width: 96px; }
+.rearrange-actions .btn.primary { margin-top: 0; }
+.rearrange > .link-btn { display: block; margin: 0 auto; }
+body.with-tabs .toast { bottom: calc(env(safe-area-inset-bottom) + 76px); }

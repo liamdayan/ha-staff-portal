@@ -140,6 +140,15 @@
           <input name="public_url" type="url" placeholder="https://staff.example.com"></label>
       </fieldset>
       <fieldset>
+        <legend>Staff phones</legend>
+        <label class="check-row"><input type="checkbox" name="allow_phone_reorder">
+          <span>Let staff rearrange their phone
+          <small>Adds a “Rearrange” button on the phone for reordering its tabs and items.
+          It only changes that phone (or that person, on a shared phone), never your layout, and you
+          can reset it from Phones → Edit or the Staff tab. Turning this off puts every phone back
+          on your layout.</small></span></label>
+      </fieldset>
+      <fieldset>
         <legend>Home Assistant logbook</legend>
         <label class="check-row"><input type="checkbox" name="ha_logbook">
           <span>Add staff actions to Home Assistant's logbook
@@ -181,6 +190,10 @@
       <div class="staff-checks" data-pages-list></div>
       <p class="hint">On each page the phone still only sees what its role allows.</p>
     </div>
+    <div class="order-reset" data-order-reset hidden>
+      <span>This phone has been rearranged on the phone.</span>
+      <button class="btn" type="button">Reset to your layout</button>
+    </div>
     <p class="hint" data-pages-none hidden>This phone uses the automatic layout. Build pages on the
       Layout tab, then choose here which ones this phone shows.</p>
     <label>PIN <small data-pin-hint>Optional, 4 to 8 digits. Staff enter it when opening the app.</small>
@@ -199,6 +212,10 @@
     <label>PIN <small data-pin-hint></small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <label class="check"><input type="checkbox" name="active"> Can sign in</label>
+    <div class="order-reset" data-order-reset hidden>
+      <span>They've rearranged their phone screens.</span>
+      <button class="btn" type="button">Reset to your layout</button>
+    </div>
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="save">Save</button>

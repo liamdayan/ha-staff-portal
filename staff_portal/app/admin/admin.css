@@ -336,3 +336,5 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 #page-list li.sort-row { display: flex; align-items: center; gap: 4px; }
 #page-list li.sort-row .role-item { flex: 1; min-width: 0; }
 .member-row .drag-handle, .item-row .drag-handle, .area-row .drag-handle { margin-left: -6px; }
+.order-reset { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 14px; color: var(--muted); }

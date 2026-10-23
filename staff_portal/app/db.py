@@ -89,6 +89,12 @@ CREATE TABLE IF NOT EXISTS role_areas (
     level TEXT NOT NULL CHECK (level IN ('view', 'control')),
     PRIMARY KEY (role_id, area_id)
 );
+-- A phone's own arrangement (or, on shared phones, one staff member's): JSON
+-- {"pages": [page IDs], "items": {page ID: [item IDs]}}. Owner is "d:<device id>" or "s:<staff id>".
+CREATE TABLE IF NOT EXISTS phone_orders (
+    owner TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -118,6 +124,7 @@ DEFAULT_SETTINGS = {
     "max_pin_attempts": "5",
     "enroll_hours": "72",
     "ha_logbook": "1",
+    "allow_phone_reorder": "1",
 }
 
 ENROLL_TTL_DEFAULT = 72 * 3600
@@ -399,6 +406,7 @@ class Database:
         self.conn.commit()
 
     def delete_staff(self, staff_id: int) -> None:
+        self.conn.execute("DELETE FROM phone_orders WHERE owner = ?", (f"s:{staff_id}",))
         self.conn.execute("DELETE FROM staff WHERE id = ?", (staff_id,))
         self.conn.commit()
 
@@ -442,8 +450,29 @@ class Database:
         self.conn.commit()
 
     def delete_device(self, device_id: int) -> None:
+        self.conn.execute("DELETE FROM phone_orders WHERE owner = ?", (f"d:{device_id}",))
         self.conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
         self.conn.commit()
+
+    # Personal arrangements set on the phone
+
+    def phone_order(self, owner: str) -> dict | None:
+        row = self.conn.execute("SELECT data FROM phone_orders WHERE owner = ?", (owner,)).fetchone()
+        try:
+            return json.loads(row[0]) if row else None
+        except ValueError:
+            return None
+
+    def set_phone_order(self, owner: str, order: dict | None) -> None:
+        if order is None:
+            self.conn.execute("DELETE FROM phone_orders WHERE owner = ?", (owner,))
+        else:
+            self.conn.execute("INSERT OR REPLACE INTO phone_orders (owner, data) VALUES (?, ?)",
+                              (owner, json.dumps(order)))
+        self.conn.commit()
+
+    def phone_order_owners(self) -> set[str]:
+        return {r[0] for r in self.conn.execute("SELECT owner FROM phone_orders")}
 
     # Activity log
 

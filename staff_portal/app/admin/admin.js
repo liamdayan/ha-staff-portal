@@ -396,7 +396,8 @@
                 title: d.ha_link_error || "Actions show in Home Assistant as this user",
               }, d.ha_link_error ? `HA user ${d.ha_user}: link broken` : `HA user: ${d.ha_user}`) : null,
               h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`)),
-            d.status !== "revoked" && phonePagesText(d) ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`) : null),
+            d.status !== "revoked" && phonePagesText(d) ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
+              d.custom_order ? " \u00b7 rearranged on the phone" : "") : null),
           h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
     }));
@@ -463,6 +464,7 @@
       h("input", { type: "checkbox", value: m.id, checked: !!d?.staff_ids.includes(m.id) }),
       m.status === "disabled" ? `${m.name} (inactive)` : m.name)));
     $("[data-no-staff]", dialog).hidden = state.staff.length > 0;
+    orderResetRow(dialog, d, "devices");
     const pageOptions = layoutPageOptions();
     const chosenPages = d?.layout_pages ?? null;
     $("[data-pages-pick]", dialog).hidden = !pageOptions.length;
@@ -643,6 +645,18 @@
     }));
   }
 
+  // "Reset to your layout" for a phone or person that rearranged things on the phone.
+  // Takes effect straight away.
+  function orderResetRow(dialog, target, kind) {
+    const row = $("[data-order-reset]", dialog);
+    row.hidden = !target?.custom_order;
+    $("button", row).onclick = () => run(async () => {
+      await api("DELETE", `api/${kind}/${target.id}/order`);
+      await load();
+      row.hidden = true;
+    }, "Back to your layout. The phone updates within a few seconds.");
+  }
+
   function editStaff(m) {
     const dialog = $("#staff-dialog");
     const form = $("#staff-form");
@@ -655,6 +669,7 @@
       : "4 to 8 digits. They enter it after tapping their name.";
     form.elements["active"].checked = !m || m.status !== "disabled";
     form.elements["active"].closest("label").hidden = !m;
+    orderResetRow(dialog, m, "staff");
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
       const body = { name: form.elements["name"].value };
@@ -1068,6 +1083,7 @@
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
+    body.allow_phone_reorder = e.target.elements["allow_phone_reorder"].checked ? "1" : "0";
     run(async () => {
       await api("PUT", "api/settings", body);
       await load();
