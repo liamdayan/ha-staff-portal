@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{APP_NAME}}</title>
+<meta name="theme-color" content="{{ACCENT}}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{APP_NAME}}">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="{{MANIFEST}}">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="stylesheet" href="/static/app.css">
+<meta name="accent" content="{{ACCENT}}">
+</head>
+<body>
+<header class="bar" id="bar" hidden>
+  <img id="bar-logo" class="bar-logo" alt="" hidden>
+  <div class="bar-text">
+    <div class="bar-title" id="bar-title">{{PROPERTY_NAME}}</div>
+    <div class="bar-sub" id="bar-sub"></div>
+  </div>
+  <button class="icon-btn" id="lock-btn" hidden aria-label="Lock app">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg>
+  </button>
+</header>
+
+<main id="screen" class="screen">
+  <div class="center"><div class="spinner" aria-label="Loading"></div></div>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<template id="tpl-message">
+  <div class="center message">
+    <img class="hero-logo" src="/icon-192.png" alt="">
+    <h1 data-title></h1>
+    <p data-body></p>
+  </div>
+</template>
+
+<template id="tpl-install">
+  <div class="center message">
+    <img class="hero-logo" src="/icon-192.png" alt="">
+    <h1>Add {{APP_NAME}} to your home screen</h1>
+    <ol class="steps" data-steps></ol>
+    <p class="muted">Then open it from the home screen to finish setup.</p>
+    <button class="link-btn" data-browser>Use it in this browser instead</button>
+  </div>
+</template>
+
+<template id="tpl-pin">
+  <div class="center pin">
+    <img class="hero-logo" src="/icon-192.png" alt="">
+    <h1>Enter PIN</h1>
+    <div class="pin-dots" data-dots></div>
+    <p class="pin-error" data-error></p>
+    <div class="pinpad" data-pad></div>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Staff Access</title>
+<link rel="stylesheet" href="static/admin.css">
+</head>
+<body>
+<header class="top">
+  <img class="top-icon" id="top-icon" src="icon-192.png" alt="">
+  <div class="top-text">
+    <h1 id="top-title">Staff Access</h1>
+    <p>Control which staff phones can see and use which devices.</p>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="phones" aria-selected="true">Phones</button>
+  <button role="tab" data-tab="roles">Roles</button>
+  <button role="tab" data-tab="activity">Activity</button>
+  <button role="tab" data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <section id="tab-phones" class="tab">
+    <div class="notice" id="url-notice" hidden>
+      Set the <strong>staff app address</strong> in <button class="linkish" data-goto="settings">Settings</button>
+      before setting up phones. The setup QR codes use it.
+    </div>
+    <div class="section-head">
+      <h2>Staff phones</h2>
+      <button class="btn primary" id="add-phone">Add phone</button>
+    </div>
+    <div id="phone-list" class="cards"></div>
+  </section>
+
+  <section id="tab-roles" class="tab" hidden>
+    <div class="roles-layout">
+      <aside class="role-list">
+        <div class="section-head">
+          <h2>Roles</h2>
+          <button class="btn" id="add-role">New role</button>
+        </div>
+        <ul id="role-list"></ul>
+      </aside>
+      <div class="role-editor" id="role-editor">
+        <div class="empty">Pick a role, or create one like “Maintenance” or “Housekeeping.”</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-activity" class="tab" hidden>
+    <div class="section-head">
+      <h2>Activity</h2>
+      <button class="btn" id="refresh-activity">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table class="activity">
+        <thead><tr><th>When</th><th>Who</th><th>What</th><th>Device</th></tr></thead>
+        <tbody id="activity-rows"></tbody>
+      </table>
+    </div>
+    <button class="btn more" id="more-activity" hidden>Show older</button>
+  </section>
+
+  <section id="tab-settings" class="tab" hidden>
+    <form id="settings-form" class="settings">
+      <fieldset>
+        <legend>Branding</legend>
+        <label>Property name<input name="property_name" maxlength="40" required></label>
+        <label>Home screen name <small>Shown under the app icon. Keep it short.</small>
+          <input name="app_name" maxlength="12" required></label>
+        <div class="row">
+          <label>Brand color<input type="color" name="accent_color"></label>
+          <label>Icon background<input type="color" name="icon_background"></label>
+        </div>
+        <div class="logo-row">
+          <img id="icon-preview" class="icon-preview" src="icon-192.png" alt="Home screen icon preview">
+          <div>
+            <label class="btn file-btn">Upload logo<input type="file" id="logo-file" accept="image/png,image/jpeg,image/webp" hidden></label>
+            <button type="button" class="btn subtle" id="remove-logo">Remove logo</button>
+            <p class="hint">A square PNG with some padding looks best. Without a logo, the icon shows your initials.</p>
+          </div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Staff app address</legend>
+        <label>Public address <small>The Cloudflare Tunnel hostname that points at this add-on's port 8787.</small>
+          <input name="public_url" type="url" placeholder="https://staff.example.com"></label>
+      </fieldset>
+      <fieldset>
+        <legend>Security</legend>
+        <div class="row">
+          <label>Ask for PIN again after (minutes)<input name="pin_timeout_minutes" type="number" min="1" max="1440"></label>
+          <label>Lock phone after wrong PINs<input name="max_pin_attempts" type="number" min="3" max="20"></label>
+          <label>Setup QR codes expire after (hours)<input name="enroll_hours" type="number" min="1" max="720"></label>
+        </div>
+      </fieldset>
+      <div class="form-actions"><button class="btn primary" type="submit">Save settings</button></div>
+    </form>
+  </section>
+</main>
+
+<dialog id="phone-dialog">
+  <form method="dialog" id="phone-form">
+    <h2 data-title>Add phone</h2>
+    <label>Name<input name="name" maxlength="60" placeholder="Maintenance phone" required></label>
+    <label>Role<select name="role_id"></select></label>
+    <label>PIN <small data-pin-hint>Optional, 4 to 8 digits. Staff enter it when opening the app.</small>
+      <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="qr-dialog">
+  <h2>Set up <span data-name></span></h2>
+  <ol class="qr-steps">
+    <li>Open the phone's <strong>Camera</strong> and point it at this code.</li>
+    <li>Tap the link, then follow the prompt to <strong>Add to Home Screen</strong>.</li>
+    <li>Open the new icon. The phone stays signed in until you revoke it.</li>
+  </ol>
+  <div class="qr" data-qr></div>
+  <p class="hint">Or open this link on the phone: <code data-url></code></p>
+  <p class="hint" data-expires></p>
+  <div class="dialog-actions"><button class="btn primary" data-close>Done</button></div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="static/admin.js"></script>
+</body>
+</html>
