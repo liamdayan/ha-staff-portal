@@ -140,6 +140,18 @@
           <input name="public_url" type="url" placeholder="https://staff.example.com"></label>
       </fieldset>
       <fieldset>
+        <legend>Phone security</legend>
+        <label class="check-row"><input type="checkbox" name="require_pin">
+          <span>Require a PIN on every phone
+          <small>Phones without a PIN (that aren't shared phones) stop working until you set one in
+          Phones → Edit. Recommended, so a lost or unattended phone can't be used.</small></span></label>
+        <label class="check-row"><input type="checkbox" name="phones_via_tunnel_only">
+          <span>Only allow phones through your Cloudflare Tunnel
+          <small>Blocks phones (or anyone on your Wi-Fi) from reaching the staff app directly on the
+          local network, so the only way in is your secure https address. Turn this on if your tunnel
+          runs in the Cloudflared add-on. Leave it off if the tunnel runs on another computer.</small></span></label>
+      </fieldset>
+      <fieldset>
         <legend>Staff phones</legend>
         <label class="check-row"><input type="checkbox" name="allow_phone_reorder">
           <span>Let staff rearrange their phone
@@ -304,7 +316,7 @@
   <strong>Something went wrong</strong>
   <p>Please send a screenshot of this box (or copy it from the add-on's Log tab).</p>
   <pre data-detail></pre>
-  <button class="btn" type="button" onclick="this.parentElement.hidden = true">Close</button>
+  <button class="btn" type="button" data-close-error>Close</button>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

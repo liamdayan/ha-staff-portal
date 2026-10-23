@@ -8,6 +8,7 @@ Core with that user's own token, so Home Assistant's logbook credits the user by
 """
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ class HomeAssistant:
     def __init__(self):
         if os.environ.get("SUPERVISOR_TOKEN"):
             self.base = "http://supervisor/core/api"
+            self.ws_url = "ws://supervisor/core/websocket"
             token = os.environ["SUPERVISOR_TOKEN"]
             # Core is reachable directly on the add-on network. Tried with https if it has SSL on.
             self.core_urls = [os.environ.get("HA_CORE_URL", "http://homeassistant:8123")]
@@ -54,8 +56,10 @@ class HomeAssistant:
         else:
             root = os.environ.get("HA_URL", "http://localhost:8123").rstrip("/")
             self.base = root + "/api"
+            self.ws_url = root.replace("http", "ws", 1) + "/api/websocket"
             token = os.environ.get("HA_TOKEN", "")
             self.core_urls = [root]
+        self.token = token
         self.headers = {"Authorization": f"Bearer {token}"}
         self.session: aiohttp.ClientSession | None = None
         self._states: dict[str, dict] = {}
@@ -63,6 +67,11 @@ class HomeAssistant:
         self._entity_area: dict[str, str] = {}  # entity_id -> Home Assistant area ID
         self._area_names: dict[str, str] = {}   # Home Assistant area ID -> name
         self._areas_at = float("-inf")
+        # Entities Home Assistant itself tucks away (config/diagnostic or hidden), such as
+        # restart buttons, child locks and calibration numbers. Area grants skip these.
+        self._tucked_away: set[str] = set()
+        self._admins: set[str] = set()
+        self._admins_at = float("-inf")
         self._core: str | None = None
         self._user_tokens: dict[str, tuple[str, float]] = {}  # refresh token -> (access, expiry)
 
@@ -105,8 +114,53 @@ class HomeAssistant:
                     aid: name or aid for aid, name in zip(data["area_ids"], data["area_names"])}
             except (HomeAssistantError, KeyError, TypeError, ValueError, SyntaxError) as err:
                 log.warning("Couldn't read Home Assistant areas: %s", err)
+            try:
+                registry = await self.ws_command({"type": "config/entity_registry/list"})
+                self._tucked_away = {
+                    e["entity_id"] for e in registry
+                    if isinstance(e, dict) and (e.get("entity_category") or e.get("hidden_by"))}
+            except (HomeAssistantError, KeyError, TypeError) as err:
+                log.warning("Couldn't read the entity registry: %s", err)
             self._areas_at = time.monotonic()
         return self._entity_area, self._area_names
+
+    def tucked_away(self) -> set[str]:
+        """Config/diagnostic/hidden entities (as of the last area refresh)."""
+        return self._tucked_away
+
+    # ------------------------------------------------------------ websocket API
+
+    async def ws_command(self, payload: dict, timeout: float = 10.0):
+        """Run one Home Assistant WebSocket command with the add-on's own token."""
+        try:
+            async with self.session.ws_connect(self.ws_url, timeout=timeout) as ws:
+                async def receive():
+                    return await asyncio.wait_for(ws.receive_json(), timeout)
+                if (await receive()).get("type") != "auth_required":
+                    raise HomeAssistantError("unexpected websocket greeting")
+                await ws.send_json({"type": "auth", "access_token": self.token})
+                if (await receive()).get("type") != "auth_ok":
+                    raise HomeAssistantError("websocket authentication failed")
+                await ws.send_json({"id": 1, **payload})
+                reply = await receive()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as err:
+            raise HomeAssistantError(f"websocket: {err}") from err
+        if not reply.get("success"):
+            raise HomeAssistantError(f"websocket: {reply.get('error')}")
+        return reply.get("result")
+
+    async def is_admin(self, user_id: str) -> bool:
+        """Whether a Home Assistant user is an active administrator. Cached for a minute;
+        an unknown ID triggers one fresh lookup (someone may have just been made admin)."""
+        stale = time.monotonic() - self._admins_at > 60
+        if stale or user_id not in self._admins:
+            users = await self.ws_command({"type": "config/auth/list"})
+            self._admins = {
+                u["id"] for u in users
+                if isinstance(u, dict) and u.get("is_active") and not u.get("system_generated")
+                and (u.get("is_owner") or "system-admin" in (u.get("group_ids") or []))}
+            self._admins_at = time.monotonic()
+        return user_id in self._admins
 
     async def areas(self, max_age: float = 300.0) -> dict[str, str]:
         """{entity_id: Home Assistant area name} for entities that have an area."""

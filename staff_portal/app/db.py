@@ -111,6 +111,14 @@ MIGRATIONS = {
         # JSON list of layout page IDs this phone shows ("more" = the More page).
         # NULL means every page, including pages added later.
         "layout_pages": "TEXT",
+        # When this phone's shared-sign-in failure count was last increased; the count is
+        # forgotten after a quiet spell rather than reset by someone else signing in.
+        "failed_at": "REAL",
+    },
+    "staff": {
+        # Too many wrong PINs locks a person out for a while (not permanently), so one
+        # colleague can't lock everyone out. An admin can unlock sooner.
+        "locked_until": "REAL",
     },
 }
 
@@ -125,10 +133,13 @@ DEFAULT_SETTINGS = {
     "enroll_hours": "72",
     "ha_logbook": "1",
     "allow_phone_reorder": "1",
+    "phones_via_tunnel_only": "0",
+    "require_pin": "0",
 }
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180
+ACTIVITY_MAX_ROWS = 50_000
 
 
 def hash_token(token: str) -> str:
@@ -336,7 +347,7 @@ class Database:
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
-                   "layout_pages"}
+                   "layout_pages", "failed_at"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -396,7 +407,7 @@ class Database:
         return cur.lastrowid
 
     def update_staff(self, staff_id: int, **fields) -> None:
-        allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen",
+        allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
                    "ha_user", "ha_refresh_token", "ha_link_error"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
@@ -477,13 +488,18 @@ class Database:
     # Activity log
 
     def log(self, actor, action, *, role=None, entity_id=None, detail=None, ok=True, ip=None):
+        # Every field is capped, and the log is capped in rows, so nothing sent from a phone
+        # can grow the database (and Home Assistant's disk) without limit.
+        cap = lambda value, n: None if value is None else str(value)[:n]
         self.conn.execute(
             """INSERT INTO activity (ts, actor, role, entity_id, action, detail, ok, ip)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (time.time(), actor, role, entity_id, action, detail, int(ok), ip),
+            (time.time(), cap(actor, 120), cap(role, 80), cap(entity_id, 255), cap(action, 120),
+             cap(detail, 300), int(ok), cap(ip, 64)),
         )
         self.conn.execute(
-            "DELETE FROM activity WHERE ts < ?", (time.time() - ACTIVITY_KEEP_DAYS * 86400,)
+            "DELETE FROM activity WHERE ts < ? OR id <= (SELECT MAX(id) FROM activity) - ?",
+            (time.time() - ACTIVITY_KEEP_DAYS * 86400, ACTIVITY_MAX_ROWS),
         )
         self.conn.commit()
 

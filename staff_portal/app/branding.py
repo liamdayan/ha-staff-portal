@@ -6,6 +6,9 @@ import os
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 MAX_LOGO_PX = 1024
+# Refuse huge images before decoding them: a small compressed file can expand to gigabytes.
+MAX_SOURCE_PIXELS = 25_000_000
+LOGO_FORMATS = ["PNG", "JPEG", "WEBP", "GIF"]
 
 
 def hex_to_rgb(value: str, fallback=(255, 255, 255)):
@@ -36,7 +39,10 @@ class Branding:
 
     def save_logo(self, raw: bytes) -> None:
         """Re-encode the upload as PNG so only clean image data is ever served back."""
-        img = Image.open(io.BytesIO(raw))
+        img = Image.open(io.BytesIO(raw), formats=LOGO_FORMATS)
+        if img.width * img.height > MAX_SOURCE_PIXELS:
+            raise ValueError("image too large")
+        img.draft("RGB", (MAX_LOGO_PX, MAX_LOGO_PX))  # JPEG: decode at reduced size
         img = ImageOps.exif_transpose(img).convert("RGBA")
         img.thumbnail((MAX_LOGO_PX, MAX_LOGO_PX))
         img.save(self.logo_path, "PNG")

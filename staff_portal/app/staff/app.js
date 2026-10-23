@@ -12,6 +12,10 @@
 
   let me = null;
   let tiles = new Map();
+  let lastTouch = 0;
+  for (const type of ["pointerdown", "keydown"]) {
+    document.addEventListener(type, () => { lastTouch = Date.now(); }, { capture: true, passive: true });
+  }
   // True while the phone is showing its devices (or an empty-state message about them) and
   // should keep checking for updates, including after the screen has been locked.
   let live = false;
@@ -76,6 +80,9 @@
     if (token) headers.Authorization = "Bearer " + token;
     const pinSession = session.get(SESSION_KEY);
     if (pinSession) headers["X-Session"] = pinSession;
+    // Tell the server someone is actually using the phone, so their PIN session stays open.
+    // Background refreshes on an untouched phone don't, and it signs out when idle.
+    if (Date.now() - lastTouch < 60_000) headers["X-Active"] = "1";
     let res;
     try {
       res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -118,6 +125,11 @@
       session.del(SESSION_KEY);
       message("Phone locked",
         "Too many wrong PINs. Ask your manager to unlock this phone from the admin dashboard.");
+      return true;
+    }
+    if (res.status === 403 && res.data.error === "pin_not_set") {
+      message("This phone needs a PIN",
+        "Ask your manager to set a PIN for this phone before it can be used.", true);
       return true;
     }
     if (res.status === 403 && res.data.error === "pin_required") {

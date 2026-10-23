@@ -6,7 +6,8 @@ A branded, locked-down web app for staff phones. You decide which devices each s
 - Staff phones never get a Home Assistant login. They talk only to this add-on, and the add-on
   refuses anything their role doesn't allow, even if someone pokes at it directly.
 - Phones are set up by scanning a QR code once and stay signed in until you revoke them.
-- Optional PIN per phone. Too many wrong PINs locks the phone until you unlock it.
+- Optional PIN per phone (or required, see [Security settings](#security-settings)). Too many
+  wrong PINs locks the phone until you unlock it.
 - Every action (and every blocked attempt) is recorded in the Activity tab.
 
 ## 1. Install
@@ -181,8 +182,10 @@ and they're signed out automatically after the idle time set in **Settings**.
 - What they can control still comes from the **phone's role**.
 - The Activity tab shows entries like "Bob on Maintenance phone", and Home Assistant logbook
   entries read "set to 140° by Bob (Maintenance phone) via Staff Portal".
-- Too many wrong PINs locks that **person** (unlock them on the Staff tab). Wrong PINs across
-  several names in a row lock the **phone**, so PINs can't be guessed by switching names.
+- Too many wrong PINs locks that **person** for 15 minutes (or until you unlock them on the
+  Staff tab). The lock only stops new sign-ins; if they're already signed in on another phone,
+  that stays signed in. Wrong PINs across several names lock the **phone** until you unlock it,
+  so PINs can't be guessed by switching names.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
 
 ## Seeing staff actions in Home Assistant
@@ -220,6 +223,32 @@ How it works and what to know:
 - **Unlink** or deleting the phone signs the add-on out of that user's account.
 - If you've turned on Home Assistant's IP banning for failed logins, typing the wrong password
   here several times counts against the add-on.
+
+## Security settings
+
+PINs are never stored as typed. Each PIN is scrambled with scrypt and its own random salt, so
+nobody can read PINs back, even from a backup.
+
+Under **Settings → Phone security**:
+
+- **Require a PIN on every phone.** Phones without a PIN (other than shared phones, where each
+  person has their own) stop working until you give them one (**Phones → Edit**). Turn this on if a lost phone shouldn't open without a PIN.
+- **Only allow phones through your Cloudflare Tunnel.** Blocks the staff app on your local network
+  (`http://<HA IP>:8787`), so phones can only reach it through your secure https address. This works only if
+  the tunnel runs in the **Cloudflared add-on**. If `cloudflared` runs on another computer, leave
+  this off, or phones will be blocked.
+
+Always on:
+
+- Only Home Assistant **administrators** can open Staff Access. Other Home Assistant users get
+  "Only Home Assistant administrators can open Staff Access."
+- Phones with a PIN ask for it again after **Ask for PIN again after** minutes without being
+  touched, even with the app left open on the screen.
+- Each phone can send up to 60 actions a minute, and one action per device each second, so a
+  stuck button or a script can't flood your equipment.
+- Giving a role a whole area doesn't include a device's hidden or configuration controls (like
+  "Restart controller" or "Child lock"). To give access to one of those, add it to the area by
+  hand in **Settings → Areas**, or set it on the role directly.
 
 ## Tips for a locked-down maintenance phone
 

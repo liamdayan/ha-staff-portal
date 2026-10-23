@@ -24,12 +24,13 @@
     }
     fetch("api/client-error", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Requested-With": "staff-portal" },
       body: JSON.stringify({ detail: detail.slice(0, 4000), agent: navigator.userAgent }),
     }).catch(() => { /* nothing more we can do */ });
   }
   window.addEventListener("error", (e) =>
     reportError(e.message, e.error, e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : ""));
+  $("[data-close-error]")?.addEventListener("click", () => { $("#error-panel").hidden = true; });
   window.addEventListener("unhandledrejection", (e) =>
     reportError(String(e.reason?.message || e.reason), e.reason, "in a background task"));
 
@@ -230,7 +231,9 @@
   }
 
   async function api(method, path, body) {
-    const opts = { method, headers: {} };
+    // The header marks requests as coming from this dashboard; the server refuses changes
+    // without it, which stops other websites from sending them through an admin's browser.
+    const opts = { method, headers: { "X-Requested-With": "staff-portal" } };
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
@@ -445,6 +448,12 @@
     return names.length ? names.join(", ") : "None";
   }
 
+  function pinNote(text) {
+    return state.settings.require_pin === "1"
+      ? "Required (Settings \u2192 Phone security), 4 to 8 digits. Staff enter it when opening the app."
+      : text;
+  }
+
   function editPhone(d) {
     const dialog = $("#phone-dialog");
     const form = $("#phone-form");
@@ -454,8 +463,8 @@
     fillRoleOptions(form.elements["role_id"], d ? d.role_id : state.roles[0]?.id);
     $("[data-pin-hint]", dialog).textContent = d
       ? (d.has_pin ? "Enter a new PIN to change it, or leave blank and tick below to remove it."
-        : "Optional, 4 to 8 digits.")
-      : "Optional, 4 to 8 digits. Staff enter it when opening the app.";
+        : pinNote("Optional, 4 to 8 digits."))
+      : pinNote("Optional, 4 to 8 digits. Staff enter it when opening the app.");
     const mode = form.elements["signin_mode"];
     mode.value = d?.signin_mode || "phone";
     form.elements["staff_all"].checked = d ? !!d.staff_all : true;
@@ -601,11 +610,11 @@
       return;
     }
     list.replaceChildren(...state.staff.map((m) => {
-      const status = { active: ["Active", "active"], locked: ["Locked (wrong PINs)", "locked"],
-        disabled: ["Inactive", "revoked"] }[m.status] || [m.status, ""];
+      const status = m.status === "disabled" ? ["Inactive", "revoked"]
+        : m.locked ? ["Locked for now (wrong PINs)", "locked"] : ["Active", "active"];
       const phones = phonesFor(m);
       const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit")];
-      if (m.status === "locked") {
+      if (m.locked) {
         actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
           await api("POST", `api/staff/${m.id}/unlock`);
           await load();
@@ -1083,7 +1092,9 @@
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
-    body.allow_phone_reorder = e.target.elements["allow_phone_reorder"].checked ? "1" : "0";
+    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only"]) {
+      body[name] = e.target.elements[name].checked ? "1" : "0";
+    }
     run(async () => {
       await api("PUT", "api/settings", body);
       await load();

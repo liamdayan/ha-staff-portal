@@ -10,6 +10,7 @@ phone's role before it is forwarded.
 import asyncio
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -26,8 +27,8 @@ from db import Database, check_pin, hash_pin
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
                     clean_phone_pages, visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
-from permissions import (ActionRejected, build_service_call, controllable, describe_action,
-                         domain_of, offered)
+from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
+                         controllable, describe_action, domain_of, offered)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -36,6 +37,9 @@ STAFF_PORT = int(os.environ.get("STAFF_PORT", "8787"))
 ADMIN_ALLOWED_IPS = set(os.environ.get("ADMIN_ALLOWED_IPS", "172.30.32.2,127.0.0.1").split(","))
 HERE = os.path.dirname(os.path.abspath(__file__))
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+MAX_LOGO_BYTES = 5 * 1024 * 1024
+PIN_FAILURE_MEMORY = 15 * 60  # a phone forgets wrong-PIN attempts after this quiet time
+STAFF_LOCK_SECONDS = 15 * 60  # how long a person is locked out after too many wrong PINs
 
 log = logging.getLogger("staff_portal")
 
@@ -80,13 +84,29 @@ class HTTPLocked(web.HTTPClientError):
     status_code = 423
 
 
+# Home Assistant's internal network: Supervisor (ingress) and other add-ons such as Cloudflared.
+TRUSTED_NETWORKS = [ipaddress.ip_network(n) for n in ("172.30.32.0/23", "127.0.0.0/8", "::1/128")]
+
+
+def from_trusted_network(remote: str | None) -> bool:
+    try:
+        address = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return False
+    return any(address in network for network in TRUSTED_NETWORKS)
+
+
 def client_ip(request: web.Request) -> str:
-    return (
-        request.headers.get("CF-Connecting-IP")
-        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.remote
-        or ""
-    )
+    """The caller's address. Forwarding headers are only believed when the connection comes
+    from a proxy on Home Assistant's own network (such as the Cloudflare Tunnel add-on);
+    anyone else could write whatever they like in them."""
+    remote = request.remote or ""
+    if from_trusted_network(remote):
+        forwarded = (request.headers.get("CF-Connecting-IP")
+                     or request.headers.get("X-Forwarded-For", "").split(",")[0].strip())
+        if forwarded:
+            return forwarded[:64]
+    return remote
 
 
 def too_many_failures(ip: str, limit: int = 20, window: float = 600) -> bool:
@@ -128,7 +148,8 @@ class AreaLayout:
     otherwise under its Home Assistant area, otherwise under "Other".
     """
 
-    def __init__(self, areas: list[dict], entity_ha_area: dict[str, str], ha_names: dict[str, str]):
+    def __init__(self, areas: list[dict], entity_ha_area: dict[str, str], ha_names: dict[str, str],
+                 tucked_away: set[str] | frozenset = frozenset()):
         self.areas = areas
         self.entity_ha_area = entity_ha_area
         self.ha_names = ha_names
@@ -141,6 +162,11 @@ class AreaLayout:
             for ha_area in area["ha_areas"]:
                 by_ha_area.setdefault(ha_area, []).append(area["id"])
         for eid, ha_area in entity_ha_area.items():
+            # Config/diagnostic/hidden entities (restart buttons, child locks, calibration)
+            # never come along with a whole Home Assistant area; add them to an area
+            # individually if staff really need them.
+            if eid in tucked_away:
+                continue
             for area_id in by_ha_area.get(ha_area, []):
                 if area_id not in self.membership.setdefault(eid, []):
                     self.membership[eid].append(area_id)
@@ -166,7 +192,7 @@ class AreaLayout:
 
 async def area_layout(max_age: float = 300.0) -> AreaLayout:
     entity_ha_area, ha_names = await ha.area_info(max_age)
-    return AreaLayout(db.areas(), entity_ha_area, ha_names)
+    return AreaLayout(db.areas(), entity_ha_area, ha_names, ha.tucked_away())
 
 
 LEVEL_RANK = {"view": 1, "control": 2}
@@ -312,8 +338,13 @@ def json_error(exc_class, error: str, **extra):
     return exc_class(text=json.dumps({"error": error, **extra}), content_type="application/json")
 
 
-def authenticate(request: web.Request, need_unlock: bool = True) -> tuple[dict, dict | None]:
-    """Return (phone, signed-in staff member or None), or raise the error the app should show."""
+def authenticate(request: web.Request, need_unlock: bool = True,
+                 active: bool = False) -> tuple[dict, dict | None]:
+    """Return (phone, signed-in staff member or None), or raise the error the app should show.
+
+    `active` marks a request someone actually made (a control, saving an order). Only those,
+    and polls sent right after the person touched the screen (X-Active), keep a PIN session
+    alive; background refreshes don't, so an unattended phone still signs out when idle."""
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
     device = db.device_by_token(token) if token else None
@@ -324,6 +355,8 @@ def authenticate(request: web.Request, need_unlock: bool = True) -> tuple[dict, 
     if not device["last_seen"] or time.time() - device["last_seen"] > 60:
         db.touch_device(device["id"])
     shared = device["signin_mode"] == "staff"
+    if not shared and not device["pin_hash"] and db.settings().get("require_pin") == "1":
+        raise json_error(web.HTTPForbidden, "pin_not_set")
     if not need_unlock or not (shared or device["pin_hash"]):
         return device, None
 
@@ -345,8 +378,36 @@ def authenticate(request: web.Request, need_unlock: bool = True) -> tuple[dict, 
         # Phone was switched out of shared mode while someone was signed in.
         pin_sessions.pop(key, None)
         raise json_error(web.HTTPForbidden, "pin_required")
-    pin_sessions[key] = (device["id"], time.time(), session[2])
+    if active or request.headers.get("X-Active") == "1":
+        pin_sessions[key] = (device["id"], time.time(), session[2])
     return device, member
+
+
+# Speed limits on controls: real relays, pumps and lock motors shouldn't be cycled faster
+# than a person could tap.
+ACTIONS_PER_MINUTE = 60
+ENTITY_MIN_INTERVAL = 1.0
+recent_actions: dict[int, list[float]] = {}
+last_entity_action: dict[tuple[int, str], float] = {}
+
+
+def phone_too_busy(device_id: int) -> bool:
+    now = time.time()
+    times = [t for t in recent_actions.get(device_id, []) if now - t < 60]
+    busy = len(times) >= ACTIONS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_actions[device_id] = times
+    return busy
+
+
+def entity_too_soon(device_id: int, entity_id: str) -> bool:
+    now = time.time()
+    if len(last_entity_action) > 5000:
+        for key, t in list(last_entity_action.items()):
+            if now - t > 60:
+                del last_entity_action[key]
+    return now - last_entity_action.get((device_id, entity_id), 0) < ENTITY_MIN_INTERVAL
 
 
 def actor_name(device: dict, member: dict | None) -> str:
@@ -414,31 +475,37 @@ async def api_unlock(request: web.Request):
         member = None
     if not member or member["status"] == "disabled" or not db.staff_allowed_on(member["id"], device):
         return bad_request("Pick your name again.", 404)
-    if member["status"] == "locked":
-        return bad_request(f"{member['name']} is locked after too many wrong PINs. "
-                           "Ask your manager to unlock you.", 403, staff_locked=True)
+    now = time.time()
+    locked_msg = (f"{member['name']} is locked for a while after too many wrong PINs. "
+                  "Try again later, or ask your manager to unlock you.")
+    if member["status"] == "locked" or (member["locked_until"] or 0) > now:
+        return bad_request(locked_msg, 403, staff_locked=True)
     if check_pin(pin, member["pin_hash"]):
-        db.update_staff(member["id"], failed_pins=0, last_seen=time.time())
-        db.update_device(device["id"], failed_pins=0)
+        # Only this person's own count is cleared. The phone's count isn't, so signing in as
+        # yourself can't be used to keep guessing other people's PINs.
+        db.update_staff(member["id"], failed_pins=0, locked_until=None, last_seen=now)
         db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
         return web.json_response({"session": new_session(device, member),
                                   "staff_name": member["name"]})
 
     attempts = member["failed_pins"] + 1
-    # Also count per phone, so cycling through names can't be used to guess PINs.
-    phone_attempts = device["failed_pins"] + 1
+    # Also count per phone, so cycling through names can't be used to guess PINs. The count
+    # is forgotten after a quiet spell with no wrong PINs.
+    quiet = now - (device["failed_at"] or 0) > PIN_FAILURE_MEMORY
+    phone_attempts = (0 if quiet else device["failed_pins"]) + 1
     if phone_attempts >= max_attempts * 3:
-        db.update_device(device["id"], failed_pins=phone_attempts, status="locked")
+        db.update_device(device["id"], failed_pins=phone_attempts, failed_at=now, status="locked")
         db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
                ok=False, ip=ip)
         return bad_request("locked", 423)
-    db.update_device(device["id"], failed_pins=phone_attempts)
+    db.update_device(device["id"], failed_pins=phone_attempts, failed_at=now)
     if attempts >= max_attempts:
-        db.update_staff(member["id"], failed_pins=attempts, status="locked")
-        db.log(actor_name(device, member), "Locked after wrong PINs", role=device["role_name"],
-               ok=False, ip=ip)
-        return bad_request(f"{member['name']} is locked after too many wrong PINs. "
-                           "Ask your manager to unlock you.", 403, staff_locked=True)
+        # A temporary lock that doesn't end their sessions on other phones, so wrong guesses
+        # can't be used to shut a colleague out.
+        db.update_staff(member["id"], failed_pins=0, locked_until=now + STAFF_LOCK_SECONDS)
+        db.log(actor_name(device, member), "Locked for a while after wrong PINs",
+               role=device["role_name"], ok=False, ip=ip)
+        return bad_request(locked_msg, 403, staff_locked=True)
     db.update_staff(member["id"], failed_pins=attempts)
     return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
 
@@ -491,7 +558,7 @@ def order_owner(device: dict, member: dict | None) -> str:
 
 
 async def api_save_order(request: web.Request):
-    device, member = authenticate(request)
+    device, member = authenticate(request, active=True)
     if db.settings().get("allow_phone_reorder") != "1":
         return bad_request("Rearranging is turned off for this phone.", 403)
     try:
@@ -504,20 +571,26 @@ async def api_save_order(request: web.Request):
 
 
 async def api_reset_order(request: web.Request):
-    device, member = authenticate(request)
+    device, member = authenticate(request, active=True)
     db.set_phone_order(order_owner(device, member), None)
     db.log(actor_name(device, member), "Reset the phone's arrangement", role=device["role_name"])
     return web.json_response({"ok": True})
 
 
 async def api_action(request: web.Request):
-    device, member = authenticate(request)
+    device, member = authenticate(request, active=True)
     data = await read_json(request)
     entity_id = str(data.get("entity_id", ""))
     action = str(data.get("action", ""))
     params = data.get("params") or {}
     ip = client_ip(request)
     actor = actor_name(device, member)
+    if phone_too_busy(device["id"]):
+        return bad_request("Too many changes at once. Wait a moment and try again.", 429)
+    if not ENTITY_ID_RE.match(entity_id) or action not in ACTIONS.get(domain_of(entity_id), {}):
+        # Never store junk a phone sends; just note that something invalid was refused.
+        db.log(actor, "Blocked: invalid request", role=device["role_name"], ok=False, ip=ip)
+        return bad_request("You don't have access to control that.", 403)
     try:
         allowed = role_access(device["role_id"], await area_layout())
     except HomeAssistantError as err:
@@ -530,6 +603,10 @@ async def api_action(request: web.Request):
     try:
         states = await ha.states()
         domain, service, call = build_service_call(entity_id, action, params, states.get(entity_id))
+        # Only commands that would really reach the device count towards the per-device pause.
+        if entity_too_soon(device["id"], entity_id):
+            return bad_request("That was changed a moment ago. Wait a second and try again.", 429)
+        last_entity_action[(device["id"], entity_id)] = time.time()
         as_user = await send_command(device, member, domain, service, call)
     except ActionRejected as err:
         return bad_request(str(err))
@@ -538,7 +615,7 @@ async def api_action(request: web.Request):
         db.log(actor, action, role=device["role_name"], entity_id=entity_id,
                detail=str(err)[:200], ok=False, ip=ip)
         return bad_request("The system didn't accept that. Try again.", 502)
-    detail = ", ".join(f"{k}={v}" for k, v in params.items()) or None
+    detail = ", ".join(f"{k}={v}" for k, v in call.items() if k != "entity_id") or None
     db.log(actor, action, role=device["role_name"], entity_id=entity_id, detail=detail, ip=ip)
     # Commands sent as a linked user are already credited to them in Home Assistant's logbook.
     if not as_user and db.settings().get("ha_logbook") == "1":
@@ -579,7 +656,14 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
 
 @web.middleware
 async def staff_headers(request: web.Request, handler):
-    response = await handler(request)
+    if (db.settings().get("phones_via_tunnel_only") == "1"
+            and not from_trusted_network(request.remote)):
+        # Direct connections from the local network are refused; only the Cloudflare Tunnel
+        # add-on (on Home Assistant's own network) may pass phones through.
+        response = web.Response(status=403, text="Staff Portal is only available through the "
+                                                 "property's secure address.")
+    else:
+        response = await handler(request)
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
@@ -656,10 +740,19 @@ async def admin_index(request: web.Request):
             return f.read()
     html = read("index.html").replace("{{VERSION}}", _esc(VERSION))
     script = read("admin.js").replace("{{SCRIPT_VERSION}}", VERSION)
+    # This page runs on Home Assistant's own web address, so a script injected here could
+    # reach the admin's Home Assistant session. Only the page's own script and styles may run.
+    nonce = secrets.token_urlsafe(16)
     html = html.replace('<link rel="stylesheet" href="static/admin.css">',
-                        f"<style>\n{read('admin.css')}\n</style>")
-    html = html.replace('<script src="static/admin.js"></script>', f"<script>\n{script}\n</script>")
-    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+                        f'<style nonce="{nonce}">\n{read("admin.css")}\n</style>')
+    html = html.replace('<script src="static/admin.js"></script>',
+                        f'<script nonce="{nonce}">\n{script}\n</script>')
+    csp = (f"default-src 'self'; script-src 'nonce-{nonce}'; style-src 'self' 'nonce-{nonce}'; "
+           "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+           "form-action 'none'; frame-ancestors 'self'")
+    return web.Response(text=html, content_type="text/html", headers={
+        "Cache-Control": "no-store", "Content-Security-Policy": csp,
+        "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin"})
 
 
 async def admin_state(request: web.Request):
@@ -668,7 +761,9 @@ async def admin_state(request: web.Request):
         "settings": db.settings(),
         "roles": db.roles(),
         "devices": device_payload(),
-        "staff": [{**m, "custom_order": f"s:{m['id']}" in owners} for m in db.staff_list()],
+        "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
+                   "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time()}
+                  for m in db.staff_list()],
         "areas": db.areas(),
         "layout": db.layout(),
         "has_logo": branding.has_logo(),
@@ -733,9 +828,20 @@ async def admin_update_role(request: web.Request):
 async def admin_client_error(request: web.Request):
     """Errors from the admin dashboard, written to the add-on log for troubleshooting."""
     data = await read_json(request)
-    log.warning("Dashboard error (%s): %s", str(data.get("agent", ""))[:200],
-                str(data.get("detail", ""))[:4000])
+    now = time.time()
+    recent = [t for t in client_error_times if now - t < 60]
+    client_error_times[:] = recent
+    if len(recent) >= 20:
+        return web.json_response({"ok": False}, status=429)
+    client_error_times.append(now)
+    # Flatten to one line so nothing sent here can fake extra lines in the add-on's log.
+    one_line = lambda value, n: " | ".join(str(value or "").splitlines())[:n]
+    log.warning("Dashboard error (%s): %s", one_line(data.get("agent"), 200),
+                one_line(data.get("detail"), 2000))
     return web.json_response({"ok": True})
+
+
+client_error_times: list[float] = []
 
 
 async def admin_save_layout(request: web.Request):
@@ -1025,7 +1131,7 @@ async def admin_unlock_staff(request: web.Request):
     member = db.staff(int(request.match_info["id"]))
     if not member:
         raise web.HTTPNotFound()
-    db.update_staff(member["id"], status="active", failed_pins=0)
+    db.update_staff(member["id"], status="active", failed_pins=0, locked_until=None)
     db.log(admin_name(request), f"Unlocked staff member {member['name']}")
     return web.json_response({"ok": True})
 
@@ -1074,7 +1180,7 @@ async def admin_update_settings(request: web.Request):
         if url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", url):
             return bad_request("The staff app address must start with https:// (no path).")
         values["public_url"] = url
-    for key in ("ha_logbook", "allow_phone_reorder"):
+    for key in ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin"):
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
@@ -1095,11 +1201,16 @@ async def admin_upload_logo(request: web.Request):
     field = await reader.next()
     if not field or field.name != "logo":
         return bad_request("No file received.")
-    raw = await field.read(decode=True)
+    raw = bytearray()
+    while chunk := await field.read_chunk(64 * 1024):
+        raw.extend(chunk)
+        if len(raw) > MAX_LOGO_BYTES:
+            return bad_request("That file is too big. Use an image under 5 MB.", 413)
     try:
-        await asyncio.to_thread(branding.save_logo, raw)
+        await asyncio.to_thread(branding.save_logo, bytes(raw))
     except Exception:
-        return bad_request("That file isn't an image we can use. Try a PNG or JPG.")
+        return bad_request("That file isn't an image we can use. Try a PNG, JPG or WebP "
+                           "under 5000 \u00d7 5000 pixels.")
     db.log(admin_name(request), "Uploaded logo")
     return web.json_response({"ok": True})
 
@@ -1111,8 +1222,27 @@ async def admin_delete_logo(request: web.Request):
 
 @web.middleware
 async def admin_guard(request: web.Request, handler):
-    if request.remote not in ADMIN_ALLOWED_IPS:
+    remote = request.remote or ""
+    if remote not in ADMIN_ALLOWED_IPS:
         return web.Response(status=403, text="Open Staff Access from the Home Assistant sidebar.")
+    if not ipaddress.ip_address(remote).is_loopback:
+        # Through ingress. Home Assistant lets any signed-in user open an add-on's page if
+        # they know the address, so check that this user is an administrator.
+        user_id = request.headers.get("X-Remote-User-Id", "")
+        try:
+            admin = bool(user_id) and await ha.is_admin(user_id)
+        except HomeAssistantError as err:
+            log.warning("Couldn't check Home Assistant user %s: %s", user_id, err)
+            return web.Response(status=503, text="Couldn't check your Home Assistant account. "
+                                                 "Try again in a moment.")
+        if not admin:
+            return web.Response(status=403, text="Only Home Assistant administrators can open "
+                                                 "Staff Access.")
+        # Changes must come from the dashboard itself: it sends this header, which another
+        # website can't add to a request without the browser blocking it.
+        if request.method not in ("GET", "HEAD") and request.headers.get(
+                "X-Requested-With") != "staff-portal":
+            return web.Response(status=403, text="Request blocked.")
     try:
         response = await handler(request)
     except ValueError:
