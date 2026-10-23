@@ -247,6 +247,12 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
+    def duplicate_role(self, role_id: int, name: str) -> int:
+        """A new role with the same device and area settings. Phones stay on the original."""
+        new_id = self.create_role(name)
+        self.update_role(new_id, name, self.role_entities(role_id), self.role_areas(role_id))
+        return new_id
+
     def update_role(self, role_id: int, name: str, entities: dict[str, str],
                     areas: dict[int, str] | None = None) -> None:
         self.conn.execute("UPDATE roles SET name = ? WHERE id = ?", (name, role_id))

@@ -169,6 +169,10 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input {
 .seg .seg-none[aria-checked="true"] { background: var(--muted); }
 .seg .seg-view[aria-checked="true"] { background: #4f7dbf; }
 .seg .seg-control[aria-checked="true"] { background: var(--ok); }
+.seg .seg-role[aria-checked="true"] { background: var(--accent); }
+.access-field .seg { margin: 4px 0 2px; }
+.member-access { width: auto !important; font-size: 13px; padding: 4px 6px; }
+.via.access-note { color: var(--warn); }
 
 /* Activity */
 .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }

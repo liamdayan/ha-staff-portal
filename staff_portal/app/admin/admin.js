@@ -916,6 +916,22 @@
       save.setAttribute("disabled", "");
       await load();
     }, "Role saved. Phones pick up the change within a few seconds."));
+    const dup = h("button", { class: "btn" }, "Duplicate");
+    dup.addEventListener("click", async () => {
+      const name = await askText(editing.dirty
+        ? "Name for the copy. It gets your unsaved changes; this role stays as it was last saved."
+        : "Name for the copy. No phones move to it until you pick it on a phone.", "", `${editing.name} (copy)`);
+      if (!name) return;
+      run(async () => {
+        const { id } = await api("POST", `api/roles/${editing.id}/duplicate`, { name });
+        if (editing.dirty) {
+          await api("PUT", `api/roles/${id}`, { name, entities: editing.entities, areas: editing.areas });
+        }
+        editing.dirty = false;
+        await load();
+        openRole(id);
+      }, `Created ${name}. Pick it on a phone under Phones → Edit.`);
+    });
     const del = h("button", { class: "btn danger" }, "Delete role");
     del.addEventListener("click", async () => {
       const role = state.roles.find((r) => r.id === editing.id);
@@ -932,7 +948,7 @@
     box.replaceChildren(
       h("div", { class: "editor-head" },
         h("label", { class: "role-name-field" }, "Role name", nameInput),
-        h("div", { class: "editor-actions" }, del, save)),
+        h("div", { class: "editor-actions" }, del, dup, save)),
       h("p", { class: "hint" },
         "View lets staff see a device’s status. Control also lets them operate it. ",
         "Sensors can only be viewed. Anything left Hidden doesn’t exist as far as the phone is concerned."),
@@ -1169,6 +1185,17 @@
     renderLayoutEditor();
   });
 
+  const ACCESS_TEXT = { none: "Hidden", view: "View only", control: "Control" };
+
+  // How an item's access override reads in the item list ("" when it follows the role).
+  function accessNote(item) {
+    const own = item.type === "group" ? item.entities.filter((m) => m.access).length : 0;
+    const parts = [];
+    if (item.access) parts.push(`Access: ${ACCESS_TEXT[item.access]} on every phone`);
+    if (own) parts.push(`${own} device${own === 1 ? "" : "s"} with their own access`);
+    return parts.join(" \u00b7 ");
+  }
+
   function itemSummary(item) {
     if (item.type === "heading") return ["Heading", item.title, ""];
     if (item.type === "device") {
@@ -1232,7 +1259,9 @@
         h("span", { class: "item-kind" }, kind),
         h("div", { class: "entity-text" },
           h("div", { class: "entity-name" }, title),
-          sub ? h("div", { class: "entity-id" }, sub) : null),
+          sub ? h("div", { class: "entity-id" }, sub) : null,
+          item.type !== "heading" && accessNote(item)
+            ? h("div", { class: "via access-note" }, accessNote(item)) : null),
         h("div", { class: "area-actions" },
           h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
           h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
@@ -1343,6 +1372,35 @@
     return { el: h("div", { class: "pick-block" }, search, list), redraw: draw };
   }
 
+  // "Use role" (no override), or Hidden / View / Control for every phone showing the page.
+  function accessPicker(item, canControl) {
+    const choices = [["", "Use role"], ["none", "Hidden"], ["view", "View"], ["control", "Control"]];
+    const wrap = h("div", { class: "seg seg-access", role: "radiogroup", "aria-label": "Access on phones" });
+    const draw = () => wrap.replaceChildren(...choices.map(([value, text]) => {
+      const allowed = value !== "control" || canControl();
+      if (!allowed && item.access === "control") item.access = "view";
+      return h("button", {
+        type: "button", role: "radio", class: `seg-${value || "role"}`,
+        "aria-checked": String((item.access || "") === value), disabled: !allowed,
+        title: allowed ? null : "This kind of device can only be viewed",
+        onclick: () => {
+          if (value) item.access = value; else delete item.access;
+          draw();
+        },
+      }, text);
+    }));
+    draw();
+    return {
+      el: h("div", { class: "access-field" },
+        h("div", { class: "pick-head" }, "Access on phones"),
+        wrap,
+        h("p", { class: "hint" }, "Use role keeps whatever each phone\u2019s role allows. Hidden, View or " +
+          "Control replaces that on every phone that shows this page, even phones whose role doesn\u2019t " +
+          "include the device.")),
+      redraw: draw,
+    };
+  }
+
   async function editItem(page, index, type) {
     if (!entities) await loadEntities();
     if (!entities) return;
@@ -1374,7 +1432,9 @@
         ? h("div", { class: "item-fields" }, h("label", null, "Area", select),
           h("label", null, "Heading on the phone (optional)", title),
           h("p", { class: "hint" }, "Shows every device in this area that the phone's role allows, " +
-            "including devices added to the area later."))
+            "including devices added to the area later."),
+          accessPicker(item, () => true).el,
+          h("p", { class: "hint" }, "Control only applies to devices that can be operated; sensors stay View."))
         : h("p", { class: "hint" }, "Create areas in Settings \u2192 Areas first."));
       validate = () => (item.area_id != null ? null : "Create an area first.");
     } else if (type === "device") {
@@ -1384,10 +1444,11 @@
       const drawChosen = () => chosen.replaceChildren(item.entity_id
         ? h("div", null, h("strong", null, entityName(item.entity_id)), h("div", { class: "entity-id" }, item.entity_id))
         : h("p", { class: "hint" }, "Pick a device below."));
-      const picker = devicePicker((e) => { item.entity_id = e.entity_id; drawChosen(); }, () => false);
+      const access = accessPicker(item, () => !item.entity_id || entityById(item.entity_id)?.controllable !== false);
+      const picker = devicePicker((e) => { item.entity_id = e.entity_id; drawChosen(); access.redraw(); }, () => false);
       drawChosen();
       body.replaceChildren(h("div", { class: "item-fields" }, chosen,
-        h("label", null, "Label (optional)", label), picker.el));
+        h("label", null, "Label (optional)", label), access.el, picker.el));
       validate = () => (item.entity_id ? null : "Pick a device.");
     } else {
       item.entities = item.entities || [];
@@ -1403,11 +1464,18 @@
           label.addEventListener("input", () => { m.label = label.value; });
           const summary = h("input", { type: "checkbox", checked: !!m.summary, disabled: !m.summary && onCard >= 4 });
           summary.addEventListener("change", () => { m.summary = summary.checked; drawMembers(); });
+          const canControl = entityById(m.entity_id)?.controllable !== false;
+          const own = h("select", { class: "member-access", "aria-label": `Access for ${entityName(m.entity_id)}` },
+            [["", "Same as card"], ["none", "Hidden"], ["view", "View"], ["control", "Control"]]
+              .filter(([value]) => value !== "control" || canControl)
+              .map(([value, text]) => h("option", { value, selected: (m.access || "") === value }, text)));
+          own.addEventListener("change", () => { if (own.value) m.access = own.value; else delete m.access; });
           return h("div", { class: "member-row sort-row" },
             dragHandle(`Reorder ${m.label || entityName(m.entity_id)}`),
             h("div", { class: "member-main" }, label,
               h("div", { class: "entity-id", title: m.entity_id }, `${entityName(m.entity_id)} \u00b7 ${m.entity_id}`)),
             h("label", { class: "check on-card" }, summary, "On card"),
+            own,
             h("div", { class: "area-actions" },
               h("button", { type: "button", class: "btn subtle", "aria-label": "Remove",
                 onclick: () => { item.entities.splice(i, 1); drawMembers(); picker.redraw(); } }, "\u2715")));
@@ -1424,9 +1492,11 @@
       drawMembers();
       body.replaceChildren(h("div", { class: "item-fields" },
         h("label", null, "Card title", title),
+        accessPicker(item, () => true).el,
         h("div", { class: "pick-head" }, "In this group"),
         h("p", { class: "hint" }, "Give each device a short label like \u201cWater\u201d or \u201cSetpoint.\u201d " +
-          "Tick up to 4 to show on the card; tapping the card shows all of them, plus controls where the role allows."),
+          "Tick up to 4 to show on the card; tapping the card shows all of them, plus controls where the phone has Control. " +
+          "Each device can also have its own access, which wins over the card\u2019s."),
         members,
         h("div", { class: "pick-head" }, "Add devices"),
         picker.el));

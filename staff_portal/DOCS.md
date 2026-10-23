@@ -86,6 +86,11 @@ shows when access comes from an area ("Control via Soaking Area").
 Click **Save role**. Phones with that role update within a few
 seconds.
 
+**Duplicate** makes a copy of the role under a new name, with the same device and area settings,
+so you can make a variation (say *Pool tech, nights*) without changing anyone else's phone. No
+phones move to the copy until you pick it for a phone in **Phones → Edit**. If you've made changes
+you haven't saved yet, the copy gets them and the original stays as it was last saved.
+
 What **Control** allows depends on the device type:
 
 | Type | Staff can |
@@ -126,9 +131,34 @@ You can also do it from the Layout tab: each page shows **Shown on: …** with a
 button. Phone cards show their pages as **Pages: …**. A phone set to specific pages won't pick
 up new pages automatically; tick **All pages** again for that.
 
-The layout only decides how things are arranged; **roles still decide what each phone can see
-and do**. A group card only shows the devices that phone's role allows (and disappears if it
-allows none of them), and controls appear only for devices the role has set to **Control**.
+By default the layout only decides how things are arranged, and **roles decide what each phone
+can see and do**. A group card only shows the devices that phone's role allows (and disappears if
+it allows none of them), and controls appear only for devices the role has set to **Control**.
+
+**Access on a layout item.** Device, group card and whole-area items have an **Access on phones**
+choice when you edit them:
+
+| Choice | What happens |
+|---|---|
+| **Use role** (default) | Each phone gets whatever its role allows. |
+| **Hidden** | Hidden on every phone that shows this page, even if the role allows it. |
+| **View** | Status only on every phone that shows this page, even if the role has it Hidden or Control. |
+| **Control** | Status and controls on every phone that shows this page, even if the role doesn't include it. Sensors stay View. |
+
+In a group card, each device also has its own choice (**Same as card**, Hidden, View or Control),
+which wins over the card's. For example: set the Tub 1 card to **View** and just its setpoint to
+**Control**.
+
+Things to know:
+
+- An override applies on **every phone that shows that page**, whatever its role. To give only
+  some phones the extra access, put the item on a page that only those phones show
+  (**Choose phones**), or use a role instead.
+- The override is for that device on the whole phone, not just that spot. A device set to
+  **Hidden** doesn't show up anywhere on those phones, including the More page.
+- If a device has different overrides in more than one place, the higher one wins.
+- Overrides are enforced by the add-on, the same as roles, not just hidden from view.
+- Items with an override say so in the Layout tab ("Access: Control on every phone").
 With **Put devices… on a "More" page** ticked, anything a role allows that isn't placed on a
 page still shows up on a "More" page. Delete every page to go back to the automatic layout.
 

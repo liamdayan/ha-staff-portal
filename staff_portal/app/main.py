@@ -25,7 +25,7 @@ from aiohttp import web
 from branding import Branding
 from db import Database, check_pin, hash_pin
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
-                    clean_phone_pages, visible_layout)
+                    clean_phone_pages, layout_overrides, visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
@@ -213,6 +213,18 @@ def role_access(role_id: int | None, layout: AreaLayout) -> dict[str, str]:
                 access[eid] = best
     return {eid: "control" if lvl == "control" and controllable(eid) else "view"
             for eid, lvl in access.items() if offered(eid)}
+
+
+def phone_access(device: dict, layout: AreaLayout) -> dict[str, str]:
+    """What one phone may see and control: its role, adjusted by any access overrides on the
+    layout items it shows."""
+    access = role_access(device["role_id"], layout)
+    for eid, level in layout_overrides(db.layout(), layout, device_pages(device)).items():
+        if level == "none":
+            access.pop(eid, None)
+        elif offered(eid):
+            access[eid] = "control" if level == "control" and controllable(eid) else "view"
+    return access
 
 
 def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
@@ -528,7 +540,7 @@ async def api_entities(request: web.Request):
     device, member = authenticate(request)
     try:
         layout = await area_layout()
-        allowed = role_access(device["role_id"], layout)
+        allowed = phone_access(device, layout)
         states = await ha.states() if allowed else {}
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
@@ -592,7 +604,7 @@ async def api_action(request: web.Request):
         db.log(actor, "Blocked: invalid request", role=device["role_name"], ok=False, ip=ip)
         return bad_request("You don't have access to control that.", 403)
     try:
-        allowed = role_access(device["role_id"], await area_layout())
+        allowed = phone_access(device, await area_layout())
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
         return bad_request("Can't reach the system right now.", 503)
@@ -792,6 +804,22 @@ async def admin_create_role(request: web.Request):
     except Exception:
         return bad_request("A role with that name already exists.")
     db.log(admin_name(request), f"Created role {name}", role=name)
+    return web.json_response({"id": role_id})
+
+
+async def admin_duplicate_role(request: web.Request):
+    role = db.role(int(request.match_info["id"]))
+    if not role:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    name = clean_name(data.get("name"))
+    if not name:
+        return bad_request("Give the new role a name.")
+    try:
+        role_id = db.duplicate_role(role["id"], name)
+    except sqlite3.IntegrityError:
+        return bad_request("A role with that name already exists.")
+    db.log(admin_name(request), f"Created role {name} as a copy of {role['name']}", role=name)
     return web.json_response({"id": role_id})
 
 
@@ -1262,6 +1290,7 @@ def admin_app() -> web.Application:
     app.router.add_get("/api/entities", admin_entities)
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)
+    app.router.add_post(r"/api/roles/{id:\d+}/duplicate", admin_duplicate_role)
     app.router.add_delete(r"/api/roles/{id:\d+}", admin_delete_role)
     app.router.add_put("/api/layout", admin_save_layout)
     app.router.add_post("/api/client-error", admin_client_error)

@@ -1,7 +1,8 @@
 """Custom phone layouts: pages made of headings, single devices, whole areas and group cards.
 
-The layout only decides how things are arranged. What a phone can see or control still comes
-from its role: when a layout is sent to a phone, anything the role doesn't allow is removed.
+The layout decides how things are arranged. What a phone can see or control comes from its
+role, unless a layout item overrides it ("access"): an override applies on every phone that shows
+that item's page, and can give more or less than the role does.
 """
 
 import re
@@ -15,11 +16,19 @@ MAX_SUMMARY = 4
 MAX_PHONE_PAGES = 60
 ITEM_TYPES = ("heading", "device", "area", "group")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+ACCESS_LEVELS = ("none", "view", "control")  # an item's override; missing = use the role's
+ACCESS_RANK = {"none": 0, "view": 1, "control": 2}
 MORE_PAGE_ID = "more"  # the automatic page for allowed devices that aren't on any page
 
 
 def _text(value, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _access(item: dict) -> dict:
+    """The item's access override as a field to merge in, or nothing when it follows the role."""
+    level = item.get("access")
+    return {"access": level} if level in ACCESS_LEVELS else {}
 
 
 def _id(value, fallback: str) -> str:
@@ -51,13 +60,15 @@ def clean_layout(data) -> dict:
             elif kind == "device":
                 eid = str(item.get("entity_id") or "")
                 if offered(eid):
-                    items.append({**base, "entity_id": eid, "label": _text(item.get("label"), 40)})
+                    items.append({**base, "entity_id": eid, "label": _text(item.get("label"), 40),
+                                  **_access(item)})
             elif kind == "area":
                 try:
                     area_id = int(item.get("area_id"))
                 except (TypeError, ValueError):
                     continue
-                items.append({**base, "area_id": area_id, "title": _text(item.get("title"), 60)})
+                items.append({**base, "area_id": area_id, "title": _text(item.get("title"), 60),
+                              **_access(item)})
             elif kind == "group":
                 members, summary_count = [], 0
                 for member in (item.get("entities") or [])[:MAX_GROUP_ENTITIES]:
@@ -66,10 +77,11 @@ def clean_layout(data) -> dict:
                     summary = bool(member.get("summary")) and summary_count < MAX_SUMMARY
                     summary_count += summary
                     members.append({"entity_id": member["entity_id"],
-                                    "label": _text(member.get("label"), 40), "summary": summary})
+                                    "label": _text(member.get("label"), 40), "summary": summary,
+                                    **_access(member)})
                 title = _text(item.get("title"), 60)
                 if title and members:
-                    items.append({**base, "title": title, "entities": members})
+                    items.append({**base, "title": title, "entities": members, **_access(item)})
         page_id = str(page.get("id") or "")
         if not ID_RE.match(page_id) or page_id == MORE_PAGE_ID or page_id in used:
             page_id = _free_id(f"p{p_index}", used | explicit | {MORE_PAGE_ID})
@@ -93,6 +105,36 @@ def clean_phone_pages(value) -> list[str] | None:
     if len(ids) > MAX_PHONE_PAGES:
         raise ValueError(f"a phone can be given at most {MAX_PHONE_PAGES} pages")
     return ids
+
+
+def layout_overrides(layout: dict, areas, page_ids: list[str] | None = None) -> dict[str, str]:
+    """{entity_id: 'none'|'view'|'control'} set by layout items on the pages this phone shows.
+
+    A device in a group card uses its own override if it has one, otherwise the card's. When
+    the same device is overridden in several places, the highest level wins.
+    """
+    wanted = None if page_ids is None else set(page_ids)
+    result: dict[str, str] = {}
+
+    def put(eid: str, level: str | None) -> None:
+        if level in ACCESS_LEVELS and ACCESS_RANK[level] >= ACCESS_RANK.get(result.get(eid), -1):
+            result[eid] = level
+
+    for page in (layout or {}).get("pages", []):
+        if wanted is not None and page["id"] not in wanted:
+            continue
+        for item in page["items"]:
+            kind = item["type"]
+            if kind == "device":
+                put(item["entity_id"], item.get("access"))
+            elif kind == "group":
+                for member in item["entities"]:
+                    put(member["entity_id"], member.get("access") or item.get("access"))
+            elif kind == "area" and item.get("access"):
+                for eid, area_ids in areas.membership.items():
+                    if item["area_id"] in area_ids:
+                        put(eid, item["access"])
+    return result
 
 
 def visible_layout(layout: dict, access: dict[str, str], areas,
