@@ -101,6 +101,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; }
 .badge { border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .badge.active { color: var(--ok); border-color: currentColor; }
 .badge.pending { color: var(--warn); border-color: currentColor; }
+.badge.linked { color: #4f7dbf; border-color: currentColor; }
 .badge.locked, .badge.revoked { color: var(--danger); border-color: currentColor; }
 .inline-select { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .inline-select select, .filters select, .filters input[type="search"], .settings input:not([type="color"]):not([type="file"]),
@@ -222,3 +223,7 @@ code { word-break: break-all; font-size: 12px; }
   z-index: 100;
 }
 .toast.error { background: var(--danger); color: #fff; }
+.check-row { display: flex !important; grid-template-columns: none; gap: 10px; align-items: flex-start; }
+.check-row input { margin-top: 3px; }
+.check-row span { display: grid; gap: 2px; }
+.form-error { color: var(--danger); margin: 0; min-height: 1em; font-size: 14px; }

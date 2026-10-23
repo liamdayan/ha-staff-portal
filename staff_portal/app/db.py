@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX IF NOT EXISTS activity_ts ON activity (ts DESC);
 """
 
+# Columns added after the first release, applied to existing databases on startup.
+MIGRATIONS = {
+    "devices": {
+        "ha_user": "TEXT",
+        "ha_refresh_token": "TEXT",
+        "ha_link_error": "TEXT",
+    },
+}
+
 DEFAULT_SETTINGS = {
     "property_name": "Staff Portal",
     "app_name": "Staff",
@@ -58,6 +67,7 @@ DEFAULT_SETTINGS = {
     "pin_timeout_minutes": "15",
     "max_pin_attempts": "5",
     "enroll_hours": "72",
+    "ha_logbook": "1",
 }
 
 ENROLL_TTL_DEFAULT = 72 * 3600
@@ -87,6 +97,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        for table, columns in MIGRATIONS.items():
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for column, kind in columns.items():
+                if column not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         for key, value in DEFAULT_SETTINGS.items():
             self.conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -171,6 +186,7 @@ class Database:
             d = dict(r)
             d["has_pin"] = bool(d.pop("pin_hash"))
             d.pop("token_hash")
+            d.pop("ha_refresh_token")
             if d["status"] != "pending" or (d["enroll_expires"] or 0) < time.time():
                 d["enroll_code"] = None
             result.append(d)
@@ -190,7 +206,8 @@ class Database:
         return cur.lastrowid
 
     def update_device(self, device_id: int, **fields) -> None:
-        allowed = {"name", "role_id", "status", "pin_hash", "failed_pins"}
+        allowed = {"name", "role_id", "status", "pin_hash", "failed_pins",
+                   "ha_user", "ha_refresh_token", "ha_link_error"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return

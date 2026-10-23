@@ -90,6 +90,14 @@
           <input name="public_url" type="url" placeholder="https://staff.example.com"></label>
       </fieldset>
       <fieldset>
+        <legend>Home Assistant logbook</legend>
+        <label class="check-row"><input type="checkbox" name="ha_logbook">
+          <span>Add staff actions to Home Assistant's logbook
+          <small>Shows entries like “Main Boiler set to 140° by Maintenance phone (Staff Portal).”
+          Phones linked to a Home Assistant user don't need this; Home Assistant already credits
+          that user.</small></span></label>
+      </fieldset>
+      <fieldset>
         <legend>Security</legend>
         <div class="row">
           <label>Ask for PIN again after (minutes)<input name="pin_timeout_minutes" type="number" min="1" max="1440"></label>
@@ -127,6 +135,24 @@
   <p class="hint">Or open this link on the phone: <code data-url></code></p>
   <p class="hint" data-expires></p>
   <div class="dialog-actions"><button class="btn primary" data-close>Done</button></div>
+</dialog>
+
+<dialog id="link-dialog">
+  <form id="link-form">
+    <h2>Link <span data-name></span> to a Home Assistant user</h2>
+    <p class="hint">Changes made from this phone will show in Home Assistant's logbook as this
+      user, for example “Porch Light turned off by Maintenance.” The phone can still only use
+      what its role allows.</p>
+    <p class="hint">Use a <strong>non-admin</strong> user without two-factor login. The password
+      is used once to sign in and isn't saved.</p>
+    <label>Home Assistant username<input name="username" autocomplete="off" autocapitalize="none" required></label>
+    <label>Password<input name="password" type="password" autocomplete="new-password" required></label>
+    <p class="form-error" data-error></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" value="cancel">Cancel</button>
+      <button class="btn primary" value="save">Link user</button>
+    </div>
+  </form>
 </dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

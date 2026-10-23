@@ -92,6 +92,39 @@ Each QR code works once and expires (72 hours by default, changeable in Settings
 - **Unlock** clears a lock after too many wrong PINs.
 - Changing a phone's role takes effect within a few seconds.
 
+## Seeing staff actions in Home Assistant
+
+Every staff action is always recorded in **Staff Access → Activity**. You can also have them show
+up in Home Assistant's own **Logbook**, in one of two ways.
+
+**Logbook entries (on by default).** The add-on adds an entry for each action, for example
+"Main Boiler set to 140° by Maintenance phone (Staff Portal)". Turn this off under
+**Settings → Home Assistant logbook**.
+
+**Link a phone to a Home Assistant user.** Home Assistant then credits that user directly,
+the same as if they had tapped it in the Home Assistant app: "Porch Light turned off triggered
+by action light.turn_off by Maintenance." Linked phones don't get the extra logbook entry.
+
+1. In Home Assistant, create a user for it under **Settings → People → Users → Add user**
+   (for a shared phone, something like *Maintenance*). Leave **Administrator** off.
+2. In **Staff Access → Phones**, click **Link HA user** on the phone and enter that user's
+   username and password.
+
+How it works and what to know:
+
+- The password is used once to sign in and isn't saved. The add-on keeps the sign-in token on
+  your Home Assistant box (in the add-on's data, which is included in backups). It shows up in
+  that user's profile under **Refresh tokens**.
+- The phone's role still decides what it can do. The Home Assistant user only changes whose
+  name shows in the logbook.
+- Users with two-factor login turned on can't be linked.
+- If the user is deleted or the sign-in stops working, staff aren't locked out. The add-on
+  switches back to its own access and adds logbook entries instead, and the phone shows
+  **link broken** until you relink it.
+- **Unlink** or deleting the phone signs the add-on out of that user's account.
+- If you've turned on Home Assistant's IP banning for failed logins, typing the wrong password
+  here several times counts against the add-on.
+
 ## Tips for a locked-down maintenance phone
 
 - Don't sign in to the regular Home Assistant app on staff phones. Staff Portal is all they need.

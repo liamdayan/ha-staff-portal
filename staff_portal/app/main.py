@@ -21,8 +21,9 @@ from aiohttp import web
 
 from branding import Branding
 from db import Database, check_pin, hash_pin
-from ha import HomeAssistant, HomeAssistantError
-from permissions import ActionRejected, build_service_call, controllable, domain_of, offered
+from ha import HomeAssistant, HomeAssistantError, LinkError
+from permissions import (ActionRejected, build_service_call, controllable, describe_action,
+                         domain_of, offered)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -290,7 +291,7 @@ async def api_action(request: web.Request):
     try:
         states = await ha.states()
         domain, service, call = build_service_call(entity_id, action, params, states.get(entity_id))
-        await ha.call_service(domain, service, call)
+        as_user = await send_command(device, domain, service, call)
     except ActionRejected as err:
         return bad_request(str(err))
     except HomeAssistantError as err:
@@ -301,7 +302,34 @@ async def api_action(request: web.Request):
     detail = ", ".join(f"{k}={v}" for k, v in params.items()) or None
     db.log(device["name"], action, role=device["role_name"], entity_id=entity_id,
            detail=detail, ip=ip)
+    # Commands sent as a linked user are already credited to them in Home Assistant's logbook.
+    if not as_user and db.settings().get("ha_logbook") == "1":
+        name = (states.get(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
+        try:
+            await ha.logbook(name, f"{describe_action(entity_id, action, call)} by "
+                                   f"{device['name']} (Staff Portal)", entity_id)
+        except HomeAssistantError as err:
+            log.warning("Couldn't write logbook entry: %s", err)
     return web.json_response({"ok": True})
+
+
+async def send_command(device: dict, domain: str, service: str, call: dict) -> bool:
+    """Send as the phone's linked HA user when it has one. Returns True if it did."""
+    if device.get("ha_refresh_token"):
+        try:
+            await ha.call_service(domain, service, call, refresh_token=device["ha_refresh_token"])
+            if device.get("ha_link_error"):
+                db.update_device(device["id"], ha_link_error=None)
+            return True
+        except LinkError as err:
+            # Keep staff working: fall back to the add-on's own access and flag it for the admin.
+            log.warning("Linked user for %s failed: %s", device["name"], err)
+            if device.get("ha_link_error") != str(err):
+                db.update_device(device["id"], ha_link_error=str(err))
+                db.log(device["name"], "Home Assistant user link stopped working",
+                       role=device["role_name"], detail=str(err), ok=False)
+    await ha.call_service(domain, service, call)
+    return False
 
 
 @web.middleware
@@ -499,8 +527,45 @@ async def admin_delete_device(request: web.Request):
     device = db.device(int(request.match_info["id"]))
     if not device:
         raise web.HTTPNotFound()
+    if device["ha_refresh_token"]:
+        await ha.unlink_user(device["ha_refresh_token"])
     db.delete_device(device["id"])
     db.log(admin_name(request), f"Deleted phone {device['name']}")
+    return web.json_response({"ok": True})
+
+
+async def admin_link_user(request: web.Request):
+    device = db.device(int(request.match_info["id"]))
+    if not device:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+    if not username or not password:
+        return bad_request("Enter the Home Assistant username and password.")
+    try:
+        refresh = await ha.link_user(username, password)
+    except LinkError as err:
+        return bad_request(str(err))
+    except HomeAssistantError as err:
+        log.warning("Linking %s failed: %s", username, err)
+        return bad_request("Couldn't reach Home Assistant's login. Try again in a moment.", 502)
+    if device["ha_refresh_token"]:
+        await ha.unlink_user(device["ha_refresh_token"])
+    db.update_device(device["id"], ha_user=username, ha_refresh_token=refresh, ha_link_error=None)
+    db.log(admin_name(request), f"Linked {device['name']} to Home Assistant user {username}")
+    return web.json_response({"ok": True})
+
+
+async def admin_unlink_user(request: web.Request):
+    device = db.device(int(request.match_info["id"]))
+    if not device:
+        raise web.HTTPNotFound()
+    if device["ha_refresh_token"]:
+        await ha.unlink_user(device["ha_refresh_token"])
+    db.update_device(device["id"], ha_user=None, ha_refresh_token=None, ha_link_error=None)
+    db.log(admin_name(request), f"Unlinked {device['name']} from Home Assistant user "
+                                f"{device['ha_user']}")
     return web.json_response({"ok": True})
 
 
@@ -536,6 +601,8 @@ async def admin_update_settings(request: web.Request):
         if url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", url):
             return bad_request("The staff app address must start with https:// (no path).")
         values["public_url"] = url
+    if "ha_logbook" in data:
+        values["ha_logbook"] = "1" if data["ha_logbook"] in (True, "1", "true", "on") else "0"
     for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
                         ("enroll_hours", 1, 720)):
         if key in data:
@@ -593,6 +660,8 @@ def admin_app() -> web.Application:
     app.router.add_patch(r"/api/devices/{id:\d+}", admin_update_device)
     app.router.add_delete(r"/api/devices/{id:\d+}", admin_delete_device)
     app.router.add_post(r"/api/devices/{id:\d+}/{action:revoke|reenroll|unlock}", admin_device_action)
+    app.router.add_post(r"/api/devices/{id:\d+}/link", admin_link_user)
+    app.router.add_delete(r"/api/devices/{id:\d+}/link", admin_unlink_user)
     app.router.add_get(r"/api/devices/{id:\d+}/qr.svg", admin_device_qr)
     app.router.add_get("/api/activity", admin_activity)
     app.router.add_put("/api/settings", admin_update_settings)

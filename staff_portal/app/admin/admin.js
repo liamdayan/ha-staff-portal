@@ -148,6 +148,17 @@
           d.status === "active" ? "Re-pair" : "New setup QR"));
       }
       actions.push(h("button", { class: "btn", onclick: () => editPhone(d) }, "Edit"));
+      if (d.ha_user) {
+        actions.push(h("button", { class: "btn", onclick: () => linkUser(d) },
+          d.ha_link_error ? "Relink HA user" : "Change HA user"));
+        actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
+          if (!confirm(`Unlink ${d.name} from Home Assistant user ${d.ha_user}?`)) return;
+          await api("DELETE", `api/devices/${d.id}/link`);
+          await load();
+        }, "Unlinked.") }, "Unlink"));
+      } else {
+        actions.push(h("button", { class: "btn", onclick: () => linkUser(d) }, "Link HA user"));
+      }
       if (d.status !== "revoked") {
         actions.push(h("button", { class: "btn danger", onclick: () => deviceAction(d, "revoke",
           `Remove access for ${d.name}? It will be signed out right away.`, "Access removed.") },
@@ -167,6 +178,10 @@
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
               d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
+              d.ha_user ? h("span", {
+                class: d.ha_link_error ? "badge locked" : "badge linked",
+                title: d.ha_link_error || "Actions show in Home Assistant as this user",
+              }, d.ha_link_error ? `HA user ${d.ha_user}: link broken` : `HA user: ${d.ha_user}`) : null,
               h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`))),
           h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
@@ -246,6 +261,39 @@
   });
 
   $("#add-phone").addEventListener("click", () => editPhone(null));
+
+  function linkUser(d) {
+    const dialog = $("#link-dialog");
+    const form = $("#link-form");
+    form.reset();
+    $("[data-name]", dialog).textContent = d.name;
+    $("[data-error]", dialog).textContent = d.ha_link_error || "";
+    if (d.ha_user) form.elements["username"].value = d.ha_user;
+    const submit = $("button[value=save]", form);
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      submit.disabled = true;
+      try {
+        await api("POST", `api/devices/${d.id}/link`, {
+          username: form.elements["username"].value,
+          password: form.elements["password"].value,
+        });
+        form.elements["password"].value = "";
+        dialog.close();
+        await load();
+        toast(`${d.name} is now linked. Its actions show in Home Assistant as that user.`);
+      } catch (err) {
+        $("[data-error]", dialog).textContent = err.message;
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    $("button[value=cancel]", form).onclick = () => {
+      form.elements["password"].value = "";
+      dialog.close();
+    };
+    dialog.showModal();
+  }
 
   // ---------------------------------------------------------------- roles
 
@@ -468,7 +516,9 @@
   function fillSettings() {
     const form = $("#settings-form");
     for (const [k, v] of Object.entries(state.settings)) {
-      if (form.elements[k]) form.elements[k].value = v;
+      const field = form.elements[k];
+      if (field?.type === "checkbox") field.checked = v === "1";
+      else if (field) field.value = v;
     }
     refreshIcon();
   }
@@ -476,6 +526,7 @@
   $("#settings-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
+    body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
     run(async () => {
       await api("PUT", "api/settings", body);
       await load();

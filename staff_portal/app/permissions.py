@@ -96,3 +96,30 @@ def build_service_call(entity_id: str, action: str, params: dict, state: dict | 
                 raise ActionRejected(f"'{value}' is not a valid {name}")
             data[name] = value
     return domain, action, data
+
+
+PAST_TENSE = {
+    "turn_on": "turned on", "turn_off": "turned off", "toggle": "toggled",
+    "lock": "locked", "unlock": "unlocked", "press": "pressed",
+    "open_cover": "opened", "close_cover": "closed", "stop_cover": "stopped",
+    "open_valve": "opened", "close_valve": "closed",
+    "start": "started", "pause": "paused", "return_to_base": "sent back to its dock",
+}
+
+
+def describe_action(entity_id: str, action: str, data: dict) -> str:
+    """Plain-English summary for Home Assistant's logbook, such as 'set to 140°'."""
+    domain = domain_of(entity_id)
+    if "temperature" in data:
+        return f"set to {data['temperature']}°"
+    if "hvac_mode" in data:
+        return f"set to {data['hvac_mode'].replace('_', ' ')} mode"
+    if "operation_mode" in data:
+        return f"set to {data['operation_mode'].replace('_', ' ')} mode"
+    if "brightness_pct" in data:
+        return f"turned on at {data['brightness_pct']}% brightness"
+    if domain == "script" and action == "turn_on":
+        return "run"
+    if domain == "scene" and action == "turn_on":
+        return "activated"
+    return PAST_TENSE.get(action, action.replace("_", " "))
