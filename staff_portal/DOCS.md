@@ -97,6 +97,34 @@ What **Control** allows depends on the device type:
 | Covers, valves | Open/close/stop |
 | Scripts, scenes, buttons | Run/press |
 | Vacuums | Start/pause/dock |
+| Numbers (setpoints) | Set a value within the entity's min and max |
+| Dropdowns (select) | Choose one of the entity's options |
+
+## Phone layout (optional)
+
+By default the phone lists every allowed device grouped by area. In **Layout** you can design
+it yourself instead:
+
+- **Pages.** Click **Add page** (for example "Soaking" and "Mechanical"). With more than one
+  page, the phone shows tabs along the bottom.
+- **Group cards.** For something like "Tub 1", add a group card, pick every device that
+  belongs to it (water, inlet and outlet temperatures, setpoint, fill valve, pump, mode…),
+  give each a short label, and tick up to 4 to show **on the card**. Tapping the card opens a
+  screen with the key readings at the top, every reading in a list, and controls below.
+- **Device.** A single device tile, with an optional label.
+- **Whole area.** Every device in one of your areas, kept up to date automatically.
+- **Heading.** A section title such as "Tubs".
+
+Use the arrows to reorder, then click **Save layout**.
+
+The layout only decides how things are arranged; **roles still decide what each phone can see
+and do**. A group card only shows the devices that phone's role allows (and disappears if it
+allows none of them), and controls appear only for devices the role has set to **Control**.
+With **Put devices… on a "More" page** ticked, anything a role allows that isn't placed on a
+page still shows up on a "More" page. Delete every page to go back to the automatic layout.
+
+Setpoints (number entities) and dropdowns (select entities) can be controlled too, always
+within the entity's own minimum, maximum and options.
 
 ## 5. Add phones
 

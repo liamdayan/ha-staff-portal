@@ -4,6 +4,8 @@ Staff never send raw service calls. They pick an action from this table, and eve
 parameter is checked against the entity's own limits before anything reaches Home Assistant.
 """
 
+import re
+
 # Parameter specs:
 #   ("number", min_attr, max_attr, fallback_min, fallback_max)
 #   ("choice", list_attr)
@@ -38,12 +40,17 @@ ACTIONS: dict[str, dict[str, dict]] = {
     "script": {"turn_on": {}},
     "scene": {"turn_on": {}},
     "vacuum": {"start": {}, "pause": {}, "return_to_base": {}},
+    # Setpoints and dropdowns. Values must stay within the entity's own min/max or options.
+    "number": {"set_value": {"value": ("number", "min", "max", -1e9, 1e9)}},
+    "input_number": {"set_value": {"value": ("number", "min", "max", -1e9, 1e9)}},
+    "select": {"select_option": {"option": ("choice", "options")}},
+    "input_select": {"select_option": {"option": ("choice", "options")}},
 }
 
 # Read-only domains staff may be given "view" access to.
 VIEW_ONLY = {
     "sensor", "binary_sensor", "weather", "device_tracker", "person",
-    "camera", "update", "event", "number", "select", "input_number", "input_select",
+    "camera", "update", "event",
 }
 
 # Never offered in the admin picker: internal or not meaningful to staff.
@@ -58,7 +65,12 @@ def controllable(entity_id: str) -> bool:
     return domain_of(entity_id) in ACTIONS
 
 
+ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+
+
 def offered(entity_id: str) -> bool:
+    if not ENTITY_ID_RE.match(entity_id or ""):
+        return False
     d = domain_of(entity_id)
     return d not in HIDDEN and (d in ACTIONS or d in VIEW_ONLY)
 
@@ -116,6 +128,10 @@ def describe_action(entity_id: str, action: str, data: dict) -> str:
         return f"set to {data['hvac_mode'].replace('_', ' ')} mode"
     if "operation_mode" in data:
         return f"set to {data['operation_mode'].replace('_', ' ')} mode"
+    if "value" in data:
+        return f"set to {data['value']}"
+    if "option" in data:
+        return f"set to {data['option']}"
     if "brightness_pct" in data:
         return f"turned on at {data['brightness_pct']}% brightness"
     if domain == "script" and action == "turn_on":

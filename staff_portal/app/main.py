@@ -22,6 +22,7 @@ from aiohttp import web
 
 from branding import Branding
 from db import Database, check_pin, hash_pin
+from layout import clean_layout, visible_layout
 from ha import HomeAssistant, HomeAssistantError, LinkError
 from permissions import (ActionRejected, build_service_call, controllable, describe_action,
                          domain_of, offered)
@@ -164,6 +165,7 @@ def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
         "unit_of_measurement", "device_class", "brightness", "current_temperature", "temperature",
         "target_temp_high", "target_temp_low", "hvac_modes", "hvac_action", "min_temp",
         "max_temp", "operation_list", "operation_mode", "current_position", "icon",
+        "min", "max", "step", "options",
     )
     return {
         "entity_id": entity_id,
@@ -420,7 +422,11 @@ async def api_entities(request: web.Request):
         return bad_request("Can't reach the system right now.", 503)
     entities = [entity_view(eid, states.get(eid), layout, lvl) for eid, lvl in allowed.items()]
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
-    return web.json_response({"entities": entities, "staff_name": member and member["name"]})
+    return web.json_response({
+        "entities": entities,
+        "layout": visible_layout(db.layout(), allowed, layout),
+        "staff_name": member and member["name"],
+    })
 
 
 async def api_action(request: web.Request):
@@ -554,6 +560,7 @@ async def admin_state(request: web.Request):
         "devices": device_payload(),
         "staff": db.staff_list(),
         "areas": db.areas(),
+        "layout": db.layout(),
         "has_logo": branding.has_logo(),
     })
 
@@ -611,6 +618,18 @@ async def admin_update_role(request: web.Request):
     detail = f"{len(cleaned)} devices" + (f", {len(areas)} areas" if areas else "")
     db.log(admin_name(request), f"Updated role {name}", role=name, detail=detail)
     return web.json_response({"ok": True})
+
+
+async def admin_save_layout(request: web.Request):
+    try:
+        layout = clean_layout(await read_json(request))
+    except ValueError as err:
+        return bad_request(str(err))
+    db.set_layout(layout)
+    items = sum(len(p["items"]) for p in layout["pages"])
+    db.log(admin_name(request), "Updated phone layout",
+           detail=f"{len(layout['pages'])} pages, {items} items")
+    return web.json_response({"ok": True, "layout": layout})
 
 
 async def admin_create_area(request: web.Request):
@@ -973,6 +992,7 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)
     app.router.add_delete(r"/api/roles/{id:\d+}", admin_delete_role)
+    app.router.add_put("/api/layout", admin_save_layout)
     app.router.add_post("/api/areas", admin_create_area)
     app.router.add_put("/api/areas/order", admin_reorder_areas)
     app.router.add_put(r"/api/areas/{id:\d+}", admin_update_area)

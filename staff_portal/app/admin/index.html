@@ -19,6 +19,7 @@
   <button role="tab" data-tab="phones" aria-selected="true">Phones</button>
   <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
+  <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
 </nav>
@@ -58,6 +59,32 @@
       <div class="role-editor" id="role-editor">
         <div class="empty">Pick a role, or create one like “Maintenance” or “Housekeeping.”</div>
       </div>
+    </div>
+  </section>
+
+  <section id="tab-layout" class="tab" hidden>
+    <div class="section-head">
+      <h2>Phone layout</h2>
+      <div class="editor-actions">
+        <button class="btn subtle" id="discard-layout" disabled>Discard changes</button>
+        <button class="btn primary" id="save-layout" disabled>Save layout</button>
+      </div>
+    </div>
+    <p class="hint">Arrange what staff see: pages, group cards such as “Tub 1” that open to show
+      everything about it, single devices, whole areas and headings. Each phone only sees the parts its
+      role allows, and only gets controls where its role says Control. With no pages, phones use the
+      automatic layout grouped by area.</p>
+    <label class="check"><input type="checkbox" id="show-unplaced">
+      Put devices a role allows but that aren't on any page on a “More” page</label>
+    <div class="roles-layout layout-editor">
+      <aside class="role-list">
+        <div class="section-head">
+          <h2>Pages</h2>
+          <button class="btn" id="add-page">Add page</button>
+        </div>
+        <ul id="page-list"></ul>
+      </aside>
+      <div class="role-editor" id="page-editor"></div>
     </div>
   </section>
 
@@ -189,6 +216,18 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="save">Save area</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="item-dialog" class="wide">
+  <form method="dialog" id="item-form">
+    <h2 data-title></h2>
+    <div data-body class="item-body"></div>
+    <p class="form-error" data-error></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Done</button>
     </div>
   </form>
 </dialog>

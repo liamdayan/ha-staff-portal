@@ -328,46 +328,229 @@
       return;
     }
     setSubtitle(res.data.staff_name);
-    render(res.data.entities);
+    render(res.data);
     if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
   }
 
-  function render(entities) {
-    const ids = entities.map((e) => e.entity_id).join("|");
-    if (ids !== render.lastIds || !tiles.size) {
-      render.lastIds = ids;
-      if (!entities.length) {
+  // view: which layout page is open, and which group card's detail screen (if any).
+  const view = { page: Number(session.get("page")) || 0, detail: null };
+  let lastData = null;
+
+  function render(data) {
+    lastData = data;
+    const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
+    const shape = JSON.stringify(data.layout
+      ? [data.layout, view.page, view.detail]
+      : data.entities.map((e) => [e.entity_id, e.area]));
+    if (shape !== render.shape || !tiles.size) {
+      render.shape = shape;
+      if (!data.entities.length) {
         show(h("div", { class: "center message" },
           h("h1", null, "Nothing here yet"),
           h("p", null, "Your manager hasn't given this phone access to anything.")));
-        render.lastIds = null;
+        render.shape = null;
         return;
       }
-      const groups = new Map();
-      for (const e of entities) {
-        const key = e.area || "Other";
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(e);
-      }
-      const root = h("div", { class: "groups" });
       const next = new Map();
-      for (const [area, list] of groups) {
-        const grid = h("div", { class: "grid" });
-        for (const e of list) {
-          const tile = makeTile(e);
-          next.set(e.entity_id, tile);
-          grid.append(tile.el);
-        }
-        root.append(h("section", { class: "group" }, h("h2", null, area), grid));
-      }
+      const root = data.layout ? buildLayout(data.layout, byId, next) : buildAutomatic(data.entities, next);
       show(root);
       tiles = next;
     }
-    for (const e of entities) {
-      const tile = tiles.get(e.entity_id);
-      if (tile && !tile.busy) tile.update(e);
-    }
+    for (const t of tiles.values()) t.refresh(byId);
   }
+
+  // A tile that follows one entity. Skips updates while the user is mid-change.
+  function deviceTile(e, label, into) {
+    const tile = makeTile(e, label);
+    into.set(`${into.size}:${e.entity_id}`, {
+      refresh: (byId) => {
+        const fresh = byId.get(e.entity_id);
+        if (fresh && !tile.busy) tile.update(fresh);
+      },
+    });
+    return tile.el;
+  }
+
+  function sortByName(ids, byId) {
+    return ids.filter((id) => byId.has(id))
+      .sort((a, b) => byId.get(a).name.localeCompare(byId.get(b).name));
+  }
+
+  // No custom layout: devices grouped by area, as before.
+  function buildAutomatic(entities, into) {
+    const groups = new Map();
+    for (const e of entities) {
+      const key = e.area || "Other";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(e);
+    }
+    const root = h("div", { class: "groups" });
+    for (const [area, list] of groups) {
+      root.append(h("section", { class: "group" }, h("h2", null, area),
+        h("div", { class: "grid" }, list.map((e) => deviceTile(e, null, into)))));
+    }
+    return root;
+  }
+
+  function buildLayout(layout, byId, into) {
+    const pages = layout.pages;
+    if (view.page >= pages.length) view.page = 0;
+    const page = pages[view.page];
+    const detailItem = view.detail && page.items.find((i) => i.id === view.detail && i.type === "group");
+    if (view.detail && !detailItem) view.detail = null;
+
+    const root = h("div", { class: pages.length > 1 ? "layout has-tabs" : "layout" });
+    root.append(detailItem ? buildDetail(detailItem, page, byId, into) : buildPage(page, byId, into));
+    if (pages.length > 1) {
+      root.append(h("nav", { class: "tabbar", "aria-label": "Pages" }, pages.map((p, i) =>
+        h("button", {
+          class: i === view.page ? "tab active" : "tab",
+          "aria-current": i === view.page ? "page" : null,
+          onclick: () => openPage(i),
+        }, p.name))));
+    }
+    return root;
+  }
+
+  function buildPage(page, byId, into) {
+    const root = h("div", { class: "groups" });
+    let grid = null;
+    const gridFor = () => {
+      if (!grid) {
+        grid = h("div", { class: "grid" });
+        root.append(h("section", { class: "group" }, grid));
+      }
+      return grid;
+    }
+    for (const item of page.items) {
+      if (item.type === "heading") {
+        grid = null;
+        root.append(h("h2", { class: "page-heading" }, item.title));
+      } else if (item.type === "area") {
+        grid = null;
+        const ids = sortByName(item.entity_ids, byId);
+        root.append(h("section", { class: "group" }, item.title ? h("h2", null, item.title) : null,
+          h("div", { class: "grid" }, ids.map((id) => deviceTile(byId.get(id), null, into)))));
+      } else if (item.type === "device" && byId.has(item.entity_id)) {
+        gridFor().append(deviceTile(byId.get(item.entity_id), item.label, into));
+      } else if (item.type === "group") {
+        gridFor().append(groupCard(item, into));
+      }
+    }
+    return root;
+  }
+
+  function memberName(m, byId) {
+    return m.label || byId.get(m.entity_id)?.name || m.entity_id;
+  }
+
+  // The short value shown for a member on a card or in the readings list.
+  function valueText(e) {
+    const a = e.attributes;
+    if ((e.domain === "climate" || e.domain === "water_heater") && a.current_temperature != null) {
+      const target = a.temperature != null ? ` \u2192 ${withUnit(num(a.temperature), "\u00b0")}` : "";
+      return withUnit(num(a.current_temperature), "\u00b0") + target;
+    }
+    if (e.domain === "valve" || e.domain === "cover") return cap(e.state);
+    return stateText(e) || cap(e.state);
+  }
+
+  // Group card (such as "Tub 1"): title, a few key readings, tap for everything else.
+  function groupCard(item, into) {
+    const rows = h("div", { class: "card-rows" });
+    const card = h("button", { class: "tile group-card", onclick: () => openDetail(item.id) },
+      h("div", { class: "tile-head" },
+        h("div", { class: "tile-text" }, h("div", { class: "tile-name" }, item.title)),
+        h("span", { class: "chevron", "aria-hidden": "true" }, "\u203a")),
+      rows);
+    const summary = item.entities.filter((m) => m.summary);
+    into.set(`${into.size}:card:${item.id}`, {
+      refresh: (byId) => {
+        const members = item.entities.map((m) => byId.get(m.entity_id)).filter(Boolean);
+        card.classList.toggle("alert", members.some(isAlert));
+        card.classList.toggle("off", members.length > 0 && members.every((e) => e.state === "unavailable"));
+        // Key readings, plus anything raising an alert so the card says why it's highlighted.
+        const base = summary.length ? summary : item.entities.slice(0, 2);
+        const alerting = item.entities.filter((m) => !base.includes(m) && byId.has(m.entity_id) &&
+          isAlert(byId.get(m.entity_id)));
+        const shown = [...base, ...alerting];
+        rows.replaceChildren(...shown.filter((m) => byId.has(m.entity_id)).map((m) => {
+          const e = byId.get(m.entity_id);
+          return h("div", { class: isAlert(e) ? "card-row alert" : "card-row" },
+            h("span", { class: "card-label" }, memberName(m, byId)),
+            h("span", { class: "card-value" }, valueText(e)));
+        }));
+      },
+    });
+    return card;
+  }
+
+  // Detail screen for a group card: key readings, every reading, then the controls allowed.
+  function buildDetail(item, page, byId, into) {
+    const readings = h("div", { class: "readings" });
+    const hero = h("div", { class: "hero-values" });
+    const controlsGrid = h("div", { class: "grid" });
+    const controllable = item.entities.filter((m) => {
+      const e = byId.get(m.entity_id);
+      return e && e.level === "control" && e.controllable;
+    });
+    for (const m of controllable) controlsGrid.append(deviceTile(byId.get(m.entity_id), memberName(m, byId), into));
+    into.set(`${into.size}:detail:${item.id}`, {
+      refresh: (byId2) => {
+        const summary = item.entities.filter((m) => m.summary && byId2.has(m.entity_id));
+        hero.replaceChildren(...summary.map((m) => {
+          const e = byId2.get(m.entity_id);
+          return h("div", { class: isAlert(e) ? "hero-value alert" : "hero-value" },
+            h("div", { class: "hero-number" }, valueText(e)),
+            h("div", { class: "hero-label" }, memberName(m, byId2)));
+        }));
+        readings.replaceChildren(...item.entities.filter((m) => byId2.has(m.entity_id)).map((m) => {
+          const e = byId2.get(m.entity_id);
+          return h("div", { class: isAlert(e) ? "reading-row alert" : "reading-row" },
+            h("span", null, memberName(m, byId2)),
+            h("span", { class: "reading-value" }, valueText(e)));
+        }));
+      },
+    });
+    return h("div", { class: "detail" },
+      h("div", { class: "detail-head" },
+        h("button", { class: "back-btn", onclick: () => history.back() }, `\u2039 ${page.name}`),
+        h("h1", null, item.title)),
+      hero,
+      h("section", { class: "group" }, h("h2", null, "All readings"), readings),
+      controllable.length
+        ? h("section", { class: "group" }, h("h2", null, "Controls"), controlsGrid)
+        : null);
+  }
+
+  // Redraw from the last data without waiting for the next poll, and keep polling going.
+  function rerender() {
+    if (!lastData) return;
+    render(lastData);
+    if (!pollTimer && document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
+  }
+
+  function openPage(index) {
+    view.page = index;
+    view.detail = null;
+    session.set("page", String(index));
+    history.replaceState(null, "", "/");
+    window.scrollTo(0, 0);
+    rerender();
+  }
+
+  function openDetail(id) {
+    view.detail = id;
+    history.pushState({ detail: id }, "", "/");
+    window.scrollTo(0, 0);
+    rerender();
+  }
+
+  // Phone back button / swipe closes the detail screen instead of leaving the app.
+  window.addEventListener("popstate", (ev) => {
+    view.detail = ev.state?.detail || null;
+    rerender();
+  });
 
   async function act(tile, action, params, confirmText) {
     if (confirmText && !window.confirm(confirmText)) return;
@@ -449,8 +632,8 @@
     return false;
   }
 
-  function makeTile(entity) {
-    const tile = { entity, busy: false };
+  function makeTile(entity, label) {
+    const tile = { entity, label, busy: false };
     const name = h("div", { class: "tile-name" });
     const status = h("div", { class: "tile-state" });
     const controls = h("div", { class: "tile-controls" });
@@ -541,6 +724,48 @@
         mode.value = current;
         if (!canControl() && hasTarget) reading.textContent += ` · Set to ${withUnit(num(a.temperature), "°")}`;
       };
+    } else if (d === "number" || d === "input_number") {
+      const value = h("span", { class: "target" });
+      const stepSize = () => Number(tile.entity.attributes.step) || 1;
+      let pending = null;
+      let sendTimer = null;
+      const nudge = (dir) => {
+        const a = tile.entity.attributes;
+        const base = pending ?? Number(tile.entity.state);
+        if (!Number.isFinite(base)) return;
+        const next = Math.round((base + dir * stepSize()) * 1000) / 1000;
+        pending = Math.min(Number(a.max ?? Infinity), Math.max(Number(a.min ?? -Infinity), next));
+        value.textContent = withUnit(num(pending), a.unit_of_measurement);
+        tile.busy = true;
+        clearTimeout(sendTimer);
+        sendTimer = setTimeout(() => {
+          const v = pending;
+          pending = null;
+          act(tile, "set_value", { value: v });
+        }, 900);
+      };
+      const stepper = h("div", { class: "stepper" },
+        h("button", { class: "round", "aria-label": "Lower", onclick: () => nudge(-1) }, "\u2212"),
+        value,
+        h("button", { class: "round", "aria-label": "Raise", onclick: () => nudge(1) }, "+"));
+      controls.append(stepper);
+      build = (e) => {
+        stepper.hidden = !canControl();
+        if (canControl()) status.textContent = "";
+        value.textContent = withUnit(num(e.state), e.attributes.unit_of_measurement);
+      };
+    } else if (d === "select" || d === "input_select") {
+      const choice = h("select", { class: "select", "aria-label": "Choose" });
+      choice.addEventListener("change", () => act(tile, "select_option", { option: choice.value }));
+      controls.append(choice);
+      build = (e) => {
+        choice.hidden = !canControl();
+        const options = e.attributes.options || [];
+        if (choice.options.length !== options.length) {
+          choice.replaceChildren(...options.map((o) => h("option", { value: o }, o)));
+        }
+        choice.value = e.state;
+      };
     } else if (d === "lock") {
       const btn = h("button", { class: "btn" });
       btn.addEventListener("click", () => {
@@ -571,7 +796,7 @@
 
     tile.update = (e) => {
       tile.entity = e;
-      name.textContent = e.name;
+      name.textContent = tile.label || e.name;
       status.textContent = stateText(e);
       tile.el.classList.toggle("on", ["on", "open", "unlocked", "heat", "cool", "heat_cool"].includes(e.state)
         && e.domain !== "binary_sensor" && e.domain !== "sensor");

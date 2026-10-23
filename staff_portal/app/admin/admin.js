@@ -78,6 +78,7 @@
     state.roles = data.roles;
     state.staff = data.staff;
     state.areas = data.areas;
+    state.layout = data.layout;
     state.devices = data.devices;
     state.hasLogo = data.has_logo;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
@@ -95,12 +96,17 @@
     document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== `tab-${name}`; });
     if (name === "activity") loadActivity(true);
     if (name === "settings") fillSettings();
-    if (name === "roles" && !entities) loadEntities();
+    if ((name === "roles" || name === "layout") && !entities) loadEntities();
+    if (name === "layout") renderLayoutEditor();
     try { sessionStorage.setItem("tab", name); } catch { /* ignore */ }
   }
 
   document.querySelectorAll("[role=tab]").forEach((b) =>
     b.addEventListener("click", () => {
+      if (layoutDraft?.dirty && b.dataset.tab !== "layout") {
+        if (!confirm("Discard unsaved layout changes?")) return;
+        layoutDraft = null;
+      }
       if (editing?.dirty) {
         if (!confirm("Discard unsaved role changes?")) return;
         editing = null;
@@ -444,6 +450,7 @@
       toast(err.message, true);
     }
     if (editing) renderRoleEditor();
+    if (!$("#tab-layout").hidden) renderLayoutEditor();
   }
 
   function openRole(id) {
@@ -667,7 +674,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (editing?.dirty) e.preventDefault();
+    if (editing?.dirty || layoutDraft?.dirty) e.preventDefault();
   });
 
   // ---------------------------------------------------------------- activity
@@ -827,6 +834,285 @@
     await load();
     refreshIcon();
   }, "Logo removed."));
+
+  // ---------------------------------------------------------------- layout
+
+  // Working copy of the layout; saved with "Save layout".
+  let layoutDraft = null;
+  let pageIndex = 0;
+  const newId = () => Math.random().toString(36).slice(2, 10);
+  const entityById = (id) => entities?.find((e) => e.entity_id === id);
+  const entityName = (id) => entityById(id)?.name || id;
+
+  function draft() {
+    if (!layoutDraft) {
+      layoutDraft = JSON.parse(JSON.stringify(state.layout || { pages: [], show_unplaced: true }));
+      layoutDraft.dirty = false;
+    }
+    return layoutDraft;
+  }
+
+  function markLayoutDirty() {
+    draft().dirty = true;
+    $("#save-layout").disabled = false;
+    $("#discard-layout").disabled = false;
+  }
+
+  function renderLayoutEditor() {
+    const d = draft();
+    $("#show-unplaced").checked = d.show_unplaced !== false;
+    $("#save-layout").disabled = !d.dirty;
+    $("#discard-layout").disabled = !d.dirty;
+    if (pageIndex >= d.pages.length) pageIndex = Math.max(0, d.pages.length - 1);
+    $("#page-list").replaceChildren(...(d.pages.length ? d.pages.map((p, i) => h("li", null,
+      h("button", { class: i === pageIndex ? "role-item active" : "role-item",
+        onclick: () => { pageIndex = i; renderLayoutEditor(); } },
+      h("span", { class: "role-name" }, p.name),
+      h("span", { class: "role-meta" }, `${p.items.length} item${p.items.length === 1 ? "" : "s"}`))))
+      : [h("li", { class: "empty small" }, "No pages yet. Phones use the automatic layout.")]));
+    renderPageEditor();
+  }
+
+  function moveIn(list, index, dir) {
+    const to = index + dir;
+    if (to < 0 || to >= list.length) return;
+    [list[index], list[to]] = [list[to], list[index]];
+    markLayoutDirty();
+    renderLayoutEditor();
+  }
+
+  function itemSummary(item) {
+    if (item.type === "heading") return ["Heading", item.title, ""];
+    if (item.type === "device") {
+      return ["Device", item.label || entityName(item.entity_id), item.entity_id];
+    }
+    if (item.type === "area") {
+      const area = state.areas.find((a) => a.id === item.area_id);
+      return ["Area", item.title || area?.name || "Deleted area", "Every device in the area the role allows"];
+    }
+    const onCard = item.entities.filter((m) => m.summary).map((m) => m.label || entityName(m.entity_id));
+    return ["Group card", item.title,
+      `${item.entities.length} device${item.entities.length === 1 ? "" : "s"}` +
+      (onCard.length ? ` \u00b7 card shows ${onCard.join(", ")}` : "")];
+  }
+
+  function renderPageEditor() {
+    const box = $("#page-editor");
+    const d = draft();
+    const page = d.pages[pageIndex];
+    if (!page) {
+      box.replaceChildren(h("div", { class: "empty" },
+        "Add a page to start a custom layout, for example \u201cSoaking\u201d or \u201cMechanical.\u201d"));
+      return;
+    }
+    const add = (type) => editItem(page, null, type);
+    box.replaceChildren(
+      h("div", { class: "editor-head" },
+        h("label", { class: "role-name-field" }, "Page name",
+          h("input", { value: page.name, maxlength: "30", oninput: (e) => {
+            page.name = e.target.value;
+            markLayoutDirty();
+            const btn = $("#page-list .role-item.active .role-name");
+            if (btn) btn.textContent = page.name;
+          } })),
+        h("div", { class: "editor-actions" },
+          h("button", { class: "btn subtle", "aria-label": "Move page up", disabled: pageIndex === 0,
+            onclick: () => { moveIn(d.pages, pageIndex, -1); pageIndex -= 1; renderLayoutEditor(); } }, "\u2191"),
+          h("button", { class: "btn subtle", "aria-label": "Move page down", disabled: pageIndex === d.pages.length - 1,
+            onclick: () => { moveIn(d.pages, pageIndex, 1); pageIndex += 1; renderLayoutEditor(); } }, "\u2193"),
+          h("button", { class: "btn danger", onclick: () => {
+            if (!confirm(`Delete the ${page.name} page?`)) return;
+            d.pages.splice(pageIndex, 1);
+            markLayoutDirty();
+            renderLayoutEditor();
+          } }, "Delete page"))),
+      h("div", { class: "add-row" }, "Add:",
+        h("button", { class: "btn", onclick: () => add("group") }, "Group card"),
+        h("button", { class: "btn", onclick: () => add("device") }, "Device"),
+        h("button", { class: "btn", onclick: () => add("area") }, "Whole area"),
+        h("button", { class: "btn", onclick: () => add("heading") }, "Heading")),
+      page.items.length
+        ? h("div", { class: "item-list" }, page.items.map((item, i) => {
+          const [kind, title, sub] = itemSummary(item);
+          return h("div", { class: `item-row item-${item.type}` },
+            h("span", { class: "item-kind" }, kind),
+            h("div", { class: "entity-text" },
+              h("div", { class: "entity-name" }, title),
+              sub ? h("div", { class: "entity-id" }, sub) : null),
+            h("div", { class: "area-actions" },
+              h("button", { class: "btn subtle", "aria-label": "Move up", disabled: i === 0,
+                onclick: () => moveIn(page.items, i, -1) }, "\u2191"),
+              h("button", { class: "btn subtle", "aria-label": "Move down", disabled: i === page.items.length - 1,
+                onclick: () => moveIn(page.items, i, 1) }, "\u2193"),
+              h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
+              h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
+                page.items.splice(i, 1);
+                markLayoutDirty();
+                renderLayoutEditor();
+              } }, "Remove")));
+        }))
+        : h("div", { class: "empty" }, "This page is empty. Add a group card, device, area or heading."));
+  }
+
+  // Searchable device list used by the item dialogs.
+  function devicePicker(onPick, isPicked) {
+    const search = h("input", { type: "search", placeholder: "Search devices to add" });
+    const list = h("div", { class: "pick-box tall" });
+    const draw = () => {
+      const q = search.value.toLowerCase();
+      const shown = (entities || []).filter((e) => !isPicked(e.entity_id) &&
+        (!q || e.name.toLowerCase().includes(q) || e.entity_id.includes(q)));
+      list.replaceChildren(...shown.slice(0, 200).map((e) => h("button", {
+        type: "button", class: "pick-add", onclick: () => { onPick(e); draw(); },
+      }, h("span", null, e.name, h("small", null, e.area ? ` \u00b7 ${e.area}` : "")), h("span", { class: "plus" }, "+"))));
+      if (shown.length > 200) list.append(h("p", { class: "hint" }, `Showing 200 of ${shown.length}. Search to narrow it down.`));
+      if (!shown.length) list.append(h("p", { class: "hint" }, "No devices match."));
+    };
+    search.addEventListener("input", draw);
+    search.addEventListener("keydown", (ev) => { if (ev.key === "Enter") ev.preventDefault(); });
+    draw();
+    return { el: h("div", { class: "pick-block" }, search, list), redraw: draw };
+  }
+
+  async function editItem(page, index, type) {
+    if (!entities) await loadEntities();
+    if (!entities) return;
+    const existing = index == null ? null : page.items[index];
+    const item = existing ? JSON.parse(JSON.stringify(existing)) : { id: newId(), type };
+    const dialog = $("#item-dialog");
+    const body = $("[data-body]", dialog);
+    const error = $("[data-error]", dialog);
+    error.textContent = "";
+    body.oninput = () => { error.textContent = ""; };
+    body.onclick = () => { error.textContent = ""; };
+    const titles = { group: "group card", device: "device", area: "whole area", heading: "heading" };
+    $("[data-title]", dialog).textContent = `${existing ? "Edit" : "Add"} ${titles[type]}`;
+    let validate = () => null;
+
+    if (type === "heading") {
+      const input = h("input", { value: item.title || "", maxlength: "60", placeholder: "Tubs" });
+      input.addEventListener("input", () => { item.title = input.value; });
+      body.replaceChildren(h("label", null, "Heading text", input));
+      validate = () => (item.title?.trim() ? null : "Enter the heading text.");
+    } else if (type === "area") {
+      const select = h("select", null, state.areas.map((a) =>
+        h("option", { value: a.id, selected: a.id === item.area_id }, a.name)));
+      const title = h("input", { value: item.title || "", maxlength: "60", placeholder: "Same as the area name" });
+      item.area_id = item.area_id ?? state.areas[0]?.id;
+      select.addEventListener("change", () => { item.area_id = Number(select.value); });
+      title.addEventListener("input", () => { item.title = title.value; });
+      body.replaceChildren(state.areas.length
+        ? h("div", { class: "item-fields" }, h("label", null, "Area", select),
+          h("label", null, "Heading on the phone (optional)", title),
+          h("p", { class: "hint" }, "Shows every device in this area that the phone's role allows, " +
+            "including devices added to the area later."))
+        : h("p", { class: "hint" }, "Create areas in Settings \u2192 Areas first."));
+      validate = () => (item.area_id != null ? null : "Create an area first.");
+    } else if (type === "device") {
+      const chosen = h("div", { class: "chosen-device" });
+      const label = h("input", { value: item.label || "", maxlength: "40", placeholder: "Same as the device name" });
+      label.addEventListener("input", () => { item.label = label.value; });
+      const drawChosen = () => chosen.replaceChildren(item.entity_id
+        ? h("div", null, h("strong", null, entityName(item.entity_id)), h("div", { class: "entity-id" }, item.entity_id))
+        : h("p", { class: "hint" }, "Pick a device below."));
+      const picker = devicePicker((e) => { item.entity_id = e.entity_id; drawChosen(); }, () => false);
+      drawChosen();
+      body.replaceChildren(h("div", { class: "item-fields" }, chosen,
+        h("label", null, "Label (optional)", label), picker.el));
+      validate = () => (item.entity_id ? null : "Pick a device.");
+    } else {
+      item.entities = item.entities || [];
+      const title = h("input", { value: item.title || "", maxlength: "60", placeholder: "Tub 1" });
+      title.addEventListener("input", () => { item.title = title.value; });
+      const members = h("div", { class: "member-list" });
+      let picker = null;
+      const drawMembers = () => {
+        const onCard = item.entities.filter((m) => m.summary).length;
+        members.replaceChildren(...(item.entities.length ? item.entities.map((m, i) => {
+          const label = h("input", { value: m.label || "", maxlength: "40", placeholder: entityName(m.entity_id),
+            "aria-label": `Label for ${entityName(m.entity_id)}` });
+          label.addEventListener("input", () => { m.label = label.value; });
+          const summary = h("input", { type: "checkbox", checked: !!m.summary, disabled: !m.summary && onCard >= 4 });
+          summary.addEventListener("change", () => { m.summary = summary.checked; drawMembers(); });
+          return h("div", { class: "member-row" },
+            h("div", { class: "member-main" }, label,
+              h("div", { class: "entity-id", title: m.entity_id }, `${entityName(m.entity_id)} \u00b7 ${m.entity_id}`)),
+            h("label", { class: "check on-card" }, summary, "On card"),
+            h("div", { class: "area-actions" },
+              h("button", { type: "button", class: "btn subtle", "aria-label": "Move up", disabled: i === 0,
+                onclick: () => { [item.entities[i - 1], item.entities[i]] = [item.entities[i], item.entities[i - 1]]; drawMembers(); } }, "\u2191"),
+              h("button", { type: "button", class: "btn subtle", "aria-label": "Move down", disabled: i === item.entities.length - 1,
+                onclick: () => { [item.entities[i + 1], item.entities[i]] = [item.entities[i], item.entities[i + 1]]; drawMembers(); } }, "\u2193"),
+              h("button", { type: "button", class: "btn subtle", "aria-label": "Remove",
+                onclick: () => { item.entities.splice(i, 1); drawMembers(); picker.redraw(); } }, "\u2715")));
+        }) : [h("p", { class: "hint" }, "No devices yet. Add them from the list below.")]));
+      };
+      picker = devicePicker((e) => {
+        item.entities.push({ entity_id: e.entity_id, label: "", summary: item.entities.filter((m) => m.summary).length < 2 });
+        drawMembers();
+      }, (id) => item.entities.some((m) => m.entity_id === id));
+      drawMembers();
+      body.replaceChildren(h("div", { class: "item-fields" },
+        h("label", null, "Card title", title),
+        h("div", { class: "pick-head" }, "In this group"),
+        h("p", { class: "hint" }, "Give each device a short label like \u201cWater\u201d or \u201cSetpoint.\u201d " +
+          "Tick up to 4 to show on the card; tapping the card shows all of them, plus controls where the role allows."),
+        members,
+        h("div", { class: "pick-head" }, "Add devices"),
+        picker.el));
+      validate = () => (!item.title?.trim() ? "Give the card a title."
+        : !item.entities.length ? "Add at least one device." : null);
+    }
+
+    const form = $("#item-form");
+    // Enter in a text box would otherwise "click" the first button, which is Cancel.
+    form.onkeydown = (ev) => {
+      if (ev.key === "Enter" && ev.target.tagName === "INPUT") ev.preventDefault();
+    };
+    form.onsubmit = (ev) => {
+      if (ev.submitter?.value !== "save") return;
+      const problem = validate();
+      if (problem) {
+        ev.preventDefault();
+        error.textContent = problem;
+        return;
+      }
+      if (existing) page.items[index] = item;
+      else page.items.push(item);
+      markLayoutDirty();
+      renderLayoutEditor();
+    };
+    dialog.showModal();
+  }
+
+  $("#add-page").addEventListener("click", () => {
+    const name = prompt("Page name (for example Soaking or Mechanical):");
+    if (!name?.trim()) return;
+    const d = draft();
+    d.pages.push({ id: newId(), name: name.trim().slice(0, 30), items: [] });
+    pageIndex = d.pages.length - 1;
+    markLayoutDirty();
+    renderLayoutEditor();
+  });
+
+  $("#show-unplaced").addEventListener("change", (e) => {
+    draft().show_unplaced = e.target.checked;
+    markLayoutDirty();
+  });
+
+  $("#save-layout").addEventListener("click", () => run(async () => {
+    const d = draft();
+    const { layout } = await api("PUT", "api/layout", { pages: d.pages, show_unplaced: d.show_unplaced !== false });
+    state.layout = layout;
+    layoutDraft = null;
+    renderLayoutEditor();
+  }, "Layout saved. Phones update within a few seconds."));
+
+  $("#discard-layout").addEventListener("click", () => {
+    if (!confirm("Discard your layout changes?")) return;
+    layoutDraft = null;
+    renderLayoutEditor();
+  });
 
   // ---------------------------------------------------------------- start
 

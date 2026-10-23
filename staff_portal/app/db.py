@@ -1,6 +1,7 @@
 """SQLite storage for roles, phones, settings and the activity log."""
 
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -157,7 +158,8 @@ class Database:
     # Settings
 
     def settings(self) -> dict:
-        return {r["key"]: r["value"] for r in self.conn.execute("SELECT key, value FROM settings")}
+        return {r["key"]: r["value"] for r in self.conn.execute(
+            "SELECT key, value FROM settings WHERE key != 'layout'")}
 
     def update_settings(self, values: dict) -> None:
         for key, value in values.items():
@@ -165,6 +167,18 @@ class Database:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
                 )
+        self.conn.commit()
+
+    def layout(self) -> dict:
+        row = self.conn.execute("SELECT value FROM settings WHERE key = 'layout'").fetchone()
+        try:
+            return json.loads(row[0]) if row else {"pages": [], "show_unplaced": True}
+        except ValueError:
+            return {"pages": [], "show_unplaced": True}
+
+    def set_layout(self, layout: dict) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('layout', ?)",
+                          (json.dumps(layout),))
         self.conn.commit()
 
     def setting_int(self, key: str) -> int:
