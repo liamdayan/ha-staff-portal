@@ -238,3 +238,25 @@ dialog label[hidden] { display: none; }
   .entity-row { flex-wrap: wrap; }
   .area-head { flex-wrap: wrap; }
 }
+
+/* Areas */
+.area-list { display: grid; gap: 0; }
+.area-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.area-actions { display: flex; gap: 6px; margin-left: auto; }
+.area-actions .btn.subtle { min-width: 36px; padding: 7px 8px; }
+.area-actions .btn:disabled { opacity: 0.35; cursor: default; }
+.role-areas { margin: 14px 0 6px; }
+.editor-sub { font-size: 15px; margin: 16px 0 4px; }
+.via { font-size: 12px; color: var(--ok); font-weight: 600; }
+dialog.wide { width: min(640px, calc(100vw - 32px)); }
+.pick-block { display: grid; gap: 6px; }
+.pick-head { font-weight: 600; font-size: 14px; }
+.pick-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pick-tools input[type="search"] { flex: 1; min-width: 160px; }
+.pick-box { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: grid; gap: 4px; max-height: 160px; overflow: auto; }
+.pick-box.tall { max-height: 280px; }
+.pick-row small { color: var(--muted); }
+.check span { min-width: 0; overflow-wrap: anywhere; }
+/* Never let a long name or ID push the page sideways. */
+.area-head h4, .entity-name, .role-name { overflow-wrap: anywhere; min-width: 0; }
+.filters select { max-width: 100%; }

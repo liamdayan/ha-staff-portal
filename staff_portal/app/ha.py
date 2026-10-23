@@ -7,15 +7,23 @@ Phones can also be linked to a Home Assistant user. Those phones' commands are s
 Core with that user's own token, so Home Assistant's logbook credits the user by name.
 """
 
+import ast
+import json
+import logging
 import os
 import time
 
 import aiohttp
 
+log = logging.getLogger("staff_portal")
+
+# Rendered as JSON so Home Assistant's template whitespace handling can't change the layout.
+# Lists line up by position: "areas"[i] is the area ID (or null) of "ids"[i].
 AREA_TEMPLATE = (
-    "{%- for s in states -%}"
-    "{{ s.entity_id }}\t{{ area_name(s.entity_id) or '' }}\n"
-    "{%- endfor -%}"
+    '{{ {"ids": states | map(attribute="entity_id") | list,'
+    ' "areas": states | map(attribute="entity_id") | map("area_id") | list,'
+    ' "area_ids": areas() | list,'
+    ' "area_names": areas() | map("area_name") | list} | tojson }}'
 )
 
 # Identifies this add-on to Home Assistant's login system. It appears under the linked user's
@@ -50,7 +58,8 @@ class HomeAssistant:
         self.session: aiohttp.ClientSession | None = None
         self._states: dict[str, dict] = {}
         self._states_at = 0.0
-        self._areas: dict[str, str] = {}
+        self._entity_area: dict[str, str] = {}  # entity_id -> Home Assistant area ID
+        self._area_names: dict[str, str] = {}   # Home Assistant area ID -> name
         self._areas_at = 0.0
         self._core: str | None = None
         self._user_tokens: dict[str, tuple[str, float]] = {}  # refresh token -> (access, expiry)
@@ -82,20 +91,25 @@ class HomeAssistant:
             self._states_at = time.monotonic()
         return self._states
 
-    async def areas(self, max_age: float = 300.0) -> dict[str, str]:
+    async def area_info(self, max_age: float = 300.0) -> tuple[dict[str, str], dict[str, str]]:
+        """Return ({entity_id: HA area ID}, {HA area ID: name}). Empty if HA can't tell us."""
         if time.monotonic() - self._areas_at > max_age:
             try:
-                text = await self._request("POST", "/template", json={"template": AREA_TEMPLATE})
-            except HomeAssistantError:
-                text = ""
-            areas = {}
-            for line in str(text).splitlines():
-                entity_id, _, area = line.partition("\t")
-                if entity_id:
-                    areas[entity_id.strip()] = area.strip()
-            self._areas = areas
+                raw = await self._request("POST", "/template", json={"template": AREA_TEMPLATE})
+                data = parse_template_result(raw)
+                self._entity_area = {
+                    eid: aid for eid, aid in zip(data["ids"], data["areas"]) if eid and aid}
+                self._area_names = {
+                    aid: name or aid for aid, name in zip(data["area_ids"], data["area_names"])}
+            except (HomeAssistantError, KeyError, TypeError, ValueError, SyntaxError) as err:
+                log.warning("Couldn't read Home Assistant areas: %s", err)
             self._areas_at = time.monotonic()
-        return self._areas
+        return self._entity_area, self._area_names
+
+    async def areas(self, max_age: float = 300.0) -> dict[str, str]:
+        """{entity_id: Home Assistant area name} for entities that have an area."""
+        entity_area, names = await self.area_info(max_age)
+        return {eid: names.get(aid, aid) for eid, aid in entity_area.items()}
 
     async def call_service(self, domain: str, service: str, data: dict,
                            refresh_token: str | None = None) -> None:
@@ -203,3 +217,14 @@ class HomeAssistant:
         self._user_tokens[refresh_token] = (token["access_token"],
                                             time.monotonic() + token.get("expires_in", 1800) - 60)
         return token["access_token"]
+
+
+def parse_template_result(raw) -> dict:
+    """Template results come back as text, or already parsed on some Home Assistant versions."""
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw).strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return ast.literal_eval(text)  # a Python-style dict if HA re-printed the parsed result

@@ -76,6 +76,17 @@
   </section>
 
   <section id="tab-settings" class="tab" hidden>
+    <div class="settings">
+      <fieldset>
+        <legend>Areas</legend>
+        <p class="hint">Group devices the way your staff think about the property, such as
+          “Soaking Area” or “Mechanical.” An area can include whole Home Assistant areas
+          (new devices there join automatically) and individual devices. The staff app shows
+          devices under these headings, in this order, and roles can grant access to a whole area.</p>
+        <div id="area-list" class="area-list"></div>
+        <div><button type="button" class="btn" id="add-area">Add area</button></div>
+      </fieldset>
+    </div>
     <form id="settings-form" class="settings">
       <fieldset>
         <legend>Branding</legend>
@@ -155,6 +166,29 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="area-dialog" class="wide">
+  <form method="dialog" id="area-form">
+    <h2 data-title>Area</h2>
+    <label>Name<input name="name" maxlength="40" placeholder="Soaking Area" required></label>
+    <div class="pick-block">
+      <div class="pick-head">Include whole Home Assistant areas</div>
+      <div class="pick-box" data-ha-areas></div>
+    </div>
+    <div class="pick-block">
+      <div class="pick-head">Also include these devices <span class="hint" data-count></span></div>
+      <div class="pick-tools">
+        <input type="search" placeholder="Search devices" data-search>
+        <label class="check"><input type="checkbox" data-only> Only selected</label>
+      </div>
+      <div class="pick-box tall" data-devices></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save area</button>
     </div>
   </form>
 </dialog>

@@ -2,8 +2,9 @@
   "use strict";
 
   // All URLs are relative: Home Assistant serves this page under an ingress path.
-  const state = { settings: {}, roles: [], devices: [], staff: [], hasLogo: false };
+  const state = { settings: {}, roles: [], devices: [], staff: [], areas: [], hasLogo: false };
   let entities = null;
+  let haAreas = [];
   let editing = null; // { id, name, entities: {entity_id: level}, dirty }
   let oldestActivity = null;
 
@@ -76,11 +77,13 @@
     state.settings = data.settings;
     state.roles = data.roles;
     state.staff = data.staff;
+    state.areas = data.areas;
     state.devices = data.devices;
     state.hasLogo = data.has_logo;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
     renderStaff();
+    renderAreaSettings();
     renderRoleList();
   }
 
@@ -418,19 +421,24 @@
     const list = $("#role-list");
     list.replaceChildren(...state.roles.map((r) => {
       const count = Object.keys(r.entities).length;
+      const areaCount = Object.keys(r.areas).length;
+      const parts = [`${count} device${count === 1 ? "" : "s"}`];
+      if (areaCount) parts.push(`${areaCount} area${areaCount === 1 ? "" : "s"}`);
+      parts.push(`${r.device_count} phone${r.device_count === 1 ? "" : "s"}`);
       return h("li", null, h("button", {
         class: editing?.id === r.id ? "role-item active" : "role-item",
         onclick: () => openRole(r.id),
       }, h("span", { class: "role-name" }, r.name),
-      h("span", { class: "role-meta" },
-        `${count} device${count === 1 ? "" : "s"} · ${r.device_count} phone${r.device_count === 1 ? "" : "s"}`)));
+      h("span", { class: "role-meta" }, parts.join(" · "))));
     }));
     if (!state.roles.length) list.replaceChildren(h("li", { class: "empty small" }, "No roles yet."));
   }
 
   async function loadEntities() {
     try {
-      entities = (await api("GET", "api/entities")).entities;
+      const data = await api("GET", "api/entities");
+      entities = data.entities;
+      haAreas = data.ha_areas;
     } catch (err) {
       entities = null;
       toast(err.message, true);
@@ -441,8 +449,8 @@
   function openRole(id) {
     if (editing?.dirty && editing.id !== id && !confirm("Discard unsaved changes?")) return;
     const role = state.roles.find((r) => r.id === id);
-    editing = { id, name: role.name, entities: { ...role.entities }, dirty: false,
-      filter: "", area: "", onlySelected: false };
+    editing = { id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
+      dirty: false, filter: "", area: "", onlySelected: false };
     renderRoleList();
     renderRoleEditor();
   }
@@ -462,6 +470,35 @@
     else editing.entities[entityId] = level;
     editing.dirty = true;
     $("#save-role")?.removeAttribute("disabled");
+  }
+
+  const RANK = { none: 0, view: 1, control: 2 };
+  const LABELS = { none: "Hidden", view: "View", control: "Control" };
+
+  // The strongest access this role gets to a device through its areas, and which area gives it.
+  function accessFromAreas(e) {
+    let best = { level: "none", area: null };
+    for (const id of e.area_ids || []) {
+      const level = editing.areas[id] || "none";
+      if (RANK[level] > RANK[best.level]) best = { level, area: state.areas.find((a) => a.id === id) };
+    }
+    if (best.level === "control" && !e.controllable) best.level = "view";
+    return best;
+  }
+
+  function segmented(options, current, label, onPick) {
+    const wrap = h("div", { class: "seg", role: "radiogroup", "aria-label": label });
+    for (const opt of options) {
+      const btn = h("button", {
+        type: "button", role: "radio", "aria-checked": String(current === opt), class: `seg-${opt}`,
+      }, LABELS[opt]);
+      btn.addEventListener("click", () => {
+        wrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-checked", String(b === btn)));
+        onPick(opt);
+      });
+      wrap.append(btn);
+    }
+    return wrap;
   }
 
   function levelControl(e) {
@@ -487,6 +524,40 @@
     const n = Object.keys(editing.entities).length;
     const el = $("#role-count");
     if (el) el.textContent = `${n} device${n === 1 ? "" : "s"} selected`;
+  }
+
+  function areaSection(redraw) {
+    if (!state.areas.length) {
+      return h("div", { class: "role-areas empty-areas" },
+        h("h3", { class: "editor-sub" }, "Areas"),
+        h("p", { class: "hint" }, "Create areas such as \u201cSoaking Area\u201d in ",
+          h("button", { type: "button", class: "linkish", onclick: () => selectTab("settings") }, "Settings"),
+          " to give access to a whole area at once."));
+    }
+    return h("div", { class: "role-areas" },
+      h("h3", { class: "editor-sub" }, "Areas"),
+      h("p", { class: "hint" }, "Covers every device in the area, including ones added later. ",
+        "A device gets whichever is higher: its area\u2019s setting or its own setting below."),
+      state.areas.map((a) => h("div", { class: "entity-row" },
+        h("div", { class: "entity-text" },
+          h("div", { class: "entity-name" }, a.name),
+          h("div", { class: "entity-id" }, areaSummary(a))),
+        segmented(["none", "view", "control"], editing.areas[a.id] || "none", `Access to ${a.name}`,
+          (level) => {
+            if (level === "none") delete editing.areas[a.id];
+            else editing.areas[a.id] = level;
+            editing.dirty = true;
+            $("#save-role")?.removeAttribute("disabled");
+            redraw();
+          }))));
+  }
+
+  function areaSummary(a) {
+    const names = a.ha_areas.map((id) => haAreas.find((x) => x.id === id)?.name || id);
+    const parts = [];
+    if (names.length) parts.push(`Home Assistant: ${names.join(", ")}`);
+    if (a.entities.length) parts.push(`${a.entities.length} added device${a.entities.length === 1 ? "" : "s"}`);
+    return parts.join(" \u00b7 ") || "Empty";
   }
 
   function renderRoleEditor() {
@@ -543,11 +614,17 @@
               h("button", { type: "button", class: "linkish", onclick: bulk("none") }, "Hidden"),
               h("button", { type: "button", class: "linkish", onclick: bulk("view") }, "View"),
               h("button", { type: "button", class: "linkish", onclick: bulk("control") }, "Control"))),
-          list.map((e) => h("div", { class: "entity-row" },
-            h("div", { class: "entity-text" },
-              h("div", { class: "entity-name" }, e.name),
-              h("div", { class: "entity-id", title: e.entity_id }, `${e.entity_id} · ${e.state}`)),
-            levelControl(e))));
+          list.map((e) => {
+            const via = accessFromAreas(e);
+            return h("div", { class: "entity-row" },
+              h("div", { class: "entity-text" },
+                h("div", { class: "entity-name" }, e.name),
+                h("div", { class: "entity-id", title: e.entity_id }, `${e.entity_id} · ${e.state}`),
+                via.area && RANK[via.level] >= RANK[editing.entities[e.entity_id] || "none"]
+                  ? h("div", { class: "via" }, `${LABELS[via.level]} via ${via.area.name}`)
+                  : null),
+              levelControl(e));
+          }));
       }));
     };
 
@@ -557,7 +634,8 @@
 
     const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save role");
     save.addEventListener("click", () => run(async () => {
-      await api("PUT", `api/roles/${editing.id}`, { name: editing.name, entities: editing.entities });
+      await api("PUT", `api/roles/${editing.id}`,
+        { name: editing.name, entities: editing.entities, areas: editing.areas });
       editing.dirty = false;
       save.setAttribute("disabled", "");
       await load();
@@ -582,6 +660,8 @@
       h("p", { class: "hint" },
         "View lets staff see a device’s status. Control also lets them operate it. ",
         "Sensors can only be viewed. Anything left Hidden doesn’t exist as far as the phone is concerned."),
+      areaSection(drawList),
+      h("h3", { class: "editor-sub" }, "Individual devices"),
       h("div", { class: "filters" }, search, areaSel,
         h("label", { class: "check" }, only, "Only selected"),
         h("span", { class: "count", id: "role-count" }),
@@ -620,6 +700,90 @@
   }
   $("#refresh-activity").addEventListener("click", () => loadActivity(true));
   $("#more-activity").addEventListener("click", () => loadActivity(false));
+
+  // ---------------------------------------------------------------- areas (in Settings)
+
+  function renderAreaSettings() {
+    const list = $("#area-list");
+    if (!state.areas.length) {
+      list.replaceChildren(h("div", { class: "empty small" }, "No areas yet."));
+      return;
+    }
+    const move = (index, dir) => run(async () => {
+      const ids = state.areas.map((a) => a.id);
+      [ids[index], ids[index + dir]] = [ids[index + dir], ids[index]];
+      await api("PUT", "api/areas/order", { order: ids });
+      await load();
+    });
+    list.replaceChildren(...state.areas.map((a, i) => h("div", { class: "area-row" },
+      h("div", { class: "entity-text" },
+        h("div", { class: "entity-name" }, a.name),
+        h("div", { class: "entity-id" }, areaSummary(a))),
+      h("div", { class: "area-actions" },
+        h("button", { type: "button", class: "btn subtle", "aria-label": `Move ${a.name} up`,
+          disabled: i === 0, onclick: () => move(i, -1) }, "\u2191"),
+        h("button", { type: "button", class: "btn subtle", "aria-label": `Move ${a.name} down`,
+          disabled: i === state.areas.length - 1, onclick: () => move(i, 1) }, "\u2193"),
+        h("button", { type: "button", class: "btn", onclick: () => editArea(a) }, "Edit"),
+        h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
+          if (!confirm(`Delete the ${a.name} area? Roles lose any access they had through it.`)) return;
+          await api("DELETE", `api/areas/${a.id}`);
+          await load();
+        }, "Area deleted.") }, "Delete")))));
+  }
+
+  async function editArea(a) {
+    if (!entities) await loadEntities();
+    if (!entities) return;
+    const dialog = $("#area-dialog");
+    const form = $("#area-form");
+    form.reset();
+    $("[data-title]", dialog).textContent = a ? `Edit ${a.name}` : "Add area";
+    form.elements["name"].value = a ? a.name : "";
+    const chosenHa = new Set(a ? a.ha_areas : []);
+    const chosen = new Set(a ? a.entities : []);
+    $("[data-ha-areas]", dialog).replaceChildren(...(haAreas.length
+      ? haAreas.map((x) => h("label", { class: "check" },
+        h("input", { type: "checkbox", checked: chosenHa.has(x.id),
+          onchange: (ev) => (ev.target.checked ? chosenHa.add(x.id) : chosenHa.delete(x.id)) }),
+        x.name))
+      : [h("p", { class: "hint" }, "No areas are set up in Home Assistant.")]));
+    const box = $("[data-devices]", dialog);
+    const search = $("[data-search]", dialog);
+    const only = $("[data-only]", dialog);
+    const count = () => { $("[data-count]", dialog).textContent = `(${chosen.size} selected)`; };
+    const draw = () => {
+      const q = search.value.toLowerCase();
+      const shown = entities.filter((e) => (!q || e.name.toLowerCase().includes(q) || e.entity_id.includes(q)) &&
+        (!only.checked || chosen.has(e.entity_id)));
+      box.replaceChildren(...shown.slice(0, 400).map((e) => h("label", { class: "check pick-row" },
+        h("input", { type: "checkbox", checked: chosen.has(e.entity_id), onchange: (ev) => {
+          if (ev.target.checked) chosen.add(e.entity_id); else chosen.delete(e.entity_id);
+          count();
+        } }),
+        h("span", null, e.name, h("small", { title: e.entity_id }, e.ha_area ? ` \u00b7 ${e.ha_area}` : "")))));
+      if (shown.length > 400) box.append(h("p", { class: "hint" }, `Showing 400 of ${shown.length}. Search to narrow it down.`));
+      if (!shown.length) box.append(h("p", { class: "hint" }, "No devices match."));
+    };
+    search.oninput = draw;
+    search.onkeydown = (ev) => { if (ev.key === "Enter") ev.preventDefault(); };
+    only.onchange = draw;
+    count();
+    draw();
+    dialog.onclose = () => {
+      if (dialog.returnValue !== "save") return;
+      const name = form.elements["name"].value;
+      run(async () => {
+        const id = a ? a.id : (await api("POST", "api/areas", { name })).id;
+        await api("PUT", `api/areas/${id}`, { name, ha_areas: [...chosenHa], entities: [...chosen] });
+        await load();
+        await loadEntities(); // device headings and area membership changed
+      }, a ? "Area saved." : `${name} added.`);
+    };
+    dialog.showModal();
+  }
+
+  $("#add-area").addEventListener("click", () => editArea(null));
 
   // ---------------------------------------------------------------- settings
 

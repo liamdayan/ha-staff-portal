@@ -49,6 +49,21 @@ brand color, and upload a logo (a square PNG works best). Phones pick up the nam
 right away. iOS caches the home-screen icon itself, so a new logo shows up on phones that are
 set up after the change, or after re-pairing.
 
+## Areas (optional)
+
+Areas let you group devices the way your staff think about the property, such as
+"Soaking Area" or "Mechanical", and give a role access to a whole area at once.
+
+In **Settings → Areas**, click **Add area**, name it, and choose what's in it:
+
+- **Whole Home Assistant areas.** Everything in them is included, and devices you add to
+  that Home Assistant area later join automatically.
+- **Individual devices.** Search and tick any device, even one from a different area.
+
+A device can be in more than one area. The staff app lists devices under these headings in
+the order shown in Settings (use the arrows to reorder). A device shows under its first area;
+devices in no area show under their Home Assistant area.
+
 ## 4. Create roles
 
 In **Roles**, create a role such as *Maintenance*. Every device in Home Assistant is listed,
@@ -60,7 +75,14 @@ grouped by area. For each one choose:
 | **View** | Status only (for example, "Locked," "Dry," "61.4 °F"). |
 | **Control** | Status plus the controls for it. |
 
-Sensors can only be set to View. Click **Save role**. Phones with that role update within a few
+Sensors can only be set to View.
+
+If you've set up areas, the role also has an **Areas** section at the top. Setting an area to
+View or Control covers every device in it, including devices added to the area later. Each
+device gets whichever is higher: its area's setting or its own setting, and the device list
+shows when access comes from an area ("Control via Soaking Area").
+
+Click **Save role**. Phones with that role update within a few
 seconds.
 
 What **Control** allows depends on the device type:

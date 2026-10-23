@@ -88,7 +88,77 @@ def clean_name(value, limit: int = 60) -> str:
     return str(value or "").strip()[:limit]
 
 
-def entity_view(entity_id: str, state: dict | None, areas: dict, level: str | None = None) -> dict:
+class AreaLayout:
+    """Which Staff Access areas each device is in, and which heading it's shown under.
+
+    A device is in an area if it was added to it directly or sits in one of the Home Assistant
+    areas the area includes. It's shown under its first area (in the order set in Settings),
+    otherwise under its Home Assistant area, otherwise under "Other".
+    """
+
+    def __init__(self, areas: list[dict], entity_ha_area: dict[str, str], ha_names: dict[str, str]):
+        self.areas = areas
+        self.entity_ha_area = entity_ha_area
+        self.ha_names = ha_names
+        order = {a["id"]: i for i, a in enumerate(areas)}
+        by_ha_area: dict[str, list[int]] = {}
+        self.membership: dict[str, list[int]] = {}
+        for area in areas:
+            for eid in area["entities"]:
+                self.membership.setdefault(eid, []).append(area["id"])
+            for ha_area in area["ha_areas"]:
+                by_ha_area.setdefault(ha_area, []).append(area["id"])
+        for eid, ha_area in entity_ha_area.items():
+            for area_id in by_ha_area.get(ha_area, []):
+                if area_id not in self.membership.setdefault(eid, []):
+                    self.membership[eid].append(area_id)
+        for ids in self.membership.values():
+            ids.sort(key=order.get)
+        self.names = {a["id"]: a["name"] for a in areas}
+        self.order = order
+
+    def ha_area_name(self, entity_id: str) -> str:
+        ha_area = self.entity_ha_area.get(entity_id)
+        return self.ha_names.get(ha_area, ha_area or "")
+
+    def group(self, entity_id: str) -> tuple[int, str]:
+        """(sort rank, heading) for the section a device is listed under."""
+        ids = self.membership.get(entity_id)
+        if ids:
+            return self.order[ids[0]], self.names[ids[0]]
+        ha_name = self.ha_area_name(entity_id)
+        if ha_name:
+            return len(self.areas), ha_name
+        return len(self.areas) + 1, ""
+
+
+async def area_layout(max_age: float = 300.0) -> AreaLayout:
+    entity_ha_area, ha_names = await ha.area_info(max_age)
+    return AreaLayout(db.areas(), entity_ha_area, ha_names)
+
+
+LEVEL_RANK = {"view": 1, "control": 2}
+
+
+def role_access(role_id: int | None, layout: AreaLayout) -> dict[str, str]:
+    """Effective {entity_id: 'view'|'control'} for a role: the higher of the device's own
+    setting and the settings of every area it's in."""
+    if not role_id:
+        return {}
+    access = dict(db.role_entities(role_id))
+    area_levels = db.role_areas(role_id)
+    if area_levels:
+        for eid, area_ids in layout.membership.items():
+            best = max((area_levels[a] for a in area_ids if a in area_levels),
+                       key=LEVEL_RANK.get, default=None)
+            if best and LEVEL_RANK[best] > LEVEL_RANK.get(access.get(eid), 0):
+                access[eid] = best
+    return {eid: "control" if lvl == "control" and controllable(eid) else "view"
+            for eid, lvl in access.items() if offered(eid)}
+
+
+def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
+                level: str | None = None) -> dict:
     attrs = (state or {}).get("attributes", {})
     keep = (
         "unit_of_measurement", "device_class", "brightness", "current_temperature", "temperature",
@@ -99,7 +169,10 @@ def entity_view(entity_id: str, state: dict | None, areas: dict, level: str | No
         "entity_id": entity_id,
         "domain": domain_of(entity_id),
         "name": attrs.get("friendly_name") or entity_id,
-        "area": areas.get(entity_id, ""),
+        "area": layout.group(entity_id)[1],
+        "group_rank": layout.group(entity_id)[0],
+        "ha_area": layout.ha_area_name(entity_id),
+        "area_ids": layout.membership.get(entity_id, []),
         "state": (state or {}).get("state", "unavailable"),
         "attributes": {k: attrs[k] for k in keep if k in attrs},
         "last_changed": (state or {}).get("last_changed"),
@@ -338,16 +411,15 @@ async def api_signout(request: web.Request):
 
 async def api_entities(request: web.Request):
     device, member = authenticate(request)
-    allowed = db.role_entities(device["role_id"]) if device["role_id"] else {}
-    if not allowed:
-        return web.json_response({"entities": [], "staff_name": member and member["name"]})
     try:
-        states, areas = await ha.states(), await ha.areas()
+        layout = await area_layout()
+        allowed = role_access(device["role_id"], layout)
+        states = await ha.states() if allowed else {}
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
         return bad_request("Can't reach the system right now.", 503)
-    entities = [entity_view(eid, states.get(eid), areas, lvl) for eid, lvl in allowed.items()]
-    entities.sort(key=lambda e: (e["area"] or "~", e["name"].lower()))
+    entities = [entity_view(eid, states.get(eid), layout, lvl) for eid, lvl in allowed.items()]
+    entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
     return web.json_response({"entities": entities, "staff_name": member and member["name"]})
 
 
@@ -359,7 +431,11 @@ async def api_action(request: web.Request):
     params = data.get("params") or {}
     ip = client_ip(request)
     actor = actor_name(device, member)
-    allowed = db.role_entities(device["role_id"]) if device["role_id"] else {}
+    try:
+        allowed = role_access(device["role_id"], await area_layout())
+    except HomeAssistantError as err:
+        log.warning("Home Assistant unavailable: %s", err)
+        return bad_request("Can't reach the system right now.", 503)
     if allowed.get(entity_id) != "control" or not isinstance(params, dict):
         db.log(actor, f"Blocked: {action}", role=device["role_name"],
                entity_id=entity_id, ok=False, ip=ip)
@@ -477,18 +553,21 @@ async def admin_state(request: web.Request):
         "roles": db.roles(),
         "devices": device_payload(),
         "staff": db.staff_list(),
+        "areas": db.areas(),
         "has_logo": branding.has_logo(),
     })
 
 
 async def admin_entities(request: web.Request):
     try:
-        states, areas = await ha.states(max_age=0), await ha.areas(max_age=0)
+        states, layout = await ha.states(max_age=0), await area_layout(max_age=0)
     except HomeAssistantError as err:
         return bad_request(f"Can't reach Home Assistant: {err}", 503)
-    entities = [entity_view(eid, st, areas) for eid, st in states.items() if offered(eid)]
-    entities.sort(key=lambda e: (e["area"] or "~", e["domain"], e["name"].lower()))
-    return web.json_response({"entities": entities})
+    entities = [entity_view(eid, st, layout) for eid, st in states.items() if offered(eid)]
+    entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["domain"], e["name"].lower()))
+    ha_areas = sorted(({"id": aid, "name": name} for aid, name in layout.ha_names.items()),
+                      key=lambda a: a["name"].lower())
+    return web.json_response({"entities": entities, "ha_areas": ha_areas})
 
 
 async def admin_create_role(request: web.Request):
@@ -520,12 +599,64 @@ async def admin_update_role(request: web.Request):
         if not isinstance(eid, str) or not offered(eid) or lvl not in ("view", "control"):
             continue
         cleaned[eid] = "control" if lvl == "control" and controllable(eid) else "view"
+    areas = None
+    if isinstance(data.get("areas"), dict):
+        known = {a["id"] for a in db.areas()}
+        areas = {int(aid): lvl for aid, lvl in data["areas"].items()
+                 if str(aid).isdigit() and int(aid) in known and lvl in ("view", "control")}
     try:
-        db.update_role(role_id, name, cleaned)
-    except Exception:
+        db.update_role(role_id, name, cleaned, areas)
+    except sqlite3.IntegrityError:
         return bad_request("A role with that name already exists.")
-    db.log(admin_name(request), f"Updated role {name}", role=name,
-           detail=f"{len(cleaned)} devices")
+    detail = f"{len(cleaned)} devices" + (f", {len(areas)} areas" if areas else "")
+    db.log(admin_name(request), f"Updated role {name}", role=name, detail=detail)
+    return web.json_response({"ok": True})
+
+
+async def admin_create_area(request: web.Request):
+    data = await read_json(request)
+    name = clean_name(data.get("name"), 40)
+    if not name:
+        return bad_request("Give the area a name.")
+    try:
+        area_id = db.create_area(name)
+    except sqlite3.IntegrityError:
+        return bad_request("An area with that name already exists.")
+    db.log(admin_name(request), f"Created area {name}")
+    return web.json_response({"id": area_id})
+
+
+async def admin_update_area(request: web.Request):
+    area = db.area(int(request.match_info["id"]))
+    if not area:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    name = clean_name(data.get("name"), 40) or area["name"]
+    entities = [e for e in data.get("entities") or [] if isinstance(e, str) and offered(e)]
+    ha_areas = [a for a in data.get("ha_areas") or [] if isinstance(a, str) and a]
+    try:
+        db.update_area(area["id"], name, entities, ha_areas)
+    except sqlite3.IntegrityError:
+        return bad_request("An area with that name already exists.")
+    db.log(admin_name(request), f"Updated area {name}",
+           detail=f"{len(ha_areas)} Home Assistant areas, {len(entities)} devices")
+    return web.json_response({"ok": True})
+
+
+async def admin_reorder_areas(request: web.Request):
+    data = await read_json(request)
+    ids = [int(i) for i in data.get("order") or []]
+    known = {a["id"] for a in db.areas()}
+    db.reorder_areas([i for i in ids if i in known])
+    return web.json_response({"ok": True})
+
+
+async def admin_delete_area(request: web.Request):
+    area = db.area(int(request.match_info["id"]))
+    if not area:
+        raise web.HTTPNotFound()
+    db.delete_area(area["id"])
+    db.log(admin_name(request), f"Deleted area {area['name']}")
     return web.json_response({"ok": True})
 
 
@@ -842,6 +973,10 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)
     app.router.add_delete(r"/api/roles/{id:\d+}", admin_delete_role)
+    app.router.add_post("/api/areas", admin_create_area)
+    app.router.add_put("/api/areas/order", admin_reorder_areas)
+    app.router.add_put(r"/api/areas/{id:\d+}", admin_update_area)
+    app.router.add_delete(r"/api/areas/{id:\d+}", admin_delete_area)
     app.router.add_post("/api/devices", admin_create_device)
     app.router.add_patch(r"/api/devices/{id:\d+}", admin_update_device)
     app.router.add_delete(r"/api/devices/{id:\d+}", admin_delete_device)

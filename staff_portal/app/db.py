@@ -64,6 +64,30 @@ CREATE TABLE IF NOT EXISTS staff_devices (
     device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     PRIMARY KEY (staff_id, device_id)
 );
+-- Areas are groupings defined in Staff Access (such as "Soaking Area"). An area holds
+-- individual devices and/or whole Home Assistant areas, which stay in sync automatically.
+CREATE TABLE IF NOT EXISTS areas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS area_entities (
+    area_id INTEGER NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY (area_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS area_ha_areas (
+    area_id INTEGER NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+    ha_area_id TEXT NOT NULL,
+    PRIMARY KEY (area_id, ha_area_id)
+);
+CREATE TABLE IF NOT EXISTS role_areas (
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    area_id INTEGER NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('view', 'control')),
+    PRIMARY KEY (role_id, area_id)
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -155,6 +179,7 @@ class Database:
         roles = [dict(r) for r in self.conn.execute("SELECT * FROM roles ORDER BY name")]
         for role in roles:
             role["entities"] = self.role_entities(role["id"])
+            role["areas"] = self.role_areas(role["id"])
             role["device_count"] = self.conn.execute(
                 "SELECT COUNT(*) FROM devices WHERE role_id = ? AND status != 'revoked'",
                 (role["id"],),
@@ -167,7 +192,12 @@ class Database:
             return None
         role = dict(row)
         role["entities"] = self.role_entities(role_id)
+        role["areas"] = self.role_areas(role_id)
         return role
+
+    def role_areas(self, role_id: int) -> dict[int, str]:
+        rows = self.conn.execute("SELECT area_id, level FROM role_areas WHERE role_id = ?", (role_id,))
+        return {r["area_id"]: r["level"] for r in rows}
 
     def role_entities(self, role_id: int) -> dict[str, str]:
         rows = self.conn.execute(
@@ -182,13 +212,65 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
-    def update_role(self, role_id: int, name: str, entities: dict[str, str]) -> None:
+    def update_role(self, role_id: int, name: str, entities: dict[str, str],
+                    areas: dict[int, str] | None = None) -> None:
         self.conn.execute("UPDATE roles SET name = ? WHERE id = ?", (name, role_id))
         self.conn.execute("DELETE FROM role_entities WHERE role_id = ?", (role_id,))
         self.conn.executemany(
             "INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
             [(role_id, eid, lvl) for eid, lvl in entities.items() if lvl in ("view", "control")],
         )
+        if areas is not None:
+            self.conn.execute("DELETE FROM role_areas WHERE role_id = ?", (role_id,))
+            self.conn.executemany(
+                "INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
+                [(role_id, aid, lvl) for aid, lvl in areas.items() if lvl in ("view", "control")],
+            )
+        self.conn.commit()
+
+    # Areas (groupings defined in Staff Access)
+
+    def areas(self) -> list[dict]:
+        areas = [dict(r) for r in self.conn.execute(
+            "SELECT id, name, sort_order FROM areas ORDER BY sort_order, id")]
+        for area in areas:
+            area["entities"] = [r[0] for r in self.conn.execute(
+                "SELECT entity_id FROM area_entities WHERE area_id = ? ORDER BY entity_id",
+                (area["id"],))]
+            area["ha_areas"] = [r[0] for r in self.conn.execute(
+                "SELECT ha_area_id FROM area_ha_areas WHERE area_id = ? ORDER BY ha_area_id",
+                (area["id"],))]
+        return areas
+
+    def area(self, area_id: int) -> dict | None:
+        return next((a for a in self.areas() if a["id"] == area_id), None)
+
+    def create_area(self, name: str) -> int:
+        next_order = self.conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM areas").fetchone()[0]
+        cur = self.conn.execute(
+            "INSERT INTO areas (name, sort_order, created_at) VALUES (?, ?, ?)",
+            (name, next_order, time.time()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_area(self, area_id: int, name: str, entities: list[str], ha_areas: list[str]) -> None:
+        self.conn.execute("UPDATE areas SET name = ? WHERE id = ?", (name, area_id))
+        self.conn.execute("DELETE FROM area_entities WHERE area_id = ?", (area_id,))
+        self.conn.executemany("INSERT OR IGNORE INTO area_entities (area_id, entity_id) VALUES (?, ?)",
+                              [(area_id, e) for e in entities])
+        self.conn.execute("DELETE FROM area_ha_areas WHERE area_id = ?", (area_id,))
+        self.conn.executemany("INSERT OR IGNORE INTO area_ha_areas (area_id, ha_area_id) VALUES (?, ?)",
+                              [(area_id, a) for a in ha_areas])
+        self.conn.commit()
+
+    def reorder_areas(self, area_ids: list[int]) -> None:
+        self.conn.executemany("UPDATE areas SET sort_order = ? WHERE id = ?",
+                              [(i, aid) for i, aid in enumerate(area_ids, 1)])
+        self.conn.commit()
+
+    def delete_area(self, area_id: int) -> None:
+        self.conn.execute("DELETE FROM areas WHERE id = ?", (area_id,))
         self.conn.commit()
 
     def delete_role(self, role_id: int) -> None:
