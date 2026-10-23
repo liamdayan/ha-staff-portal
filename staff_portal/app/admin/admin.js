@@ -1814,6 +1814,15 @@
     }
     const result = await api("POST", `api/import/${kind}`, { file, mode });
     await load();
+    // A role open in the editor that the import just replaced must show the imported access,
+    // or saving it would quietly put the old access back.
+    let reloaded = false;
+    if (kind === "roles" && editing && mode === "replace" &&
+        clashes.some((n) => String(n).trim().toLowerCase() === editing.name.trim().toLowerCase())) {
+      editing.dirty = false;
+      if (state.roles.some((r) => r.id === editing.id)) openRole(editing.id);
+      reloaded = true;
+    }
     const notes = [`${result.added} added`, result.replaced && `${result.replaced} replaced`,
       result.skipped && `${result.skipped} skipped`].filter(Boolean).join(", ");
     const extra = [
@@ -1821,7 +1830,8 @@
       result.missing_phones?.length && `No phone here called ${result.missing_phones.join(", ")}.`,
       result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
     ].filter(Boolean).join(" ");
-    toast(`Imported ${word[1]}: ${notes}. ${extra}`.trim());
+    toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? "The role open in the editor was reloaded." : ""]
+      .filter(Boolean).join(" "));
     return false;
   }
 

@@ -92,8 +92,9 @@ class HomeAssistant:
                 if resp.content_type == "application/json":
                     return await resp.json()
                 return await resp.text()
-        except aiohttp.ClientError as err:
-            raise HomeAssistantError(str(err)) from err
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+            # Timeouts included: a slow Home Assistant is "can't reach it", never a crash.
+            raise HomeAssistantError(str(err) or type(err).__name__) from err
 
     async def states(self, max_age: float = 2.0) -> dict[str, dict]:
         if time.monotonic() - self._states_at > max_age:
@@ -216,8 +217,8 @@ class HomeAssistant:
                     if resp.status >= 400:
                         raise HomeAssistantError(f"{resp.status}: {body}")
                     return body
-            except aiohttp.ClientError as err:
-                last_error = err
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                last_error = err if str(err) else type(err).__name__
         raise HomeAssistantError(f"Can't reach Home Assistant directly: {last_error}")
 
     async def link_user(self, username: str, password: str) -> str:

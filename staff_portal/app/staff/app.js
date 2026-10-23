@@ -109,8 +109,23 @@
     return { status: res.status, data };
   }
 
+  // Leaving the dashboard (sign-out, lock, an error screen): forget what was on it, so nothing
+  // (a late poll, Back, a window resize) can draw the previous person's screen again, and
+  // reset Rearrange so the next sign-in starts clean.
+  let screenEpoch = 0;
+  function leaveDashboard() {
+    screenEpoch += 1;
+    lastData = null;
+    render.shape = null;
+    view.detail = null;
+    rearranging = false;
+    activeDrag = false;
+    stopPolling();
+  }
+
   function message(title, body, retry) {
     live = false;
+    leaveDashboard();
     const node = fromTemplate("tpl-message");
     node.querySelector("[data-title]").textContent = title;
     node.querySelector("[data-body]").textContent = body;
@@ -230,9 +245,11 @@
   }
 
   function askForPin() {
+    leaveDashboard();
     relock(); // whoever signs in next starts with controls locked
-    if (me?.shared) showWho();
-    else showPin(null);
+    // showWho asks the server how this device signs in now (it may have just been switched
+    // to shared), then shows the name list or the device PIN pad.
+    showWho();
   }
 
   // Shared phone: pick your name, then enter your own PIN.
@@ -293,7 +310,8 @@
         return boot();
       }
       if (res.status === 423 || res.status === 401 || res.status === 0) return handleAuthError(res);
-      if (res.status === 404 && member) return showWho();
+      // 404: the device was switched to shared sign-in (or the person was removed): ask again.
+      if (res.status === 404) return showWho();
       pin = "";
       draw();
       error.textContent = res.data.error || "Wrong PIN.";
@@ -364,7 +382,11 @@
   async function refresh() {
     if (rearranging) return; // don't replace the Rearrange screen
     stopPolling();
+    const epoch = screenEpoch;
     const res = await api("GET", "/api/entities");
+    // While this was in flight someone may have opened Rearrange, signed out or locked:
+    // then this answer is for a screen that's gone.
+    if (epoch !== screenEpoch || rearranging) return;
     if (res.status !== 200) {
       if (res.status === 503 || res.status === 0) {
         if (!live) {
@@ -726,7 +748,7 @@
 
   // Redraw from the last data without waiting for the next poll, and keep polling going.
   function rerender() {
-    if (!lastData) return;
+    if (!lastData || rearranging) return;
     render(lastData);
     if (!pollTimer && document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
   }

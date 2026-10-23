@@ -1,11 +1,11 @@
 name: Staff Portal
-version: "0.6.12"
+version: "0.6.13"
 slug: staff_portal
 description: Branded, locked-down staff app for phones and front desk computers, with per-role access to your devices.
 arch:
   - aarch64
   - amd64
-init: false
+init: true
 startup: application
 boot: auto
 homeassistant_api: true

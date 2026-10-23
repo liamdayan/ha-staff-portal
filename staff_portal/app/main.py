@@ -519,8 +519,11 @@ async def api_me(request: web.Request):
 
 
 async def api_unlock(request: web.Request):
-    device, _ = authenticate(request, need_unlock=False)
+    # Read the body first. Everything after this line is synchronous, so each attempt sees the
+    # latest wrong-PIN count and lock state; reading the device before awaiting the body let
+    # thousands of held-open requests share one stale count and never trigger the lock.
     data = await read_json(request)
+    device, _ = authenticate(request, need_unlock=False)
     pin = str(data.get("pin", ""))
     ip = client_ip(request)
     max_attempts = db.setting_int("max_pin_attempts")
@@ -695,12 +698,26 @@ async def api_action(request: web.Request):
     if not as_user and db.settings().get("ha_logbook") == "1":
         name = (states.get(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
         who = f"{member['name']} ({device['name']})" if member else device["name"]
-        try:
-            await ha.logbook(name, f"{describe_action(entity_id, action, call)} by {who} "
-                                   "via Staff Portal", entity_id)
-        except HomeAssistantError as err:
-            log.warning("Couldn't write logbook entry: %s", err)
+        # The command already worked: write the logbook entry in the background so a slow or
+        # failing logbook can never turn that into an error (and a second press) on the phone.
+        background(ha.logbook(name, f"{describe_action(entity_id, action, call)} by {who} "
+                                    "via Staff Portal", entity_id), "write logbook entry")
     return web.json_response({"ok": True})
+
+
+background_tasks: set[asyncio.Task] = set()
+
+
+def background(coro, what: str) -> None:
+    """Run a coroutine without waiting for it; failures are logged, never raised."""
+    async def run():
+        try:
+            await coro
+        except Exception as err:  # noqa: BLE001 - nothing may escape a background task
+            log.warning("Couldn't %s: %s", what, err)
+    task = asyncio.create_task(run())
+    background_tasks.add(task)  # keep a reference until it finishes
+    task.add_done_callback(background_tasks.discard)
 
 
 async def send_command(device: dict, member: dict | None, domain: str, service: str,
@@ -863,6 +880,8 @@ async def admin_create_role(request: web.Request):
     name = clean_name(data.get("name"))
     if not name:
         return bad_request("Give the role a name.")
+    if db.name_taken("roles", name):
+        return bad_request("A role with that name already exists.")
     try:
         role_id = db.create_role(name)
     except Exception:
@@ -879,6 +898,8 @@ async def admin_duplicate_role(request: web.Request):
     name = clean_name(data.get("name"))
     if not name:
         return bad_request("Give the new role a name.")
+    if db.name_taken("roles", name):
+        return bad_request("A role with that name already exists.")
     try:
         role_id = db.duplicate_role(role["id"], name)
     except sqlite3.IntegrityError:
@@ -908,6 +929,8 @@ async def admin_update_role(request: web.Request):
         known = {a["id"] for a in db.areas()}
         areas = {int(aid): lvl for aid, lvl in data["areas"].items()
                  if str(aid).isdigit() and int(aid) in known and lvl in ("view", "control")}
+    if db.name_taken("roles", name, role_id):
+        return bad_request("A role with that name already exists.")
     try:
         db.update_role(role_id, name, cleaned, areas)
     except sqlite3.IntegrityError:
@@ -953,6 +976,8 @@ async def admin_create_area(request: web.Request):
     name = clean_name(data.get("name"), 40)
     if not name:
         return bad_request("Give the area a name.")
+    if db.name_taken("areas", name):
+        return bad_request("An area with that name already exists.")
     try:
         area_id = db.create_area(name)
     except sqlite3.IntegrityError:
@@ -969,6 +994,8 @@ async def admin_update_area(request: web.Request):
     name = clean_name(data.get("name"), 40) or area["name"]
     entities = [e for e in data.get("entities") or [] if isinstance(e, str) and offered(e)]
     ha_areas = [a for a in data.get("ha_areas") or [] if isinstance(a, str) and a]
+    if db.name_taken("areas", name, area["id"]):
+        return bad_request("An area with that name already exists.")
     try:
         db.update_area(area["id"], name, entities, ha_areas)
     except sqlite3.IntegrityError:
@@ -1190,6 +1217,8 @@ async def admin_create_staff(request: web.Request):
     name = clean_name(data.get("name"), 40)
     if not name:
         return bad_request("Enter the staff member's name.")
+    if db.name_taken("staff", name):
+        return bad_request("Someone with that name already exists.")
     try:
         staff_id = db.create_staff(name, require_pin(data.get("pin")))
     except sqlite3.IntegrityError:
@@ -1214,6 +1243,8 @@ async def admin_update_staff(request: web.Request):
             fields["status"] = "disabled"
         elif member["status"] == "disabled":
             fields["status"] = "active"
+    if "name" in fields and db.name_taken("staff", fields["name"], member["id"]):
+        return bad_request("Someone with that name already exists.")
     try:
         db.update_staff(member["id"], **fields)
     except sqlite3.IntegrityError:
@@ -1383,7 +1414,13 @@ async def admin_restore(request: web.Request):
         return bad_request(str(err))
     # Keep what's being replaced, so a restore can be undone by restoring this copy.
     safety = transfer.save_safety_backup(DATA_DIR, transfer.make_backup(db, branding, VERSION))
-    db.replace_everything(snap)
+    dropped_links = db.replace_everything(snap)
+    for token in dropped_links:
+        # A link that didn't survive the restore would otherwise stay valid in Home Assistant.
+        try:
+            await ha.unlink_user(token)
+        except HomeAssistantError as err:
+            log.warning("Couldn't revoke a Home Assistant sign-in after restore: %s", err)
     for device in snap["devices"]:
         if device["status"] == "pending":
             db.new_enroll_code(device["id"])  # setup codes never travel in backups
@@ -1392,9 +1429,10 @@ async def admin_restore(request: web.Request):
     else:
         branding.remove_logo()
     pin_sessions.clear()  # everyone with a PIN signs in again
-    made = time.strftime("%b %d, %Y", time.localtime(data.get("exported_at") or time.time()))
+    made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))
     db.log(admin_name(request), "Restored a backup",
-           detail=f"Backup from {made}. What it replaced was saved as {safety}.")
+           detail=f"Backup from {made}. What it replaced was saved as {safety}." +
+           (f" Revoked {len(dropped_links)} Home Assistant sign-in(s) no longer linked." if dropped_links else ""))
     return web.json_response({"ok": True, "safety_backup": safety})
 
 

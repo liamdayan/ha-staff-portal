@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.13
+
+Fixes from a bug and security review.
+
+**Security**
+
+- **Fixed:** the wrong-PIN limit could be dodged by sending many PIN guesses at the same instant;
+  they counted as one wrong attempt, so the phone never locked. On shared devices this also
+  dodged the limit on guessing across names. Every guess now counts.
+- **Fixed:** after someone signed out of a shared computer, or a phone locked, resizing the
+  window or pressing Back could briefly show the previous person's dashboard behind the
+  sign-in screen.
+- **Fixed:** restoring a backup that no longer included a phone or person linked to a Home
+  Assistant user left that sign-in valid in Home Assistant. It's now revoked during the restore.
+
+**Phones and computers**
+
+- **Fixed:** signing out or locking from the Rearrange screen left the next person stuck on a
+  loading spinner after entering their PIN.
+- **Fixed:** an update arriving just as Rearrange opened could replace it with the dashboard,
+  after which readings stopped updating and the lock button disappeared.
+- **Fixed:** switching a device to shared sign-in while it was open showed a PIN pad that never
+  worked; it now shows the list of names.
+- **Fixed:** on computers, **Sign out** and the page list couldn't be clicked while a card's side
+  panel was open.
+- When Home Assistant is slow, a command that worked no longer shows an error (which led to it
+  being pressed twice); the logbook entry is written in the background.
+
+**Dashboard and backups**
+
+- **Fixed:** having names that differ only in capitals (such as "Bob" and "bob") made every
+  backup impossible to restore. Those backups now restore, and new names that differ from an
+  existing one only in capitals are refused for roles, areas and staff.
+- **Fixed:** importing staff or roles with long names using **Keep both** could fail partway
+  and leave a half-finished import. Names are now shortened correctly, and an import is
+  all-or-nothing.
+- **Fixed:** a backup with an unusual date in it restored, but then showed an error and wasn't
+  recorded in the activity log.
+- **Fixed:** after importing roles with **Replace them**, the role open in the editor kept
+  showing the old access, and saving it put that back. It now reloads.
+
+**Add-on**
+
+- Timeouts talking to Home Assistant are handled as "can't reach the system" instead of
+  causing server errors.
+- The add-on stops promptly when restarted or updated, instead of waiting about 10 seconds and
+  being force-stopped.
+
 ## 0.6.12
 
 - Shared computers say "Click your name, then type your PIN."

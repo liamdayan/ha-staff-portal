@@ -731,7 +731,7 @@ body.desk-shell .screen { max-width: none; margin: 0; padding: 0; }
   padding: 18px 12px 14px;
   background: var(--side-bg, var(--card));
   border-right: 1px solid var(--line);
-  z-index: 6;
+  z-index: 32; /* above a card's side panel backdrop, so Sign out and the pages stay usable */
 }
 .desk-brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px 20px; min-width: 0; }
 .desk-brand img, .desk-mark {

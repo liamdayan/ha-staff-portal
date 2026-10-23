@@ -214,6 +214,16 @@ class Database:
         except ValueError:
             return int(DEFAULT_SETTINGS[key])
 
+    def name_taken(self, table: str, name: str, except_id: int | None = None) -> bool:
+        """Whether another role, area or staff member already has this name, ignoring capitals
+        ("Bob" and "bob" would be confusing on a phone, and import and restore match names
+        that way)."""
+        assert table in ("roles", "areas", "staff")
+        row = self.conn.execute(
+            f"SELECT 1 FROM {table} WHERE name = ? COLLATE NOCASE AND id != ? LIMIT 1",
+            (name, except_id if except_id is not None else -1)).fetchone()
+        return row is not None
+
     # Roles
 
     def roles(self) -> list[dict]:
@@ -479,10 +489,11 @@ class Database:
 
     # Restoring a backup
 
-    def replace_everything(self, snap: dict) -> None:
+    def replace_everything(self, snap: dict) -> list[str]:
         """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
         of it lands or none of it does. The activity log is kept. Home Assistant links are
-        kept for phones and staff that still exist with the same ID and name."""
+        kept for phones and staff that still exist with the same ID and name. Returns the Home
+        Assistant refresh tokens of links that didn't carry over, so the caller can revoke them."""
         c = self.conn
         links = {
             table: {r["id"]: r for r in c.execute(
@@ -517,10 +528,12 @@ class Database:
                   d["kind"]) for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
+            kept = set()
             for table, rows in (("devices", snap["devices"]), ("staff", snap["staff"])):
                 for row in rows:
                     old = links[table].get(row["id"])
                     if old and old["name"] == row["name"] and old["ha_refresh_token"]:
+                        kept.add(old["ha_refresh_token"])
                         c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,
                                       ha_link_error = ? WHERE id = ?""",
                                   (old["ha_user"], old["ha_refresh_token"], old["ha_link_error"], row["id"]))
@@ -533,6 +546,8 @@ class Database:
         except Exception:
             c.rollback()
             raise
+        return [r["ha_refresh_token"] for table in links.values() for r in table.values()
+                if r["ha_refresh_token"] and r["ha_refresh_token"] not in kept]
 
     # Personal arrangements set on the phone
 

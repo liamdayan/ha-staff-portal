@@ -72,20 +72,51 @@ def _int(value, what: str) -> int:
 
 
 def _time(value, default: float | None = None) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
+    # Positive and before the year 5000, so it can always be shown as a date.
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 1e11
+    return float(value) if ok else default
 
 
 def _level(entity_id: str, level: str) -> str:
     return "control" if level == "control" and controllable(entity_id) else "view"
 
 
-def _unique(name: str, taken: set[str]) -> str:
-    """name (imported), name (imported 2)... whichever isn't taken (case-insensitively)."""
-    base = f"{name[:46]} (imported"
-    candidate, n = f"{base})", 2
-    while candidate.lower() in taken:
-        candidate, n = f"{base} {n})", n + 1
-    return candidate
+def _unique(name: str, taken: set[str], limit: int) -> str:
+    """name (imported), name (imported 2)... whichever isn't taken (case-insensitively), cut so
+    the whole thing, suffix included, fits in `limit` characters."""
+    n = 1
+    while True:
+        suffix = " (imported)" if n == 1 else f" (imported {n})"
+        candidate = name[:limit - len(suffix)].rstrip() + suffix
+        if candidate.lower() not in taken:
+            return candidate
+        n += 1
+
+
+def _all_or_nothing(db, work) -> dict:
+    """Run an import in one transaction: either every row lands or none does."""
+    try:
+        result = work()
+        db.conn.commit()
+        return result
+    except Exception:
+        db.conn.rollback()
+        raise
+
+
+def _write_role(db, role_id, name: str, entities: dict, areas: dict) -> int:
+    """Create (role_id None) or overwrite a role's access, without committing."""
+    c = db.conn
+    if role_id is None:
+        role_id = c.execute("INSERT INTO roles (name, created_at) VALUES (?, ?)",
+                            (name, time.time())).lastrowid
+    c.execute("DELETE FROM role_entities WHERE role_id = ?", (role_id,))
+    c.execute("DELETE FROM role_areas WHERE role_id = ?", (role_id,))
+    c.executemany("INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
+                  [(role_id, eid, lvl) for eid, lvl in entities.items()])
+    c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
+                  [(role_id, aid, lvl) for aid, lvl in areas.items()])
+    return role_id
 
 
 # ---------------------------------------------------------------- exports
@@ -123,10 +154,15 @@ def import_roles(db, data, mode: str) -> dict:
     check_file(data, "roles")
     if mode not in IMPORT_MODES:
         raise ValueError("Choose what to do with roles that already exist.")
+    rows = _rows(data, "roles")
+    return _all_or_nothing(db, lambda: _import_roles(db, rows, mode))
+
+
+def _import_roles(db, rows: list, mode: str) -> dict:
     area_ids = {a["name"].lower(): a["id"] for a in db.areas()}
     existing = {r["name"].lower(): r for r in db.roles()}
     result = {"added": 0, "replaced": 0, "skipped": 0, "missing_areas": set()}
-    for raw in _rows(data, "roles"):
+    for raw in rows:
         name = _name(raw.get("name"))
         entities_in = raw.get("entities") if isinstance(raw.get("entities"), dict) else {}
         areas_in = raw.get("areas") if isinstance(raw.get("areas"), dict) else {}
@@ -146,13 +182,12 @@ def import_roles(db, data, mode: str) -> dict:
             result["skipped"] += 1
             continue
         if match and mode == "replace":
-            db.update_role(match["id"], match["name"], entities, areas)
+            _write_role(db, match["id"], match["name"], entities, areas)
             result["replaced"] += 1
             continue
         if match:
-            name = _unique(name, set(existing))
-        role_id = db.create_role(name)
-        db.update_role(role_id, name, entities, areas)
+            name = _unique(name, set(existing), 60)
+        role_id = _write_role(db, None, name, entities, areas)
         existing[name.lower()] = {"id": role_id, "name": name}
         result["added"] += 1
     result["missing_areas"] = sorted(result["missing_areas"])
@@ -163,11 +198,16 @@ def import_staff(db, data, mode: str) -> dict:
     check_file(data, "staff")
     if mode not in IMPORT_MODES:
         raise ValueError("Choose what to do with staff members who already exist.")
+    rows = _rows(data, "staff")
+    return _all_or_nothing(db, lambda: _import_staff(db, rows, mode))
+
+
+def _import_staff(db, rows: list, mode: str) -> dict:
     phones = {r["name"].lower(): r["id"] for r in db.conn.execute(
         "SELECT id, name FROM devices WHERE status != 'revoked'")}
     existing = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM staff")}
     result = {"added": 0, "replaced": 0, "skipped": 0, "bad_pin": 0, "missing_phones": set()}
-    for raw in _rows(data, "staff"):
+    for raw in rows:
         name = _name(raw.get("name"), 40)
         pin_hash = str(raw.get("pin_hash") or "")
         if not name:
@@ -194,7 +234,7 @@ def import_staff(db, data, mode: str) -> dict:
             result["replaced"] += 1
         else:
             if staff_id:
-                name = _unique(name, set(existing))[:40]
+                name = _unique(name, set(existing), 40)
             staff_id = db.conn.execute(
                 "INSERT INTO staff (name, pin_hash, status, created_at) VALUES (?, ?, ?, ?)",
                 (name, pin_hash, status, time.time())).lastrowid
@@ -203,7 +243,6 @@ def import_staff(db, data, mode: str) -> dict:
         db.conn.executemany(
             "INSERT OR IGNORE INTO staff_devices (staff_id, device_id) VALUES (?, ?)",
             [(staff_id, d) for d in device_ids])
-        db.conn.commit()
     result["missing_phones"] = sorted(result["missing_phones"])
     return result
 
@@ -234,7 +273,7 @@ def make_backup(db, branding, version: str) -> dict:
 
 
 def backup_summary(data: dict) -> dict:
-    return {"exported_at": data.get("exported_at"), "app_version": data.get("app_version"),
+    return {"exported_at": _time(data.get("exported_at")), "app_version": str(data.get("app_version") or "")[:20],
             "property_name": (data.get("settings") or {}).get("property_name"),
             **{k: len(data.get(k) or []) for k in ("roles", "areas", "devices", "staff")},
             "pages": len((data.get("layout") or {}).get("pages") or [])}
@@ -262,9 +301,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
     areas, names = [], set()
     for row in _rows(data, "areas"):
         area_id, name = _int(row.get("id"), "area"), _name(row.get("name"), 40)
-        if not name or name.lower() in names or any(a["id"] == area_id for a in areas):
+        if not name or name in names or any(a["id"] == area_id for a in areas):
             raise ValueError("The backup has a damaged or repeated area.")
-        names.add(name.lower())
+        names.add(name)
         order = row.get("sort_order")
         areas.append({"id": area_id, "name": name,
                       "sort_order": order if isinstance(order, int) and not isinstance(order, bool) else 0,
@@ -279,9 +318,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
     roles, names = [], set()
     for row in _rows(data, "roles"):
         role_id, name = _int(row.get("id"), "role"), _name(row.get("name"))
-        if not name or name.lower() in names or any(r["id"] == role_id for r in roles):
+        if not name or name in names or any(r["id"] == role_id for r in roles):
             raise ValueError("The backup has a damaged or repeated role.")
-        names.add(name.lower())
+        names.add(name)
         roles.append({"id": role_id, "name": name, "created_at": _time(row.get("created_at"), time.time())})
     role_ids = {r["id"] for r in roles}
     role_entities = {(r["role_id"], r["entity_id"]): _level(r["entity_id"], r["level"])
@@ -296,11 +335,11 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
     for row in _rows(data, "staff"):
         staff_id, name = _int(row.get("id"), "staff member"), _name(row.get("name"), 40)
         pin_hash = str(row.get("pin_hash") or "")
-        if not name or name.lower() in names or any(m["id"] == staff_id for m in staff):
+        if not name or name in names or any(m["id"] == staff_id for m in staff):
             raise ValueError("The backup has a damaged or repeated staff member.")
         if not PIN_HASH_RE.match(pin_hash):
             raise ValueError(f"The backup has a damaged PIN for {name}.")
-        names.add(name.lower())
+        names.add(name)
         staff.append({"id": staff_id, "name": name, "pin_hash": pin_hash,
                       "status": row.get("status") if row.get("status") in STAFF_STATUSES else "active",
                       "created_at": _time(row.get("created_at"), time.time()),
@@ -357,7 +396,8 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
             "roles": roles, "role_entities": role_entities, "role_areas": role_areas,
             "staff": staff, "devices": devices, "staff_devices": sorted(staff_devices),
-            "phone_orders": phone_orders}
+            "phone_orders": phone_orders,
+            "exported_at": _time(data.get("exported_at"), time.time())}
 
 
 # ---------------------------------------------------------------- automatic safety copies
