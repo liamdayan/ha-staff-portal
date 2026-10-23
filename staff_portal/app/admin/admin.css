@@ -298,3 +298,9 @@ dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .pick-add .plus { color: var(--accent); font-weight: 700; font-size: 18px; }
 .chosen-device { border: 1px dashed var(--line); border-radius: 10px; padding: 8px 10px; }
 #item-dialog { max-height: calc(100vh - 40px); }
+
+/* In-page confirm / text dialog */
+dialog.ask { width: min(400px, calc(100vw - 32px)); }
+.ask-message { margin: 0 0 12px; font-size: 15px; white-space: pre-line; }
+dialog.ask input { width: 100%; }
+.btn.primary.danger-fill { background: var(--danger); border-color: var(--danger); }

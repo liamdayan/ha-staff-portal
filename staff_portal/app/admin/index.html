@@ -232,6 +232,17 @@
   </form>
 </dialog>
 
+<dialog id="ask-dialog" class="ask">
+  <form method="dialog">
+    <p class="ask-message" data-message></p>
+    <div data-input-wrap hidden><input data-input maxlength="60" autocomplete="off"></div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="qr-dialog">
   <h2>Set up <span data-name></span></h2>
   <ol class="qr-steps">

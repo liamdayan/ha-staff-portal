@@ -33,6 +33,48 @@
     toast.timer = setTimeout(() => { toastEl.hidden = true; }, 3500);
   }
 
+  // In-page replacements for confirm() and prompt(). Home Assistant's apps show this page in a
+  // frame where the browser's own pop-ups can be blocked, which made those buttons do nothing.
+  function askConfirm(message, okLabel = "OK") {
+    return new Promise((resolve) => {
+      const dialog = $("#ask-dialog");
+      $("[data-message]", dialog).textContent = message;
+      $("[data-input-wrap]", dialog).hidden = true;
+      const ok = $("button[value=ok]", dialog);
+      ok.textContent = okLabel;
+      ok.classList.toggle("danger-fill", /delete|remove|revoke|discard|unlink/i.test(okLabel + message));
+      dialog.returnValue = "";
+      dialog.onclose = () => resolve(dialog.returnValue === "ok");
+      dialog.showModal();
+      ok.focus();
+    });
+  }
+
+  function askText(message, placeholder = "", initial = "") {
+    return new Promise((resolve) => {
+      const dialog = $("#ask-dialog");
+      const input = $("[data-input]", dialog);
+      $("[data-message]", dialog).textContent = message;
+      $("[data-input-wrap]", dialog).hidden = false;
+      input.value = initial;
+      input.placeholder = placeholder;
+      // Enter means OK (otherwise the form would "click" its first button, Cancel).
+      input.onkeydown = (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          dialog.close("ok");
+        }
+      };
+      const ok = $("button[value=ok]", dialog);
+      ok.textContent = "OK";
+      ok.classList.remove("danger-fill");
+      dialog.returnValue = "";
+      dialog.onclose = () => resolve(dialog.returnValue === "ok" && input.value.trim() ? input.value.trim() : null);
+      dialog.showModal();
+      input.focus();
+    });
+  }
+
   async function api(method, path, body) {
     const opts = { method, headers: {} };
     if (body instanceof FormData) opts.body = body;
@@ -49,8 +91,8 @@
 
   async function run(fn, okText) {
     try {
-      await fn();
-      if (okText) toast(okText);
+      // fn returns false when the user cancelled, so no success message is shown.
+      if ((await fn()) !== false && okText) toast(okText);
     } catch (err) {
       toast(err.message, true);
     }
@@ -102,13 +144,13 @@
   }
 
   document.querySelectorAll("[role=tab]").forEach((b) =>
-    b.addEventListener("click", () => {
+    b.addEventListener("click", async () => {
       if (layoutDraft?.dirty && b.dataset.tab !== "layout") {
-        if (!confirm("Discard unsaved layout changes?")) return;
+        if (!await askConfirm("Discard unsaved layout changes?", "Discard")) return;
         layoutDraft = null;
       }
       if (editing?.dirty) {
-        if (!confirm("Discard unsaved role changes?")) return;
+        if (!await askConfirm("Discard unsaved role changes?", "Discard")) return;
         editing = null;
         renderRoleEditor();
         renderRoleList();
@@ -163,7 +205,7 @@
         actions.push(h("button", { class: "btn", onclick: () => linkUser(d) },
           d.ha_link_error ? "Relink HA user" : "Change HA user"));
         actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
-          if (!confirm(`Unlink ${d.name} from Home Assistant user ${d.ha_user}?`)) return;
+          if (!await askConfirm(`Unlink ${d.name} from Home Assistant user ${d.ha_user}?`, "Unlink")) return false;
           await api("DELETE", `api/devices/${d.id}/link`);
           await load();
         }, "Unlinked.") }, "Unlink"));
@@ -176,7 +218,7 @@
           "Revoke"));
       } else {
         actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
-          if (!confirm(`Delete ${d.name} from the list?`)) return;
+          if (!await askConfirm(`Delete ${d.name} from the list?`, "Delete")) return false;
           await api("DELETE", `api/devices/${d.id}`);
           await load();
         }) }, "Delete"));
@@ -202,7 +244,8 @@
   }
 
   async function deviceAction(d, action, confirmText, okText) {
-    if (confirmText && !confirm(confirmText)) return;
+    const labels = { revoke: "Revoke", reenroll: "Re-pair" };
+    if (confirmText && !await askConfirm(confirmText, labels[action] || "OK")) return;
     await run(async () => {
       await api("POST", `api/devices/${d.id}/${action}`);
       await load();
@@ -362,7 +405,7 @@
         actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") },
           m.ha_link_error ? "Relink HA user" : "Change HA user"));
         actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
-          if (!confirm(`Unlink ${m.name} from Home Assistant user ${m.ha_user}?`)) return;
+          if (!await askConfirm(`Unlink ${m.name} from Home Assistant user ${m.ha_user}?`, "Unlink")) return false;
           await api("DELETE", `api/staff/${m.id}/link`);
           await load();
         }, "Unlinked.") }, "Unlink"));
@@ -370,7 +413,7 @@
         actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
       }
       actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
-        if (!confirm(`Delete ${m.name}? Their past activity stays in the log.`)) return;
+        if (!await askConfirm(`Delete ${m.name}? Their past activity stays in the log.`, "Delete")) return false;
         await api("DELETE", `api/staff/${m.id}`);
         await load();
       }, "Deleted.") }, "Delete"));
@@ -453,8 +496,8 @@
     if (!$("#tab-layout").hidden) renderLayoutEditor();
   }
 
-  function openRole(id) {
-    if (editing?.dirty && editing.id !== id && !confirm("Discard unsaved changes?")) return;
+  async function openRole(id) {
+    if (editing?.dirty && editing.id !== id && !await askConfirm("Discard unsaved changes?", "Discard")) return;
     const role = state.roles.find((r) => r.id === id);
     editing = { id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
       dirty: false, filter: "", area: "", onlySelected: false };
@@ -462,8 +505,8 @@
     renderRoleEditor();
   }
 
-  $("#add-role").addEventListener("click", () => {
-    const name = prompt("Role name (for example Maintenance or Housekeeping):");
+  $("#add-role").addEventListener("click", async () => {
+    const name = await askText("Role name (for example Maintenance or Housekeeping):");
     if (!name) return;
     run(async () => {
       const { id } = await api("POST", "api/roles", { name });
@@ -642,10 +685,10 @@
       await load();
     }, "Role saved. Phones pick up the change within a few seconds."));
     const del = h("button", { class: "btn danger" }, "Delete role");
-    del.addEventListener("click", () => {
+    del.addEventListener("click", async () => {
       const role = state.roles.find((r) => r.id === editing.id);
       const extra = role?.device_count ? ` ${role.device_count} phone(s) will lose all access.` : "";
-      if (!confirm(`Delete the ${editing.name} role?${extra}`)) return;
+      if (!await askConfirm(`Delete the ${editing.name} role?${extra}`, "Delete role")) return;
       run(async () => {
         await api("DELETE", `api/roles/${editing.id}`);
         editing = null;
@@ -727,7 +770,7 @@
           disabled: i === state.areas.length - 1, onclick: () => move(i, 1) }, "\u2193"),
         h("button", { type: "button", class: "btn", onclick: () => editArea(a) }, "Edit"),
         h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
-          if (!confirm(`Delete the ${a.name} area? Roles lose any access they had through it.`)) return;
+          if (!await askConfirm(`Delete the ${a.name} area? Roles lose any access they had through it.`, "Delete area")) return false;
           await api("DELETE", `api/areas/${a.id}`);
           await load();
         }, "Area deleted.") }, "Delete")))));
@@ -920,8 +963,8 @@
             onclick: () => { moveIn(d.pages, pageIndex, -1); pageIndex -= 1; renderLayoutEditor(); } }, "\u2191"),
           h("button", { class: "btn subtle", "aria-label": "Move page down", disabled: pageIndex === d.pages.length - 1,
             onclick: () => { moveIn(d.pages, pageIndex, 1); pageIndex += 1; renderLayoutEditor(); } }, "\u2193"),
-          h("button", { class: "btn danger", onclick: () => {
-            if (!confirm(`Delete the ${page.name} page?`)) return;
+          h("button", { class: "btn danger", onclick: async () => {
+            if (!await askConfirm(`Delete the ${page.name} page?`, "Delete page")) return;
             d.pages.splice(pageIndex, 1);
             markLayoutDirty();
             renderLayoutEditor();
@@ -1085,8 +1128,8 @@
     dialog.showModal();
   }
 
-  $("#add-page").addEventListener("click", () => {
-    const name = prompt("Page name (for example Soaking or Mechanical):");
+  $("#add-page").addEventListener("click", async () => {
+    const name = await askText("Page name (for example Soaking or Mechanical):");
     if (!name?.trim()) return;
     const d = draft();
     d.pages.push({ id: newId(), name: name.trim().slice(0, 30), items: [] });
@@ -1108,8 +1151,8 @@
     renderLayoutEditor();
   }, "Layout saved. Phones update within a few seconds."));
 
-  $("#discard-layout").addEventListener("click", () => {
-    if (!confirm("Discard your layout changes?")) return;
+  $("#discard-layout").addEventListener("click", async () => {
+    if (!await askConfirm("Discard your layout changes?", "Discard")) return;
     layoutDraft = null;
     renderLayoutEditor();
   });
