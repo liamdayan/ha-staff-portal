@@ -251,6 +251,7 @@
     }
     const node = fromTemplate("tpl-who");
     node.querySelector("h1").textContent = `Who's using this ${word()}?`;
+    if (isDesktop()) node.querySelector(".muted").textContent = "Click your name, then type your PIN.";
     const list = node.querySelector("[data-names]");
     for (const member of me.staff) {
       list.append(h("button", { class: "who", onclick: () => showPin(member) },

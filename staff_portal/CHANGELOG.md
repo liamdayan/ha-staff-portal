@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.12
+
+- Shared computers say "Click your name, then type your PIN."
+- The dashboard's subtitle mentions computers as well as phones.
+- README rewritten with every current feature and screenshots of the phone app, the computer
+  layout and the dashboard.
+
 ## 0.6.11
 
 - Computers get a real desktop layout instead of a stretched phone one:

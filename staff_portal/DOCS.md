@@ -1,13 +1,15 @@
 # Staff Portal
 
-A branded, locked-down web app for staff phones. You decide which devices each staff role can
-**see** and which they can **control**, from a dashboard in your Home Assistant sidebar.
+A branded, locked-down web app for staff phones and front desk computers. You decide which
+devices each staff role can **see** and which they can **control**, from a dashboard in your
+Home Assistant sidebar.
 
-- Staff phones never get a Home Assistant login. They talk only to this add-on, and the add-on
-  refuses anything their role doesn't allow, even if someone pokes at it directly.
-- Phones are set up by scanning a QR code once and stay signed in until you revoke them.
-- Optional PIN per phone (or required, see [Security settings](#security-settings)). Too many
-  wrong PINs locks the phone until you unlock it.
+- Staff never get a Home Assistant login. Their phones and computers talk only to this add-on,
+  and the add-on refuses anything their role doesn't allow, even if someone pokes at it directly.
+- Phones are set up by scanning a QR code once, computers by opening a link once. Both stay
+  signed in until you revoke them.
+- Optional PIN per device, or per person on shared devices (or required, see
+  [Security settings](#security-settings)). Too many wrong PINs locks it until you unlock it.
 - Every action (and every blocked attempt) is recorded in the Activity tab.
 
 ## 1. Install
