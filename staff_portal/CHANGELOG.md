@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8
+
+- New **Backup** tab:
+  - **Full backup and restore** of everything in Staff Access. Phones stay paired after a
+    restore, and the setup being replaced is saved first so a restore can be undone.
+  - **Export and import** for the layout, roles and staff on their own. Areas and phones are
+    matched by name, and you choose whether existing names are replaced, kept alongside, or skipped.
+- Backup and export files never include Home Assistant sign-ins or pending setup codes; PINs are
+  only included scrambled. Every file is checked before anything changes.
+
 ## 0.6.7
 
 - Redesigned admin dashboard to match the phone app: frosted sticky tab bar, rounded cards,

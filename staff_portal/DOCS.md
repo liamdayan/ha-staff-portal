@@ -336,7 +336,32 @@ volume at `/data`, and publish port 8787 for staff. The admin dashboard listens 
 and only accepts connections from the addresses in `ADMIN_ALLOWED_IPS` (default
 `172.30.32.2,127.0.0.1`), so put it behind something you trust before exposing it.
 
-## Backups
+## Backups, export and import
 
-All settings, roles, phones and the activity log are stored in the add-on's `/data`
-folder, which is included in normal Home Assistant backups.
+Everything is stored in the add-on's `/data` folder, which is included in normal Home Assistant
+backups. The **Backup** tab adds backups of just Staff Access, and a way to move parts of it
+between systems.
+
+**Full backup.** **Download backup** saves one file with your settings, logo, areas, roles,
+layout, phones, staff and each phone's own arrangement. **Restore from a backup…** puts all of
+that back:
+
+- Phones that were set up keep working without re-pairing.
+- Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
+- Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
+  the links for phones and staff that still match; elsewhere, link them again.
+- The activity log stays as it is.
+- Before replacing anything, Staff Access saves a copy of the current setup. It's listed under
+  **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a restore.
+- A damaged file or one from a newer version is refused, and nothing changes.
+
+**Layout, roles and staff** can each be exported and imported on their own:
+
+- **Import layout** loads the file into the Layout tab so you can check it, then click
+  **Save layout**. Whole-area items are matched to your areas by name.
+- **Import roles** and **Import staff** add to what's there. If a name already exists, you
+  choose to **replace** it, **keep both** (the imported one gets "(imported)" after its name), or
+  **skip** it. Areas (for roles) and phones (for staff) are matched by name.
+
+Keep these files private. Staff and phone PINs are included only in scrambled form (they can't
+be read back), but someone with the file could try to guess them offline.

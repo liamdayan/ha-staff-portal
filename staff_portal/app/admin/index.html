@@ -22,6 +22,7 @@
   <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
+  <button role="tab" data-tab="backup">Backup</button>
 </nav>
 
 <main>
@@ -102,6 +103,55 @@
       </table>
     </div>
     <button class="btn more" id="more-activity" hidden>Show older</button>
+  </section>
+
+  <section id="tab-backup" class="tab" hidden>
+    <div class="section-head"><h2>Backup and transfer</h2></div>
+    <div class="settings">
+      <fieldset>
+        <legend>Full backup</legend>
+        <p class="hint">Everything in Staff Access in one file: settings, logo, areas, roles, layout,
+          phones, staff and each phone's own arrangement. Restoring it puts all of that back, and
+          phones that were already set up keep working. The activity log isn't included.</p>
+        <div class="backup-actions">
+          <button class="btn primary" id="download-backup">Download backup</button>
+          <button class="btn" id="restore-backup">Restore from a backup…</button>
+        </div>
+        <p class="hint">Keep backup files somewhere private: they include staff and phone PINs
+          (scrambled, never readable). Home Assistant sign-ins and pending setup QR codes are never
+          included. Staff Access is also part of Home Assistant's own backups.</p>
+        <div id="safety-backups"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Layout</legend>
+        <p class="hint">The phone layout: pages, group cards, dividers and access settings. Importing
+          loads it into the Layout tab so you can check it before saving. Whole-area items are matched
+          to your areas by name.</p>
+        <div class="backup-actions">
+          <button class="btn" data-export="layout">Export layout</button>
+          <button class="btn" data-import="layout">Import layout…</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Roles</legend>
+        <p class="hint">Every role with its device and area access. Importing adds them to your roles;
+          areas are matched by name. You choose what happens to roles with the same name.</p>
+        <div class="backup-actions">
+          <button class="btn" data-export="roles">Export roles</button>
+          <button class="btn" data-import="roles">Import roles…</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Staff</legend>
+        <p class="hint">Staff members with their PINs (scrambled) and which shared phones they may use.
+          Importing adds them; phones are matched by name. Home Assistant links aren't included.</p>
+        <div class="backup-actions">
+          <button class="btn" data-export="staff">Export staff</button>
+          <button class="btn" data-import="staff">Import staff…</button>
+        </div>
+      </fieldset>
+    </div>
+    <input type="file" id="import-file" accept=".json,application/json" hidden>
   </section>
 
   <section id="tab-settings" class="tab" hidden>
@@ -289,6 +339,16 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="choice-dialog" class="ask">
+  <form method="dialog">
+    <p class="ask-message" data-message></p>
+    <div class="choice-list" data-choices></div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
     </div>
   </form>
 </dialog>

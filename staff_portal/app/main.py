@@ -27,6 +27,7 @@ from db import Database, check_pin, hash_pin
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
                     clean_phone_pages, layout_overrides, visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
+import transfer
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 
@@ -1254,32 +1255,50 @@ async def admin_activity(request: web.Request):
     return web.json_response({"activity": db.activity(200, float(before) if before else None)})
 
 
-async def admin_update_settings(request: web.Request):
-    data = await read_json(request)
+BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
+                 "control_lock")
+NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
+                   ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120))
+
+
+def clean_settings(data: dict, current: dict) -> dict:
+    """The settings in `data` that are valid, ready to store. Raises ValueError with a message
+    for the admin. Used by the Settings form and when restoring a backup."""
     values = {}
     for key in ("property_name", "app_name"):
         if key in data:
-            values[key] = clean_name(data[key], 40) or db.settings()[key]
+            values[key] = clean_name(data[key], 40) or current[key]
     for key in ("accent_color", "icon_background"):
         if key in data:
             if not COLOR_RE.match(str(data[key])):
-                return bad_request("Colors must look like #2f6f4f.")
+                raise ValueError("Colors must look like #2f6f4f.")
             values[key] = data[key]
     if "public_url" in data:
         url = str(data["public_url"]).strip().rstrip("/")
         if url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", url):
-            return bad_request("The staff app address must start with https:// (no path).")
+            raise ValueError("The staff app address must start with https:// (no path).")
         values["public_url"] = url
-    for key in ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
-                "control_lock"):
+    for key in BOOL_SETTINGS:
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     if "tunnel_addresses" in data:
-        try:
-            values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
-        except ValueError as err:
-            return bad_request(str(err))
+        values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
+    for key, lo, hi in NUMBER_SETTINGS:
+        if key in data:
+            try:
+                values[key] = max(lo, min(hi, int(data[key])))
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number.") from None
+    return values
+
+
+async def admin_update_settings(request: web.Request):
+    data = await read_json(request)
     current = db.settings()
+    try:
+        values = clean_settings(data, current)
+    except ValueError as err:
+        return bad_request(str(err))
     if values.get("phones_via_tunnel_only") == "1" and current.get("phones_via_tunnel_only") != "1":
         # Only switch on once tunnel traffic has been seen from an allowed address, so the
         # setting can't cut every phone off.
@@ -1295,17 +1314,97 @@ async def admin_update_settings(request: web.Request):
                     "browser), then try again.")
             return bad_request("Staff Access hasn't seen any traffic from your tunnel yet, so "
                                "turning this on would block every phone." + hint)
-    for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
-                        ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120)):
-        if key in data:
-            try:
-                values[key] = max(lo, min(hi, int(data[key])))
-            except (TypeError, ValueError):
-                return bad_request(f"{key} must be a number.")
     db.update_settings(values)
     branding.invalidate()
     db.log(admin_name(request), "Updated settings")
     return web.json_response({"ok": True})
+
+
+# ---------------------------------------------------------------- export, import, backup
+
+def download(data: dict, kind: str) -> web.Response:
+    name = f"staff-portal-{kind}-{time.strftime('%Y-%m-%d')}.json"
+    return web.Response(text=json.dumps(data, indent=1), content_type="application/json", headers={
+        "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
+async def admin_export(request: web.Request):
+    kind = request.match_info["kind"]
+    maker = {"layout": transfer.export_layout, "roles": transfer.export_roles,
+             "staff": transfer.export_staff}[kind]
+    db.log(admin_name(request), f"Exported {kind}")
+    return download(maker(db, VERSION), kind)
+
+
+async def admin_import(request: web.Request):
+    kind = request.match_info["kind"]
+    data = await read_json(request)
+    importer = {"roles": transfer.import_roles, "staff": transfer.import_staff}[kind]
+    try:
+        result = importer(db, data.get("file"), str(data.get("mode") or ""))
+    except ValueError as err:
+        return bad_request(str(err))
+    db.log(admin_name(request), f"Imported {kind}",
+           detail=f"{result['added']} added, {result['replaced']} replaced, {result['skipped']} skipped")
+    return web.json_response(result)
+
+
+async def admin_backup(request: web.Request):
+    db.log(admin_name(request), "Downloaded a full backup")
+    return download(transfer.make_backup(db, branding, VERSION), "backup")
+
+
+async def check_backup(data) -> dict:
+    # Decoding the logo is image work, so keep it off the event loop.
+    return await asyncio.to_thread(transfer.clean_backup, data, clean_settings, db.settings(),
+                                   branding.clean_logo)
+
+
+async def admin_restore_preview(request: web.Request):
+    data = (await read_json(request)).get("backup")
+    try:
+        await check_backup(data)
+    except ValueError as err:
+        return bad_request(str(err))
+    return web.json_response(transfer.backup_summary(data))
+
+
+async def admin_restore(request: web.Request):
+    data = (await read_json(request)).get("backup")
+    try:
+        snap = await check_backup(data)
+    except ValueError as err:
+        return bad_request(str(err))
+    # Keep what's being replaced, so a restore can be undone by restoring this copy.
+    safety = transfer.save_safety_backup(DATA_DIR, transfer.make_backup(db, branding, VERSION))
+    db.replace_everything(snap)
+    for device in snap["devices"]:
+        if device["status"] == "pending":
+            db.new_enroll_code(device["id"])  # setup codes never travel in backups
+    if snap["logo"]:
+        branding.write_logo(snap["logo"])
+    else:
+        branding.remove_logo()
+    pin_sessions.clear()  # everyone with a PIN signs in again
+    made = time.strftime("%b %d, %Y", time.localtime(data.get("exported_at") or time.time()))
+    db.log(admin_name(request), "Restored a backup",
+           detail=f"Backup from {made}. What it replaced was saved as {safety}.")
+    return web.json_response({"ok": True, "safety_backup": safety})
+
+
+async def admin_safety_backups(request: web.Request):
+    return web.json_response({"backups": transfer.safety_backups(DATA_DIR)})
+
+
+async def admin_safety_backup(request: web.Request):
+    path = transfer.safety_backup_path(DATA_DIR, request.match_info["name"])
+    if not path:
+        raise web.HTTPNotFound()
+    with open(path) as f:
+        text = f.read()
+    return web.Response(text=text, content_type="application/json", headers={
+        "Content-Disposition": f'attachment; filename="{os.path.basename(path)}"',
+        "Cache-Control": "no-store"})
 
 
 async def admin_upload_logo(request: web.Request):
@@ -1365,12 +1464,20 @@ async def admin_guard(request: web.Request, handler):
 
 
 def admin_app() -> web.Application:
-    app = web.Application(middlewares=[admin_guard], client_max_size=8 * 1024 * 1024)
+    # Room for a full backup with its logo.
+    app = web.Application(middlewares=[admin_guard], client_max_size=16 * 1024 * 1024)
     app.router.add_get("/", admin_index)
     app.router.add_static("/static/", os.path.join(HERE, "admin"))
     app.router.add_get("/logo.png", logo)
     app.router.add_get(r"/icon-{size:\d+}.png", staff_icon)
     app.router.add_get("/api/state", admin_state)
+    app.router.add_get(r"/api/export/{kind:layout|roles|staff}", admin_export)
+    app.router.add_post(r"/api/import/{kind:roles|staff}", admin_import)
+    app.router.add_get("/api/backup", admin_backup)
+    app.router.add_post("/api/restore/preview", admin_restore_preview)
+    app.router.add_post("/api/restore", admin_restore)
+    app.router.add_get("/api/safety-backups", admin_safety_backups)
+    app.router.add_get(r"/api/safety-backups/{name}", admin_safety_backup)
     app.router.add_get("/api/entities", admin_entities)
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)

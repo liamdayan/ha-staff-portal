@@ -461,3 +461,19 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Backup and transfer */
+.backup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.choice-list { display: grid; gap: 8px; margin-bottom: 4px; }
+.choice {
+  display: grid; gap: 2px; text-align: left; width: 100%;
+  border: 0; border-radius: 14px; padding: 12px 14px; background: var(--card-2);
+  transition: box-shadow 0.15s, background 0.15s;
+}
+.choice:hover, .choice:focus-visible { box-shadow: 0 0 0 2px var(--accent); background: var(--card); outline: none; }
+.choice strong { font-size: 15px; }
+.choice span { font-size: 13px; color: var(--muted); }
+.safety-list { display: grid; gap: 0; margin-top: 4px; }
+.safety-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.safety-row:last-child { border-bottom: 0; }
+.safety-row .entity-text { min-width: 200px; }

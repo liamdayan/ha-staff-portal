@@ -474,6 +474,62 @@ class Database:
         self.conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
         self.conn.commit()
 
+    # Restoring a backup
+
+    def replace_everything(self, snap: dict) -> None:
+        """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
+        of it lands or none of it does. The activity log is kept. Home Assistant links are
+        kept for phones and staff that still exist with the same ID and name."""
+        c = self.conn
+        links = {
+            table: {r["id"]: r for r in c.execute(
+                f"SELECT id, name, ha_user, ha_refresh_token, ha_link_error FROM {table}")}
+            for table in ("devices", "staff")
+        }
+        try:
+            for table in ("phone_orders", "staff_devices", "role_areas", "role_entities",
+                          "area_entities", "area_ha_areas", "devices", "staff", "roles", "areas"):
+                c.execute(f"DELETE FROM {table}")
+            c.executemany("INSERT INTO areas (id, name, sort_order, created_at) VALUES (?, ?, ?, ?)",
+                          [(a["id"], a["name"], a["sort_order"], a["created_at"]) for a in snap["areas"]])
+            c.executemany("INSERT INTO area_entities (area_id, entity_id) VALUES (?, ?)", snap["area_entities"])
+            c.executemany("INSERT INTO area_ha_areas (area_id, ha_area_id) VALUES (?, ?)", snap["area_ha_areas"])
+            c.executemany("INSERT INTO roles (id, name, created_at) VALUES (?, ?, ?)",
+                          [(r["id"], r["name"], r["created_at"]) for r in snap["roles"]])
+            c.executemany("INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
+                          [(*k, v) for k, v in snap["role_entities"].items()])
+            c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
+                          [(*k, v) for k, v in snap["role_areas"].items()])
+            c.executemany(
+                """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"])
+                 for m in snap["staff"]])
+            c.executemany(
+                """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
+                   staff_all, layout_pages, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
+                  d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"])
+                 for d in snap["devices"]])
+            c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
+            c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
+            for table, rows in (("devices", snap["devices"]), ("staff", snap["staff"])):
+                for row in rows:
+                    old = links[table].get(row["id"])
+                    if old and old["name"] == row["name"] and old["ha_refresh_token"]:
+                        c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,
+                                      ha_link_error = ? WHERE id = ?""",
+                                  (old["ha_user"], old["ha_refresh_token"], old["ha_link_error"], row["id"]))
+            for key, value in snap["settings"].items():
+                if key in DEFAULT_SETTINGS:
+                    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('layout', ?)",
+                      (json.dumps(snap["layout"]),))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+
     # Personal arrangements set on the phone
 
     def phone_order(self, owner: str) -> dict | None:

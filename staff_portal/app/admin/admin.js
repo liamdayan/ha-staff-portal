@@ -303,6 +303,7 @@
       if (name === "settings") fillSettings();
       if ((name === "roles" || name === "layout") && !entities) loadEntities();
       if (name === "layout") renderLayoutEditor();
+      if (name === "backup") loadSafetyBackups();
     } catch (err) {
       reportError(`Couldn't open the ${name} tab: ${err.message}`, err, "");
     }
@@ -1648,6 +1649,183 @@
     layoutDraft = null;
     renderLayoutEditor();
   });
+
+  // ---------------------------------------------------------------- backup and transfer
+
+  const KIND_NAMES = { layout: "a layout", roles: "roles", staff: "staff members", backup: "a full backup" };
+
+  // Pick between a few labelled options; resolves to the chosen key, or null on Cancel.
+  function askChoice(message, choices) {
+    return new Promise((resolve) => {
+      const dialog = $("#choice-dialog");
+      $("[data-message]", dialog).textContent = message;
+      $("[data-choices]", dialog).replaceChildren(...choices.map(([value, label, sub]) =>
+        h("button", { class: "choice", value }, h("strong", null, label), sub ? h("span", null, sub) : null)));
+      dialog.returnValue = "";
+      dialog.onclose = () => resolve(choices.some(([v]) => v === dialog.returnValue) ? dialog.returnValue : null);
+      dialog.showModal();
+      $(".choice", dialog)?.focus();
+    });
+  }
+
+  // Downloads go through fetch so a refusal shows as a message instead of a broken file.
+  async function downloadFile(path) {
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status}).`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "staff-portal.json";
+    const url = URL.createObjectURL(await res.blob());
+    const a = h("a", { href: url, download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Ask for a file and read it as a Staff Portal file of the expected kind.
+  function pickFile(kind) {
+    return new Promise((resolve, reject) => {
+      const input = $("#import-file");
+      input.value = "";
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return resolve(null);
+        try {
+          if (file.size > 16 * 1024 * 1024) throw new Error("That file is too big to be a Staff Portal file.");
+          let data;
+          try { data = JSON.parse(await file.text()); } catch { throw new Error("That isn't a Staff Portal export or backup file."); }
+          if (data?.format !== "staff-portal") throw new Error("That isn't a Staff Portal export or backup file.");
+          if (data.kind !== kind) throw new Error(`That file holds ${KIND_NAMES[data.kind] || "something else"}, not ${KIND_NAMES[kind]}.`);
+          resolve(data);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      input.click();
+    });
+  }
+
+  const fullDate = (ts) => (ts ? new Date(ts * 1000).toLocaleString(undefined,
+    { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) : "an unknown date");
+
+  document.querySelectorAll("[data-export]").forEach((btn) => btn.addEventListener("click", () =>
+    run(() => downloadFile(`api/export/${btn.dataset.export}`))));
+  $("#download-backup").addEventListener("click", () => run(() => downloadFile("api/backup"),
+    "Backup downloaded. Keep it somewhere private."));
+
+  document.querySelectorAll("[data-import]").forEach((btn) => btn.addEventListener("click", () => run(async () => {
+    const kind = btn.dataset.import;
+    const file = await pickFile(kind);
+    if (!file) return false;
+    return kind === "layout" ? importLayout(file) : importNamed(kind, file);
+  })));
+
+  // A layout goes into the Layout tab's draft, so it can be checked before saving.
+  async function importLayout(file) {
+    if (layoutDraft?.dirty && !await askConfirm("The Layout tab has unsaved changes. Replace them with the imported layout?", "Replace")) return false;
+    const fileAreas = new Map((file.areas || []).map((a) => [a.id, String(a.name || "").toLowerCase()]));
+    const ours = new Map(state.areas.map((a) => [a.name.toLowerCase(), a.id]));
+    let dropped = 0;
+    const pages = (file.layout?.pages || []).map((page) => ({
+      ...page,
+      items: (page.items || []).flatMap((item) => {
+        if (item.type !== "area") return [item];
+        const id = ours.get(fileAreas.get(item.area_id));
+        if (id == null) { dropped += 1; return []; }
+        return [{ ...item, area_id: id }];
+      }),
+    }));
+    layoutDraft = { pages, show_unplaced: file.layout?.show_unplaced !== false, dirty: false };
+    pageIndex = 0;
+    selectTab("layout");
+    markLayoutDirty();
+    renderLayoutEditor();
+    const ids = new Set(pages.map((p) => p.id));
+    const picky = state.devices.filter((d) => d.status !== "revoked" && d.layout_pages &&
+      !d.layout_pages.some((id) => ids.has(id))).length;
+    toast([`Imported ${pages.length} page${pages.length === 1 ? "" : "s"} into the editor. Check it, then click Save layout.`,
+      dropped ? `${dropped} whole-area item${dropped === 1 ? "" : "s"} left out: no area here with the same name.` : "",
+      picky ? `${picky} phone${picky === 1 ? " is" : "s are"} set to specific pages; use Choose phones to add the new ones.` : ""]
+      .filter(Boolean).join(" "));
+    return false;
+  }
+
+  // Roles and staff are added to what's here; same names get the admin's choice.
+  async function importNamed(kind, file) {
+    const list = (kind === "roles" ? file.roles : file.staff) || [];
+    const have = new Set((kind === "roles" ? state.roles : state.staff).map((x) => x.name.toLowerCase()));
+    const clashes = list.filter((x) => have.has(String(x.name || "").trim().toLowerCase())).map((x) => x.name);
+    const word = kind === "roles" ? ["role", "roles"] : ["staff member", "staff members"];
+    let mode = "copy";
+    if (clashes.length) {
+      const shown = clashes.slice(0, 5).join(", ") + (clashes.length > 5 ? `, and ${clashes.length - 5} more` : "");
+      mode = await askChoice(`${clashes.length} ${clashes.length === 1 ? word[0] : word[1]} in the file already ` +
+        `exist${clashes.length === 1 ? "s" : ""} here: ${shown}. What should happen to ${clashes.length === 1 ? "it" : "them"}?`, [
+        ["replace", "Replace them", kind === "roles"
+          ? "Use the file's access settings. Phones keep their role."
+          : "Use the file's PIN and settings. Their Home Assistant link is kept."],
+        ["copy", "Keep both", "Add the file's version with “(imported)” after the name."],
+        ["skip", "Skip them", `Keep yours and only add the ${word[1]} that are new.`],
+      ]);
+      if (!mode) return false;
+    }
+    const result = await api("POST", `api/import/${kind}`, { file, mode });
+    await load();
+    const notes = [`${result.added} added`, result.replaced && `${result.replaced} replaced`,
+      result.skipped && `${result.skipped} skipped`].filter(Boolean).join(", ");
+    const extra = [
+      result.missing_areas?.length && `No area here called ${result.missing_areas.join(", ")}; that access was left out.`,
+      result.missing_phones?.length && `No phone here called ${result.missing_phones.join(", ")}.`,
+      result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
+    ].filter(Boolean).join(" ");
+    toast(`Imported ${word[1]}: ${notes}. ${extra}`.trim());
+    return false;
+  }
+
+  $("#restore-backup").addEventListener("click", () => run(async () => {
+    const file = await pickFile("backup");
+    return file ? restoreBackup(file) : false;
+  }));
+
+  async function restoreBackup(file) {
+    const info = await api("POST", "api/restore/preview", { backup: file });
+    const counts = [`${info.roles} role${info.roles === 1 ? "" : "s"}`, `${info.devices} phone${info.devices === 1 ? "" : "s"}`,
+      `${info.staff} staff member${info.staff === 1 ? "" : "s"}`, `${info.pages} layout page${info.pages === 1 ? "" : "s"}`];
+    const ok = await askConfirm(
+      `Restore the backup of ${info.property_name || "Staff Access"} from ${fullDate(info.exported_at)}?\n\n` +
+      `It has ${counts.join(", ")}. Everything in Staff Access now (settings, roles, layout, phones and staff) ` +
+      "is replaced; the activity log stays. A copy of the current setup is saved first, so you can undo this.",
+      "Replace and restore");
+    if (!ok) return false;
+    await api("POST", "api/restore", { backup: file });
+    editing = null;
+    layoutDraft = null;
+    await load();
+    renderRoleEditor();
+    loadSafetyBackups();
+    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring.");
+    return false;
+  }
+
+  async function loadSafetyBackups() {
+    const box = $("#safety-backups");
+    let list = [];
+    try { list = (await api("GET", "api/safety-backups")).backups; } catch { /* shown as empty */ }
+    if (!list.length) { box.replaceChildren(); return; }
+    box.replaceChildren(
+      h("div", { class: "pick-head" }, "Saved before restoring"),
+      h("p", { class: "hint" }, "Each restore first saves what it replaced. Restore one of these to undo. The last 5 are kept."),
+      h("div", { class: "safety-list" }, list.map((b) => h("div", { class: "safety-row" },
+        h("div", { class: "entity-text" },
+          h("div", { class: "entity-name" }, `Before the restore on ${fullDate(b.saved_at)}`),
+          h("div", { class: "entity-id" }, `${Math.max(1, Math.round(b.size / 1024))} KB`)),
+        h("div", { class: "area-actions" },
+          h("button", { class: "btn", onclick: () => run(() => downloadFile(`api/safety-backups/${b.name}`)) }, "Download"),
+          h("button", { class: "btn", onclick: () => run(async () => {
+            const res = await fetch(`api/safety-backups/${b.name}`, { cache: "no-store" });
+            if (!res.ok) throw new Error("That saved copy couldn't be read.");
+            return restoreBackup(await res.json());
+          }) }, "Restore this"))))));
+  }
 
   // ---------------------------------------------------------------- start
 

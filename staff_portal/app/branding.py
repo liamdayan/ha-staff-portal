@@ -37,15 +37,26 @@ class Branding:
     def has_logo(self) -> bool:
         return os.path.exists(self.logo_path)
 
-    def save_logo(self, raw: bytes) -> None:
-        """Re-encode the upload as PNG so only clean image data is ever served back."""
+    @staticmethod
+    def clean_logo(raw: bytes) -> bytes:
+        """Re-encode an image as PNG so only clean image data is ever stored and served back."""
         img = Image.open(io.BytesIO(raw), formats=LOGO_FORMATS)
         if img.width * img.height > MAX_SOURCE_PIXELS:
             raise ValueError("image too large")
         img.draft("RGB", (MAX_LOGO_PX, MAX_LOGO_PX))  # JPEG: decode at reduced size
         img = ImageOps.exif_transpose(img).convert("RGBA")
         img.thumbnail((MAX_LOGO_PX, MAX_LOGO_PX))
-        img.save(self.logo_path, "PNG")
+        out = io.BytesIO()
+        img.save(out, "PNG")
+        return out.getvalue()
+
+    def save_logo(self, raw: bytes) -> None:
+        self.write_logo(self.clean_logo(raw))
+
+    def write_logo(self, png: bytes) -> None:
+        """Store a logo that has already been through clean_logo."""
+        with open(self.logo_path, "wb") as f:
+            f.write(png)
         self.invalidate()
 
     def remove_logo(self) -> None:
