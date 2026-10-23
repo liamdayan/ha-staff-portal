@@ -274,6 +274,10 @@
   async function load() {
     const data = await api("GET", "api/state");
     state.settings = data.settings;
+    // The dashboard wears the same brand color as the phones.
+    if (/^#[0-9a-f]{6}$/i.test(state.settings.accent_color || "")) {
+      document.documentElement.style.setProperty("--accent", state.settings.accent_color);
+    }
     state.roles = data.roles;
     state.staff = data.staff;
     state.areas = data.areas;
@@ -1265,6 +1269,7 @@
             if (btn) btn.textContent = page.name;
           } })),
         h("div", { class: "editor-actions" },
+          h("button", { class: "btn", onclick: () => duplicatePage(page) }, "Duplicate page"),
           h("button", { class: "btn danger", onclick: async () => {
             if (!await askConfirm(`Delete the ${page.name} page?`, "Delete page")) return;
             d.pages.splice(pageIndex, 1);
@@ -1284,6 +1289,38 @@
         : h("div", { class: "empty" }, "This page is empty. Add a group card, device, area or heading."));
   }
 
+  // A copy of an item, with its own ID, named "(copy)" where it has a title.
+  function copyOf(item) {
+    const copy = JSON.parse(JSON.stringify(item));
+    copy.id = newId();
+    if (copy.type === "group" || copy.type === "heading") copy.title = `${copy.title} (copy)`.slice(0, 60);
+    return copy;
+  }
+
+  // Duplicate puts the copy right below and opens it, since it usually needs renaming and
+  // different devices (Tub 1 -> Tub 2).
+  function duplicateItem(page, index) {
+    page.items.splice(index + 1, 0, copyOf(page.items[index]));
+    markLayoutDirty();
+    renderLayoutEditor();
+    editItem(page, index + 1, page.items[index + 1].type);
+  }
+
+  function duplicatePage(page) {
+    const d = draft();
+    const copy = { id: newId(), name: `${page.name} (copy)`.slice(0, 30),
+      items: page.items.map((item) => ({ ...copyOf(item), title: item.title })) };
+    for (const item of copy.items) if (item.title === undefined) delete item.title;
+    d.pages.splice(pageIndex + 1, 0, copy);
+    pageIndex += 1;
+    markLayoutDirty();
+    renderLayoutEditor();
+    const picky = state.devices.filter((x) => x.status !== "revoked" && x.layout_pages != null).length;
+    toast(picky
+      ? `Copied as ${copy.name}. ${picky} phone${picky === 1 ? " is" : "s are"} set to specific pages and won't show it until you add it (Choose phones).`
+      : `Copied as ${copy.name}. Rename it, then Save layout.`);
+  }
+
   // The page's items as reorderable rows.
   function itemList(page) {
     const list = h("div", { class: "item-list" }, page.items.map((item, i) => {
@@ -1298,6 +1335,8 @@
             ? h("div", { class: "via access-note" }, accessNote(item)) : null),
         h("div", { class: "area-actions" },
           h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
+          h("button", { class: "btn", "aria-label": `Duplicate ${title}`, onclick: () => duplicateItem(page, i) },
+            "Duplicate"),
           h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
             page.items.splice(i, 1);
             markLayoutDirty();

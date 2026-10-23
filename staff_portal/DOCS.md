@@ -132,6 +132,11 @@ it yourself instead:
 - **Whole area.** Every device in one of your areas, kept up to date automatically.
 - **Heading.** A section title such as "Tubs".
 
+**Duplicate** makes a copy of an item (it appears right below and opens so you can rename it and
+swap its devices, handy for turning "Tub 1" into "Tub 2"). **Duplicate page** copies a whole page
+with everything on it. A copied page shows on every phone set to **All pages**; phones set to
+specific pages need it added with **Choose phones**.
+
 Reorder pages, page items and the devices in a group card by dragging their **≡** grip
 (with a mouse or a finger), or click the grip and use the arrow keys. Then click **Save layout**.
 

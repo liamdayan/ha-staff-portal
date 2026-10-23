@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.7
+
+- Redesigned admin dashboard to match the phone app: frosted sticky tab bar, rounded cards,
+  softer fields and buttons, pill-shaped access pickers, and your brand color throughout.
+- **Duplicate** for layout items (the copy opens for editing, ready to become "Tub 2") and
+  **Duplicate page** for whole pages.
+
 ## 0.6.6
 
 - Group cards can have named dividers (**+ Add divider** in the card editor) to split the card's
