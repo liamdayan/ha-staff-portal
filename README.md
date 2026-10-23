@@ -37,3 +37,7 @@ DATA_DIR=./.dev-data HA_URL=http://homeassistant.local:8123 HA_TOKEN=<long-lived
 ```
 
 Admin dashboard: http://127.0.0.1:8099 · Staff app: http://127.0.0.1:8787
+
+## License
+
+MIT. See [LICENSE](LICENSE). Copyright (c) 2026 Hot Lake Springs Resort.
