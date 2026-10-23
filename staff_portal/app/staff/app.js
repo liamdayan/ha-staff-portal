@@ -55,6 +55,7 @@
 
   function show(node) {
     stopPolling();
+    screenKeys = null; // a screen that wants key presses sets this after showing
     tiles = new Map();
     // Keep pop-up messages above the bottom tab bar when there is one.
     document.body.classList.toggle("with-tabs", !!node.querySelector?.(".tabbar"));
@@ -68,6 +69,18 @@
     toastEl.hidden = false;
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => { toastEl.hidden = true; }, 3000);
+  }
+
+  // A computer (mouse and keyboard, not a phone or tablet). It skips the "add to home screen"
+  // step and gets the desktop layout's wording.
+  function isDesktop() {
+    return window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
+      !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  }
+
+  // "phone" or "computer", for messages.
+  function word() {
+    return (me?.kind || (isDesktop() ? "computer" : "phone")) === "computer" ? "computer" : "phone";
   }
 
   function isStandalone() {
@@ -116,21 +129,22 @@
       session.del(SESSION_KEY);
       if (had) {
         message("Access removed",
-          "This phone no longer has access. Ask your manager if you think this is a mistake.");
+          `This ${word()} no longer has access. Ask your manager if you think this is a mistake.`);
       } else {
-        message("This phone isn't set up", "Ask your manager for a setup QR code.");
+        message(`This ${word()} isn't set up`,
+          `Ask your manager for a setup ${word() === "computer" ? "link" : "QR code"}.`);
       }
       return true;
     }
     if (res.status === 423) {
       session.del(SESSION_KEY);
       message("Phone locked",
-        "Too many wrong PINs. Ask your manager to unlock this phone from the admin dashboard.");
+        `Too many wrong PINs. Ask your manager to unlock this ${word()} from the admin dashboard.`);
       return true;
     }
     if (res.status === 403 && res.data.error === "pin_not_set") {
-      message("This phone needs a PIN",
-        "Ask your manager to set a PIN for this phone before it can be used.", true);
+      message(`This ${word()} needs a PIN`,
+        `Ask your manager to set a PIN for this ${word()} before it can be used.`, true);
       return true;
     }
     if (res.status === 403 && res.data.error === "pin_required") {
@@ -139,7 +153,7 @@
       return true;
     }
     if (res.status === 0) {
-      message("Can't connect", "Check this phone's Wi-Fi or cell signal.", true);
+      message("Can't connect", word() === "computer" ? "Check this computer's network connection." : "Check this phone's Wi-Fi or cell signal.", true);
       return true;
     }
     return false;
@@ -165,18 +179,20 @@
     }
 
     if (code) {
-      if (isStandalone() || session.get("use_browser")) return enroll(code);
+      if (isStandalone() || isDesktop() || session.get("use_browser")) return enroll(code);
       return showInstall(code);
     }
-    message("This phone isn't set up", "Ask your manager for a setup QR code.");
+    message(`This ${word()} isn't set up`,
+      `Ask your manager for a setup ${word() === "computer" ? "link" : "QR code"}.`);
   }
 
   async function enroll(code) {
     const res = await api("POST", "/api/enroll", { code });
     if (res.status !== 200) {
-      if (res.status === 0) return message("Can't connect", "Check this phone's connection.", true);
+      if (res.status === 0) return message("Can't connect", `Check this ${word()}'s connection.`, true);
       return message("Setup link didn't work",
-        (res.data.error || "Please try again.") + " Ask your manager for a new QR code.");
+        (res.data.error || "Please try again.") +
+        ` Ask your manager for a new setup ${word() === "computer" ? "link" : "QR code"}.`);
     }
     local.set(TOKEN_KEY, res.data.token);
     history.replaceState(null, "", "/");
@@ -230,9 +246,10 @@
     if (!me.shared) return showPin(null);
     if (!me.staff.length) {
       return message("No one can sign in yet",
-        "Ask your manager to add you as a staff member for this phone.", true);
+        `Ask your manager to add you as a staff member for this ${word()}.`, true);
     }
     const node = fromTemplate("tpl-who");
+    node.querySelector("h1").textContent = `Who's using this ${word()}?`;
     const list = node.querySelector("[data-names]");
     for (const member of me.staff) {
       list.append(h("button", { class: "who", onclick: () => showPin(member) },
@@ -297,6 +314,14 @@
     draw();
     document.getElementById("bar").hidden = true;
     show(node);
+    // On a computer, type the PIN: digits, Backspace, Enter.
+    screenKeys = (ev) => {
+      if (/^[0-9]$/.test(ev.key)) press(ev.key);
+      else if (ev.key === "Backspace") press("del");
+      else if (ev.key === "Enter") press("ok");
+      else return;
+      ev.preventDefault();
+    };
   }
 
   function setSubtitle(staffName) {
@@ -381,15 +406,15 @@
       if (!data.entities.length) {
         show(h("div", { class: "center message" },
           h("h1", null, "Nothing here yet"),
-          h("p", null, "Your manager hasn't given this phone access to anything.")));
+          h("p", null, `Your manager hasn't given this ${word()} access to anything.`)));
         render.shape = null;
         return;
       }
       if (data.layout && !data.layout.pages.length) {
         show(h("div", { class: "center message" },
-          h("h1", null, "Nothing on this phone yet"),
-          h("p", null, "None of this phone's pages have anything it's allowed to see. " +
-            "Ask your manager to check the phone's pages and role.")));
+          h("h1", null, `Nothing on this ${word()} yet`),
+          h("p", null, `None of this ${word()}'s pages have anything it's allowed to see. ` +
+            `Ask your manager to check the ${word()}'s pages and role.`)));
         render.shape = null;
         return;
       }
@@ -765,11 +790,11 @@
         else toast(res.data.error || "Couldn't save the new order.", true);
         return;
       }
-      toast("Saved on this phone.");
+      toast(`Saved on this ${word()}.`);
       close();
     };
     const reset = async () => {
-      if (!window.confirm("Put this phone back to your manager's arrangement?")) return;
+      if (!window.confirm(`Put this ${word()} back to your manager's arrangement?`)) return;
       const res = await api("DELETE", "/api/order");
       if (res.status !== 200) {
         if (handleAuthError(res)) rearranging = false;
@@ -783,8 +808,8 @@
     rearranging = true;
     show(h("div", { class: "rearrange" },
       h("div", { class: "detail-head" }, h("h1", null, "Rearrange")),
-      h("p", { class: "muted" }, "Drag the \u2261 grips to change the order on this phone. " +
-        "It doesn't change anyone else's phone."),
+      h("p", { class: "muted" }, `Drag the \u2261 grips to change the order on this ${word()}. ` +
+        `It doesn't change anyone else's ${word()}.`),
       lists,
       h("div", { class: "rearrange-actions" },
         h("button", { class: "btn", onclick: close }, "Cancel"),
@@ -1237,7 +1262,7 @@
     const left = Math.max(1, Math.ceil((lock.until - Date.now()) / 60000));
     lockBar.replaceChildren(
       h("span", { class: "lock-status" }, "\ud83d\udd13 Unlocked",
-        h("small", null, ` \u00b7 locks in ${left} min`)),
+        h("small", null, h("span", { class: "sep" }, " \u00b7 "), `locks in ${left} min`)),
       h("button", { class: "lock-now", type: "button", onclick: relock }, "Lock now"));
   }
 
@@ -1252,6 +1277,11 @@
     if (me?.shared) await api("POST", "/api/signout");
     session.del(SESSION_KEY);
     askForPin();
+  });
+
+  let screenKeys = null;
+  document.addEventListener("keydown", (ev) => {
+    if (screenKeys && !ev.ctrlKey && !ev.metaKey && !ev.altKey) screenKeys(ev);
   });
 
   document.addEventListener("visibilitychange", () => {

@@ -16,7 +16,7 @@
 </header>
 
 <nav class="tabs" role="tablist">
-  <button role="tab" data-tab="phones" aria-selected="true">Phones</button>
+  <button role="tab" data-tab="phones" aria-selected="true">Phones &amp; computers</button>
   <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
   <button role="tab" data-tab="layout">Layout</button>
@@ -32,8 +32,11 @@
       before setting up phones. The setup QR codes use it.
     </div>
     <div class="section-head">
-      <h2>Staff phones</h2>
-      <button class="btn primary" id="add-phone">Add phone</button>
+      <h2>Phones and computers</h2>
+      <div class="editor-actions">
+        <button class="btn" id="add-computer">Add computer</button>
+        <button class="btn primary" id="add-phone">Add phone</button>
+      </div>
     </div>
     <div id="phone-list" class="cards"></div>
   </section>
@@ -247,10 +250,15 @@
   <form method="dialog" id="phone-form">
     <h2 data-title>Add phone</h2>
     <label>Name<input name="name" maxlength="60" placeholder="Maintenance phone" required></label>
+    <label>Type
+      <select name="kind">
+        <option value="phone">Phone (set up by scanning a QR code)</option>
+        <option value="computer">Computer, such as a front desk PC (set up with a link)</option>
+      </select></label>
     <label>Role<select name="role_id"></select></label>
     <label>Who uses it
       <select name="signin_mode">
-        <option value="phone">One person or team (optional phone PIN)</option>
+        <option value="phone">One person or team (optional PIN)</option>
         <option value="staff">Shared: each person signs in with their own PIN</option>
       </select></label>
     <div class="staff-pick" data-staff-pick hidden>
@@ -259,17 +267,17 @@
       <p class="hint" data-no-staff>Add people on the Staff tab first.</p>
     </div>
     <div class="staff-pick" data-pages-pick hidden>
-      <div class="pick-head">Pages on this phone</div>
+      <div class="pick-head">Pages on this <span data-word>phone</span></div>
       <label class="check"><input type="checkbox" name="pages_all"> All pages, including ones you add later</label>
       <div class="staff-checks" data-pages-list></div>
-      <p class="hint">On each page the phone still only sees what its role allows.</p>
+      <p class="hint">On each page it still only sees what its role allows.</p>
     </div>
     <div class="order-reset" data-order-reset hidden>
-      <span>This phone has been rearranged on the phone.</span>
+      <span>Staff have rearranged this <span data-word>phone</span> themselves.</span>
       <button class="btn" type="button">Reset to your layout</button>
     </div>
-    <p class="hint" data-pages-none hidden>This phone uses the automatic layout. Build pages on the
-      Layout tab, then choose here which ones this phone shows.</p>
+    <p class="hint" data-pages-none hidden>This <span data-word>phone</span> uses the automatic layout.
+      Build pages on the Layout tab, then choose here which ones it shows.</p>
     <label>PIN <small data-pin-hint>Optional, 4 to 8 digits. Staff enter it when opening the app.</small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <div class="dialog-actions">
@@ -355,13 +363,30 @@
 
 <dialog id="qr-dialog">
   <h2>Set up <span data-name></span></h2>
-  <ol class="qr-steps">
-    <li>Open the phone's <strong>Camera</strong> and point it at this code.</li>
-    <li>Tap the link, then follow the prompt to <strong>Add to Home Screen</strong>.</li>
-    <li>Open the new icon. The phone stays signed in until you revoke it.</li>
-  </ol>
-  <div class="qr" data-qr></div>
-  <p class="hint">Or open this link on the phone: <code data-url></code></p>
+  <div data-for="phone">
+    <ol class="qr-steps">
+      <li>Open the phone's <strong>Camera</strong> and point it at this code.</li>
+      <li>Tap the link, then follow the prompt to <strong>Add to Home Screen</strong>.</li>
+      <li>Open the new icon. The phone stays signed in until you revoke it.</li>
+    </ol>
+    <div class="qr" data-qr></div>
+    <p class="hint">Or open this link on the phone: <code data-url></code></p>
+  </div>
+  <div data-for="computer">
+    <ol class="qr-steps">
+      <li>On the computer, open this link in Chrome, Edge, Safari or Firefox. You can email it to
+        yourself or type it in.</li>
+      <li>It opens Staff Portal, signed in. To keep it handy, use the browser's
+        <strong>Install app</strong> option (Chrome and Edge) or bookmark it.</li>
+      <li>The computer stays signed in in that browser until you revoke it.</li>
+    </ol>
+    <div class="copy-row">
+      <input data-link readonly aria-label="Setup link">
+      <button class="btn primary" type="button" data-copy>Copy link</button>
+    </div>
+    <p class="hint">Only open it on the computer you're setting up: whoever opens it first gets
+      access.</p>
+  </div>
   <p class="hint" data-expires></p>
   <div class="dialog-actions"><button class="btn primary" data-close>Done</button></div>
 </dialog>

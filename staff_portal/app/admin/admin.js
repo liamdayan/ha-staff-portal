@@ -341,31 +341,34 @@
     const list = $("#phone-list");
     if (!state.devices.length) {
       list.replaceChildren(h("div", { class: "empty" },
-        "No phones yet. Add one, then scan its QR code with the phone's camera."));
+        "Nothing set up yet. Add a phone (set up by scanning a QR code) or a computer, such as a " +
+        "front desk PC (set up with a link)."));
       return;
     }
     list.replaceChildren(...state.devices.map((d) => {
       const [label, cls] = STATUS[d.status] || [d.status, ""];
+      const word = kindWord(d);
+      const setup = d.kind === "computer" ? "setup link" : "setup QR";
       const roleSelect = h("select", { "aria-label": "Role" },
         h("option", { value: "" }, "No role (sees nothing)"),
         state.roles.map((r) => h("option", { value: r.id, selected: r.id === d.role_id }, r.name)));
       roleSelect.addEventListener("change", () => run(async () => {
         await api("PATCH", `api/devices/${d.id}`, { role_id: roleSelect.value || null });
         await load();
-      }, "Role changed. The phone updates within a few seconds."));
+      }, `Role changed. The ${word} updates within a few seconds.`));
 
       const actions = [];
       if (d.status === "pending" && d.setup_url) {
-        actions.push(h("button", { class: "btn primary", onclick: () => showQr(d) }, "Show setup QR"));
+        actions.push(h("button", { class: "btn primary", onclick: () => showQr(d) }, `Show ${setup}`));
       }
       if (d.status === "locked") {
         actions.push(h("button", { class: "btn primary", onclick: () => deviceAction(d, "unlock",
-          null, "Phone unlocked.") }, "Unlock"));
+          null, "Unlocked.") }, "Unlock"));
       }
       if (d.status !== "pending" || !d.setup_url) {
         actions.push(h("button", { class: "btn", onclick: () => deviceAction(d, "reenroll",
-          d.status === "active" ? `Sign out ${d.name} and make a new setup QR code?` : null) },
-          d.status === "active" ? "Re-pair" : "New setup QR"));
+          d.status === "active" ? `Sign out ${d.name} and make a new ${setup === "setup QR" ? "setup QR code" : setup}?` : null) },
+          d.status === "active" ? "Re-pair" : `New ${setup}`));
       }
       actions.push(h("button", { class: "btn", onclick: () => editPhone(d) }, "Edit"));
       if (d.ha_user) {
@@ -397,6 +400,7 @@
             h("h3", null, d.name),
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
+              d.kind === "computer" ? h("span", { class: "badge computer" }, "Computer") : null,
               d.signin_mode === "staff"
                 ? h("span", { class: "badge shared" }, "Shared \u00b7 staff sign in")
                 : d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
@@ -406,7 +410,7 @@
               }, d.ha_link_error ? `HA user ${d.ha_user}: link broken` : `HA user: ${d.ha_user}`) : null,
               h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`)),
             d.status !== "revoked" && phonePagesText(d) ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
-              d.custom_order ? " \u00b7 rearranged on the phone" : "") : null),
+              d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null),
           h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
     }));
@@ -460,11 +464,22 @@
       : text;
   }
 
-  function editPhone(d) {
+  const kindWord = (d) => (d?.kind === "computer" ? "computer" : "phone");
+
+  function editPhone(d, newKind = "phone") {
     const dialog = $("#phone-dialog");
     const form = $("#phone-form");
     form.reset();
-    $("[data-title]", dialog).textContent = d ? `Edit ${d.name}` : "Add phone";
+    $("[data-title]", dialog).textContent = d ? `Edit ${d.name}` : `Add ${newKind}`;
+    const kindSelect = form.elements["kind"];
+    kindSelect.value = d?.kind || newKind;
+    const syncKind = () => {
+      const word = kindSelect.value === "computer" ? "computer" : "phone";
+      dialog.querySelectorAll("[data-word]").forEach((el) => { el.textContent = word; });
+      form.elements["name"].placeholder = word === "computer" ? "Front desk computer" : "Maintenance phone";
+    };
+    kindSelect.onchange = syncKind;
+    syncKind();
     form.elements["name"].value = d ? d.name : "";
     fillRoleOptions(form.elements["role_id"], d ? d.role_id : state.roles[0]?.id);
     $("[data-pin-hint]", dialog).textContent = d
@@ -509,7 +524,8 @@
     syncMode();
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
-      const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
+      const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null,
+        kind: kindSelect.value };
       body.signin_mode = mode.value;
       if (pageOptions.length) {
         const all = form.elements["pages_all"].checked;
@@ -543,7 +559,7 @@
           await load();
           const created = state.devices.find((x) => x.id === id);
           if (created?.setup_url) showQr(created);
-          else toast("Phone added. Set the staff app address in Settings to get its QR code.");
+          else toast(`Added. Set the staff app address in Settings to get its ${body.kind === "computer" ? "setup link" : "QR code"}.`);
         }
       }, d ? "Saved." : null);
     };
@@ -553,6 +569,19 @@
   function showQr(d) {
     const dialog = $("#qr-dialog");
     $("[data-name]", dialog).textContent = d.name;
+    const computer = d.kind === "computer";
+    dialog.querySelectorAll("[data-for]").forEach((el) => {
+      el.hidden = el.dataset.for !== (computer ? "computer" : "phone");
+    });
+    const link = $("[data-link]", dialog);
+    link.value = d.setup_url;
+    link.onfocus = () => link.select();
+    $("[data-copy]", dialog).onclick = async () => {
+      link.select();
+      // The clipboard API can be blocked inside Home Assistant's frame; fall back to the old way.
+      try { await navigator.clipboard.writeText(d.setup_url); } catch { document.execCommand("copy"); }
+      toast("Link copied. Open it on the computer you're setting up.");
+    };
     $("[data-qr]", dialog).replaceChildren(
       h("img", { src: `api/devices/${d.id}/qr.svg?t=${Date.now()}`, alt: "Setup QR code" }));
     $("[data-url]", dialog).textContent = d.setup_url;
@@ -565,7 +594,8 @@
     load();
   });
 
-  $("#add-phone").addEventListener("click", () => editPhone(null));
+  $("#add-phone").addEventListener("click", () => editPhone(null, "phone"));
+  $("#add-computer").addEventListener("click", () => editPhone(null, "computer"));
 
   function linkUser(d, kind = "devices") {
     const dialog = $("#link-dialog");

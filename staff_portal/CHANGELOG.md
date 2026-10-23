@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.9
+
+- **Computers** (such as front desk PCs) can use the staff app in a browser with the same limited
+  access as phones. **Add computer** on the **Phones & computers** tab gives a setup link to copy
+  instead of a QR code; computers skip the "add to home screen" step.
+- Desktop layout for wide screens: pages in a sidebar, more tiles per row, group card readings
+  beside their controls, and the control lock at the bottom of the sidebar.
+- PINs can be typed on a keyboard (digits, Backspace, Enter).
+- Messages on the staff app say "computer" or "phone" to match the device.
+
 ## 0.6.8
 
 - New **Backup** tab:

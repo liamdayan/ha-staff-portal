@@ -505,6 +505,7 @@ async def api_me(request: web.Request):
     shared = device["signin_mode"] == "staff"
     return web.json_response({
         "device": device["name"],
+        "kind": device["kind"],
         "role": device["role_name"],
         "shared": shared,
         "staff": db.staff_for_device(device) if shared else [],
@@ -1022,14 +1023,17 @@ def parse_pin(value) -> str | None:
 async def admin_create_device(request: web.Request):
     data = await read_json(request)
     name = clean_name(data.get("name"))
+    kind = "computer" if data.get("kind") == "computer" else "phone"
     if not name:
-        return bad_request("Give the phone a name.")
+        return bad_request(f"Give the {kind} a name.")
     shared = data.get("signin_mode") == "staff"
     # Check everything before creating the phone, so a rejected request creates nothing.
     role_id = parse_role(data.get("role_id"))
     pin = None if shared else parse_pin(data.get("pin"))
     pages = clean_phone_pages(data.get("layout_pages"))
     device_id = db.create_device(name, role_id, pin)
+    if kind != "phone":
+        db.update_device(device_id, kind=kind)
     if pages is not None:
         db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
@@ -1037,7 +1041,7 @@ async def admin_create_device(request: web.Request):
         if isinstance(data.get("staff_ids"), list):
             known = {m["id"] for m in db.staff_list()}
             db.set_device_staff(device_id, [int(i) for i in data["staff_ids"] if int(i) in known])
-    db.log(admin_name(request), f"Added phone {name}")
+    db.log(admin_name(request), f"Added {kind} {name}")
     return web.json_response({"id": device_id})
 
 
@@ -1056,6 +1060,8 @@ async def admin_update_device(request: web.Request):
         pin = parse_pin(data["pin"])
         fields["pin_hash"] = hash_pin(pin) if pin else None
         end_sessions = True
+    if data.get("kind") in ("phone", "computer"):
+        fields["kind"] = data["kind"]
     if data.get("signin_mode") in ("phone", "staff"):
         fields["signin_mode"] = data["signin_mode"]
         end_sessions = end_sessions or fields["signin_mode"] != device["signin_mode"]

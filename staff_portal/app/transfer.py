@@ -224,7 +224,7 @@ def make_backup(db, branding, version: str) -> dict:
         roles=rows("SELECT id, name, created_at FROM roles"),
         role_entities=rows("SELECT role_id, entity_id, level FROM role_entities"),
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
-        devices=rows("""SELECT id, name, role_id, status, token_hash, pin_hash, signin_mode,
+        devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, layout_pages, created_at, last_seen
                         FROM devices WHERE status != 'deleted'"""),
         staff=rows("SELECT id, name, pin_hash, status, created_at, last_seen FROM staff"),
@@ -330,6 +330,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
         pages = clean_phone_pages(pages if isinstance(pages, list) else None)
         role_id = row.get("role_id") if row.get("role_id") in role_ids else None
         devices.append({"id": device_id, "name": name, "role_id": role_id, "status": status,
+                        "kind": "computer" if row.get("kind") == "computer" else "phone",
                         "token_hash": token_hash, "pin_hash": pin_hash,
                         "signin_mode": "staff" if row.get("signin_mode") == "staff" else "phone",
                         "staff_all": 0 if row.get("staff_all") in (0, False) else 1,

@@ -568,3 +568,100 @@ body.with-tabs .lock-bar { bottom: calc(env(safe-area-inset-bottom) + 72px); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ---------------------------------------------------------------- Desktop (front desk computers,
+   tablets in landscape): pages in a sidebar, wider grids, detail screens side by side. */
+@media (min-width: 900px) {
+  .bar { padding-left: max(24px, calc((100% - 1400px) / 2 + 24px)); padding-right: max(24px, calc((100% - 1400px) / 2 + 24px)); }
+  .bar-logo { width: 40px; height: 40px; }
+  .bar-title { font-size: 17px; }
+  .screen { max-width: 1400px; padding: 20px 24px 40px; }
+  .page-title { font-size: 34px; margin-top: 4px; }
+
+  /* Pages become a sidebar instead of the floating tab bar */
+  .layout.has-tabs {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    column-gap: 32px;
+    align-items: start;
+    padding-bottom: 0;
+  }
+  .layout.has-tabs > :not(.tabbar) { grid-column: 2; }
+  .layout.has-tabs > .tabbar {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    position: sticky;
+    top: 84px;
+    left: auto;
+    bottom: auto;
+    transform: none;
+    width: auto;
+    max-width: none;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px;
+    border-radius: 20px;
+    background: var(--card);
+    box-shadow: var(--shadow);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .layout.has-tabs > .tabbar .tab {
+    text-align: left;
+    min-height: 42px;
+    border-radius: 12px;
+    padding: 0 14px;
+  }
+  .layout.has-tabs > .tabbar .tab:not(.active):hover { background: var(--card-2); color: var(--text); }
+  body.with-tabs .toast { bottom: 24px; }
+  /* With the sidebar, the lock control sits at the bottom of it instead of over the tiles */
+  body.with-tabs .lock-bar {
+    left: max(24px, calc((100% - 1400px) / 2 + 24px));
+    bottom: 24px;
+    transform: none;
+    width: 220px;
+    max-width: none;
+    border-radius: 20px;
+  }
+  body.with-tabs .lock-bar.unlocked { flex-direction: column; align-items: stretch; gap: 0; padding: 10px; }
+  body.with-tabs .lock-bar.unlocked .lock-status { padding: 2px 6px 8px; white-space: normal; }
+  body.with-tabs .lock-bar.unlocked .lock-status small { display: block; }
+  body.with-tabs .lock-bar .sep { display: none; }
+  body.with-tabs .lock-bar.unlocked .lock-now { margin: 0; }
+  body.with-tabs .lock-hold { padding: 10px 16px; line-height: 1.3; }
+  body.with-tabs .lock-bar.nudge { animation-name: lock-nudge-side; }
+  body.with-lock.with-tabs .screen { padding-bottom: 40px; }
+  body.with-lock.with-tabs .toast { bottom: 90px; }
+  body.with-lock .layout.has-tabs { padding-bottom: 0; }
+
+  /* Wider grids; cards and full-width tiles take two columns so they sit side by side */
+  .grid { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
+  .tile.wide, .group-card { grid-column: span 2; }
+  .tile.compact { min-height: 132px; }
+
+  /* Group card screens: key numbers across the top, then readings beside controls */
+  .detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); column-gap: 28px; align-items: start; }
+  .detail > .detail-head, .detail > .hero-values { grid-column: 1 / -1; }
+  .detail > section:only-of-type { grid-column: 1 / -1; }
+  .hero-values { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .detail .grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+
+  .rearrange { max-width: 640px; }
+  .who-list { max-width: 420px; }
+}
+
+/* Mouse: show what's clickable */
+@media (hover: hover) and (pointer: fine) {
+  .tile.compact.controllable:hover, .group-card:hover {
+    box-shadow: var(--shadow), 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .round:hover, .btn:hover { filter: brightness(1.08); }
+  .back-btn:hover { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+  .key:hover { background: var(--card-2); }
+  .who:hover { box-shadow: var(--shadow), 0 0 0 1.5px var(--accent); }
+}
+
+@keyframes lock-nudge-side {
+  25% { transform: translateX(-8px); }
+  75% { transform: translateX(8px); }
+}

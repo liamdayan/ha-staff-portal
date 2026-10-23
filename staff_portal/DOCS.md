@@ -214,7 +214,7 @@ and every other phone stay as they are. Items you add later appear at the end.
 
 ## 5. Add phones
 
-1. In **Phones**, click **Add phone**, name it (such as *Maintenance phone*), pick a role, and
+1. In **Phones & computers**, click **Add phone**, name it (such as *Maintenance phone*), pick a role, and
    optionally set a 4- to 8-digit PIN.
 2. A QR code appears. On the phone, open the **Camera**, scan it, and tap the link.
 3. Follow the on-screen prompt to **Add to Home Screen**, then open the app from the new icon.
@@ -227,6 +227,26 @@ Each QR code works once and expires (72 hours by default, changeable in Settings
 - **Re-pair** signs the phone out and makes a new QR code, for example after resetting a phone.
 - **Unlock** clears a lock after too many wrong PINs.
 - Changing a phone's role takes effect within a few seconds.
+
+## Computers (front desk)
+
+Front desk computers can use the same staff app in a web browser, with the same limited access as
+phones: a role, layout pages, PINs, per-person sign-in and locked controls all work the same way.
+
+1. In **Phones & computers**, click **Add computer**, name it (such as *Front desk computer*) and
+   pick a role. For a computer several people use, set **Who uses it** to **Shared** so each
+   person signs in with their own PIN (they can type it on the keyboard).
+2. A setup link appears instead of a QR code. Click **Copy link** and open it in the browser on
+   that computer (Chrome, Edge, Safari or Firefox). Whoever opens it first gets access, so only
+   open it on the computer you're setting up.
+3. Staff Portal opens, signed in. In Chrome or Edge, use **Install app** from the browser's menu
+   to give it its own window and icon, or just bookmark it. It stays signed in in that browser
+   until you revoke it.
+
+On a wide screen the app shows its pages in a sidebar, more tiles per row, and a group card's
+readings and controls side by side. The control lock button sits at the bottom of the sidebar.
+To give the front desk its own page (lobby lights, say), add a page in **Layout** and use
+**Choose phones** to show it only on the front desk computer.
 
 ## Shared phones: each person signs in
 

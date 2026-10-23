@@ -114,6 +114,9 @@ MIGRATIONS = {
         # When this phone's shared-sign-in failure count was last increased; the count is
         # forgotten after a quiet spell rather than reset by someone else signing in.
         "failed_at": "REAL",
+        # 'phone' or 'computer' (a front desk PC, say). Same app and rules; it only changes how
+        # the device is set up and described.
+        "kind": "TEXT NOT NULL DEFAULT 'phone'",
     },
     "staff": {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
@@ -354,7 +357,7 @@ class Database:
         return cur.lastrowid
 
     def update_device(self, device_id: int, **fields) -> None:
-        allowed = {"name", "role_id", "status", "pin_hash", "failed_pins",
+        allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
                    "layout_pages", "failed_at"}
         sets = {k: v for k, v in fields.items() if k in allowed}
@@ -507,10 +510,11 @@ class Database:
                  for m in snap["staff"]])
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
-                   staff_all, layout_pages, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   staff_all, layout_pages, created_at, last_seen, kind)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
-                  d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"])
-                 for d in snap["devices"]])
+                  d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
+                  d["kind"]) for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
             for table, rows in (("devices", snap["devices"]), ("staff", snap["staff"])):
