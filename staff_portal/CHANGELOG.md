@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.5
+
+- Redesigned phone app: frosted-glass header, large page titles, a floating tab bar, and rounded
+  tiles with an icon for each device that lights up when it's on.
+- Switches and lights toggle by tapping anywhere on their tile. Small tiles sit two to a row;
+  thermostats, setpoints, valves and dropdowns get a full-width tile.
+- Setpoints use a single pill-shaped − / + control; Open / Close buttons show which state the
+  valve is in.
+- Group cards show their values as large numbers with labels underneath.
+- Readings show their value large on their tile.
+- The phone's status bar matches the app background instead of the brand color.
+
 ## 0.6.4
 
 - Group card screens show each device once. Devices the phone can operate appear only under

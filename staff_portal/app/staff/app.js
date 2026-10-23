@@ -460,7 +460,7 @@
   }
 
   function buildPage(page, byId, into) {
-    const root = h("div", { class: "groups" });
+    const root = h("div", { class: "groups" }, h("h1", { class: "page-title" }, page.name));
     let grid = null;
     const gridFor = () => {
       if (!grid) {
@@ -470,13 +470,15 @@
       return grid;
     }
     for (const item of page.items) {
+      // A heading that just repeats the page's own title adds nothing under the big title.
+      const repeats = (title) => title?.trim().toLowerCase() === page.name.trim().toLowerCase();
       if (item.type === "heading") {
         grid = null;
-        root.append(h("h2", { class: "page-heading" }, item.title));
+        if (!repeats(item.title)) root.append(h("h2", { class: "page-heading" }, item.title));
       } else if (item.type === "area") {
         grid = null;
         const ids = sortByName(item.entity_ids, byId);
-        root.append(h("section", { class: "group" }, item.title ? h("h2", null, item.title) : null,
+        root.append(h("section", { class: "group" }, item.title && !repeats(item.title) ? h("h2", null, item.title) : null,
           h("div", { class: "grid" }, ids.map((id) => deviceTile(byId.get(id), null, into)))));
       } else if (item.type === "device" && byId.has(item.entity_id)) {
         gridFor().append(deviceTile(byId.get(item.entity_id), item.label, into));
@@ -814,6 +816,66 @@
   const ALERT_CLASSES = new Set(["moisture", "smoke", "gas", "carbon_monoxide", "problem",
     "safety", "battery", "tamper", "heat", "cold"]);
   const TOGGLES = new Set(["light", "switch", "fan", "input_boolean", "siren", "humidifier"]);
+  // Devices whose controls need the full width of the grid.
+  const WIDE = new Set(["climate", "water_heater", "number", "input_number", "select", "input_select",
+    "cover", "valve", "vacuum"]);
+
+  // Line icons (24px grid, drawn with currentColor).
+  const ICONS = {
+    power: '<path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/>',
+    bulb: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.2h5c0-.9.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
+    fan: '<circle cx="12" cy="12" r="1.8"/><path d="M12 10.2C11 6 12.5 3 15 3s3 3.5-1.2 7.4M13.8 12c4.2-1 7.2.5 7.2 3s-3.5 3-7.4-1.2M12 13.8c1 4.2-.5 7.2-3 7.2s-3-3.5 1.2-7.4M10.2 12C6 13 3 11.5 3 9s3.5-3 7.4 1.2"/>',
+    thermo: '<path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/><path d="M12 11v6"/>',
+    flame: '<path d="M12 3c.8 3.6 5 5.2 5 10a5 5 0 0 1-10 0c0-2.7 1.6-4 2-6 .9 1 1.8 1.9 3 2.2-.3-2.1-.6-4.1 0-6.2z"/>',
+    drop: '<path d="M12 3.5s6 6.3 6 10.7a6 6 0 0 1-12 0C6 9.8 12 3.5 12 3.5z"/>',
+    valve: '<path d="M3 15h4l2-2h6l2 2h4M3 19h18"/><path d="M12 13V8M8.5 6h7"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/>',
+    unlock: '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 7.6-1.7"/>',
+    gauge: '<path d="M4.5 18a8 8 0 1 1 15 0"/><path d="M12 15l3.5-4.5"/><circle cx="12" cy="15.5" r="1"/>',
+    list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
+    play: '<path d="M8 5.5v13l10.5-6.5z"/>',
+    sparkle: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 16v4M16.5 18h4"/>',
+    press: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/>',
+    blinds: '<rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M4 8.5h16M4 13.5h16"/>',
+    alert: '<path d="M12 4l9 15.5H3z"/><path d="M12 10v4M12 17.2v.1"/>',
+    door: '<path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21M3.5 21h17"/><circle cx="14.5" cy="12" r=".8"/>',
+    pulse: '<path d="M3 12h4l3-7 4 14 3-7h4"/>',
+    pump: '<path d="M19.5 12a7.5 7.5 0 0 1-13.4 4.6M4.5 12a7.5 7.5 0 0 1 13.4-4.6"/><path d="M18.4 3.6v4h-4M5.6 20.4v-4h4"/>',
+    robot: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/>',
+  };
+
+  function iconFor(e) {
+    const d = e.domain;
+    const dc = e.attributes.device_class;
+    const name = (e.name || "").toLowerCase();
+    let key;
+    if (d === "lock") key = e.state === "unlocked" ? "unlock" : "lock";
+    else if (d === "light") key = "bulb";
+    else if (d === "fan") key = "fan";
+    else if (d === "climate") key = "thermo";
+    else if (d === "water_heater") key = "flame";
+    else if (d === "valve") key = "valve";
+    else if (d === "cover") key = "blinds";
+    else if (d === "vacuum") key = "robot";
+    else if (d === "script") key = "play";
+    else if (d === "scene") key = "sparkle";
+    else if (d === "button" || d === "input_button") key = "press";
+    else if (d === "select" || d === "input_select") key = "list";
+    else if (d === "number" || d === "input_number") key = /temp|setpoint|heat/.test(name) ? "thermo" : "gauge";
+    else if (d === "binary_sensor") {
+      key = ALERT_CLASSES.has(dc) ? (dc === "moisture" ? "drop" : "alert")
+        : ["door", "window", "garage_door", "opening"].includes(dc) ? "door"
+        : dc === "lock" ? "lock" : /level|water|fill/.test(name) ? "drop" : "pulse";
+    } else if (d === "sensor") {
+      key = dc === "temperature" || /temp/.test(name) ? "thermo"
+        : dc === "humidity" || dc === "moisture" || /level|water|flow/.test(name) ? "drop" : "pulse";
+    } else if (/pump|circulat/.test(name)) key = "pump";
+    else if (/fill|drain|water/.test(name)) key = "drop";
+    else if (/heat/.test(name)) key = "flame";
+    else key = "power";
+    return `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" ` +
+      `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[key]}</svg>`;
+  }
 
   function cap(s) {
     s = String(s).replace(/_/g, " ");
@@ -870,8 +932,10 @@
     const name = h("div", { class: "tile-name" });
     const status = h("div", { class: "tile-state" });
     const controls = h("div", { class: "tile-controls" });
-    tile.el = h("article", { class: "tile" }, h("div", { class: "tile-head" },
-      h("div", { class: "tile-text" }, name, status)), controls);
+    const icon = h("span", { class: "tile-icon", "aria-hidden": "true" });
+    tile.el = h("article", { class: `tile ${WIDE.has(entity.domain) ? "wide" : "compact"}`,
+      "data-domain": entity.domain },
+      h("div", { class: "tile-head" }, icon, h("div", { class: "tile-text" }, name, status)), controls);
     const head = tile.el.firstChild;
     const canControl = () => tile.entity.level === "control" && tile.entity.controllable &&
       tile.entity.state !== "unavailable";
@@ -882,11 +946,16 @@
     if (TOGGLES.has(d)) {
       const sw = h("button", { class: "switch", role: "switch", "aria-label": "Toggle" },
         h("span", { class: "knob" }));
-      sw.addEventListener("click", () => {
+      const toggle = () => {
+        if (!canControl() || controlsLocked()) return; // locked taps get the reminder instead
         const on = tile.entity.state === "on";
         sw.setAttribute("aria-checked", String(!on));
+        tile.el.classList.toggle("on", !on);
         act(tile, on ? "turn_off" : "turn_on");
-      });
+      };
+      sw.addEventListener("click", (ev) => { ev.stopPropagation(); toggle(); });
+      // The whole tile is the switch's touch target; the brightness slider keeps its own taps.
+      tile.el.addEventListener("click", (ev) => { if (!ev.target.closest(".slider")) toggle(); });
       head.append(sw);
       let slider = null;
       build = (e) => {
@@ -1021,14 +1090,25 @@
         script: [["turn_on", "Run"]],
         scene: [["turn_on", "Activate"]],
       }[d];
-      const row = h("div", { class: "btn-row" }, sets.map(([action, label]) =>
-        h("button", { class: "btn", onclick: () => act(tile, action) }, label)));
+      const current = { open_cover: ["open", "opening"], close_cover: ["closed", "closing"],
+        open_valve: ["open", "opening"], close_valve: ["closed", "closing"],
+        start: ["cleaning"], pause: ["paused"], return_to_base: ["docked", "returning"] };
+      const buttons = sets.map(([action, label]) =>
+        h("button", { class: "btn", "data-action": action, onclick: () => act(tile, action) }, label));
+      const row = h("div", { class: buttons.length > 1 ? "btn-row segmented" : "btn-row" }, buttons);
       controls.append(row);
-      build = () => { row.hidden = !canControl(); };
+      build = (e) => {
+        row.hidden = !canControl();
+        for (const b of buttons) {
+          b.classList.toggle("active", (current[b.dataset.action] || []).includes(e.state));
+        }
+      };
     }
 
     tile.update = (e) => {
       tile.entity = e;
+      const svg = iconFor(e);
+      if (tile.icon !== svg) icon.innerHTML = tile.icon = svg; // fixed markup from ICONS, never device data
       name.textContent = tile.label || e.name;
       status.textContent = stateText(e);
       tile.el.classList.toggle("on", ["on", "open", "unlocked", "heat", "cool", "heat_cool"].includes(e.state)
