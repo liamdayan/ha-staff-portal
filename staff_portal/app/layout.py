@@ -32,6 +32,11 @@ def _access(item: dict) -> dict:
     return {"access": level} if level in ACCESS_LEVELS else {}
 
 
+def _collapsed(item: dict) -> dict:
+    """Headings and area sections can start folded on phones (each phone remembers its own)."""
+    return {"collapsed": True} if item.get("collapsed") is True else {}
+
+
 def _id(value, fallback: str) -> str:
     value = str(value or "")
     return value if ID_RE.match(value) else fallback
@@ -57,7 +62,7 @@ def clean_layout(data) -> dict:
             if kind == "heading":
                 title = _text(item.get("title"), 60)
                 if title:
-                    items.append({**base, "title": title})
+                    items.append({**base, "title": title, **_collapsed(item)})
             elif kind == "device":
                 eid = str(item.get("entity_id") or "")
                 if offered(eid):
@@ -69,7 +74,7 @@ def clean_layout(data) -> dict:
                 except (TypeError, ValueError):
                     continue
                 items.append({**base, "area_id": area_id, "title": _text(item.get("title"), 60),
-                              **_access(item)})
+                              **_access(item), **_collapsed(item)})
             elif kind == "group":
                 members, summary_count, devices, dividers = [], 0, 0, 0
                 for member in (item.get("entities") or [])[:MAX_GROUP_ENTITIES + MAX_GROUP_DIVIDERS]:

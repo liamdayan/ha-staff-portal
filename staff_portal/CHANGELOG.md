@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.10
+
+- Headings on phone and computer pages fold away everything under them (up to the next heading)
+  with a tap. Each phone or computer remembers what's folded.
+- A folded heading shows how many cards it holds, and turns orange if anything under it needs
+  attention.
+- **Start collapsed** option for headings and whole-area items in the Layout tab. Area sections in
+  the automatic layout fold too.
+
 ## 0.6.9
 
 - **Computers** (such as front desk PCs) can use the staff app in a browser with the same limited

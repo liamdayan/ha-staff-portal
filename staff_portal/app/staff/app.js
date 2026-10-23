@@ -424,6 +424,7 @@
       tiles = next;
     }
     for (const t of tiles.values()) t.refresh(byId);
+    updateFolds();
     drawLock();
   }
 
@@ -454,8 +455,10 @@
     }
     const root = h("div", { class: "groups" });
     for (const [area, list] of groups) {
-      root.append(h("section", { class: "group" }, h("h2", null, area),
+      const fold = foldSection(`auto:${area}`, area, false, "fold-area");
+      fold.body.append(h("section", { class: "group" },
         h("div", { class: "grid" }, list.map((e) => deviceTile(e, null, into)))));
+      root.append(fold.el);
     }
     root.append(rearrangeButton());
     return root;
@@ -486,25 +489,39 @@
 
   function buildPage(page, byId, into) {
     const root = h("div", { class: "groups" }, h("h1", { class: "page-title" }, page.name));
+    let target = root; // the page itself, or the body of the heading above
     let grid = null;
     const gridFor = () => {
       if (!grid) {
         grid = h("div", { class: "grid" });
-        root.append(h("section", { class: "group" }, grid));
+        target.append(h("section", { class: "group" }, grid));
       }
       return grid;
-    }
+    };
+    // A heading that just repeats the page's own title adds nothing under the big title.
+    const repeats = (title) => title?.trim().toLowerCase() === page.name.trim().toLowerCase();
     for (const item of page.items) {
-      // A heading that just repeats the page's own title adds nothing under the big title.
-      const repeats = (title) => title?.trim().toLowerCase() === page.name.trim().toLowerCase();
       if (item.type === "heading") {
         grid = null;
-        if (!repeats(item.title)) root.append(h("h2", { class: "page-heading" }, item.title));
+        if (repeats(item.title)) {
+          target = root;
+          continue;
+        }
+        // Everything up to the next heading folds away under this one.
+        const fold = foldSection(`${page.id}:${item.id}`, item.title, item.collapsed);
+        root.append(fold.el);
+        target = fold.body;
       } else if (item.type === "area") {
         grid = null;
         const ids = sortByName(item.entity_ids, byId);
-        root.append(h("section", { class: "group" }, item.title && !repeats(item.title) ? h("h2", null, item.title) : null,
-          h("div", { class: "grid" }, ids.map((id) => deviceTile(byId.get(id), null, into)))));
+        const tiles = h("div", { class: "grid" }, ids.map((id) => deviceTile(byId.get(id), null, into)));
+        if (item.title && !repeats(item.title)) {
+          const fold = foldSection(`${page.id}:${item.id}`, item.title, item.collapsed, "fold-area");
+          fold.body.append(h("section", { class: "group" }, tiles));
+          target.append(fold.el);
+        } else {
+          target.append(h("section", { class: "group" }, tiles));
+        }
       } else if (item.type === "device" && byId.has(item.entity_id)) {
         gridFor().append(deviceTile(byId.get(item.entity_id), item.label, into));
       } else if (item.type === "group") {
@@ -512,6 +529,47 @@
       }
     }
     return root;
+  }
+
+  // A heading that folds the cards under it away. Each phone remembers what it folded.
+  let foldCount = 0;
+  function foldSection(key, title, startCollapsed, extraClass = "") {
+    const stored = local.get(`fold:${key}`);
+    let open = stored ? stored === "open" : !startCollapsed;
+    const body = h("div", { class: "fold-body", id: `fold-${(foldCount += 1)}` });
+    const head = h("button", { class: "fold-head", type: "button", "aria-controls": body.id },
+      h("span", { class: "fold-title" }, title),
+      h("span", { class: "fold-count" }),
+      h("span", { class: "fold-chev", "aria-hidden": "true" }));
+    // Fixed markup, never device data.
+    head.querySelector(".fold-chev").innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" ' +
+      'stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>';
+    const el = h("section", { class: `fold ${extraClass}`.trim() }, head, body);
+    const apply = () => {
+      el.classList.toggle("closed", !open);
+      head.setAttribute("aria-expanded", String(open));
+      body.hidden = !open;
+    };
+    head.addEventListener("click", () => {
+      open = !open;
+      local.set(`fold:${key}`, open ? "open" : "closed");
+      apply();
+      updateFolds();
+    });
+    apply();
+    return { el, body };
+  }
+
+  // A folded section says how much it holds, and stands out if anything in it needs attention.
+  function updateFolds() {
+    for (const fold of screen.querySelectorAll(".fold")) {
+      const body = fold.querySelector(":scope > .fold-body");
+      const count = fold.querySelector(":scope > .fold-head .fold-count");
+      const alerts = body.querySelectorAll(".tile.alert").length;
+      const cards = body.querySelectorAll(".tile").length;
+      fold.classList.toggle("has-alert", alerts > 0);
+      count.textContent = alerts ? `${alerts} need${alerts === 1 ? "s" : ""} attention` : String(cards);
+    }
   }
 
   function memberName(m, byId) {

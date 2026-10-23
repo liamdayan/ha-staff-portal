@@ -130,7 +130,11 @@ it yourself instead:
   underneath. A section whose devices the phone can't see is left out.
 - **Device.** A single device tile, with an optional label.
 - **Whole area.** Every device in one of your areas, kept up to date automatically.
-- **Heading.** A section title such as "Tubs".
+- **Heading.** A section title such as "Tubs". On phones and computers, tapping a heading folds
+  away everything under it, up to the next heading, so long pages stay manageable. Each phone or
+  computer remembers what was folded. A folded heading shows how many cards it holds, and turns
+  orange with "1 needs attention" if something under it has a problem. Tick **Start collapsed**
+  on a heading (or a whole-area item) to have it start folded.
 
 **Duplicate** makes a copy of an item (it appears right below and opens so you can rename it and
 swap its devices, handy for turning "Tub 1" into "Tub 2"). **Duplicate page** copies a whole page

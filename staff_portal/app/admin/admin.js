@@ -1263,13 +1263,14 @@
   }
 
   function itemSummary(item) {
-    if (item.type === "heading") return ["Heading", item.title, ""];
+    if (item.type === "heading") return ["Heading", item.title, item.collapsed ? "Starts collapsed" : ""];
     if (item.type === "device") {
       return ["Device", item.label || entityName(item.entity_id), item.entity_id];
     }
     if (item.type === "area") {
       const area = state.areas.find((a) => a.id === item.area_id);
-      return ["Area", item.title || area?.name || "Deleted area", "Every device in the area the role allows"];
+      return ["Area", item.title || area?.name || "Deleted area",
+        "Every device in the area the role allows" + (item.collapsed ? " \u00b7 starts collapsed" : "")];
     }
     const onCard = item.entities.filter((m) => m.summary).map((m) => m.label || entityName(m.entity_id));
     const devices = item.entities.filter((m) => m.entity_id).length;
@@ -1505,6 +1506,15 @@
     };
   }
 
+  function collapsedToggle(item) {
+    const box = h("input", { type: "checkbox", checked: !!item.collapsed });
+    box.addEventListener("change", () => {
+      if (box.checked) item.collapsed = true;
+      else delete item.collapsed;
+    });
+    return h("label", { class: "check" }, box, "Start collapsed");
+  }
+
   async function editItem(page, index, type) {
     if (!entities) await loadEntities();
     if (!entities) return;
@@ -1523,7 +1533,10 @@
     if (type === "heading") {
       const input = h("input", { value: item.title || "", maxlength: "60", placeholder: "Tubs" });
       input.addEventListener("input", () => { item.title = input.value; });
-      body.replaceChildren(h("label", null, "Heading text", input));
+      body.replaceChildren(h("div", { class: "item-fields" }, h("label", null, "Heading text", input),
+        collapsedToggle(item),
+        h("p", { class: "hint" }, "On phones and computers, tapping a heading folds away everything under it, " +
+          "up to the next heading. Each one remembers what was folded; this only sets how it starts.")));
       validate = () => (item.title?.trim() ? null : "Enter the heading text.");
     } else if (type === "area") {
       const select = h("select", null, state.areas.map((a) =>
@@ -1537,6 +1550,7 @@
           h("label", null, "Heading on the phone (optional)", title),
           h("p", { class: "hint" }, "Shows every device in this area that the phone's role allows, " +
             "including devices added to the area later."),
+          collapsedToggle(item),
           accessPicker(item, () => true).el,
           h("p", { class: "hint" }, "Control only applies to devices that can be operated; sensors stay View."))
         : h("p", { class: "hint" }, "Create areas in Settings \u2192 Areas first."));
