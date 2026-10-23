@@ -134,6 +134,7 @@ DEFAULT_SETTINGS = {
     "ha_logbook": "1",
     "allow_phone_reorder": "1",
     "phones_via_tunnel_only": "0",
+    "tunnel_addresses": "",  # where cloudflared connects from, when it isn't the add-on
     "require_pin": "0",
 }
 

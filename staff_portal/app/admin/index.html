@@ -149,8 +149,12 @@
         <label class="check-row"><input type="checkbox" name="phones_via_tunnel_only">
           <span>Only allow phones through your Cloudflare Tunnel
           <small>Blocks phones (or anyone on your Wi-Fi) from reaching the staff app directly on the
-          local network, so the only way in is your secure https address. Turn this on if your tunnel
-          runs in the Cloudflared add-on. Leave it off if the tunnel runs on another computer.</small></span></label>
+          local network, so the only way in is your secure https address. If cloudflared runs
+          somewhere other than the Cloudflared add-on (another computer, VM or Docker host), enter
+          its address below first.</small></span></label>
+        <label>Tunnel address <small class="inline-note">(only if cloudflared isn't the Home Assistant add-on)</small>
+          <input name="tunnel_addresses" placeholder="192.168.1.40" autocomplete="off" spellcheck="false"></label>
+        <div id="tunnel-sources" class="tunnel-sources"></div>
       </fieldset>
       <fieldset>
         <legend>Staff phones</legend>

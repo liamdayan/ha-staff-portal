@@ -40,6 +40,11 @@ Tunnels → your tunnel → Public Hostname → Add**, and set the service to
 Then open **Staff Access → Settings** and enter `https://staff.yourdomain.com` as the
 **staff app address**. Setup QR codes use this address.
 
+If `cloudflared` runs outside Home Assistant (another computer, VM or Docker host), also set
+**Settings → Phone security → Tunnel address** to the IP address it connects from (see
+[Security settings](#security-settings)). Without it, Staff Access sees every phone as that one
+computer, so one phone's wrong setup codes can briefly block the others.
+
 > Don't put a Cloudflare Access login page in front of the staff hostname. The app does its
 > own sign-in, and an Access page would make staff log in again every few days.
 
@@ -264,9 +269,17 @@ Under **Settings → Phone security**:
 - **Require a PIN on every phone.** Phones without a PIN (other than shared phones, where each
   person has their own) stop working until you give them one (**Phones → Edit**). Turn this on if a lost phone shouldn't open without a PIN.
 - **Only allow phones through your Cloudflare Tunnel.** Blocks the staff app on your local network
-  (`http://<HA IP>:8787`), so phones can only reach it through your secure https address. This works only if
-  the tunnel runs in the **Cloudflared add-on**. If `cloudflared` runs on another computer, leave
-  this off, or phones will be blocked.
+  (`http://<HA IP>:8787`), so phones can only reach it through your secure https address.
+  - With the **Cloudflared add-on**, just tick it.
+  - If `cloudflared` runs anywhere else (another computer, a VM, or a Docker container on another
+    host), set the **Tunnel address** first, to the IP address that computer connects from. For
+    a Docker container this is usually the Docker host's own LAN address (such as the VM's IP in
+    Proxmox), not the container's internal address. The easy way: open the staff app once
+    through your https address, reload Settings, and click **Use this address** next to the
+    address shown under "Cloudflare traffic recently came from". Then tick the box and save.
+  - Staff Access won't turn this on until it has seen tunnel traffic from an allowed address, so
+    it can't cut every phone off. If the tunnel computer's address changes later, phones are
+    blocked until you update the Tunnel address. Give that computer a fixed IP.
 
 Always on:
 

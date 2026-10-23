@@ -280,6 +280,7 @@
     state.layout = data.layout;
     state.devices = data.devices;
     state.hasLogo = data.has_logo;
+    state.tunnelSources = data.tunnel_sources;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
     renderStaff();
@@ -1101,7 +1102,30 @@
       if (field?.type === "checkbox") field.checked = v === "1";
       else if (field) field.value = v;
     }
+    renderTunnelSources();
     refreshIcon();
+  }
+
+  // Where Cloudflare traffic has arrived from lately, so the tunnel address can be filled in.
+  function renderTunnelSources() {
+    const box = $("#tunnel-sources");
+    const sources = state.tunnelSources || [];
+    if (!sources.length) {
+      box.replaceChildren(h("p", { class: "hint" }, "No traffic from Cloudflare seen since the add-on started. " +
+        "Open the staff app through your https address once and reload this page to see where it comes from."));
+      return;
+    }
+    const input = $("#settings-form").elements["tunnel_addresses"];
+    box.replaceChildren(h("p", { class: "hint" }, "Cloudflare traffic recently came from:"),
+      ...sources.slice(0, 5).map((src) => h("div", { class: "tunnel-row" },
+        h("code", null, src.address),
+        h("span", { class: "hint" }, ` ${ago(src.last_seen).toLowerCase()}, ${src.count} request${src.count === 1 ? "" : "s"} \u00b7 `,
+          src.ha_network ? "the Cloudflared add-on (allowed)" : src.allowed ? "allowed" : "not allowed yet"),
+        !src.allowed ? h("button", { type: "button", class: "btn", onclick: () => {
+          input.value = [...input.value.split(/[\s,]+/).filter(Boolean), src.address].join(", ");
+          toast(`Added ${src.address}. Click Save settings to keep it.`);
+        } }, "Use this address") : null)),
+      h("p", { class: "hint" }, "Only add an address you recognize as the computer running cloudflared."));
   }
 
   $("#settings-form").addEventListener("submit", (e) => {
@@ -1112,7 +1136,14 @@
       body[name] = e.target.elements[name].checked ? "1" : "0";
     }
     run(async () => {
-      await api("PUT", "api/settings", body);
+      try {
+        await api("PUT", "api/settings", body);
+      } catch (err) {
+        // A refusal (such as turning on tunnel-only too early) may name a newly seen address.
+        await load();
+        renderTunnelSources();
+        throw err;
+      }
       await load();
       fillSettings();
     }, "Settings saved.");

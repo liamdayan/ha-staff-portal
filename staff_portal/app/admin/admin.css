@@ -342,3 +342,9 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .member-row .drag-handle, .item-row .drag-handle, .area-row .drag-handle { margin-left: -6px; }
 .order-reset { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 14px; color: var(--muted); }
+
+.tunnel-sources { display: grid; gap: 6px; margin-top: 6px; }
+.tunnel-sources .hint { margin: 0; }
+.tunnel-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tunnel-row code { font-size: 13px; }
+.inline-note { font-weight: 400; color: var(--muted); }

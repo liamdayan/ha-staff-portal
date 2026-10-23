@@ -88,6 +88,9 @@ class HTTPLocked(web.HTTPClientError):
 TRUSTED_NETWORKS = [ipaddress.ip_network(n) for n in ("172.30.32.0/23", "127.0.0.0/8", "::1/128")]
 
 
+MAX_TUNNEL_ADDRESSES = 10
+
+
 def from_trusted_network(remote: str | None) -> bool:
     try:
         address = ipaddress.ip_address(remote or "")
@@ -96,12 +99,67 @@ def from_trusted_network(remote: str | None) -> bool:
     return any(address in network for network in TRUSTED_NETWORKS)
 
 
+def parse_tunnel_addresses(text) -> list[str]:
+    """The tunnel addresses typed in Settings: single IPs, separated by commas or spaces."""
+    found = []
+    for part in re.split(r"[\s,]+", str(text or "").strip()):
+        if not part:
+            continue
+        try:
+            address = str(ipaddress.ip_address(part))
+        except ValueError:
+            raise ValueError(f"{part[:40]} isn't an IP address. Enter the address of the computer "
+                             "that runs cloudflared, such as 192.168.1.40.") from None
+        if address not in found:
+            found.append(address)
+    if len(found) > MAX_TUNNEL_ADDRESSES:
+        raise ValueError(f"Enter at most {MAX_TUNNEL_ADDRESSES} tunnel addresses.")
+    return found
+
+
+def from_tunnel(remote: str | None, addresses: list[str] | None = None) -> bool:
+    """Whether a connection comes from the Cloudflare Tunnel: the Cloudflared add-on (Home
+    Assistant's own network) or a tunnel computer listed in Settings."""
+    if from_trusted_network(remote):
+        return True
+    if addresses is None:
+        addresses = parse_tunnel_addresses(db.settings().get("tunnel_addresses"))
+    try:
+        return str(ipaddress.ip_address(remote or "")) in addresses
+    except ValueError:
+        return False
+
+
+# Where requests carrying Cloudflare's headers have come from lately: {address: (last seen, count)}.
+# Shown in Settings so the admin can tell which address the tunnel connects from.
+tunnel_seen: dict[str, tuple[float, int]] = {}
+
+
+def note_tunnel_source(request: web.Request) -> None:
+    if not request.headers.get("CF-Connecting-IP"):
+        return
+    remote = (request.remote or "")[:64]
+    _, count = tunnel_seen.get(remote, (0.0, 0))
+    tunnel_seen[remote] = (time.time(), count + 1)
+    if len(tunnel_seen) > 20:
+        oldest = min(tunnel_seen, key=lambda k: tunnel_seen[k][0])
+        tunnel_seen.pop(oldest)
+
+
+def tunnel_sources() -> list[dict]:
+    addresses = parse_tunnel_addresses(db.settings().get("tunnel_addresses"))
+    return [{"address": addr, "last_seen": seen, "count": count,
+             "allowed": from_tunnel(addr, addresses),
+             "ha_network": from_trusted_network(addr)}
+            for addr, (seen, count) in sorted(tunnel_seen.items(), key=lambda kv: -kv[1][0])]
+
+
 def client_ip(request: web.Request) -> str:
     """The caller's address. Forwarding headers are only believed when the connection comes
-    from a proxy on Home Assistant's own network (such as the Cloudflare Tunnel add-on);
+    from the tunnel (the Cloudflared add-on, or a tunnel computer listed in Settings);
     anyone else could write whatever they like in them."""
     remote = request.remote or ""
-    if from_trusted_network(remote):
+    if from_tunnel(remote):
         forwarded = (request.headers.get("CF-Connecting-IP")
                      or request.headers.get("X-Forwarded-For", "").split(",")[0].strip())
         if forwarded:
@@ -668,10 +726,11 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
 
 @web.middleware
 async def staff_headers(request: web.Request, handler):
+    note_tunnel_source(request)
     if (db.settings().get("phones_via_tunnel_only") == "1"
-            and not from_trusted_network(request.remote)):
+            and not from_tunnel(request.remote)):
         # Direct connections from the local network are refused; only the Cloudflare Tunnel
-        # add-on (on Home Assistant's own network) may pass phones through.
+        # (the add-on, or a tunnel computer listed in Settings) may pass phones through.
         response = web.Response(status=403, text="Staff Portal is only available through the "
                                                  "property's secure address.")
     else:
@@ -771,6 +830,7 @@ async def admin_state(request: web.Request):
     owners = db.phone_order_owners()
     return web.json_response({
         "settings": db.settings(),
+        "tunnel_sources": tunnel_sources(),
         "roles": db.roles(),
         "devices": device_payload(),
         "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
@@ -1211,6 +1271,27 @@ async def admin_update_settings(request: web.Request):
     for key in ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin"):
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
+    if "tunnel_addresses" in data:
+        try:
+            values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
+        except ValueError as err:
+            return bad_request(str(err))
+    current = db.settings()
+    if values.get("phones_via_tunnel_only") == "1" and current.get("phones_via_tunnel_only") != "1":
+        # Only switch on once tunnel traffic has been seen from an allowed address, so the
+        # setting can't cut every phone off.
+        addresses = parse_tunnel_addresses(values.get("tunnel_addresses",
+                                                      current.get("tunnel_addresses")))
+        recent = [addr for addr, (seen, _) in tunnel_seen.items()
+                  if time.time() - seen < 24 * 3600 and from_tunnel(addr, addresses)]
+        if not recent:
+            seen = [addr for addr, (when, _) in tunnel_seen.items() if time.time() - when < 24 * 3600]
+            hint = (f" Cloudflare traffic recently came from {', '.join(seen)}; add that as the "
+                    "tunnel address if it's the computer running cloudflared." if seen else
+                    " Open the staff app through your https address once (on any phone or "
+                    "browser), then try again.")
+            return bad_request("Staff Access hasn't seen any traffic from your tunnel yet, so "
+                               "turning this on would block every phone." + hint)
     for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
                         ("enroll_hours", 1, 720)):
         if key in data:
