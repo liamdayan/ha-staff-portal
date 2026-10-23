@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4
+
+- Group card screens show each device once. Devices the phone can operate appear only under
+  Controls (showing their state), not also in the readings list.
+- Controls on phones are locked until staff press and hold **Hold to unlock controls** at the
+  bottom of the screen, and lock again after 10 minutes with no control used. Readings always
+  work. Change the time or turn it off in **Settings → Staff phones**.
+
 ## 0.6.3
 
 - **Fixed:** "Only allow phones through your Cloudflare Tunnel" blocked every phone when cloudflared

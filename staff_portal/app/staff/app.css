@@ -354,3 +354,72 @@ button { cursor: pointer; }
 .rearrange-actions .btn.primary { margin-top: 0; }
 .rearrange > .link-btn { display: block; margin: 0 auto; }
 body.with-tabs .toast { bottom: calc(env(safe-area-inset-bottom) + 76px); }
+
+/* Control lock: controls ignore taps until someone holds "Unlock controls" */
+body.controls-locked .tile.controllable :is(.switch, .stepper, .select, .btn, .slider) {
+  pointer-events: none;
+  opacity: 0.4;
+}
+body.with-lock .screen { padding-bottom: calc(env(safe-area-inset-bottom) + 84px); }
+body.with-lock .toast { bottom: calc(env(safe-area-inset-bottom) + 84px); }
+body.with-lock.with-tabs .toast { bottom: calc(env(safe-area-inset-bottom) + 140px); }
+body.with-lock .layout.has-tabs { padding-bottom: calc(env(safe-area-inset-bottom) + 124px); }
+.lock-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom) + 14px);
+  z-index: 7;
+  width: min(420px, calc(100% - 32px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+body.with-tabs .lock-bar { bottom: calc(env(safe-area-inset-bottom) + 70px); }
+.lock-bar[hidden] { display: none; }
+.lock-hold {
+  position: relative;
+  flex: 1;
+  min-height: 52px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 16px;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+.lock-bar:not(.unlocked) { background: var(--accent); border-color: var(--accent); }
+.lock-bar:not(.unlocked) .lock-hold { color: #fff; }
+.lock-fill {
+  position: absolute;
+  inset: 0;
+  width: 0;
+  background: rgba(0, 0, 0, 0.28);
+}
+.lock-hold.holding .lock-fill { width: 100%; transition: width 0.8s linear; }
+.lock-label { position: relative; }
+.lock-bar.unlocked { padding-left: 16px; border-color: var(--accent); }
+.lock-status { flex: 1; font-weight: 600; padding: 14px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lock-status small { font-weight: 400; color: var(--muted); }
+.lock-now {
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
+  align-self: stretch;
+  padding: 0 20px;
+}
+.lock-bar.nudge { animation: lock-nudge 0.4s; }
+@keyframes lock-nudge {
+  25% { transform: translateX(calc(-50% - 8px)); }
+  75% { transform: translateX(calc(-50% + 8px)); }
+}

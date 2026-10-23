@@ -121,7 +121,9 @@ it yourself instead:
 - **Group cards.** For something like "Tub 1", add a group card, pick every device that
   belongs to it (water, inlet and outlet temperatures, setpoint, fill valve, pump, mode…),
   give each a short label, and tick up to 4 to show **on the card**. Tapping the card opens a
-  screen with the key readings at the top, every reading in a list, and controls below.
+  screen with the key readings at the top, then the readings, then the controls. Each device
+  appears once: if the phone can operate it, it shows as a control (with its current state),
+  otherwise in the readings list.
 - **Device.** A single device tile, with an optional label.
 - **Whole area.** Every device in one of your areas, kept up to date automatically.
 - **Heading.** A section title such as "Tubs".
@@ -169,6 +171,23 @@ page still shows up on a "More" page. Delete every page to go back to the automa
 
 Setpoints (number entities) and dropdowns (select entities) can be controlled too, always
 within the entity's own minimum, maximum and options.
+
+## Locked controls on the phone
+
+So someone checking temperatures can't switch something by accident, controls on the phone are
+locked until they're unlocked on purpose. Readings always work.
+
+- While locked, switches, buttons, setpoints and dropdowns are dimmed and ignore taps. Tapping
+  one shows a reminder.
+- To unlock, **press and hold** the 🔒 **Hold to unlock controls** button at the bottom of the
+  screen for about a second. A quick tap doesn't unlock.
+- Controls lock again after 10 minutes with no control used (each use restarts the 10 minutes),
+  when someone taps **Lock now**, or when the phone asks for a PIN or someone signs out.
+- The lock button only shows on screens that have controls.
+- Change the time, or turn this off, under **Settings → Staff phones → Lock controls until staff
+  unlock them**. Phones pick up the change within a few seconds.
+
+This guards against slips, not people: what a phone may do still comes from its role.
 
 ## Rearranging on the phone
 

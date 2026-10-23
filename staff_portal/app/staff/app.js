@@ -59,6 +59,7 @@
     // Keep pop-up messages above the bottom tab bar when there is one.
     document.body.classList.toggle("with-tabs", !!node.querySelector?.(".tabbar"));
     screen.replaceChildren(node);
+    drawLock();
   }
 
   function toast(text, isError) {
@@ -212,6 +213,7 @@
   }
 
   function askForPin() {
+    relock(); // whoever signs in next starts with controls locked
     if (me?.shared) showWho();
     else showPin(null);
   }
@@ -363,6 +365,8 @@
 
   function render(data) {
     lastData = data;
+    lock.enabled = !!data.control_lock;
+    lock.minutes = data.control_lock_minutes || 10;
     const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
     // Settle which page is open before comparing shapes, so a remembered page that's gone
     // (or the first load) doesn't cause an extra full redraw on the next poll.
@@ -395,6 +399,7 @@
       tiles = next;
     }
     for (const t of tiles.values()) t.refresh(byId);
+    drawLock();
   }
 
   // A tile that follows one entity. Skips updates while the user is mid-change.
@@ -527,7 +532,8 @@
     return card;
   }
 
-  // Detail screen for a group card: key readings, every reading, then the controls allowed.
+  // Detail screen for a group card: key readings, the readings, then the controls allowed.
+  // A device this phone can operate appears once, as a control (its tile shows its state too).
   function buildDetail(item, page, byId, into) {
     const readings = h("div", { class: "readings" });
     const hero = h("div", { class: "hero-values" });
@@ -537,6 +543,8 @@
       return e && e.level === "control" && e.controllable;
     });
     for (const m of controllable) controlsGrid.append(deviceTile(byId.get(m.entity_id), memberName(m, byId), into));
+    const readOnly = item.entities.filter((m) => !controllable.includes(m));
+    const readingsSection = h("section", { class: "group" }, h("h2", null, "Readings"), readings);
     into.set(`${into.size}:detail:${item.id}`, {
       refresh: (byId2) => {
         const summary = item.entities.filter((m) => m.summary && byId2.has(m.entity_id));
@@ -546,7 +554,9 @@
             h("div", { class: "hero-number" }, valueText(e)),
             h("div", { class: "hero-label" }, memberName(m, byId2)));
         }));
-        readings.replaceChildren(...item.entities.filter((m) => byId2.has(m.entity_id)).map((m) => {
+        const shown = readOnly.filter((m) => byId2.has(m.entity_id));
+        readingsSection.hidden = !shown.length;
+        readings.replaceChildren(...shown.map((m) => {
           const e = byId2.get(m.entity_id);
           return h("div", { class: isAlert(e) ? "reading-row alert" : "reading-row" },
             h("span", null, memberName(m, byId2)),
@@ -559,7 +569,7 @@
         h("button", { class: "back-btn", onclick: () => history.back() }, `\u2039 ${page.name}`),
         h("h1", null, item.title)),
       hero,
-      h("section", { class: "group" }, h("h2", null, "All readings"), readings),
+      readingsSection,
       controllable.length
         ? h("section", { class: "group" }, h("h2", null, "Controls"), controlsGrid)
         : null);
@@ -768,7 +778,15 @@
   });
 
   async function act(tile, action, params, confirmText) {
+    if (controlsLocked()) {
+      // Locked while a change was pending (such as a stepper): drop it and show the real state.
+      tile.busy = false;
+      tile.update(tile.entity);
+      lockedNudge();
+      return;
+    }
     if (confirmText && !window.confirm(confirmText)) return;
+    keepUnlocked();
     tile.busy = true;
     tile.el.classList.add("working");
     const res = await api("POST", "/api/action", { entity_id: tile.entity.entity_id, action, params });
@@ -1018,9 +1036,113 @@
       tile.el.classList.toggle("alert", isAlert(e));
       tile.el.classList.toggle("off", e.state === "unavailable");
       build(e);
+      tile.el.classList.toggle("controllable", canControl());
     };
     return tile;
   }
+
+  // ---------------------------------------------------------------- control lock
+
+  // Controls stay locked until someone holds "Unlock controls", so a phone used to check
+  // readings can't switch something by accident. They lock again after `minutes` with no
+  // control used. This guards against slips, not people: the role still decides what's allowed.
+  const HOLD_MS = 800;
+  const lock = { enabled: false, minutes: 10, until: 0, timer: null, tick: null };
+  const lockBar = h("div", { class: "lock-bar", hidden: true });
+  document.body.append(lockBar);
+
+  function controlsLocked() {
+    return lock.enabled && Date.now() >= lock.until;
+  }
+
+  function schedule() {
+    clearTimeout(lock.timer);
+    clearInterval(lock.tick);
+    if (!lock.until) return;
+    lock.timer = setTimeout(drawLock, Math.max(0, lock.until - Date.now()) + 50);
+    lock.tick = setInterval(drawLock, 15000);
+  }
+
+  function unlockControls() {
+    lock.until = Date.now() + lock.minutes * 60000;
+    schedule();
+    drawLock();
+    toastEl.hidden = true; // drop any "controls are locked" hint
+    navigator.vibrate?.(15);
+  }
+
+  function relock() {
+    lock.until = 0;
+    schedule();
+    drawLock();
+  }
+
+  // Using a control counts as activity, so they don't lock mid-job.
+  function keepUnlocked() {
+    if (lock.enabled && lock.until) {
+      lock.until = Date.now() + lock.minutes * 60000;
+      schedule();
+      drawLock();
+    }
+  }
+
+  function lockedNudge() {
+    lockBar.classList.remove("nudge");
+    void lockBar.offsetWidth; // restart the animation
+    lockBar.classList.add("nudge");
+    toast("Controls are locked. Press and hold the lock button at the bottom to unlock.");
+  }
+
+  function holdButton() {
+    const btn = h("button", { class: "lock-hold", type: "button" },
+      h("span", { class: "lock-fill", "aria-hidden": "true" }),
+      h("span", { class: "lock-label" }, "\ud83d\udd12 Hold to unlock controls"));
+    let timer = null;
+    const cancel = () => { clearTimeout(timer); timer = null; btn.classList.remove("holding"); };
+    btn.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      btn.classList.add("holding");
+      timer = setTimeout(() => { cancel(); unlockControls(); }, HOLD_MS);
+    });
+    for (const type of ["pointerup", "pointercancel", "pointerleave"]) btn.addEventListener(type, cancel);
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    // Keyboard and screen readers can't hold; a deliberate key press is enough there.
+    btn.addEventListener("click", (e) => { if (e.detail === 0) unlockControls(); });
+    return btn;
+  }
+
+  function drawLock() {
+    const onScreen = !!screen.querySelector("article.tile.controllable");
+    if (!lock.enabled || !onScreen || rearranging) {
+      lockBar.hidden = true;
+      document.body.classList.remove("with-lock", "controls-locked");
+      if (!lock.enabled && lock.until) relock();
+      return;
+    }
+    if (lock.until && Date.now() >= lock.until) {
+      lock.until = 0;
+      schedule(); // stop the countdown
+    }
+    const locked = controlsLocked();
+    lockBar.hidden = false;
+    document.body.classList.add("with-lock");
+    document.body.classList.toggle("controls-locked", locked);
+    lockBar.classList.toggle("unlocked", !locked);
+    if (locked) {
+      if (!lockBar.querySelector(".lock-hold")) lockBar.replaceChildren(holdButton());
+      return;
+    }
+    const left = Math.max(1, Math.ceil((lock.until - Date.now()) / 60000));
+    lockBar.replaceChildren(
+      h("span", { class: "lock-status" }, "\ud83d\udd13 Unlocked",
+        h("small", null, ` \u00b7 locks in ${left} min`)),
+      h("button", { class: "lock-now", type: "button", onclick: relock }, "Lock now"));
+  }
+
+  // While locked, controls ignore taps (CSS); a tap on a control's tile explains why.
+  document.addEventListener("click", (e) => {
+    if (controlsLocked() && e.target.closest?.("article.tile.controllable")) lockedNudge();
+  });
 
   // ---------------------------------------------------------------- wiring
 
@@ -1031,6 +1153,7 @@
   });
 
   document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") drawLock();
     if (document.visibilityState === "visible" && live) refresh();
     else if (document.visibilityState === "hidden") clearTimeout(pollTimer);
   });

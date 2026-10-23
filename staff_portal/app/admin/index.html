@@ -164,6 +164,13 @@
           It only changes that phone (or that person, on a shared phone), never your layout, and you
           can reset it from Phones → Edit or the Staff tab. Turning this off puts every phone back
           on your layout.</small></span></label>
+        <label class="check-row"><input type="checkbox" name="control_lock">
+          <span>Lock controls until staff unlock them
+          <small>Switches, buttons and setpoints don't respond until someone presses and holds the lock
+          button at the bottom of the phone, so checking temperatures can't switch something by accident. Readings always
+          work. Controls lock again after the time below with no control used.</small></span></label>
+        <label class="inline-number">Lock controls again after (minutes)
+          <input name="control_lock_minutes" type="number" min="1" max="120"></label>
       </fieldset>
       <fieldset>
         <legend>Home Assistant logbook</legend>

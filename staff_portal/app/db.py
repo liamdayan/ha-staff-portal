@@ -133,6 +133,8 @@ DEFAULT_SETTINGS = {
     "enroll_hours": "72",
     "ha_logbook": "1",
     "allow_phone_reorder": "1",
+    "control_lock": "1",  # controls need a hold-to-unlock, and lock again after a quiet spell
+    "control_lock_minutes": "10",
     "phones_via_tunnel_only": "0",
     "tunnel_addresses": "",  # where cloudflared connects from, when it isn't the add-on
     "require_pin": "0",

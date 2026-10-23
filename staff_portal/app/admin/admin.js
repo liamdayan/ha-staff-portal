@@ -1132,7 +1132,7 @@
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
-    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only"]) {
+    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock"]) {
       body[name] = e.target.elements[name].checked ? "1" : "0";
     }
     run(async () => {

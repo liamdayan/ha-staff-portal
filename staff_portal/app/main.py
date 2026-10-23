@@ -617,6 +617,8 @@ async def api_entities(request: web.Request):
         "layout": phone_layout,
         "staff_name": member and member["name"],
         "can_reorder": can_reorder,
+        "control_lock": db.settings().get("control_lock") == "1",
+        "control_lock_minutes": db.setting_int("control_lock_minutes"),
         "custom_order": bool(order),
         "order": order or {"pages": [], "items": {}},
     })
@@ -1268,7 +1270,8 @@ async def admin_update_settings(request: web.Request):
         if url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?", url):
             return bad_request("The staff app address must start with https:// (no path).")
         values["public_url"] = url
-    for key in ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin"):
+    for key in ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
+                "control_lock"):
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     if "tunnel_addresses" in data:
@@ -1293,7 +1296,7 @@ async def admin_update_settings(request: web.Request):
             return bad_request("Staff Access hasn't seen any traffic from your tunnel yet, so "
                                "turning this on would block every phone." + hint)
     for key, lo, hi in (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
-                        ("enroll_hours", 1, 720)):
+                        ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120)):
         if key in data:
             try:
                 values[key] = max(lo, min(hi, int(data[key])))
