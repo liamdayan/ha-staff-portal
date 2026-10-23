@@ -8,6 +8,7 @@ phone's role before it is forwarded.
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -36,6 +37,35 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 log = logging.getLogger("staff_portal")
+
+
+def read_version() -> str:
+    """Add-on version from config.yaml (copied into the image; one level up in development)."""
+    for path in (os.path.join(HERE, "config.yaml"), os.path.join(HERE, "..", "config.yaml")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                match = re.search(r'^version:\s*"?([^"\n]+)"?', f.read(), re.M)
+        except OSError:
+            continue
+        if match:
+            return match.group(1).strip()
+    return "dev"
+
+
+def asset_fingerprint(folder: str) -> str:
+    """Short hash of a folder's files. Added to script/style URLs so every update makes
+    browsers fetch the new files instead of reusing old cached copies."""
+    digest = hashlib.sha1()
+    root = os.path.join(HERE, folder)
+    for name in sorted(os.listdir(root)):
+        with open(os.path.join(root, name), "rb") as f:
+            digest.update(name.encode() + f.read())
+    return digest.hexdigest()[:10]
+
+
+VERSION = read_version()
+ADMIN_ASSETS = asset_fingerprint("admin")
+STAFF_ASSETS = asset_fingerprint("staff")
 db = Database(DATA_DIR)
 ha = HomeAssistant()
 branding = Branding(DATA_DIR)
@@ -198,6 +228,8 @@ def render_staff_index(enroll_code: str | None = None) -> web.Response:
     }
     for key, value in replacements.items():
         html = html.replace(key, _esc(value))
+    for asset in ("/static/app.css", "/static/app.js"):
+        html = html.replace(f'"{asset}"', f'"{asset}?v={STAFF_ASSETS}"')
     return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
@@ -508,6 +540,8 @@ async def staff_headers(request: web.Request, handler):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    elif request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"  # always check for a newer version
     return response
 
 
@@ -549,8 +583,12 @@ def device_payload() -> list[dict]:
 
 
 async def admin_index(request: web.Request):
-    return web.FileResponse(os.path.join(HERE, "admin", "index.html"),
-                            headers={"Cache-Control": "no-cache"})
+    with open(os.path.join(HERE, "admin", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    for asset in ("static/admin.css", "static/admin.js"):
+        html = html.replace(f'"{asset}"', f'"{asset}?v={ADMIN_ASSETS}"')
+    html = html.replace("{{VERSION}}", _esc(VERSION))
+    return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 async def admin_state(request: web.Request):
@@ -976,9 +1014,12 @@ async def admin_guard(request: web.Request, handler):
     if request.remote not in ADMIN_ALLOWED_IPS:
         return web.Response(status=403, text="Open Staff Access from the Home Assistant sidebar.")
     try:
-        return await handler(request)
+        response = await handler(request)
     except ValueError:
         return bad_request("invalid value")
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"  # always check for a newer version
+    return response
 
 
 def admin_app() -> web.Application:
@@ -1024,7 +1065,8 @@ async def main():
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port).start()
         runners.append(runner)
-    log.info("Admin on :%s (ingress), staff app on :%s", ADMIN_PORT, STAFF_PORT)
+    log.info("Staff Portal %s: admin on :%s (ingress), staff app on :%s",
+             VERSION, ADMIN_PORT, STAFF_PORT)
     try:
         await asyncio.Event().wait()
     finally:

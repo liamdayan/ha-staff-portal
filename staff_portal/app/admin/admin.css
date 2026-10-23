@@ -304,3 +304,4 @@ dialog.ask { width: min(400px, calc(100vw - 32px)); }
 .ask-message { margin: 0 0 12px; font-size: 15px; white-space: pre-line; }
 dialog.ask input { width: 100%; }
 .btn.primary.danger-fill { background: var(--danger); border-color: var(--danger); }
+.version { color: var(--muted); font-size: 12px; margin-left: 6px; opacity: 0.8; }

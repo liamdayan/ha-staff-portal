@@ -11,6 +11,11 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
 
+  // Never fail silently: show unexpected errors so they can be reported.
+  window.addEventListener("error", (e) => toast(`Something went wrong: ${e.message}`, true));
+  window.addEventListener("unhandledrejection", (e) =>
+    toast(`Something went wrong: ${e.reason?.message || e.reason}`, true));
+
   function h(tag, attrs, ...children) {
     const el = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
