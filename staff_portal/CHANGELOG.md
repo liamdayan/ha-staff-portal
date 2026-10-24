@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.18
+
+- Repeated taps are ignored for 3 seconds instead of 5, so the same command can be sent again
+  sooner.
+
 ## 0.6.17
 
 - **Hide names (PIN only)** for shared phones and computers (**Edit → Who uses it**): the

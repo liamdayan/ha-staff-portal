@@ -520,7 +520,7 @@ def authenticate(request: web.Request, need_unlock: bool = True,
 # than a person could tap.
 ACTIONS_PER_MINUTE = 60
 ENTITY_MIN_INTERVAL = 1.0
-REPEAT_WINDOW = 5.0          # the same command again this soon is a double tap: ignored
+REPEAT_WINDOW = 3.0          # the same command again this soon is a double tap: ignored
 recent_actions: dict[int, list[float]] = {}
 last_entity_action: dict[tuple[int, str], float] = {}
 last_command: dict[tuple[int, str], tuple[str, str, float]] = {}   # (service, call, when)

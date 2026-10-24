@@ -442,7 +442,7 @@ Always on:
   touched, even with the app left open on the screen.
 - Each phone can send up to 60 actions a minute, and one action per device each second, so a
   stuck button or a script can't flood your equipment.
-- Double taps are ignored: the same command from the same phone within 5 seconds isn't sent
+- Double taps are ignored: the same command from the same phone within 3 seconds isn't sent
   again or logged again, and switching something on or off that already is does nothing. The
   app also ignores taps on a control while its last command is still being sent.
 - Giving a role a whole area doesn't include a device's hidden or configuration controls (like
