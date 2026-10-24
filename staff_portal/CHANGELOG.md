@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.20
+
+**Layout**
+
+- **New: page groups.** Put pages that go together in a group, such as "Pool staff", and give
+  the whole group to phones and computers with **Choose devices** instead of page by page.
+  Devices that show a group also get pages added to it later. A group's pages stay together in
+  the page list and move together. Staff don't see groups, just their pages.
+- **New: Duplicate group** copies a group with all its pages, ready to rename and give to other
+  devices.
+- **Delete group** asks whether to keep its pages or delete them too. Kept pages stay on the
+  devices that showed the group.
+- **New: Preview** shows the layout as a phone or as a computer would, including unsaved
+  changes and live readings. Preview everything on the layout, or exactly what one phone or
+  computer would show. Tapping a control in the preview sends nothing.
+- The device dialog lists a group once instead of each of its pages. Taking one page away from a
+  device that showed every page keeps its groups as groups, so it still gets their new pages.
+- The docs now call the button **Choose devices**, as the dashboard does.
+
+**Staff app**
+
+- **Fixed:** on phones not allowed to rearrange, the word "null" showed at the bottom of each
+  page.
+
 ## 0.6.19
 
 Fixes from a security review.

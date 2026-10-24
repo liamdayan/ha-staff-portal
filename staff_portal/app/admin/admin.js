@@ -453,26 +453,56 @@
       ...state.roles.map((r) => h("option", { value: r.id, selected: r.id === selected }, r.name)));
   }
 
-  // Pages a phone can be given: layout pages plus the automatic More page.
-  function layoutPageOptions(pages = state.layout?.pages || [], showMore = state.layout?.show_unplaced !== false) {
-    const options = pages.map((p) => ({ id: p.id, name: p.name }));
-    if (pages.length && showMore) options.push({ id: "more", name: "More (allowed devices not on any page)" });
+  // What a phone can be given: page groups (each stands for all of its pages, including ones
+  // added later), pages that aren't in a group, and the automatic More page.
+  function layoutPageOptions(layout = state.layout) {
+    const pages = layout?.pages || [];
+    const groups = layout?.page_groups || [];
+    const options = groups.map((g) => {
+      const names = pages.filter((p) => p.page_group === g.id).map((p) => p.name);
+      return { id: `group:${g.id}`, name: `${g.name} (group: ${names.length ? names.join(", ") : "no pages yet"})` };
+    });
+    for (const p of pages) if (!groups.some((g) => g.id === p.page_group)) options.push({ id: p.id, name: p.name });
+    if (pages.length && layout?.show_unplaced !== false) options.push({ id: "more", name: "More (allowed devices not on any page)" });
     return options;
   }
 
-  // Page IDs a phone's list may refer to: saved pages, pages in the unsaved layout draft, and
-  // More. Anything else is a page that no longer exists.
-  function knownPageIds() {
-    const ids = new Set(["more", ...(state.layout?.pages || []).map((p) => p.id)]);
-    for (const p of layoutDraft?.pages || []) ids.add(p.id);
+  // What a phone's list may name: pages and page groups that are saved or in the unsaved layout,
+  // and More. Anything else no longer exists.
+  function knownChoices() {
+    const ids = new Set(["more"]);
+    for (const layout of [state.layout, layoutDraft]) {
+      for (const p of layout?.pages || []) ids.add(p.id);
+      for (const g of layout?.page_groups || []) ids.add(`group:${g.id}`);
+    }
     return ids;
   }
 
+  // "Every page" written out as a list (each group, each page outside a group, and More), for
+  // when a phone that showed every page is switched to chosen pages.
+  function allChoices() {
+    const ids = new Set();
+    for (const layout of [state.layout, layoutDraft]) {
+      const groups = new Set((layout?.page_groups || []).map((g) => g.id));
+      for (const id of groups) ids.add(`group:${id}`);
+      for (const p of layout?.pages || []) if (!groups.has(p.page_group)) ids.add(p.id);
+    }
+    ids.add("more");
+    return [...ids];
+  }
+
   function phonePagesText(d) {
-    if (!(state.layout?.pages || []).length) return null;
+    const layout = state.layout;
+    if (!(layout?.pages || []).length) return null;
     if (d.layout_pages == null) return "All pages";
-    const names = layoutPageOptions().filter((o) => d.layout_pages.includes(o.id))
-      .map((o) => (o.id === "more" ? "More" : o.name));
+    const names = d.layout_pages.map((id) => {
+      if (id === "more") return "More";
+      if (id.startsWith("group:")) {
+        const group = (layout.page_groups || []).find((g) => `group:${g.id}` === id);
+        return group && `${group.name} (group)`;
+      }
+      return layout.pages.find((p) => p.id === id)?.name;
+    }).filter(Boolean);
     return names.length ? names.join(", ") : "None";
   }
 
@@ -557,7 +587,7 @@
           // Keep choices this dialog doesn't list (the More page while it's switched off, or a
           // page that's only in the unsaved layout) so saving here doesn't quietly drop them.
           const offered = new Set(pageOptions.map((o) => o.id));
-          const known = knownPageIds();
+          const known = knownChoices();
           body.layout_pages = all ? null
             : [...ticked, ...(chosenPages || []).filter((id) => !offered.has(id) && known.has(id))];
         }
@@ -1357,7 +1387,10 @@
 
   // Working copy of the layout; saved with "Save layout".
   let layoutDraft = null;
-  let pageIndex = 0;
+  let pageSel = null;   // the open page's ID...
+  let groupSel = null;  // ...or the open page group's ID
+  const MAX_PAGES = 20;
+  const MAX_PAGE_GROUPS = 12;
   const newId = () => Math.random().toString(36).slice(2, 10);
   const entityById = (id) => entities?.find((e) => e.entity_id === id);
   const entityName = (id) => entityById(id)?.name || id;
@@ -1365,6 +1398,7 @@
   function draft() {
     if (!layoutDraft) {
       layoutDraft = JSON.parse(JSON.stringify(state.layout || { pages: [], show_unplaced: true }));
+      layoutDraft.page_groups ||= [];
       layoutDraft.dirty = false;
     }
     return layoutDraft;
@@ -1381,22 +1415,82 @@
     $("#show-unplaced").checked = d.show_unplaced !== false;
     $("#save-layout").disabled = !d.dirty;
     $("#discard-layout").disabled = !d.dirty;
-    if (pageIndex >= d.pages.length) pageIndex = Math.max(0, d.pages.length - 1);
-    $("#page-list").replaceChildren(...(d.pages.length ? d.pages.map((p, i) => h("li", { class: "sort-row" },
-      dragHandle(`Reorder page ${p.name}`),
-      h("button", { class: i === pageIndex ? "role-item active" : "role-item",
-        onclick: () => { pageIndex = i; renderLayoutEditor(); } },
-      h("span", { class: "role-name" }, p.name),
-      h("span", { class: "role-meta" }, `${p.items.length} item${p.items.length === 1 ? "" : "s"}`))))
+    if (groupSel && !d.page_groups.some((g) => g.id === groupSel)) groupSel = null;
+    if (!groupSel && !d.pages.some((p) => p.id === pageSel)) pageSel = d.pages[0]?.id ?? null;
+    const blocks = pageBlocks(d);
+    $("#page-list").replaceChildren(...(blocks.length
+      ? blocks.map((b) => (b.page ? pageRow(b.page) : groupRow(b)))
       : [h("li", { class: "empty small" }, "No pages yet. Phones use the automatic layout.")]));
-    renderPageEditor();
+    if (groupSel) renderGroupEditor();
+    else renderPageEditor();
+  }
+
+  function pageRow(p) {
+    return h("li", { class: "sort-row" },
+      dragHandle(`Reorder page ${p.name}`),
+      h("button", { class: !groupSel && p.id === pageSel ? "role-item active" : "role-item",
+        onclick: () => { pageSel = p.id; groupSel = null; renderLayoutEditor(); } },
+      h("span", { class: "role-name" }, p.name),
+      h("span", { class: "role-meta" }, `${p.items.length} item${p.items.length === 1 ? "" : "s"}`)));
+  }
+
+  // A page group in the page list: its name, then its pages, which reorder within the group.
+  function groupRow({ group, pages }) {
+    const list = h("ul", { class: "group-pages" }, pages.length ? pages.map(pageRow)
+      : [h("li", { class: "empty small" }, "No pages yet")]);
+    sortable(list, `group-${group.id}`, (from, to) => {
+      const d = draft();
+      const inGroup = d.pages.filter((p) => p.page_group === group.id);
+      moveItem(inGroup, from, to);
+      let next = 0;
+      d.pages = d.pages.map((p) => (p.page_group === group.id ? inGroup[next++] : p));
+      markLayoutDirty();
+      renderLayoutEditor();
+    });
+    return h("li", { class: "sort-row page-group" },
+      dragHandle(`Reorder group ${group.name}`),
+      h("div", { class: "page-group-box" },
+        h("button", { class: groupSel === group.id ? "role-item group-item active" : "role-item group-item",
+          onclick: () => { groupSel = group.id; renderLayoutEditor(); } },
+        h("span", { class: "role-name" }, group.name),
+        h("span", { class: "role-meta" }, `Group \u00b7 ${pages.length} page${pages.length === 1 ? "" : "s"}`)),
+        list));
+  }
+
+  // The page group a page is in, if any.
+  function groupOf(page, d = draft()) {
+    return page.page_group ? d.page_groups.find((g) => g.id === page.page_group) || null : null;
+  }
+
+  // The page list's order: single pages, and page groups with their pages side by side (where
+  // the group's first page is, which is also the order phones show them in). Groups with no
+  // pages yet come last.
+  function pageBlocks(d) {
+    const blocks = [];
+    const seen = new Set();
+    for (const page of d.pages) {
+      const group = groupOf(page, d);
+      if (!group) {
+        blocks.push({ page });
+      } else if (!seen.has(group.id)) {
+        seen.add(group.id);
+        blocks.push({ group, pages: d.pages.filter((p) => p.page_group === group.id) });
+      }
+    }
+    for (const group of d.page_groups) if (!seen.has(group.id)) blocks.push({ group, pages: [] });
+    return blocks;
+  }
+
+  function setBlocks(d, blocks) {
+    d.pages = blocks.flatMap((b) => (b.page ? [b.page] : b.pages));
+    d.page_groups = blocks.filter((b) => b.group).map((b) => b.group);
   }
 
   sortable($("#page-list"), "pages", (from, to) => {
     const d = draft();
-    const selected = d.pages[pageIndex];
-    moveItem(d.pages, from, to);
-    pageIndex = d.pages.indexOf(selected);
+    const blocks = pageBlocks(d);
+    moveItem(blocks, from, to);
+    setBlocks(d, blocks);
     markLayoutDirty();
     renderLayoutEditor();
   });
@@ -1434,13 +1528,25 @@
   function renderPageEditor() {
     const box = $("#page-editor");
     const d = draft();
-    const page = d.pages[pageIndex];
+    const page = d.pages.find((p) => p.id === pageSel);
     if (!page) {
       box.replaceChildren(h("div", { class: "empty" },
-        "Add a page to start a custom layout, for example \u201cSoaking\u201d or \u201cMechanical.\u201d"));
+        "Add a page to start a custom layout, for example \u201cSoaking\u201d or \u201cMechanical.\u201d " +
+        "Put pages in a group (such as \u201cPool staff\u201d) to give them to phones together."));
       return;
     }
     const add = (type) => editItem(page, null, type);
+    const group = groupOf(page, d);
+    const groupPick = d.page_groups.length ? h("label", { class: "inline-select" }, "Group",
+      h("select", { onchange: (e) => {
+        if (e.target.value) page.page_group = e.target.value;
+        else delete page.page_group;
+        setBlocks(d, pageBlocks(d));
+        markLayoutDirty();
+        renderLayoutEditor();
+      } },
+      h("option", { value: "" }, "No group"),
+      ...d.page_groups.map((g) => h("option", { value: g.id, selected: g.id === group?.id }, g.name)))) : null;
     box.replaceChildren(
       h("div", { class: "editor-head" },
         h("label", { class: "role-name-field" }, "Page name",
@@ -1454,13 +1560,19 @@
           h("button", { class: "btn", onclick: () => duplicatePage(page) }, "Duplicate page"),
           h("button", { class: "btn danger", onclick: async () => {
             if (!await askConfirm(`Delete the ${page.name} page?`, "Delete page")) return;
-            d.pages.splice(pageIndex, 1);
+            d.pages = d.pages.filter((p) => p !== page);
+            pageSel = null;
             markLayoutDirty();
             renderLayoutEditor();
           } }, "Delete page"))),
-      h("div", { class: "shown-on" },
-        h("span", null, "Shown on: ", h("strong", null, shownOnText(page.id))),
-        h("button", { class: "btn", onclick: () => choosePhones(page) }, "Choose devices")),
+      group
+        ? h("div", { class: "shown-on" }, groupPick,
+          h("span", null, "Shown on: ", h("strong", null, shownOnText(`group:${group.id}`)),
+            ` (with the ${group.name} group)`),
+          h("button", { class: "btn", onclick: () => { groupSel = group.id; renderLayoutEditor(); } }, "Open group"))
+        : h("div", { class: "shown-on" }, groupPick,
+          h("span", null, "Shown on: ", h("strong", null, shownOnText(page.id))),
+          h("button", { class: "btn", onclick: () => choosePhones(page.id, page.name) }, "Choose devices")),
       h("div", { class: "add-row" }, "Add:",
         h("button", { class: "btn", onclick: () => add("group") }, "Group card"),
         h("button", { class: "btn", onclick: () => add("device") }, "Device"),
@@ -1488,19 +1600,139 @@
     editItem(page, index + 1, page.items[index + 1].type);
   }
 
-  function duplicatePage(page) {
-    const d = draft();
-    const copy = { id: newId(), name: `${page.name} (copy)`.slice(0, 30),
+  // A copy of a page with new IDs for it and its items, in the same group. Item titles stay
+  // as they are.
+  function copyPage(page, name = page.name) {
+    const copy = { id: newId(), name: name.slice(0, 30),
       items: page.items.map((item) => ({ ...copyOf(item), title: item.title })) };
     for (const item of copy.items) if (item.title === undefined) delete item.title;
-    d.pages.splice(pageIndex + 1, 0, copy);
-    pageIndex += 1;
+    if (page.page_group) copy.page_group = page.page_group;
+    return copy;
+  }
+
+  function roomForPages(count) {
+    if (draft().pages.length + count <= MAX_PAGES) return true;
+    toast(`A layout can have at most ${MAX_PAGES} pages.`, true);
+    return false;
+  }
+
+  function duplicatePage(page) {
+    const d = draft();
+    if (!roomForPages(1)) return;
+    const copy = copyPage(page, `${page.name} (copy)`);
+    d.pages.splice(d.pages.indexOf(page) + 1, 0, copy);
+    pageSel = copy.id;
     markLayoutDirty();
     renderLayoutEditor();
+    const group = groupOf(copy, d);
     const picky = state.devices.filter((x) => x.status !== "revoked" && x.layout_pages != null).length;
-    toast(picky
-      ? `Copied as ${copy.name}. ${picky} phone${picky === 1 ? " is" : "s are"} set to specific pages and won't show it until you add it (Choose phones).`
+    toast(group ? `Copied as ${copy.name}, in the ${group.name} group. Rename it, then Save layout.`
+      : picky ? `Copied as ${copy.name}. ${picky} device${picky === 1 ? " is" : "s are"} set to specific pages and won't show it until you add it (Choose devices).`
       : `Copied as ${copy.name}. Rename it, then Save layout.`);
+  }
+
+  async function addPage(group) {
+    if (!roomForPages(1)) return;
+    const name = await askText(group ? `Name of the new page in ${group.name}:`
+      : "Page name (for example Soaking or Mechanical):");
+    if (!name?.trim()) return;
+    const d = draft();
+    const page = { id: newId(), name: name.trim().slice(0, 30), items: [] };
+    if (group) page.page_group = group.id;
+    d.pages.push(page);
+    setBlocks(d, pageBlocks(d));
+    pageSel = page.id;
+    groupSel = null;
+    markLayoutDirty();
+    renderLayoutEditor();
+  }
+
+  function renderGroupEditor() {
+    const box = $("#page-editor");
+    const d = draft();
+    const group = d.page_groups.find((g) => g.id === groupSel);
+    const pages = d.pages.filter((p) => p.page_group === group.id);
+    const others = d.pages.filter((p) => p.page_group !== group.id);
+    const regroup = (page, groupId) => {
+      if (groupId) page.page_group = groupId;
+      else delete page.page_group;
+      setBlocks(d, pageBlocks(d));
+      markLayoutDirty();
+      renderLayoutEditor();
+    };
+    const moveIn = others.length ? h("select", {
+      "aria-label": "Move a page into this group",
+      onchange: (e) => regroup(d.pages.find((p) => p.id === e.target.value), group.id),
+    }, h("option", { value: "" }, "Move a page here\u2026"),
+    ...others.map((p) => h("option", { value: p.id }, groupOf(p, d) ? `${p.name} (from ${groupOf(p, d).name})` : p.name))) : null;
+    box.replaceChildren(
+      h("div", { class: "editor-head" },
+        h("label", { class: "role-name-field" }, "Group name",
+          h("input", { value: group.name, maxlength: "30", oninput: (e) => {
+            group.name = e.target.value;
+            markLayoutDirty();
+            const label = $("#page-list .group-item.active .role-name");
+            if (label) label.textContent = group.name;
+          } })),
+        h("div", { class: "editor-actions" },
+          h("button", { class: "btn", onclick: () => duplicateGroup(group) }, "Duplicate group"),
+          h("button", { class: "btn danger", onclick: () => deleteGroup(group) }, "Delete group"))),
+      h("p", { class: "hint" }, "Give a group to phones and computers to show all of its pages. Pages you add " +
+        "to the group later show up on them too, and each device still only sees what its role allows."),
+      h("div", { class: "shown-on" },
+        h("span", null, "Shown on: ", h("strong", null, shownOnText(`group:${group.id}`))),
+        h("button", { class: "btn", onclick: () => choosePhones(`group:${group.id}`, group.name) }, "Choose devices")),
+      h("div", { class: "add-row" }, "Add:",
+        h("button", { class: "btn", onclick: () => addPage(group) }, "New page"), moveIn),
+      pages.length
+        ? h("div", { class: "item-list" }, pages.map((page) => h("div", { class: "item-row" },
+          h("span", { class: "item-kind" }, "Page"),
+          h("div", { class: "entity-text" },
+            h("div", { class: "entity-name" }, page.name),
+            h("div", { class: "entity-id" }, `${page.items.length} item${page.items.length === 1 ? "" : "s"}`)),
+          h("div", { class: "area-actions" },
+            h("button", { class: "btn", onclick: () => { pageSel = page.id; groupSel = null; renderLayoutEditor(); } }, "Edit"),
+            h("button", { class: "btn", "aria-label": `Take ${page.name} out of the group`,
+              onclick: () => regroup(page, null) }, "Take out")))))
+        : h("div", { class: "empty" }, "No pages in this group yet. Add a new page, or move one here."));
+  }
+
+  // A copy of a whole group with copies of all its pages, right below it. The copy isn't on
+  // any device yet (except devices that show every page), ready to be renamed and given out.
+  function duplicateGroup(group) {
+    const d = draft();
+    if (d.page_groups.length >= MAX_PAGE_GROUPS) return toast(`A layout can have at most ${MAX_PAGE_GROUPS} groups.`, true);
+    const originals = d.pages.filter((p) => p.page_group === group.id);
+    if (!roomForPages(originals.length)) return;
+    const copy = { id: newId(), name: `${group.name} (copy)`.slice(0, 30) };
+    const pages = originals.map((p) => ({ ...copyPage(p), page_group: copy.id }));
+    const blocks = pageBlocks(d);
+    blocks.splice(blocks.findIndex((b) => b.group?.id === group.id) + 1, 0, { group: copy, pages });
+    setBlocks(d, blocks);
+    groupSel = copy.id;
+    markLayoutDirty();
+    renderLayoutEditor();
+    toast(`Copied as ${copy.name} with ${pages.length} page${pages.length === 1 ? "" : "s"}. ` +
+      "Rename it, choose its devices, then Save layout.");
+  }
+
+  async function deleteGroup(group) {
+    const d = draft();
+    const pages = d.pages.filter((p) => p.page_group === group.id);
+    const choice = pages.length
+      ? await askChoice(`Delete the group ${group.name}? It has ${pages.length} page${pages.length === 1 ? "" : "s"}: ` +
+        `${pages.map((p) => p.name).join(", ")}.`, [
+        ["keep", "Keep its pages", "They stay in the layout, outside any group. Devices that got the group keep them."],
+        ["delete", "Delete its pages too", "They're removed from every device.", "danger"],
+      ])
+      : (await askConfirm(`Delete the group ${group.name}?`, "Delete group") ? "keep" : null);
+    if (!choice) return;
+    if (choice === "delete") d.pages = d.pages.filter((p) => p.page_group !== group.id);
+    else for (const page of pages) delete page.page_group;
+    d.page_groups = d.page_groups.filter((g) => g !== group);
+    groupSel = null;
+    markLayoutDirty();
+    renderLayoutEditor();
   }
 
   // The page's items as reorderable rows.
@@ -1533,36 +1765,38 @@
     return list;
   }
 
-  function phonesShowing(pageId) {
+  // Devices given a page (its ID) or a page group ("group:<id>"), or every page.
+  function phonesShowing(key) {
     return state.devices.filter((d) => d.status !== "revoked" &&
-      (d.layout_pages == null || d.layout_pages.includes(pageId)));
+      (d.layout_pages == null || d.layout_pages.includes(key)));
   }
 
-  function shownOnText(pageId) {
+  function shownOnText(key) {
     const all = state.devices.filter((d) => d.status !== "revoked");
-    const on = phonesShowing(pageId);
+    const on = phonesShowing(key);
     if (!all.length) return "no devices set up yet";
     if (on.length === all.length) return "all devices";
     if (!on.length) return "no devices";
     return on.map((d) => d.name).join(", ");
   }
 
-  // Pick which phones show one page. Saved straight away (it's a phone setting, not part of
-  // the layout draft).
-  function choosePhones(page) {
+  // Pick which devices show one page (key: its ID) or page group (key: "group:<id>"). Saved
+  // straight away (it's a device setting, not part of the layout draft).
+  function choosePhones(key, name) {
     const dialog = $("#item-dialog");
     const body = $("[data-body]", dialog);
     $("[data-error]", dialog).textContent = "";
-    $("[data-title]", dialog).textContent = `Devices that show \u201c${page.name}\u201d`;
+    $("[data-title]", dialog).textContent = `Devices that show \u201c${name}\u201d`;
     const devices = state.devices.filter((d) => d.status !== "revoked");
     const boxes = devices.map((d) => ({
-      d, input: h("input", { type: "checkbox", checked: d.layout_pages == null || d.layout_pages.includes(page.id) }),
+      d, input: h("input", { type: "checkbox", checked: d.layout_pages == null || d.layout_pages.includes(key) }),
     }));
     body.onclick = null;
     body.oninput = null;
     body.replaceChildren(devices.length
       ? h("div", { class: "item-fields" },
-        h("p", { class: "hint" }, "Each phone or computer still only sees what its role allows on this page. " +
+        h("p", { class: "hint" }, "Each phone or computer still only sees what its role allows on " +
+          (key.startsWith("group:") ? "these pages. " : "this page. ") +
           "Unticking a device that shows all pages switches it to a fixed list of pages, so it " +
           "won't get new pages automatically. Changes here are saved straight away."),
         h("div", { class: "member-list" }, boxes.map(({ d, input }) => h("label", { class: "check pick-row" },
@@ -1576,16 +1810,16 @@
     };
     form.onsubmit = (ev) => {
       if (ev.submitter?.value !== "save") return;
-      // Every page that could still exist: saved, in the unsaved draft, and More. A phone that
-      // showed all pages keeps all of these except this one, so discarding the draft later
-      // can't take pages away from it. Pages that no longer exist are dropped from lists.
-      const known = knownPageIds();
+      // A device that showed all pages keeps every page and group that could still exist (saved
+      // or in the unsaved draft) except this one, so discarding the draft later can't take
+      // pages away from it. Pages and groups that no longer exist are dropped from lists.
+      const known = knownChoices();
       const changes = [];
       for (const { d, input } of boxes) {
-        const shows = d.layout_pages == null || d.layout_pages.includes(page.id);
+        const shows = d.layout_pages == null || d.layout_pages.includes(key);
         if (input.checked === shows) continue;
-        const current = (d.layout_pages ?? [...known]).filter((id) => known.has(id));
-        const next = input.checked ? [...current, page.id] : current.filter((id) => id !== page.id);
+        const current = (d.layout_pages ?? allChoices()).filter((id) => known.has(id));
+        const next = input.checked ? [...current, key] : current.filter((id) => id !== key);
         changes.push([d, next]);
       }
       if (!changes.length) return;
@@ -1602,7 +1836,7 @@
         await load();
         renderLayoutEditor();
         if (failed.length) throw new Error(`Couldn't update ${failed.join(", ")}.`);
-      }, "Phones updated.");
+      }, "Devices updated.");
     };
     dialog.showModal();
   }
@@ -1815,12 +2049,16 @@
     dialog.showModal();
   }
 
-  $("#add-page").addEventListener("click", async () => {
-    const name = await askText("Page name (for example Soaking or Mechanical):");
-    if (!name?.trim()) return;
+  $("#add-page").addEventListener("click", () => addPage(null));
+
+  $("#add-group").addEventListener("click", async () => {
     const d = draft();
-    d.pages.push({ id: newId(), name: name.trim().slice(0, 30), items: [] });
-    pageIndex = d.pages.length - 1;
+    if (d.page_groups.length >= MAX_PAGE_GROUPS) return toast(`A layout can have at most ${MAX_PAGE_GROUPS} groups.`, true);
+    const name = await askText("Group name (for example Pool staff or Front desk):");
+    if (!name?.trim()) return;
+    const group = { id: newId(), name: name.trim().slice(0, 30) };
+    d.page_groups.push(group);
+    groupSel = group.id;
     markLayoutDirty();
     renderLayoutEditor();
   });
@@ -1832,7 +2070,8 @@
 
   $("#save-layout").addEventListener("click", () => run(async () => {
     const d = draft();
-    const { layout } = await api("PUT", "api/layout", { pages: d.pages, show_unplaced: d.show_unplaced !== false });
+    const { layout } = await api("PUT", "api/layout",
+      { pages: d.pages, page_groups: d.page_groups, show_unplaced: d.show_unplaced !== false });
     state.layout = layout;
     layoutDraft = null;
     renderLayoutEditor();
@@ -1843,6 +2082,75 @@
     layoutDraft = null;
     renderLayoutEditor();
   });
+
+  // ---------------------------------------------------------------- layout preview
+
+  // The staff app with the layout being edited, as a phone or a computer shows it. It runs in a
+  // frame on the dashboard's own address, asks this page for the draft (staffPortalPreview),
+  // shows live readings, and never sends a command.
+  const preview = { view: "phone", device: "" };
+  const PREVIEW_SIZES = { phone: [390, 780], desktop: [1280, 800] };
+
+  window.staffPortalPreview = () => {
+    const d = draft();
+    return {
+      layout: { pages: d.pages, page_groups: d.page_groups, show_unplaced: d.show_unplaced !== false },
+      device_id: preview.device ? Number(preview.device) : null,
+    };
+  };
+
+  function openPreview() {
+    const dialog = $("#preview-dialog");
+    const select = $("#preview-device");
+    const devices = state.devices.filter((d) => d.status !== "revoked");
+    select.replaceChildren(h("option", { value: "" }, "Everything on the layout"),
+      ...devices.map((d) => h("option", { value: d.id }, `${d.name} (${d.role_name || "no role"})`)));
+    if (!devices.some((d) => String(d.id) === preview.device)) preview.device = "";
+    select.value = preview.device;
+    select.onchange = () => { preview.device = select.value; loadPreview(); };
+    for (const btn of dialog.querySelectorAll("[data-view]")) {
+      btn.onclick = () => { preview.view = btn.dataset.view; loadPreview(); };
+    }
+    dialog.showModal();
+    loadPreview();
+  }
+
+  function loadPreview() {
+    const dialog = $("#preview-dialog");
+    for (const btn of dialog.querySelectorAll("[data-view]")) {
+      btn.setAttribute("aria-checked", String(btn.dataset.view === preview.view));
+    }
+    const device = state.devices.find((d) => String(d.id) === preview.device);
+    $("[data-preview-note]", dialog).textContent = (draft().dirty ? "Showing your unsaved changes. " : "") +
+      (device ? `What ${device.name} shows, with its role and pages. `
+        : "Everything on the layout, as a device allowed to control all of it would show it. ") +
+      "Readings are live. Tapping a control doesn't change anything.";
+    const query = new URLSearchParams({ view: preview.view });
+    if (preview.device) query.set("device", preview.device);
+    $("[data-frame]", dialog).src = `preview?${query}`;
+    fitPreview();
+  }
+
+  // The computer view is a full-size screen scaled down to fit; the phone view is phone-sized.
+  function fitPreview() {
+    const dialog = $("#preview-dialog");
+    const stage = $("[data-stage]", dialog);
+    const frame = $("[data-frame]", dialog);
+    const [width, height] = PREVIEW_SIZES[preview.view];
+    const scale = Math.min(1, (stage.clientWidth - 24) / width, (window.innerHeight - 250) / height);
+    frame.style.width = `${width}px`;
+    frame.style.height = `${height}px`;
+    frame.style.transform = `scale(${scale})`;
+    const box = frame.parentElement;
+    box.style.width = `${Math.round(width * scale)}px`;
+    box.style.height = `${Math.round(height * scale)}px`;
+    box.className = `preview-box ${preview.view}`;
+  }
+
+  $("#preview-layout").addEventListener("click", openPreview);
+  $("#preview-dialog [data-close]").addEventListener("click", () => $("#preview-dialog").close());
+  $("#preview-dialog").addEventListener("close", () => { $("#preview-dialog [data-frame]").src = "about:blank"; });
+  window.addEventListener("resize", () => { if ($("#preview-dialog").open) fitPreview(); });
 
   // ---------------------------------------------------------------- backup and transfer
 
@@ -1930,17 +2238,21 @@
         return [{ ...item, area_id: id }];
       }),
     }));
-    layoutDraft = { pages, show_unplaced: file.layout?.show_unplaced !== false, dirty: false };
-    pageIndex = 0;
+    const groups = (Array.isArray(file.layout?.page_groups) ? file.layout.page_groups : [])
+      .filter((g) => g && typeof g === "object" && typeof g.id === "string");
+    layoutDraft = { pages, page_groups: groups, show_unplaced: file.layout?.show_unplaced !== false, dirty: false };
+    pageSel = null;
+    groupSel = null;
     selectTab("layout");
     markLayoutDirty();
     renderLayoutEditor();
-    const ids = new Set(pages.map((p) => p.id));
+    // Devices whose chosen pages and groups match nothing in the file won't show any of it.
+    const ids = new Set([...pages.map((p) => p.id), ...groups.map((g) => `group:${g.id}`)]);
     const picky = state.devices.filter((d) => d.status !== "revoked" && d.layout_pages &&
       !d.layout_pages.some((id) => ids.has(id))).length;
     toast([`Imported ${pages.length} page${pages.length === 1 ? "" : "s"} into the editor. Check it, then click Save layout.`,
       dropped ? `${dropped} whole-area item${dropped === 1 ? "" : "s"} left out: no area here with the same name.` : "",
-      picky ? `${picky} phone${picky === 1 ? " is" : "s are"} set to specific pages; use Choose phones to add the new ones.` : ""]
+      picky ? `${picky} device${picky === 1 ? " is" : "s are"} set to specific pages; use Choose devices to add the new ones.` : ""]
       .filter(Boolean).join(" "));
     return false;
   }

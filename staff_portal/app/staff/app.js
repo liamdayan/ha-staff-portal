@@ -10,6 +10,13 @@
   const screen = document.getElementById("screen");
   const toastEl = document.getElementById("toast");
 
+  // Preview: the dashboard's Layout tab shows this app with the layout being edited. It runs on
+  // the dashboard's address (so links are relative), reads the draft from the dashboard page
+  // around it, and never sends a command.
+  const PREVIEW = !!document.querySelector('meta[name="preview"]');
+  const previewQuery = new URLSearchParams(location.search).toString();
+  const url = (path) => (PREVIEW ? path.replace(/^\//, "") : path);
+
   let me = null;
   let tiles = new Map();
   let lastTouch = 0;
@@ -90,6 +97,7 @@
   }
 
   async function api(method, path, body) {
+    if (PREVIEW) return previewApi(path);
     const headers = { "Content-Type": "application/json" };
     const token = local.get(TOKEN_KEY);
     if (token) headers.Authorization = "Bearer " + token;
@@ -104,6 +112,29 @@
     } catch {
       return { status: 0, data: {} };
     }
+    let data = {};
+    try { data = await res.json(); } catch { /* empty body */ }
+    return { status: res.status, data };
+  }
+
+  async function previewApi(path) {
+    if (path === "/api/action") {
+      toast("Preview: nothing was sent to your equipment.");
+      return { status: 200, data: { ok: true } };
+    }
+    const headers = { "Content-Type": "application/json", "X-Requested-With": "staff-portal" };
+    let request;
+    if (path === "/api/me") {
+      request = fetch(`api/preview/me?${previewQuery}`, { headers });
+    } else if (path === "/api/entities") {
+      let draft = {};
+      try { draft = window.parent.staffPortalPreview?.() || {}; } catch { /* not in the dashboard */ }
+      request = fetch("api/preview/entities", { method: "POST", headers, body: JSON.stringify(draft) });
+    } else {
+      return { status: 200, data: {} }; // signing in and rearranging aren't part of a preview
+    }
+    let res;
+    try { res = await request; } catch { return { status: 0, data: {} }; }
     let data = {};
     try { data = await res.json(); } catch { /* empty body */ }
     return { status: res.status, data };
@@ -185,6 +216,13 @@
   // ---------------------------------------------------------------- startup
 
   async function boot() {
+    if (PREVIEW) {
+      const res = await api("GET", "/api/me");
+      if (res.status !== 200) {
+        return message("Preview isn't available", res.data.error || "Close the preview and try again.", true);
+      }
+      return start(res.data);
+    }
     const match = location.pathname.match(/^\/e\/([A-Za-z0-9_-]{16,64})$/);
     const code = match && match[1];
 
@@ -392,7 +430,7 @@
     setSubtitle(null);
     const logo = document.getElementById("bar-logo");
     logo.hidden = !info.has_logo;
-    if (info.has_logo) logo.src = "/logo.png";
+    if (info.has_logo) logo.src = url("/logo.png");
     const lockBtn = document.getElementById("lock-btn");
     lockBtn.hidden = !info.pin_required;
     lockBtn.classList.toggle("text", !!info.shared);
@@ -544,7 +582,7 @@
           onclick: () => el.scrollIntoView({ behavior: "smooth", block: "start" }) }, h("span", null, area))));
       return deskShell({ nav, title: "All devices", content: root });
     }
-    root.append(rearrangeButton());
+    root.append(...rearrangeButton());
     return root;
   }
 
@@ -576,7 +614,7 @@
 
     const root = h("div", { class: pages.length > 1 ? "layout has-tabs" : "layout" });
     root.append(detailItem ? buildDetail(detailItem, page, byId, into) : buildPage(page, byId, into));
-    if (!detailItem) root.append(rearrangeButton());
+    if (!detailItem) root.append(...rearrangeButton());
     if (pages.length > 1) {
       root.append(h("nav", { class: "tabbar", "aria-label": "Pages" }, pages.map((p, i) =>
         h("button", {
@@ -827,7 +865,7 @@
   deskQuery.addEventListener("change", () => { render.shape = null; rerender(); });
 
   function deskShell({ nav, title, content, drawer = null }) {
-    const logo = me?.has_logo ? h("img", { src: "/logo.png", alt: "" }) :
+    const logo = me?.has_logo ? h("img", { src: url("/logo.png"), alt: "" }) :
       h("span", { class: "desk-mark" }, (me?.property_name || "S").trim().charAt(0).toUpperCase());
     const who = lastData?.staff_name || me?.device || "";
     const lockBtn = me?.pin_required ? h("button", { class: "desk-foot-btn", type: "button",
@@ -860,10 +898,12 @@
   let rearranging = false;
   let activeDrag = false;
 
+  // The Rearrange link, if this phone may rearrange: as a list to spread into append(), since
+  // append(null) would put the word "null" on the screen.
   function rearrangeButton() {
-    if (!lastData?.can_reorder) return null;
-    return h("div", { class: "rearrange-row" },
-      h("button", { class: "link-btn", onclick: openRearrange }, "\u21c5 Rearrange"));
+    if (!lastData?.can_reorder) return [];
+    return [h("div", { class: "rearrange-row" },
+      h("button", { class: "link-btn", onclick: openRearrange }, "\u21c5 Rearrange"))];
   }
 
   function grip(label) {
@@ -1523,7 +1563,7 @@
     installPrompt = e;
   });
 
-  if ("serviceWorker" in navigator) {
+  if (!PREVIEW && "serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => { /* optional */ });
   }
 

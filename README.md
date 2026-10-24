@@ -59,10 +59,14 @@ system.
 ### Admin dashboard (Home Assistant sidebar → Staff Access)
 
 - **Phones & computers:** add, revoke, re-pair, unlock, link to a Home Assistant user, and choose
-  which pages each one shows.
+  which pages or page groups each one shows.
 - **Staff:** people with personal PINs for shared devices.
 - **Layout editor:** pages, headings, single devices, whole areas and group cards. Drag to
   reorder, duplicate items or whole pages, and set per-item access.
+- **Page groups:** bundle pages (such as "Pool staff") and give them to devices together. A
+  device also gets pages added to its groups later. Duplicate a whole group with its pages.
+- **Preview:** see the layout as a phone or a computer would, unsaved changes included, either
+  everything on it or exactly what one device would show. Tapping a control there sends nothing.
 - **Branding:** property name, home-screen name, brand color and logo.
 - **Backup tab:**
   - a full backup and restore, with automatic undo copies;

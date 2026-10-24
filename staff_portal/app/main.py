@@ -25,7 +25,8 @@ from aiohttp import web
 from branding import Branding
 from db import Database, check_pin, hash_pin
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
-                    clean_phone_pages, layout_overrides, visible_layout)
+                    clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
+                    visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import transfer
 from connecteam import Connecteam, ConnecteamError
@@ -351,11 +352,12 @@ def role_access(role_id: int | None, layout: AreaLayout) -> dict[str, str]:
             for eid, lvl in access.items() if offered(eid)}
 
 
-def phone_access(device: dict, layout: AreaLayout) -> dict[str, str]:
+def phone_access(device: dict, layout: AreaLayout, layout_data: dict | None = None) -> dict[str, str]:
     """What one phone may see and control: its role, adjusted by any access overrides on the
-    layout items it shows."""
+    layout items it shows. layout_data: the layout to use (the saved one unless previewing)."""
     access = role_access(device["role_id"], layout)
-    for eid, level in layout_overrides(db.layout(), layout, device_pages(device)).items():
+    data = db.layout() if layout_data is None else layout_data
+    for eid, level in layout_overrides(data, layout, device_pages(device, data)).items():
         if level == "none":
             access.pop(eid, None)
         elif offered(eid):
@@ -390,10 +392,16 @@ def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
 
 # ---------------------------------------------------------------- staff app
 
-def render_staff_index(enroll_code: str | None = None) -> web.Response:
+def render_staff_index(enroll_code: str | None = None, preview: bool = False) -> web.Response:
+    """The staff app's page. preview: the copy shown in the dashboard's layout preview, served
+    from the dashboard's address (so its links are relative) and framed by the dashboard."""
     s = db.settings()
     with open(os.path.join(HERE, "staff", "index.html"), encoding="utf-8") as f:
         html = f.read()
+    if preview:
+        html = (html.replace('<link rel="manifest" href="{{MANIFEST}}">\n', "")
+                .replace('href="/icon-', 'href="icon-').replace('src="/icon-', 'src="icon-')
+                .replace("</head>", '<meta name="preview" content="1">\n</head>'))
     manifest = "/manifest.webmanifest" + (f"?e={enroll_code}" if enroll_code else "")
     replacements = {
         "{{APP_NAME}}": s["app_name"],
@@ -414,11 +422,13 @@ def render_staff_index(enroll_code: str | None = None) -> web.Response:
                         f'<style nonce="{nonce}">\n{css}\n</style>')
     html = html.replace('<script src="/static/app.js"></script>',
                         f'<script nonce="{nonce}">\n{script}\n</script>')
+    framed_by = "'self'" if preview else "'none'"   # only the dashboard may frame the preview
     csp = (f"default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-{nonce}'; "
-           f"script-src 'self' 'nonce-{nonce}'; connect-src 'self'; frame-ancestors 'none'; "
+           f"script-src 'self' 'nonce-{nonce}'; connect-src 'self'; frame-ancestors {framed_by}; "
            "base-uri 'none'; form-action 'none'")
     return web.Response(text=html, content_type="text/html",
-                        headers={"Cache-Control": "no-store", "Content-Security-Policy": csp})
+                        headers={"Cache-Control": "no-store", "Content-Security-Policy": csp,
+                                 "X-Content-Type-Options": "nosniff"})
 
 
 def _esc(value: str) -> str:
@@ -849,9 +859,10 @@ async def api_signout(request: web.Request):
 
 async def api_entities(request: web.Request):
     device, member = authenticate(request)
+    layout_data = db.layout()
     try:
         layout = await area_layout()
-        allowed = phone_access(device, layout)
+        allowed = phone_access(device, layout, layout_data)
         states = await ha.states() if allowed else {}
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
@@ -860,7 +871,7 @@ async def api_entities(request: web.Request):
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
     can_reorder = db.settings().get("allow_phone_reorder") == "1"
     order = db.phone_order(order_owner(device, member)) if can_reorder else None
-    phone_layout = visible_layout(db.layout(), allowed, layout, device_pages(device))
+    phone_layout = visible_layout(layout_data, allowed, layout, device_pages(device, layout_data))
     if phone_layout:
         phone_layout = apply_phone_order(phone_layout, order)
     else:
@@ -1089,9 +1100,10 @@ def setup_url(code: str | None) -> str | None:
     return f"{base}/e/{code}" if base and code else None
 
 
-def device_pages(device: dict) -> list[str] | None:
-    """Layout pages chosen for a phone, or None for every page. A damaged value means no
-    pages rather than every page, so it can never widen what a phone sees."""
+def device_page_choice(device: dict) -> list[str] | None:
+    """A phone's page choice as stored: None for every page, otherwise page IDs and page
+    groups ("group:<id>"). A damaged value means no pages rather than every page, so it can
+    never widen what a phone sees."""
     raw = device.get("layout_pages")
     if not raw:
         return None
@@ -1102,13 +1114,20 @@ def device_pages(device: dict) -> list[str] | None:
     return [str(i) for i in value] if isinstance(value, list) else []
 
 
+def device_pages(device: dict, layout_data: dict | None = None) -> list[str] | None:
+    """The layout pages a phone shows (its groups turned into their pages), or None for every
+    page. layout_data: the layout to use (the saved one unless previewing a draft)."""
+    return expand_page_choice(db.layout() if layout_data is None else layout_data,
+                              device_page_choice(device))
+
+
 def device_payload() -> list[dict]:
     devices = db.devices()
     owners = db.phone_order_owners()
     for d in devices:
         d["setup_url"] = setup_url(d["enroll_code"])
         d["staff_ids"] = db.device_staff_ids(d["id"])
-        d["layout_pages"] = device_pages(d)
+        d["layout_pages"] = device_page_choice(d)
         d["custom_order"] = f"d:{d['id']}" in owners
     return devices
 
@@ -1344,11 +1363,103 @@ async def admin_save_layout(request: web.Request):
         layout = clean_layout(await read_json(request))
     except ValueError as err:
         return bad_request(str(err))
+    old = db.layout()
     db.set_layout(layout)
+    # A page group that's gone: phones that showed it keep its pages, now as single pages.
+    for device in db.devices():
+        choice = device_page_choice(device)
+        kept = keep_removed_groups(choice, old, layout)
+        if kept != choice:
+            db.update_device(device["id"], layout_pages=json.dumps(kept))
     items = sum(len(p["items"]) for p in layout["pages"])
     db.log(admin_name(request), "Updated phone layout",
            detail=f"{len(layout['pages'])} pages, {items} items")
     return web.json_response({"ok": True, "layout": layout})
+
+
+# ---------------------------------------------------------------- layout preview
+# The Layout tab can show the staff app with the layout being edited, as a phone or a computer
+# would. The preview runs on the dashboard's own address (admins only), takes the unsaved draft
+# from the dashboard, shows live readings, and never sends a command.
+
+async def admin_preview(request: web.Request):
+    return render_staff_index(preview=True)
+
+
+def preview_device(value) -> dict | None:
+    try:
+        device = db.device(int(value))
+    except (TypeError, ValueError):
+        return None
+    return device if device and device["status"] != "revoked" else None
+
+
+async def admin_preview_me(request: web.Request):
+    s = db.settings()
+    device = preview_device(request.query.get("device"))
+    role = next((r["name"] for r in db.roles() if device and r["id"] == device["role_id"]),
+                "No role assigned" if device else "Everything on the layout")
+    return web.json_response({
+        "device": device["name"] if device else "Preview",
+        "kind": "computer" if request.query.get("view") == "desktop" else "phone",
+        "role": role, "shared": False, "pin_only": False, "staff": [], "pin_required": False,
+        "property_name": s["property_name"], "app_name": s["app_name"],
+        "accent_color": s["accent_color"], "has_logo": branding.has_logo(),
+        "pin_timeout_minutes": db.setting_int("pin_timeout_minutes"),
+    })
+
+
+def layout_access(layout_data: dict, areas: AreaLayout) -> dict[str, str]:
+    """Everything a layout shows, at the most any phone could get, with the items' own access
+    settings applied: what the preview shows when it isn't previewing one particular device."""
+    eids: set[str] = set()
+    for page in layout_data["pages"]:
+        for item in page["items"]:
+            if item["type"] == "device":
+                eids.add(item["entity_id"])
+            elif item["type"] == "group":
+                eids.update(m["entity_id"] for m in item["entities"] if "entity_id" in m)
+            elif item["type"] == "area":
+                eids.update(eid for eid, ids in areas.membership.items() if item["area_id"] in ids)
+    access = {eid: "control" if controllable(eid) else "view" for eid in eids if offered(eid)}
+    for eid, level in layout_overrides(layout_data, areas).items():
+        if level == "none":
+            access.pop(eid, None)
+        elif level == "view" and eid in access:
+            access[eid] = "view"
+    return access
+
+
+async def admin_preview_entities(request: web.Request):
+    data = await read_json(request)
+    try:
+        draft = clean_layout(data["layout"]) if data.get("layout") is not None else db.layout()
+    except ValueError as err:
+        return bad_request(str(err))
+    device = preview_device(data.get("device_id"))
+    try:
+        areas = await area_layout()
+        states = await ha.states()
+    except HomeAssistantError as err:
+        log.warning("Home Assistant unavailable: %s", err)
+        return bad_request("Can't reach the system right now.", 503)
+    if device:
+        allowed = phone_access(device, areas, draft)
+        pages = device_pages(device, draft)
+    else:
+        allowed, pages = layout_access(draft, areas), None
+    entities = [entity_view(eid, states.get(eid), areas, lvl) for eid, lvl in allowed.items()]
+    entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
+    return web.json_response({
+        "entities": entities,
+        "layout": visible_layout(draft, allowed, areas, pages),
+        "staff_name": None,
+        "can_reorder": False,
+        "control_lock": db.settings().get("control_lock") == "1",
+        "control_lock_minutes": db.setting_int("control_lock_minutes"),
+        "custom_order": False,
+        "order": {"pages": [], "items": {}},
+    })
 
 
 async def admin_create_area(request: web.Request):
@@ -1943,6 +2054,9 @@ def admin_app() -> web.Application:
     app = web.Application(middlewares=[admin_guard], client_max_size=16 * 1024 * 1024)
     app[BODY_SECONDS] = 120.0   # a 16 MB backup over a slow connection
     app.router.add_get("/", admin_index)
+    app.router.add_get("/preview", admin_preview)
+    app.router.add_get("/api/preview/me", admin_preview_me)
+    app.router.add_post("/api/preview/entities", admin_preview_entities)
     app.router.add_static("/static/", os.path.join(HERE, "admin"))
     app.router.add_get("/logo.png", logo)
     app.router.add_get(r"/icon-{size:\d+}.png", staff_icon)

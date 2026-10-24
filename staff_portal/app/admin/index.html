@@ -73,6 +73,7 @@
     <div class="section-head">
       <h2>Phone layout</h2>
       <div class="editor-actions">
+        <button class="btn" id="preview-layout">Preview</button>
         <button class="btn subtle" id="discard-layout" disabled>Discard changes</button>
         <button class="btn primary" id="save-layout" disabled>Save layout</button>
       </div>
@@ -81,15 +82,20 @@
       everything about it, single devices, whole areas and headings. Each phone only sees the parts its
       role allows, and only gets controls where its role says Control, unless you give an item its own
       access (Edit → Access on phones). Every phone shows every page
-      unless you choose otherwise (“Choose phones” on a page, or Phones → Edit). With no pages,
-      phones use the automatic layout grouped by area.</p>
+      unless you choose otherwise (“Choose devices” on a page or group, or Phones → Edit). Put pages
+      in a group, such as “Pool staff”, to give them to phones together. With no pages, phones use
+      the automatic layout grouped by area. <b>Preview</b> shows your changes as a phone or computer
+      would, before you save.</p>
     <label class="check"><input type="checkbox" id="show-unplaced">
       Put devices a role allows but that aren't on any page on a “More” page</label>
     <div class="roles-layout layout-editor">
       <aside class="role-list">
         <div class="section-head">
           <h2>Pages</h2>
-          <button class="btn" id="add-page">Add page</button>
+          <div class="head-actions">
+            <button class="btn" id="add-group">Add group</button>
+            <button class="btn" id="add-page">Add page</button>
+          </div>
         </div>
         <ul id="page-list"></ul>
       </aside>
@@ -352,6 +358,22 @@
       <button class="btn primary" value="save">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="preview-dialog" class="preview-dialog">
+  <div class="preview-head">
+    <h2>Preview</h2>
+    <div class="seg seg-view" role="radiogroup" aria-label="Show as">
+      <button type="button" role="radio" data-view="phone" aria-checked="true">Phone</button>
+      <button type="button" role="radio" data-view="desktop" aria-checked="false">Desktop</button>
+    </div>
+    <label class="inline-select">As <select id="preview-device"></select></label>
+    <button class="btn" type="button" data-close>Close</button>
+  </div>
+  <p class="hint" data-preview-note></p>
+  <div class="preview-stage" data-stage>
+    <div class="preview-box phone"><iframe title="Layout preview" data-frame></iframe></div>
+  </div>
 </dialog>
 
 <dialog id="ct-dialog" class="wide">

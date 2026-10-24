@@ -3,6 +3,10 @@
 The layout decides how things are arranged. What a phone can see or control comes from its
 role, unless a layout item overrides it ("access"): an override applies on every phone that shows
 that item's page, and can give more or less than the role does.
+
+Pages can be put in page groups (such as "Pool staff"), so a whole set of pages can be given to
+phones at once: a phone's page choice can name a group ("group:<id>"), which stands for every
+page in that group, including pages added to it later.
 """
 
 import re
@@ -15,6 +19,8 @@ MAX_GROUP_ENTITIES = 40
 MAX_GROUP_DIVIDERS = 20  # named dividers that split a group card's detail screen into sections
 MAX_SUMMARY = 4
 MAX_PHONE_PAGES = 60
+MAX_PAGE_GROUPS = 12
+GROUP_PREFIX = "group:"  # in a phone's page choice: every page in that page group
 ITEM_TYPES = ("heading", "device", "area", "group")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 ACCESS_LEVELS = ("none", "view", "control")  # an item's override; missing = use the role's
@@ -46,6 +52,16 @@ def clean_layout(data) -> dict:
     """Validate a layout sent from the admin dashboard. Unknown fields are dropped."""
     if not isinstance(data, dict):
         raise ValueError("layout must be an object")
+    groups, group_ids = [], set()
+    raw_groups = [g for g in (data.get("page_groups") or [])[:MAX_PAGE_GROUPS] if isinstance(g, dict)]
+    # As with pages below: a replacement ID never takes one another group was sent with.
+    explicit_groups = {str(g.get("id")) for g in raw_groups if ID_RE.match(str(g.get("id") or ""))}
+    for g_index, group in enumerate(raw_groups):
+        group_id = str(group.get("id") or "")
+        if not ID_RE.match(group_id) or group_id in group_ids:
+            group_id = _free_id(f"g{g_index}", group_ids | explicit_groups)
+        group_ids.add(group_id)
+        groups.append({"id": group_id, "name": _text(group.get("name"), 30) or f"Group {g_index + 1}"})
     raw_pages = [p for p in (data.get("pages") or [])[:MAX_PAGES] if isinstance(p, dict)]
     # IDs the admin sent explicitly. A page whose ID is missing, "more" or a repeat gets a new
     # one that clashes with none of these, so no other page's ID (or a phone's choice) moves.
@@ -101,21 +117,81 @@ def clean_layout(data) -> dict:
         if not ID_RE.match(page_id) or page_id == MORE_PAGE_ID or page_id in used:
             page_id = _free_id(f"p{p_index}", used | explicit | {MORE_PAGE_ID})
         used.add(page_id)
+        group_id = str(page.get("page_group") or "")
         pages.append({"id": page_id,
                       "name": _text(page.get("name"), 30) or f"Page {p_index + 1}",
-                      "items": items})
-    return {"pages": pages, "show_unplaced": bool(data.get("show_unplaced", True))}
+                      "items": items,
+                      **({"page_group": group_id} if group_id in group_ids else {})})
+    return {"pages": _groups_together(pages), "page_groups": groups,
+            "show_unplaced": bool(data.get("show_unplaced", True))}
+
+
+def _groups_together(pages: list[dict]) -> list[dict]:
+    """A group's pages side by side, where its first page is, so phones show pages in the same
+    order as the editor (which lists each group's pages together)."""
+    result, placed = [], set()
+    for page in pages:
+        group_id = page.get("page_group")
+        if not group_id:
+            result.append(page)
+        elif group_id not in placed:
+            placed.add(group_id)
+            result.extend(p for p in pages if p.get("page_group") == group_id)
+    return result
+
+
+def group_pages(layout: dict | None) -> dict[str, list[str]]:
+    """{page group ID: its page IDs, in order}."""
+    members: dict[str, list[str]] = {}
+    for page in (layout or {}).get("pages", []):
+        if page.get("page_group"):
+            members.setdefault(page["page_group"], []).append(page["id"])
+    return members
+
+
+def expand_page_choice(layout: dict | None, choice: list[str] | None) -> list[str] | None:
+    """A phone's page choice as page IDs (None: every page). A group entry stands for every
+    page in that group now."""
+    if choice is None:
+        return None
+    members = group_pages(layout)
+    result: list[str] = []
+    for entry in choice:
+        ids = members.get(entry[len(GROUP_PREFIX):], []) if entry.startswith(GROUP_PREFIX) else [entry]
+        result.extend(i for i in ids if i not in result)
+    return result
+
+
+def keep_removed_groups(choice: list[str] | None, old: dict, new: dict) -> list[str] | None:
+    """A phone's page choice after a layout save: a page group that no longer exists is replaced
+    by the pages it had, so deleting a group doesn't take its pages away from phones."""
+    if choice is None:
+        return None
+    groups = {g["id"] for g in new.get("page_groups", [])}
+    pages = {p["id"] for p in new.get("pages", [])}
+    old_members = group_pages(old)
+    result: list[str] = []
+    for entry in choice:
+        if entry.startswith(GROUP_PREFIX) and entry[len(GROUP_PREFIX):] not in groups:
+            kept = [i for i in old_members.get(entry[len(GROUP_PREFIX):], []) if i in pages]
+        else:
+            kept = [entry]
+        result.extend(i for i in kept if i not in result)
+    return result
 
 
 def clean_phone_pages(value) -> list[str] | None:
-    """A phone's page choice from the admin dashboard: None (all pages) or a list of page IDs."""
+    """A phone's page choice from the admin dashboard: None (all pages) or a list of page IDs
+    and page groups ("group:<id>")."""
     if value is None:
         return None
     if not isinstance(value, list):
         raise ValueError("layout_pages must be a list of page IDs or null")
     ids: list[str] = []
     for item in value:
-        if isinstance(item, str) and ID_RE.match(item) and item not in ids:
+        if not isinstance(item, str) or item in ids:
+            continue
+        if ID_RE.match(item[len(GROUP_PREFIX):] if item.startswith(GROUP_PREFIX) else item):
             ids.append(item)
     if len(ids) > MAX_PHONE_PAGES:
         raise ValueError(f"a phone can be given at most {MAX_PHONE_PAGES} pages")

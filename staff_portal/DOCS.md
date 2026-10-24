@@ -140,18 +140,20 @@ it yourself instead:
 
 **Duplicate** makes a copy of an item (it appears right below and opens so you can rename it and
 swap its devices, handy for turning "Tub 1" into "Tub 2"). **Duplicate page** copies a whole page
-with everything on it. A copied page shows on every phone set to **All pages**; phones set to
-specific pages need it added with **Choose phones**.
+with everything on it. A copied page shows on every device set to **All pages**; devices set to
+specific pages need it added with **Choose devices** (or put it in a page group they show).
 
-Reorder pages, page items and the devices in a group card by dragging their **≡** grip
-(with a mouse or a finger), or click the grip and use the arrow keys. Then click **Save layout**.
+Reorder pages, page groups, page items and the devices in a group card by dragging their **≡**
+grip (with a mouse or a finger), or click the grip and use the arrow keys. Then click
+**Save layout**.
 
-**Which phones show which pages.** Every phone shows every page by default, including pages
-you add later. To change that for one phone, open **Phones → Edit** and use **Pages on this
-phone**: untick **All pages** and pick the pages it should show (including the **More** page).
-You can also do it from the Layout tab: each page shows **Shown on: …** with a **Choose phones**
-button. Phone cards show their pages as **Pages: …**. A phone set to specific pages won't pick
-up new pages automatically; tick **All pages** again for that.
+**Which devices show which pages.** Every phone and computer shows every page by default,
+including pages you add later. To change that for one device, open **Phones & computers → Edit**
+and use **Pages on this phone** (or computer): untick **All pages** and pick the pages and page
+groups it should show (including the **More** page). You can also do it from the Layout tab:
+each page and page group shows **Shown on: …** with a **Choose devices** button. Device cards
+show their pages as **Pages: …**. A device set to specific pages won't pick up new pages
+automatically, except pages added to a group it shows; tick **All pages** again for that.
 
 By default the layout only decides how things are arranged, and **roles decide what each phone
 can see and do**. A group card only shows the devices that phone's role allows (and disappears if
@@ -175,17 +177,58 @@ Things to know:
 
 - An override applies on **every phone that shows that page**, whatever its role. To give only
   some phones the extra access, put the item on a page that only those phones show
-  (**Choose phones**), or use a role instead.
+  (**Choose devices**), or use a role instead.
 - The override is for that device on the whole phone, not just that spot. A device set to
   **Hidden** doesn't show up anywhere on those phones, including the More page.
 - If a device has different overrides in more than one place, the higher one wins.
 - Overrides are enforced by the add-on, the same as roles, not just hidden from view.
 - Items with an override say so in the Layout tab ("Access: Control on every phone").
+
 With **Put devices… on a "More" page** ticked, anything a role allows that isn't placed on a
 page still shows up on a "More" page. Delete every page to go back to the automatic layout.
 
 Setpoints (number entities) and dropdowns (select entities) can be controlled too, always
 within the entity's own minimum, maximum and options.
+
+### Page groups
+
+A page group bundles pages that go together, such as "Pool staff" (Tubs, Spa, Chemicals) or
+"Front desk" (Lobby, Doors), so you can give them to phones and computers in one go instead of
+page by page.
+
+- **Add group** creates one. To fill it, open the group and use **Move a page here…** or
+  **New page**, or open a page and pick its **Group**. A group's pages stay together in the page
+  list, under the group. Drag the group by its grip to move all its pages at once.
+- **Choose devices** on the group picks which phones and computers show it. A page in a group
+  doesn't have its own **Choose devices**: it's shown wherever its group is. **Take out** (in the
+  group) makes it an ordinary page again, so devices that only showed it through the group stop
+  showing it.
+- A device that shows a group also gets pages you add to the group later.
+- **Duplicate group** copies the group with every page in it, right below the original, ready to
+  rename ("Pool staff" into "Spa staff", say) and give to other devices. The copy isn't on any
+  device yet, except devices set to **All pages**.
+- **Delete group** asks what to do with its pages: **Keep its pages** leaves them in the layout,
+  outside any group, and devices that showed the group keep showing them. **Delete its pages
+  too** removes them.
+- Staff don't see groups: a group's pages show as ordinary tabs (or sidebar pages on a computer),
+  in layout order.
+
+A layout can have up to 12 groups. Group changes take effect when you click **Save layout**,
+except **Choose devices**, which is saved straight away.
+
+### Preview
+
+**Preview**, at the top of the Layout tab, shows the layout the way staff will see it, including
+changes you haven't saved yet. Try things out, then **Save layout** or **Discard changes**.
+
+- **Phone** shows it at phone size, with pages as tabs along the bottom. **Desktop** shows the
+  computer layout, with the sidebar.
+- **As** picks whose view to show. **Everything on the layout** shows every page with everything
+  on it, as a device allowed to control all of it would. Pick a phone or computer to see exactly
+  what it would show: its pages, its role's access and your access settings on items.
+- Readings are live, but nothing in the preview changes anything: tapping a control just says
+  "Preview: nothing was sent to your equipment." Signing in and rearranging aren't part of the
+  preview.
 
 ## Locked controls on the phone
 
@@ -262,7 +305,7 @@ On a computer the staff app works like a desktop app rather than a big phone:
 
 A computer's browser window narrower than a tablet falls back to the phone layout.
 To give the front desk its own page (lobby lights, say), add a page in **Layout** and use
-**Choose phones** to show it only on the front desk computer.
+**Choose devices** to show it only on the front desk computer.
 
 ## Shared phones: each person signs in
 
