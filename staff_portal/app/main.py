@@ -78,13 +78,32 @@ ha = HomeAssistant()
 branding = Branding(DATA_DIR)
 
 
-def connecteam_settings() -> tuple[bool, str, str]:
+def connecteam_settings() -> tuple[bool, str, str, str, int]:
     s = db.settings()
     return (s.get("connecteam_enabled") == "1", s.get("connecteam_client_id", ""),
-            s.get("connecteam_client_secret", ""))
+            s.get("connecteam_client_secret", ""), s.get("connecteam_region", "global"),
+            max(30, db.setting_int("connecteam_poll_minutes")))
 
 
-connecteam = Connecteam(connecteam_settings)
+def connecteam_wanted() -> bool:
+    """Whether anyone needs the time clock checked (so Connecteam isn't asked for nothing)."""
+    return db.conn.execute(
+        "SELECT 1 FROM staff WHERE connecteam_user_id IS NOT NULL AND require_clock_in = 1 "
+        "AND status != 'disabled' LIMIT 1").fetchone() is not None
+
+
+def load_connecteam_usage() -> dict:
+    try:
+        usage = json.loads(db.settings().get("connecteam_usage") or "{}")
+    except ValueError:
+        return {}
+    return usage if isinstance(usage, dict) and isinstance(usage.get("count"), int) else {}
+
+
+connecteam = Connecteam(
+    connecteam_settings, connecteam_wanted,
+    (load_connecteam_usage, lambda u: db.update_settings({"connecteam_usage": json.dumps(u)})),
+    f"HomeAssistant-StaffPortal/{VERSION} (+https://github.com/liamdayan/ha-staff-portal)")
 
 
 def needs_clock_in(member: dict | None) -> bool:
@@ -441,12 +460,14 @@ def json_error(exc_class, error: str, **extra):
 
 
 def authenticate(request: web.Request, need_unlock: bool = True,
-                 active: bool = False) -> tuple[dict, dict | None]:
+                 active: bool = False, control: bool = False) -> tuple[dict, dict | None]:
     """Return (phone, signed-in staff member or None), or raise the error the app should show.
 
     `active` marks a request someone actually made (a control, saving an order). Only those,
     and polls sent right after the person touched the screen (X-Active), keep a PIN session
-    alive; background refreshes don't, so an unattended phone still signs out when idle."""
+    alive; background refreshes don't, so an unattended phone still signs out when idle.
+    `control` marks a control being used: only then (and at sign-in) must a clocked-in-only
+    person be on the clock. Reading doesn't check, so it never costs a Connecteam request."""
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
     device = db.device_by_token(token) if token else None
@@ -474,7 +495,7 @@ def authenticate(request: web.Request, need_unlock: bool = True,
         if not member or member["status"] != "active" or not db.staff_allowed_on(member["id"], device):
             pin_sessions.pop(key, None)
             raise json_error(web.HTTPForbidden, "pin_required")
-        blocked = clock_block(member)
+        blocked = clock_block(member) if control else None
         if blocked:
             # Clocked out (or the time clock can't be checked): this person's session ends.
             pin_sessions.pop(key, None)
@@ -568,12 +589,7 @@ async def api_unlock(request: web.Request):
     data = await read_json(request)
     # Someone who must be clocked in and looks clocked out may have just clocked in: ask
     # Connecteam now, before the device is read, so the rest stays synchronous (see above).
-    try:
-        candidate = db.staff(int(data.get("staff_id")))
-    except (TypeError, ValueError):
-        candidate = None
-    if needs_clock_in(candidate) and clock_block(candidate) and not connecteam.fresh(15):
-        await connecteam.check(force=True)
+    await recheck_clock(data.get("staff_id"))
     device, _ = authenticate(request, need_unlock=False)
     pin = str(data.get("pin", ""))
     ip = client_ip(request)
@@ -713,8 +729,23 @@ async def api_reset_order(request: web.Request):
     return web.json_response({"ok": True})
 
 
+async def recheck_clock(staff_id) -> None:
+    """Before a sign-in or a control: if this person must be clocked in and the last check didn't
+    find them on the clock, ask Connecteam now (one request updates everyone). Someone the last
+    check found clocked in costs nothing."""
+    try:
+        member = db.staff(int(staff_id))
+    except (TypeError, ValueError):
+        return
+    if needs_clock_in(member) and clock_block(member):
+        await connecteam.check(force=True)
+
+
 async def api_action(request: web.Request):
-    device, member = authenticate(request, active=True)
+    session = pin_sessions.get(request.headers.get("X-Session", ""))
+    if session and session[2]:
+        await recheck_clock(session[2])
+    device, member = authenticate(request, active=True, control=True)
     data = await read_json(request)
     entity_id = str(data.get("entity_id", ""))
     action = str(data.get("action", ""))
@@ -928,12 +959,20 @@ def public_settings() -> dict:
     """Settings as the dashboard may see them: the Connecteam secret is only ever "set or not"."""
     s = db.settings()
     s["connecteam_secret_set"] = "1" if s.pop("connecteam_client_secret", "") else "0"
+    s.pop("connecteam_usage", None)
     return s
 
 
 def connecteam_state() -> dict:
+    now = time.time()
     return {"enabled": connecteam_settings()[0], "checked_at": connecteam.checked_at,
-            "last_error": connecteam.last_error, "clocked_in": len(connecteam.clocked_in)}
+            "last_error": connecteam.last_error, "clocked_in": len(connecteam.clocked_in),
+            "halted": connecteam.halted, "needed": connecteam_wanted(),
+            "paused": connecteam.pause_reason if connecteam.paused_until > now else None,
+            "interval": connecteam.interval(), "used_today": connecteam.usage()["count"],
+            "daily_cap": connecteam.daily_cap(),
+            "account_left": connecteam.limits.get("day_left"),
+            "account_limit": connecteam.limits.get("day_limit")}
 
 
 async def admin_connecteam_users(request: web.Request):
@@ -949,15 +988,23 @@ async def admin_connecteam_users(request: web.Request):
          "linked_to": linked.get(u["id"])} for u in users]})
 
 
+connecteam_tested = [0.0]
+
+
 async def admin_connecteam_test(request: web.Request):
-    try:
-        users = await connecteam.users()
-        clocks = await connecteam.time_clock_ids()
-    except ConnecteamError as err:
-        return bad_request(str(err), 502)
-    await connecteam.check()
+    if not connecteam_settings()[0]:
+        return bad_request("Turn on Connecteam and save the settings first.")
+    if time.time() - connecteam_tested[0] < 10:
+        return bad_request("Wait a few seconds before testing again.", 429)
+    connecteam_tested[0] = time.time()
+    await connecteam.check(admin=True)   # also lifts a stop after rejected keys
     if connecteam.last_error:
         return bad_request(connecteam.last_error, 502)
+    try:
+        users = await connecteam.users()          # reused for 5 minutes
+        clocks = await connecteam.time_clock_ids()  # cached by the check above
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
     db.log(admin_name(request), "Tested the Connecteam connection")
     return web.json_response({"users": len(users), "time_clocks": len(clocks),
                               "clocked_in": len(connecteam.clocked_in)})
@@ -1441,7 +1488,8 @@ async def admin_activity(request: web.Request):
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
                  "control_lock", "connecteam_enabled")
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
-                   ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120))
+                   ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120),
+                   ("connecteam_poll_minutes", 30, 240))
 
 
 def clean_settings(data: dict, current: dict) -> dict:
@@ -1466,6 +1514,10 @@ def clean_settings(data: dict, current: dict) -> dict:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
     if "tunnel_addresses" in data:
         values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
+    if "connecteam_region" in data:
+        if data["connecteam_region"] not in ("global", "au"):
+            raise ValueError("Choose where your Connecteam account is hosted.")
+        values["connecteam_region"] = data["connecteam_region"]
     if "connecteam_client_id" in data:
         client_id = str(data["connecteam_client_id"] or "").strip()
         if len(client_id) > 200 or not re.fullmatch(r"[\x21-\x7e]*", client_id):
@@ -1514,9 +1566,7 @@ async def admin_update_settings(request: web.Request):
     db.update_settings(values)
     branding.invalidate()
     if connecteam_settings() != ct_before:
-        connecteam.forget()
-        if connecteam_settings()[0]:
-            background(connecteam.check(), "check the Connecteam time clock")
+        connecteam.forget()   # also wakes the clock check, which runs only if someone needs it
     db.log(admin_name(request), "Updated settings")
     return web.json_response({"ok": True})
 
@@ -1594,8 +1644,6 @@ async def admin_restore(request: web.Request):
         branding.remove_logo()
     pin_sessions.clear()  # everyone with a PIN signs in again
     connecteam.forget()   # the restored settings may point somewhere else
-    if connecteam_settings()[0]:
-        background(connecteam.check(), "check the Connecteam time clock")
     made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))
     db.log(admin_name(request), "Restored a backup",
            detail=f"Backup from {made}. What it replaced was saved as {safety}." +

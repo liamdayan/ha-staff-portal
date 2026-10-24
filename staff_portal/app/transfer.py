@@ -268,7 +268,8 @@ def make_backup(db, branding, version: str) -> dict:
         "backup", version, schema=BACKUP_SCHEMA,
         # The Connecteam secret is a credential: it never goes into a file (a restore keeps the
         # one already saved).
-        settings={k: v for k, v in db.settings().items() if k != "connecteam_client_secret"},
+        settings={k: v for k, v in db.settings().items()
+                  if k not in ("connecteam_client_secret", "connecteam_usage")},
         layout=db.layout(),
         logo=base64.b64encode(logo).decode() if logo else None,
         areas=rows("SELECT id, name, sort_order, created_at FROM areas"),

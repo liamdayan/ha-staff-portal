@@ -232,9 +232,9 @@
         <legend>Connecteam</legend>
         <label class="check-row"><input type="checkbox" name="connecteam_enabled">
           <span>Link staff to Connecteam
-          <small>Add staff from your Connecteam user list, and only let them sign in while they're
-          clocked in on a Connecteam time clock (you can turn that off per person). Staff you add by
-          hand aren't affected.</small></span></label>
+          <small>Add staff from your Connecteam user list, and only let them sign in and use controls
+          while they're clocked in on a Connecteam time clock (you can turn that off per person).
+          Staff you add by hand aren't affected.</small></span></label>
         <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
           <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
           changed later). Copy the Client Secret straight away: Connecteam only shows it once, then paste its keys
@@ -244,6 +244,19 @@
           <label>Client Secret<input name="connecteam_client_secret" type="password" maxlength="200"
             autocomplete="new-password" spellcheck="false"></label>
         </div>
+        <div class="row">
+          <label>Account hosted in<select name="connecteam_region">
+            <option value="global">Global (api.connecteam.com)</option>
+            <option value="au">Australia (api-au.connecteam.com)</option></select></label>
+          <label>Check the time clock every (minutes)<input name="connecteam_poll_minutes" type="number" min="30" max="240"></label>
+        </div>
+        <p class="hint">Connecteam limits API requests per account, shared with your other integrations
+          and reports (Expert plan: 10,000 a day). One check covers everyone and costs one request per
+          time clock. Staff Access checks on that schedule only while someone must be clocked in, plus
+          once when someone the last check didn't find clocked in signs in or uses a control (that check
+          replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With one
+          time clock that's about 24 requests a day plus a few at the start of shifts. It never uses more
+          than a fifth of your daily limit and pauses on its own if your account runs low.</p>
         <label class="check-row" id="ct-clear-row" hidden><input type="checkbox" name="connecteam_clear_secret">
           <span>Remove the saved Client Secret</span></label>
         <div class="ct-status">

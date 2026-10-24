@@ -298,7 +298,8 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
    Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later.
 2. Copy the **Client ID** and **Client Secret**. Connecteam only shows the secret once.
 3. In Staff Access, open **Settings → Connecteam**, tick **Link staff to Connecteam**, paste both
-   keys and click **Save settings**, then **Test connection**. It reports how many users and time
+   keys, choose **Australia** under **Account hosted in** if your Connecteam account is hosted
+   there, and click **Save settings**, then **Test connection**. It reports how many users and time
    clocks it found and how many people are clocked in now.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
    greyed out.
@@ -312,20 +313,56 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
 
 How clocked-in sign-in works:
 
-- Staff Access checks Connecteam's time clocks every minute. A shift that has started and not
-  ended means "clocked in" (a shift left open for more than 24 hours doesn't count).
-- When someone who looks clocked out enters their PIN, it checks again straight away, so they
-  can sign in right after clocking in.
-- When they clock out, they're signed out within about a minute, with a message saying why.
-  The sign-in list shows **Not clocked in** under their name.
-- If Connecteam can't be reached, the last answer is kept for **15 minutes**. After that,
-  clocked-in-only people can't sign in until Connecteam answers again. The Settings page and the
-  add-on log show what went wrong.
+- One check covers everyone. Staff Access checks once an hour (change it under **Check the time
+  clock every**), only while someone must be clocked in. A shift that has started and not ended
+  means "clocked in" (a shift left open for more than 24 hours doesn't count).
+- Clocked-in-only people must be on the clock to **sign in** and to **use a control**. Reading
+  (temperatures and other states) never checks the clock.
+- If the last check found them clocked in, signing in or using a control just works, with no
+  request to Connecteam. If it didn't (they've just clocked in, say), Staff Access checks right
+  away, which also updates everyone else. That check replaces the next hourly one if it's within
+  20 minutes of it.
+- If they're still not clocked in, they can't sign in, and a control signs them out with a
+  message saying why. The sign-in list shows **Not clocked in** under their name.
+- So someone who clocks out can keep reading until their session ends, but the first control
+  they use after the next check signs them out.
+- If Connecteam can't be reached, the last answer is kept until 15 minutes after the next check
+  was due. After that, clocked-in-only people can't sign in or use controls until Connecteam
+  answers again. The Settings page and the add-on log show what went wrong.
 - The Staff tab shows each linked person's clock status. **Edit** lets you turn clocked-in-only
   on or off, change their PIN to their current kiosk code (if it changed in Connecteam), or
   **Unlink** them.
 - Turning off **Link staff to Connecteam** lets everyone sign in with their PIN again, without
   removing the links.
+
+### Staying within Connecteam's API limits
+
+Connecteam limits API requests **per account**, shared by every integration you use (Expert plan:
+100 a minute and 10,000 a day; going over gets requests refused). Staff Access is built to use
+a small, steady share:
+
+- It only checks the time clock while it's needed: Connecteam is turned on and at least one
+  active person must be clocked in. Otherwise it sends nothing.
+- Each check is one request per active time clock. The list of time clocks is reused for 6 hours
+  and the user list for 5 minutes. The access token lasts 24 hours (one more request a day).
+- With one time clock, hourly checks are 24 requests a day. Add one for each sign-in or control
+  by someone the last check didn't find clocked in, typically the start of each shift. With many
+  time clocks it checks less often if needed, so regular checks stay under 15% of your daily limit.
+- Those extra checks happen at most every 30 seconds, and less often while Connecteam is failing.
+- Its own hard limits: 20 requests a minute, and a fifth of your account's daily limit (2,000 on
+  Expert) per day, counted across add-on restarts. At the cap it pauses until midnight UTC.
+- It reads Connecteam's rate-limit headers. If your account (from any integration) has less than
+  10% of its daily requests left, or is close to the per-minute limit, Staff Access pauses until
+  the limit resets.
+- If Connecteam says "too many requests", it waits as long as Connecteam asks (at least a
+  minute, doubling each time) and never retries straight away.
+- If Connecteam rejects the keys or the app is missing a scope, it stops all automatic requests
+  until you save the Connecteam settings again or click **Test connection**.
+- Requests identify themselves as Staff Portal (in the User-Agent).
+
+**Settings → Connecteam** shows how many requests Staff Access made today and, once Connecteam
+has answered, how many your account has left. While paused or stopped it says why. Remember that
+after 15 minutes without an answer, people who must be clocked in can't sign in.
 
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
 included in backups. After restoring a backup on a new system, enter it again.

@@ -230,6 +230,20 @@
     });
   }
 
+  // In a dialog, Enter in a text box means Save (the highlighted button). Left alone, the
+  // browser would "click" the form's first button, Cancel, and quietly throw the entry away.
+  // Dialogs that handle Enter themselves (preventDefault) are left as they are.
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" || ev.defaultPrevented || ev.isComposing) return;
+    const input = ev.target;
+    const form = input.tagName === "INPUT" ? input.closest("dialog form") : null;
+    if (!form) return;
+    ev.preventDefault();
+    if (["checkbox", "radio", "button", "submit", "file"].includes(input.type)) return;
+    const save = form.querySelector(".dialog-actions .primary");
+    if (save && !save.disabled) form.requestSubmit(save);
+  });
+
   async function api(method, path, body) {
     // The header marks requests as coming from this dashboard; the server refuses changes
     // without it, which stops other websites from sending them through an admin's browser.
@@ -241,7 +255,9 @@
     }
     const res = await fetch(path, opts);
     let data = {};
-    try { data = await res.json(); } catch { data = { error: await res.text().catch(() => "") }; }
+    // Read the body once: some errors are plain text, and a failed .json() would use it up.
+    const text = await res.text().catch(() => "");
+    try { data = JSON.parse(text); } catch { data = { error: text.trim().slice(0, 300) }; }
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
   }
@@ -1243,10 +1259,21 @@
     secret.placeholder = saved ? "Saved — leave blank to keep" : "";
     $("#ct-clear-row").hidden = !saved;
     const ct = state.connecteam || {};
-    $("#ct-status").textContent = !ct.enabled ? "Turned off."
-      : ct.last_error ? `Problem: ${ct.last_error}`
-      : ct.checked_at ? `Connected. Checked ${ago(ct.checked_at).toLowerCase()}; ${ct.clocked_in} clocked in.`
-      : "Not checked yet.";
+    const lines = [];
+    if (!ct.enabled) lines.push("Turned off.");
+    else {
+      lines.push(ct.halted ? `Stopped: ${ct.halted} Fix it, then save the settings or click Test connection.`
+        : ct.paused ? `Paused: ${ct.paused}`
+        : ct.last_error ? `Problem: ${ct.last_error}`
+        : ct.checked_at ? `Connected. Checked ${ago(ct.checked_at).toLowerCase()}; ${ct.clocked_in} clocked in.`
+        : "Not checked yet.");
+      if (!ct.needed) lines.push("No one needs to be clocked in to sign in, so the time clock isn't being checked.");
+      else lines.push(`Checking about every ${Math.max(1, Math.round(ct.interval / 60))} min.`);
+      let use = `Requests today: ${ct.used_today} (Staff Access stops at ${ct.daily_cap})`;
+      if (ct.account_limit) use += `; your account has ${ct.account_left} of ${ct.account_limit} left`;
+      lines.push(use + ".");
+    }
+    $("#ct-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
   }
 
   // Tests the saved keys, so Save settings first.
@@ -1431,7 +1458,7 @@
           } }, "Delete page"))),
       h("div", { class: "shown-on" },
         h("span", null, "Shown on: ", h("strong", null, shownOnText(page.id))),
-        h("button", { class: "btn", onclick: () => choosePhones(page) }, "Choose phones")),
+        h("button", { class: "btn", onclick: () => choosePhones(page) }, "Choose devices")),
       h("div", { class: "add-row" }, "Add:",
         h("button", { class: "btn", onclick: () => add("group") }, "Group card"),
         h("button", { class: "btn", onclick: () => add("device") }, "Device"),
@@ -1512,9 +1539,9 @@
   function shownOnText(pageId) {
     const all = state.devices.filter((d) => d.status !== "revoked");
     const on = phonesShowing(pageId);
-    if (!all.length) return "no phones set up yet";
-    if (on.length === all.length) return "all phones";
-    if (!on.length) return "no phones";
+    if (!all.length) return "no devices set up yet";
+    if (on.length === all.length) return "all devices";
+    if (!on.length) return "no devices";
     return on.map((d) => d.name).join(", ");
   }
 
@@ -1524,7 +1551,7 @@
     const dialog = $("#item-dialog");
     const body = $("[data-body]", dialog);
     $("[data-error]", dialog).textContent = "";
-    $("[data-title]", dialog).textContent = `Phones that show \u201c${page.name}\u201d`;
+    $("[data-title]", dialog).textContent = `Devices that show \u201c${page.name}\u201d`;
     const devices = state.devices.filter((d) => d.status !== "revoked");
     const boxes = devices.map((d) => ({
       d, input: h("input", { type: "checkbox", checked: d.layout_pages == null || d.layout_pages.includes(page.id) }),
@@ -1533,13 +1560,13 @@
     body.oninput = null;
     body.replaceChildren(devices.length
       ? h("div", { class: "item-fields" },
-        h("p", { class: "hint" }, "Each phone still only sees what its role allows on this page. " +
-          "Unticking a phone that shows all pages switches it to a fixed list of pages, so it " +
+        h("p", { class: "hint" }, "Each phone or computer still only sees what its role allows on this page. " +
+          "Unticking a device that shows all pages switches it to a fixed list of pages, so it " +
           "won't get new pages automatically. Changes here are saved straight away."),
         h("div", { class: "member-list" }, boxes.map(({ d, input }) => h("label", { class: "check pick-row" },
           input, h("span", null, d.name, h("small", null,
             ` \u00b7 ${d.role_name || "no role"} \u00b7 ${d.layout_pages == null ? "all pages" : "chosen pages"}`))))))
-      : h("p", { class: "hint" }, "Set up a phone on the Phones tab first."));
+      : h("p", { class: "hint" }, "Set up a phone or computer on the Phones & computers tab first."));
     const form = $("#item-form");
     // Enter on a checkbox would otherwise "click" the first button, which is Cancel.
     form.onkeydown = (ev) => {

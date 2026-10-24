@@ -147,6 +147,9 @@ DEFAULT_SETTINGS = {
     "connecteam_enabled": "0",
     "connecteam_client_id": "",
     "connecteam_client_secret": "",  # never sent to the browser or put in backups
+    "connecteam_region": "global",   # "au" for Australian-hosted accounts
+    "connecteam_poll_minutes": "60",
+    "connecteam_usage": "{}",        # requests made today (internal: never shown or backed up)
     "require_pin": "0",
 }
 

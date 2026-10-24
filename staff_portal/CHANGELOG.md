@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.16
+
+Connecteam: made sure Staff Access stays well inside Connecteam's API limits, which apply per
+account and are shared with your other integrations.
+
+- **Fixed:** it checked every minute even when no one needed it, and asked for the list of time
+  clocks on every check: about 2,900 requests a day or more. Now:
+  - One check covers everyone, **once an hour** (new setting), and only while someone must be
+    clocked in. With one time clock that's 24 requests a day, plus one when someone the last
+    check didn't find clocked in signs in or uses a control.
+  - Signing in or using a control costs nothing when the last check found that person clocked
+    in. Otherwise it checks right away (updating everyone), and that check replaces the next
+    hourly one if it's within 20 minutes of it.
+  - Reading never checks. Clocked-in-only people must be on the clock to sign in and to use
+    controls. They're no longer signed out while only reading.
+  - The time clock list is reused for 6 hours and the user list for 5 minutes. With many time
+    clocks, checks slow down automatically to stay under 15% of your daily limit.
+- Hard limits of its own: 20 requests a minute and a fifth of your account's daily limit,
+  counted across restarts.
+- Reads Connecteam's rate-limit headers and pauses when your account is running low on
+  requests from any integration. A "too many requests" reply makes it wait as long as Connecteam
+  asks, with exponential backoff.
+- Rejected keys or missing scopes stop automatic requests until the settings are saved again or
+  **Test connection** is clicked, instead of retrying every minute.
+- Extra checks happen at most every 30 seconds (was 10), and less often while Connecteam is
+  failing. **Test connection** can be clicked at most every 10 seconds.
+- Settings shows today's request count, your account's remaining requests, and why checks are
+  paused or stopped.
+- New **Account hosted in** setting for Australian Connecteam accounts (api-au.connecteam.com).
+- Requests identify themselves as Staff Portal.
+
+Dashboard
+
+- **Fixed:** pressing **Enter** in a dialog (such as **Add staff member**) quietly cancelled it
+  instead of saving, so nothing was added and no message appeared. Enter now saves, and shows
+  what's missing if something is.
+- **Fixed:** some error messages from the add-on showed only as "Request failed (400)". The
+  actual reason now shows.
+- The layout editor says **Shown on: all devices** and **Choose devices**, since pages can be
+  on computers as well as phones.
+
 ## 0.6.15
 
 - **Connecteam** (optional, **Settings → Connecteam**):
