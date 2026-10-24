@@ -23,7 +23,7 @@ import segno
 from aiohttp import web
 
 from branding import Branding
-from db import Database, check_pin, hash_pin
+from db import Database, check_pin, hash_pin, page_choice
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
                     clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
                     visible_layout)
@@ -352,17 +352,98 @@ def role_access(role_id: int | None, layout: AreaLayout) -> dict[str, str]:
             for eid, lvl in access.items() if offered(eid)}
 
 
+def set_level(access: dict[str, str], entity_id: str, level: str) -> None:
+    """Put one device at a level in an access map ('none' takes it away). Control is only
+    kept for devices staff can operate."""
+    if level == "none":
+        access.pop(entity_id, None)
+    elif offered(entity_id):
+        access[entity_id] = "control" if level == "control" and controllable(entity_id) else "view"
+
+
 def phone_access(device: dict, layout: AreaLayout, layout_data: dict | None = None) -> dict[str, str]:
     """What one phone may see and control: its role, adjusted by any access overrides on the
     layout items it shows. layout_data: the layout to use (the saved one unless previewing)."""
     access = role_access(device["role_id"], layout)
     data = db.layout() if layout_data is None else layout_data
     for eid, level in layout_overrides(data, layout, device_pages(device, data)).items():
-        if level == "none":
-            access.pop(eid, None)
-        elif offered(eid):
-            access[eid] = "control" if level == "control" and controllable(eid) else "view"
+        set_level(access, eid, level)
     return access
+
+
+# ---------------------------------------------------------------- role-based devices
+# On a role-based device each person who signs in gets their own access and pages: their
+# role's, then the layout's own access settings on what they're shown, then the changes made
+# for them personally (whole areas, then single devices), each more specific than the last.
+# Kiosk devices ('phone' and 'staff' sign-in) use the device's own role and pages instead.
+
+SIGNIN_MODES = ("phone", "staff", "role")
+SHARED_MODES = ("staff", "role")   # each person signs in with their own PIN
+OVERRIDE_RANK = {"none": 0, "view": 1, "control": 2}
+
+
+def is_shared(device: dict) -> bool:
+    return device["signin_mode"] in SHARED_MODES
+
+
+def role_based(device: dict) -> bool:
+    return device["signin_mode"] == "role"
+
+
+def person_page_choice(member: dict) -> list[str] | None:
+    """A person's pages on role-based devices: their own choice, else their role's (None:
+    every page)."""
+    own = page_choice(member.get("layout_pages"))
+    if own is not None:
+        return own
+    role = db.role(member["role_id"]) if member.get("role_id") else None
+    return role["layout_pages"] if role else None
+
+
+def person_pages(member: dict, layout_data: dict | None = None) -> list[str] | None:
+    return expand_page_choice(db.layout() if layout_data is None else layout_data,
+                              person_page_choice(member))
+
+
+def person_access(member: dict, layout: AreaLayout, layout_data: dict | None = None) -> dict[str, str]:
+    """What one person may see and control on a role-based device. `member` may also be a
+    stand-in with just a role_id (previewing a role), which has no changes of its own."""
+    access = role_access(member.get("role_id"), layout)
+    data = db.layout() if layout_data is None else layout_data
+    for eid, level in layout_overrides(data, layout, person_pages(member, data)).items():
+        set_level(access, eid, level)
+    entities, areas = db.staff_overrides(member["id"]) if member.get("id") else ({}, {})
+    if areas:
+        for eid, area_ids in layout.membership.items():
+            level = max((areas[a] for a in area_ids if a in areas), key=OVERRIDE_RANK.get, default=None)
+            if level:
+                set_level(access, eid, level)
+    for eid, level in entities.items():
+        set_level(access, eid, level)
+    return access
+
+
+def access_for(device: dict, member: dict | None, layout: AreaLayout,
+               layout_data: dict | None = None) -> dict[str, str]:
+    """What may be seen and controlled on this device right now: on a role-based device the
+    signed-in person's own access (nothing until someone signs in), otherwise the device's."""
+    if role_based(device):
+        return person_access(member, layout, layout_data) if member else {}
+    return phone_access(device, layout, layout_data)
+
+
+def pages_for(device: dict, member: dict | None, layout_data: dict) -> list[str] | None:
+    if role_based(device):
+        return person_pages(member, layout_data) if member else []
+    return device_pages(device, layout_data)
+
+
+def role_label(device: dict, member: dict | None) -> str | None:
+    """The role behind what's on screen, for the activity log and the app's header."""
+    if not role_based(device):
+        return device["role_name"]
+    role = db.role(member["role_id"]) if member and member.get("role_id") else None
+    return role["name"] if role else None
 
 
 def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
@@ -514,7 +595,7 @@ def authenticate(request: web.Request, need_unlock: bool = True,
         raise json_error(HTTPLocked, "locked")
     if not device["last_seen"] or time.time() - device["last_seen"] > 60:
         db.touch_device(device["id"])
-    shared = device["signin_mode"] == "staff"
+    shared = is_shared(device)
     if not shared and not device["pin_hash"] and db.settings().get("require_pin") == "1":
         raise json_error(web.HTTPForbidden, "pin_not_set")
     if not need_unlock or not (shared or device["pin_hash"]):
@@ -539,7 +620,7 @@ def authenticate(request: web.Request, need_unlock: bool = True,
             db.log(actor_name(device, member),
                    "Signed out: clocked out in Connecteam" if blocked == "clocked_out"
                    else "Signed out: Connecteam time clock unavailable",
-                   role=device["role_name"], ok=False)
+                   role=role_label(device, member), ok=False)
             raise json_error(web.HTTPForbidden, blocked,
                              message=CLOCK_MESSAGES[blocked].format(name=member["name"]))
         if not member["last_seen"] or time.time() - member["last_seen"] > 60:
@@ -627,12 +708,14 @@ async def api_enroll(request: web.Request):
 async def api_me(request: web.Request):
     device, _ = authenticate(request, need_unlock=False)
     s = db.settings()
-    shared = device["signin_mode"] == "staff"
+    shared = is_shared(device)
     pin_only = shared and bool(device["pin_only"])
     return web.json_response({
         "device": device["name"],
         "kind": device["kind"],
-        "role": device["role_name"],
+        # On a role-based device the role is the signed-in person's (sent with the readings).
+        "role": None if role_based(device) else device["role_name"],
+        "role_based": role_based(device),
         "shared": shared,
         # PIN-only devices never get the list of names.
         "pin_only": pin_only,
@@ -659,7 +742,7 @@ async def api_unlock(request: web.Request):
         return bad_request("Too many sign-in attempts. Wait a minute and try again.", 429)
     async with unlock_locks.setdefault(device["id"], asyncio.Lock()):
         device, _ = authenticate(request, need_unlock=False)   # fresh, now that it's our turn
-        if device["signin_mode"] != "staff":
+        if not is_shared(device):
             return await unlock_device(request, device, data)
         if device["pin_only"]:
             return await unlock_by_pin(request, device, data)
@@ -699,7 +782,7 @@ async def unlock_device(request: web.Request, device: dict, data: dict) -> web.R
     attempts = device["failed_pins"] + 1
     if attempts >= max_attempts:
         db.update_device(device["id"], failed_pins=attempts, status="locked")
-        db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
+        db.log(device["name"], "Phone locked after wrong PINs", role=role_label(device, None),
                ok=False, ip=client_ip(request))
         return bad_request("locked", 423)
     db.update_device(device["id"], failed_pins=attempts)
@@ -727,7 +810,7 @@ def shared_wrong_pin(device: dict, ip: str, limit: int) -> tuple[int, web.Respon
         db.update_device(device["id"], status="locked", **fields)
         db.log(device["name"], "Phone locked after wrong PINs" if attempts >= limit
                else f"Phone locked after {today} wrong PINs in a day",
-               role=device["role_name"], ok=False, ip=ip)
+               role=role_label(device, None), ok=False, ip=ip)
         return attempts, bad_request("locked", 423)
     db.update_device(device["id"], **fields)
     return attempts, None
@@ -769,7 +852,7 @@ async def unlock_named(request: web.Request, device: dict, data: dict) -> web.Re
         # can't be used to shut a colleague out.
         db.update_staff(member["id"], failed_pins=0, locked_until=time.time() + STAFF_LOCK_SECONDS)
         db.log(actor_name(device, member), "Locked for a while after wrong PINs",
-               role=device["role_name"], ok=False, ip=ip)
+               role=role_label(device, member), ok=False, ip=ip)
         return bad_request(locked_msg, 403, staff_locked=True)
     db.update_staff(member["id"], failed_pins=attempts)
     return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
@@ -784,11 +867,11 @@ def staff_signed_in(device: dict, member: dict, ip: str) -> web.Response:
         db.update_staff(member["id"], failed_pins=0)
         db.log(actor_name(device, member), "Blocked sign-in: not clocked in"
                if blocked == "clocked_out" else "Blocked sign-in: time clock unavailable",
-               role=device["role_name"], ok=False, ip=ip)
+               role=role_label(device, member), ok=False, ip=ip)
         return bad_request(CLOCK_MESSAGES[blocked].format(name=member["name"]), 403,
                            clock=blocked)
     db.update_staff(member["id"], failed_pins=0, locked_until=None, last_seen=time.time())
-    db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
+    db.log(actor_name(device, member), "Signed in", role=role_label(device, member), ip=ip)
     return web.json_response({"session": new_session(device, member),
                               "staff_name": member["name"]})
 
@@ -805,7 +888,7 @@ async def unlock_by_pin(request: web.Request, device: dict, data: dict) -> web.R
         lambda: [sid for sid, stored in candidates if check_pin(pin, stored)])
     if len(matches) > 1:
         db.log(device["name"], "Blocked sign-in: PIN used by more than one person",
-               role=device["role_name"], ok=False, ip=ip)
+               role=role_label(device, None), ok=False, ip=ip)
         return bad_request("That PIN belongs to more than one person, so it can't be used here. "
                            "Ask your manager to give each person their own PIN.", 403)
     member = db.staff(matches[0]) if matches else None
@@ -853,7 +936,7 @@ async def api_signout(request: web.Request):
     device, member = authenticate(request)
     pin_sessions.pop(request.headers.get("X-Session", ""), None)
     if member:
-        db.log(actor_name(device, member), "Signed out", role=device["role_name"])
+        db.log(actor_name(device, member), "Signed out", role=role_label(device, member))
     return web.json_response({"ok": True})
 
 
@@ -862,7 +945,7 @@ async def api_entities(request: web.Request):
     layout_data = db.layout()
     try:
         layout = await area_layout()
-        allowed = phone_access(device, layout, layout_data)
+        allowed = access_for(device, member, layout, layout_data)
         states = await ha.states() if allowed else {}
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
@@ -871,7 +954,7 @@ async def api_entities(request: web.Request):
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
     can_reorder = db.settings().get("allow_phone_reorder") == "1"
     order = db.phone_order(order_owner(device, member)) if can_reorder else None
-    phone_layout = visible_layout(layout_data, allowed, layout, device_pages(device, layout_data))
+    phone_layout = visible_layout(layout_data, allowed, layout, pages_for(device, member, layout_data))
     if phone_layout:
         phone_layout = apply_phone_order(phone_layout, order)
     else:
@@ -880,6 +963,7 @@ async def api_entities(request: web.Request):
         "entities": entities,
         "layout": phone_layout,
         "staff_name": member and member["name"],
+        "role": role_label(device, member),
         "can_reorder": can_reorder,
         "control_lock": db.settings().get("control_lock") == "1",
         "control_lock_minutes": db.setting_int("control_lock_minutes"),
@@ -902,14 +986,14 @@ async def api_save_order(request: web.Request):
     except ValueError as err:
         return bad_request(str(err))
     db.set_phone_order(order_owner(device, member), order)
-    db.log(actor_name(device, member), "Rearranged the phone", role=device["role_name"])
+    db.log(actor_name(device, member), "Rearranged the phone", role=role_label(device, member))
     return web.json_response({"ok": True})
 
 
 async def api_reset_order(request: web.Request):
     device, member = authenticate(request, active=True)
     db.set_phone_order(order_owner(device, member), None)
-    db.log(actor_name(device, member), "Reset the phone's arrangement", role=device["role_name"])
+    db.log(actor_name(device, member), "Reset the phone's arrangement", role=role_label(device, member))
     return web.json_response({"ok": True})
 
 
@@ -937,20 +1021,20 @@ async def api_action(request: web.Request):
     action = str(data.get("action", ""))
     params = data.get("params") or {}
     ip = client_ip(request)
-    actor = actor_name(device, member)
+    actor, role = actor_name(device, member), role_label(device, member)
     if phone_too_busy(device["id"]):
         return bad_request("Too many changes at once. Wait a moment and try again.", 429)
     if not ENTITY_ID_RE.match(entity_id) or action not in ACTIONS.get(domain_of(entity_id), {}):
         # Never store junk a phone sends; just note that something invalid was refused.
-        db.log(actor, "Blocked: invalid request", role=device["role_name"], ok=False, ip=ip)
+        db.log(actor, "Blocked: invalid request", role=role, ok=False, ip=ip)
         return bad_request("You don't have access to control that.", 403)
     try:
-        allowed = phone_access(device, await area_layout())
+        allowed = access_for(device, member, await area_layout())
     except HomeAssistantError as err:
         log.warning("Home Assistant unavailable: %s", err)
         return bad_request("Can't reach the system right now.", 503)
     if allowed.get(entity_id) != "control" or not isinstance(params, dict):
-        db.log(actor, f"Blocked: {action}", role=device["role_name"],
+        db.log(actor, f"Blocked: {action}", role=role,
                entity_id=entity_id, ok=False, ip=ip)
         return bad_request("You don't have access to control that.", 403)
     try:
@@ -971,11 +1055,11 @@ async def api_action(request: web.Request):
         # tap: it must be sent (and not refused as too soon).
         last_command.pop((device["id"], entity_id), None)
         last_entity_action.pop((device["id"], entity_id), None)
-        db.log(actor, action, role=device["role_name"], entity_id=entity_id,
+        db.log(actor, action, role=role, entity_id=entity_id,
                detail=str(err)[:200], ok=False, ip=ip)
         return bad_request("The system didn't accept that. Try again.", 502)
     detail = ", ".join(f"{k}={v}" for k, v in call.items() if k != "entity_id") or None
-    db.log(actor, action, role=device["role_name"], entity_id=entity_id, detail=detail, ip=ip)
+    db.log(actor, action, role=role, entity_id=entity_id, detail=detail, ip=ip)
     # Written for linked users too: Home Assistant credits them, but this entry also says
     # which device and what exactly was set.
     if db.settings().get("ha_logbook") == "1":
@@ -1023,7 +1107,7 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
             if linked.get("ha_link_error") != str(err):
                 update(linked["id"], ha_link_error=str(err))
                 db.log(actor_name(device, member), "Home Assistant user link stopped working",
-                       role=device["role_name"], detail=str(err), ok=False)
+                       role=role_label(device, member), detail=str(err), ok=False)
     await ha.call_service(domain, service, call)
     return False
 
@@ -1104,14 +1188,7 @@ def device_page_choice(device: dict) -> list[str] | None:
     """A phone's page choice as stored: None for every page, otherwise page IDs and page
     groups ("group:<id>"). A damaged value means no pages rather than every page, so it can
     never widen what a phone sees."""
-    raw = device.get("layout_pages")
-    if not raw:
-        return None
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return []
-    return [str(i) for i in value] if isinstance(value, list) else []
+    return page_choice(device.get("layout_pages"))
 
 
 def device_pages(device: dict, layout_data: dict | None = None) -> list[str] | None:
@@ -1317,26 +1394,61 @@ async def admin_update_role(request: web.Request):
     entities = data.get("entities") or {}
     if not isinstance(entities, dict):
         return bad_request("entities must be an object")
-    # "control" is only kept for device types staff can actually operate.
-    cleaned = {}
-    for eid, lvl in entities.items():
-        if not isinstance(eid, str) or not offered(eid) or lvl not in ("view", "control"):
-            continue
-        cleaned[eid] = "control" if lvl == "control" and controllable(eid) else "view"
-    areas = None
-    if isinstance(data.get("areas"), dict):
-        known = {a["id"] for a in db.areas()}
-        areas = {int(aid): lvl for aid, lvl in data["areas"].items()
-                 if str(aid).isdigit() and int(aid) in known and lvl in ("view", "control")}
+    cleaned = clean_entity_levels(entities, ("view", "control"))
+    areas = clean_area_levels(data["areas"], ("view", "control")) if isinstance(data.get("areas"), dict) else None
+    try:
+        pages = clean_phone_pages(data["layout_pages"]) if "layout_pages" in data else KEEP
+    except ValueError as err:
+        return bad_request(str(err))
     if db.name_taken("roles", name, role_id):
         return bad_request("A role with that name already exists.")
     try:
         db.update_role(role_id, name, cleaned, areas)
     except sqlite3.IntegrityError:
         return bad_request("A role with that name already exists.")
+    if pages is not KEEP:
+        db.set_role_pages(role_id, pages)
     detail = f"{len(cleaned)} devices" + (f", {len(areas)} areas" if areas else "")
     db.log(admin_name(request), f"Updated role {name}", role=name, detail=detail)
     return web.json_response({"ok": True})
+
+
+async def admin_role_pages(request: web.Request):
+    """Only a role's pages (from the Layout tab), leaving its access as it is."""
+    role = db.role(int(request.match_info["id"]))
+    if not role:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    if "layout_pages" not in data:
+        return bad_request("layout_pages is missing")
+    try:
+        pages = clean_phone_pages(data["layout_pages"])
+    except ValueError as err:
+        return bad_request(str(err))
+    db.set_role_pages(role["id"], pages)
+    db.log(admin_name(request), f"Changed the pages of role {role['name']}", role=role["name"])
+    return web.json_response({"ok": True})
+
+
+KEEP = object()   # a field left out of a request: keep what's saved
+MAX_LEVELS = 5000
+
+
+def clean_entity_levels(raw: dict, levels: tuple[str, ...]) -> dict[str, str]:
+    """{entity_id: level} from the dashboard. Control is only kept for devices staff can
+    operate (otherwise View); devices staff can't be given are dropped."""
+    cleaned = {}
+    for eid, lvl in list(raw.items())[:MAX_LEVELS]:
+        if isinstance(eid, str) and offered(eid) and lvl in levels:
+            cleaned[eid] = "view" if lvl == "control" and not controllable(eid) else lvl
+    return cleaned
+
+
+def clean_area_levels(raw: dict, levels: tuple[str, ...]) -> dict[int, str]:
+    """{area_id: level} from the dashboard, for areas that exist."""
+    known = {a["id"] for a in db.areas()}
+    return {int(aid): lvl for aid, lvl in list(raw.items())[:MAX_LEVELS]
+            if re.fullmatch(r"\d{1,9}", str(aid)) and int(aid) in known and lvl in levels}
 
 
 async def admin_client_error(request: web.Request):
@@ -1365,12 +1477,21 @@ async def admin_save_layout(request: web.Request):
         return bad_request(str(err))
     old = db.layout()
     db.set_layout(layout)
-    # A page group that's gone: phones that showed it keep its pages, now as single pages.
+    # A page group that's gone: phones, roles and people that showed it keep its pages, now as
+    # single pages.
     for device in db.devices():
         choice = device_page_choice(device)
         kept = keep_removed_groups(choice, old, layout)
         if kept != choice:
             db.update_device(device["id"], layout_pages=json.dumps(kept))
+    for role in db.roles():
+        kept = keep_removed_groups(role["layout_pages"], old, layout)
+        if kept != role["layout_pages"]:
+            db.set_role_pages(role["id"], kept)
+    for member in db.staff_list():
+        kept = keep_removed_groups(member["layout_pages"], old, layout)
+        if kept != member["layout_pages"]:
+            db.update_staff(member["id"], layout_pages=json.dumps(kept))
     items = sum(len(p["items"]) for p in layout["pages"])
     db.log(admin_name(request), "Updated phone layout",
            detail=f"{len(layout['pages'])} pages, {items} items")
@@ -1387,22 +1508,51 @@ async def admin_preview(request: web.Request):
 
 
 def preview_device(value) -> dict | None:
+    """A kiosk device to preview as. A role-based device shows each person their own view, so
+    it's previewed by role or by person instead."""
     try:
         device = db.device(int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return device if device and device["status"] != "revoked" else None
+    return device if device and device["status"] != "revoked" and not role_based(device) else None
+
+
+def preview_person(role_value, staff_value) -> dict | None:
+    """A person to preview as (what they'd see on a role-based device), or a stand-in for
+    someone with a role and no changes of their own."""
+    try:
+        if staff_value not in (None, ""):
+            return db.staff(int(staff_value))
+        if role_value not in (None, ""):
+            role = db.role(int(role_value))
+            return {"id": None, "name": None, "role_id": role["id"], "layout_pages": None} if role else None
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
+def preview_role_name(device: dict | None, person: dict | None) -> str:
+    if device:
+        role_id = device["role_id"]
+    elif person:
+        role_id = person.get("role_id")
+    else:
+        return "Everything on the layout"
+    role = db.role(role_id) if role_id else None
+    return role["name"] if role else "No role assigned"
 
 
 async def admin_preview_me(request: web.Request):
     s = db.settings()
     device = preview_device(request.query.get("device"))
-    role = next((r["name"] for r in db.roles() if device and r["id"] == device["role_id"]),
-                "No role assigned" if device else "Everything on the layout")
+    person = None if device else preview_person(request.query.get("role"), request.query.get("staff"))
     return web.json_response({
         "device": device["name"] if device else "Preview",
         "kind": "computer" if request.query.get("view") == "desktop" else "phone",
-        "role": role, "shared": False, "pin_only": False, "staff": [], "pin_required": False,
+        "role": preview_role_name(device, person),
+        # A real person's preview reads like their own sign-in on a role-based device.
+        "role_based": bool(person and person.get("id")),
+        "shared": False, "pin_only": False, "staff": [], "pin_required": False,
         "property_name": s["property_name"], "app_name": s["app_name"],
         "accent_color": s["accent_color"], "has_logo": branding.has_logo(),
         "pin_timeout_minutes": db.setting_int("pin_timeout_minutes"),
@@ -1437,6 +1587,7 @@ async def admin_preview_entities(request: web.Request):
     except ValueError as err:
         return bad_request(str(err))
     device = preview_device(data.get("device_id"))
+    person = None if device else preview_person(data.get("role_id"), data.get("staff_id"))
     try:
         areas = await area_layout()
         states = await ha.states()
@@ -1446,6 +1597,9 @@ async def admin_preview_entities(request: web.Request):
     if device:
         allowed = phone_access(device, areas, draft)
         pages = device_pages(device, draft)
+    elif person:
+        allowed = person_access(person, areas, draft)
+        pages = person_pages(person, draft)
     else:
         allowed, pages = layout_access(draft, areas), None
     entities = [entity_view(eid, states.get(eid), areas, lvl) for eid, lvl in allowed.items()]
@@ -1453,7 +1607,8 @@ async def admin_preview_entities(request: web.Request):
     return web.json_response({
         "entities": entities,
         "layout": visible_layout(draft, allowed, areas, pages),
-        "staff_name": None,
+        "staff_name": person["name"] if person else None,
+        "role": preview_role_name(device, person),
         "can_reorder": False,
         "control_lock": db.settings().get("control_lock") == "1",
         "control_lock_minutes": db.setting_int("control_lock_minutes"),
@@ -1525,7 +1680,10 @@ async def admin_delete_role(request: web.Request):
 def parse_role(value) -> int | None:
     if value in (None, ""):
         return None
-    role = db.role(int(value))
+    try:
+        role = db.role(int(value))
+    except (TypeError, ValueError, OverflowError):
+        role = None
     if not role:
         raise web.HTTPBadRequest(text="unknown role")
     return role["id"]
@@ -1544,7 +1702,8 @@ async def admin_create_device(request: web.Request):
     kind = "computer" if data.get("kind") == "computer" else "phone"
     if not name:
         return bad_request(f"Give the {kind} a name.")
-    shared = data.get("signin_mode") == "staff"
+    mode = data.get("signin_mode") if data.get("signin_mode") in SIGNIN_MODES else "phone"
+    shared = mode in SHARED_MODES
     # Check everything before creating the phone, so a rejected request creates nothing.
     role_id = parse_role(data.get("role_id"))
     pin = None if shared else parse_pin(data.get("pin"))
@@ -1555,7 +1714,7 @@ async def admin_create_device(request: web.Request):
     if pages is not None:
         db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
-        db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0,
+        db.update_device(device_id, signin_mode=mode, staff_all=1 if data.get("staff_all", True) else 0,
                          pin_only=1 if data.get("pin_only") else 0)
         if isinstance(data.get("staff_ids"), list):
             known = {m["id"] for m in db.staff_list()}
@@ -1581,7 +1740,7 @@ async def admin_update_device(request: web.Request):
         end_sessions = True
     if data.get("kind") in ("phone", "computer"):
         fields["kind"] = data["kind"]
-    if data.get("signin_mode") in ("phone", "staff"):
+    if data.get("signin_mode") in SIGNIN_MODES:
         fields["signin_mode"] = data["signin_mode"]
         end_sessions = end_sessions or fields["signin_mode"] != device["signin_mode"]
     if "staff_all" in data:
@@ -1719,6 +1878,7 @@ async def admin_create_staff(request: web.Request):
     link = parse_connecteam_link(data)
     if link.get("connecteam_user_id") and "require_clock_in" not in link:
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
+    role_id = parse_role(data.get("role_id"))
     pin = (await kiosk_pin(link.get("connecteam_user_id")) if data.get("use_kiosk_code")
            else data.get("pin"))
     if await pin_taken(require_pin(pin)):
@@ -1727,8 +1887,8 @@ async def admin_create_staff(request: web.Request):
         staff_id = db.create_staff(name, require_pin(pin))
     except sqlite3.IntegrityError:
         return bad_request("Someone with that name already exists.")
-    if link:
-        db.update_staff(staff_id, **link)
+    if link or role_id:
+        db.update_staff(staff_id, role_id=role_id, **link)
     db.log(admin_name(request), f"Added staff member {name}" +
            (" from Connecteam" if link.get("connecteam_user_id") else ""))
     return web.json_response({"id": staff_id})
@@ -1756,16 +1916,48 @@ async def admin_update_staff(request: web.Request):
         elif member["status"] == "disabled":
             fields["status"] = "active"
     fields.update(link)
+    if "role_id" in data:
+        fields["role_id"] = parse_role(data["role_id"])
+    try:
+        if "layout_pages" in data:
+            pages = clean_phone_pages(data["layout_pages"])   # None: their role's pages
+            fields["layout_pages"] = None if pages is None else json.dumps(pages)
+        overrides = staff_overrides_from(data, member["id"])
+    except ValueError as err:
+        return bad_request(str(err))
     if "name" in fields and db.name_taken("staff", fields["name"], member["id"]):
         return bad_request("Someone with that name already exists.")
     try:
         db.update_staff(member["id"], **fields)
     except sqlite3.IntegrityError:
         return bad_request("Someone with that name already exists.")
+    if overrides is not None:
+        db.set_staff_overrides(member["id"], *overrides)
     if "pin_hash" in fields or fields.get("status") == "disabled":
         staff_sessions_end(member["id"])
     db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}")
     return web.json_response({"ok": True})
+
+
+def staff_overrides_from(data: dict, staff_id: int) -> tuple[dict, dict] | None:
+    """A person's own changes to their role from the dashboard ("entities" and/or "areas",
+    each {id: 'none'|'view'|'control'}), or None if the request doesn't change them. A part
+    left out stays as it is."""
+    if "entities" not in data and "areas" not in data:
+        return None
+    entities, areas = db.staff_overrides(staff_id)
+    if "entities" in data:
+        if not isinstance(data["entities"], dict):
+            raise ValueError("entities must be an object")
+        entities = clean_entity_levels(data["entities"], OVERRIDE_LEVELS)
+    if "areas" in data:
+        if not isinstance(data["areas"], dict):
+            raise ValueError("areas must be an object")
+        areas = clean_area_levels(data["areas"], OVERRIDE_LEVELS)
+    return entities, areas
+
+
+OVERRIDE_LEVELS = ("none", "view", "control")
 
 
 async def admin_unlock_staff(request: web.Request):
@@ -2073,6 +2265,7 @@ def admin_app() -> web.Application:
     app.router.add_get("/api/entities", admin_entities)
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)
+    app.router.add_patch(r"/api/roles/{id:\d+}", admin_role_pages)
     app.router.add_post(r"/api/roles/{id:\d+}/duplicate", admin_duplicate_role)
     app.router.add_delete(r"/api/roles/{id:\d+}", admin_delete_role)
     app.router.add_put("/api/layout", admin_save_layout)

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.0
+
+**Kiosk and role-based devices**
+
+- **New: a Mode for each phone and computer.** **Kiosk** works as before: the device's own role
+  and pages, for one person or team, or for people who each sign in. **Role-based** devices have
+  each person sign in with their own PIN and then show what *their* role allows, on their role's
+  pages, so a shared device shows each person something different. Existing devices are kiosk
+  devices and work exactly as before.
+- **New: people have roles.** Pick each person's role on the Staff tab (on their card or in
+  **Edit**). Roles work as staff groups.
+- **New: roles have pages**, for the people who have them on role-based devices. On the Layout
+  tab, **Shown on** and **Choose devices** also list roles once you have a role-based device.
+- **New: one person's own settings.** On the Roles tab, people are listed under their role; click
+  someone (or **Access** on their Staff card) to raise or lower their access to an area or a single
+  device, or give them their own pages, without changing their role. Their own settings beat their
+  role and items' access on the layout.
+- On role-based devices the header shows who's signed in and their role, and the activity log
+  records their role.
+- **Preview** can show a role or a person, as well as a kiosk device.
+- Every control is still checked by the add-on, now against the signed-in person's access on
+  role-based devices.
+
+**Backups and imports**
+
+- Backups include people's roles, pages and own settings, and roles' pages. Backups from earlier
+  versions still restore. An older version of the add-on refuses a 0.7.0 backup instead of
+  quietly dropping these.
+- Exported roles and staff carry their role, pages and areas by name, since IDs differ between
+  systems. Anything with no match is listed after the import, and pages with no match are left
+  out, never replaced by every page.
+- **Fixed:** a backup couldn't be restored once all the roles together had more than 5,000 device
+  settings (a few big roles on a large system). Settings like these can now number 200,000.
+
 ## 0.6.20
 
 **Layout**

@@ -246,7 +246,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
 .seg .seg-none[aria-checked="true"] { background: var(--raised); color: var(--text); }
 .seg .seg-view[aria-checked="true"] { background: var(--view); }
 .seg .seg-control[aria-checked="true"] { background: var(--ok); }
-.seg .seg-role[aria-checked="true"] { background: var(--accent); }
+/* "Same as the role": an outline, so it never looks like Control's green. */
+.seg .seg-role[aria-checked="true"] { background: var(--card); color: var(--accent-text);
+  box-shadow: inset 0 0 0 1.5px var(--accent); }
 .access-field .seg { margin: 4px 0 2px; }
 .member-access { width: auto !important; font-size: 13px; padding: 4px 8px !important; min-height: 32px !important; }
 .via.access-note { color: var(--warn); }
@@ -518,3 +520,14 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .preview-box iframe { position: absolute; top: 0; left: 0; border: 0; transform-origin: 0 0; background: var(--bg); }
 .preview-box.phone { border-radius: 28px; box-shadow: 0 0 0 8px #1c1c1e, var(--float-shadow); }
 .preview-box.desktop { border-radius: 10px; box-shadow: 0 0 0 1px var(--line), var(--float-shadow); }
+
+/* Roles tab: people listed under their role, and one person's own settings */
+.roles-hint { margin: 0 0 14px; max-width: 1162px; }
+.role-block { display: grid; gap: 6px; }
+.role-list .role-people { padding: 0 0 2px 14px; gap: 6px; border-left: 2px solid var(--line); }
+.role-people .role-item { padding-block: 7px; }
+.role-people-head { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; margin-top: 8px; }
+.person-name { font-size: 18px; font-weight: 700; color: var(--text); }
+.person-role { margin: 14px 0 2px; }
+.page-pick { margin-top: 6px; }

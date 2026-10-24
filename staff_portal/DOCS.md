@@ -74,8 +74,11 @@ devices in no area show under their Home Assistant area.
 
 ## 4. Create roles
 
-In **Roles**, create a role such as *Maintenance*. Every device in Home Assistant is listed,
-grouped by area. For each one choose:
+In **Roles**, create a role such as *Maintenance*. A role is used in two ways: a **kiosk** phone or
+computer shows what its own role allows, and on a **role-based** one each person who signs in
+sees what *their* role allows (see [Role-based devices](#role-based-devices-each-persons-own-access)).
+
+Every device in Home Assistant is listed, grouped by area. For each one choose:
 
 | Setting | What staff get |
 |---|---|
@@ -90,13 +93,18 @@ View or Control covers every device in it, including devices added to the area l
 device gets whichever is higher: its area's setting or its own setting, and the device list
 shows when access comes from an area ("Control via Soaking Area").
 
-Click **Save role**. Phones with that role update within a few
-seconds.
+**Pages** decides which layout pages (and page groups) people with this role see when they sign
+in on a role-based device. **All pages** includes pages you add later. Kiosk devices don't use
+this: each one chooses its own pages.
 
-**Duplicate** makes a copy of the role under a new name, with the same device and area settings,
-so you can make a variation (say *Pool tech, nights*) without changing anyone else's phone. No
-phones move to the copy until you pick it for a phone in **Phones → Edit**. If you've made changes
-you haven't saved yet, the copy gets them and the original stays as it was last saved.
+Click **Save role**. Kiosk devices with that role, and people with it on role-based devices,
+update within a few seconds.
+
+**Duplicate** makes a copy of the role under a new name, with the same device, area and page
+settings, so you can make a variation (say *Pool tech, nights*) without changing anyone else's
+phone. No phones or people move to the copy until you choose it for them (**Phones & computers →
+Edit**, or a person's **Role** on the Staff tab). If you've made changes you haven't saved yet,
+the copy gets them and the original stays as it was last saved.
 
 What **Control** allows depends on the device type:
 
@@ -154,6 +162,9 @@ groups it should show (including the **More** page). You can also do it from the
 each page and page group shows **Shown on: …** with a **Choose devices** button. Device cards
 show their pages as **Pages: …**. A device set to specific pages won't pick up new pages
 automatically, except pages added to a group it shows; tick **All pages** again for that.
+
+On a **role-based** device, pages come from each person's role (or their own pages) instead.
+Once you have one, **Shown on** and **Choose devices** also list roles.
 
 By default the layout only decides how things are arranged, and **roles decide what each phone
 can see and do**. A group card only shows the devices that phone's role allows (and disappears if
@@ -224,8 +235,10 @@ changes you haven't saved yet. Try things out, then **Save layout** or **Discard
 - **Phone** shows it at phone size, with pages as tabs along the bottom. **Desktop** shows the
   computer layout, with the sidebar.
 - **As** picks whose view to show. **Everything on the layout** shows every page with everything
-  on it, as a device allowed to control all of it would. Pick a phone or computer to see exactly
-  what it would show: its pages, its role's access and your access settings on items.
+  on it, as a device allowed to control all of it would. Pick a kiosk phone or computer to see
+  exactly what it would show: its pages, its role's access and your access settings on items.
+  For role-based devices, pick a **role** (what someone with it sees, before anyone's own
+  settings) or a **person** (their role plus their own saved settings).
 - Readings are live, but nothing in the preview changes anything: tapping a control just says
   "Preview: nothing was sent to your equipment." Signing in and rearranging aren't part of the
   preview.
@@ -263,8 +276,10 @@ and every other phone stay as they are. Items you add later appear at the end.
 
 ## 5. Add phones
 
-1. In **Phones & computers**, click **Add phone**, name it (such as *Maintenance phone*), pick a role, and
-   optionally set a 4- to 8-digit PIN.
+1. In **Phones & computers**, click **Add phone**, name it (such as *Maintenance phone*), leave
+   **Mode** on **Kiosk**, pick a role, and optionally set a 4- to 8-digit PIN. (For a phone that
+   several people share, each with their own access, choose **Role-based**: see
+   [Role-based devices](#role-based-devices-each-persons-own-access).)
 2. A QR code appears. On the phone, open the **Camera**, scan it, and tap the link.
 3. Follow the on-screen prompt to **Add to Home Screen**, then open the app from the new icon.
 
@@ -321,7 +336,8 @@ On the phone, the app now asks **"Who's using this phone?"**. The person taps th
 enters their PIN, and the header shows who's signed in. **Sign out** returns to the name list,
 and they're signed out automatically after the idle time set in **Settings**.
 
-- What they can control still comes from the **phone's role**.
+- What they can control still comes from the **phone's role** (it's a kiosk device). To give
+  each person their own access instead, make it role-based (next section).
 - The Activity tab shows entries like "Bob on Maintenance phone", and Home Assistant logbook
   entries read "set to 140° by Bob (Maintenance phone) via Staff Portal".
 - Too many wrong PINs locks that **person** for 15 minutes (or until you unlock them on the
@@ -340,6 +356,59 @@ The device never receives the list of names. Because a wrong guess could match a
 PINs count against the device, which locks after **Lock phone after wrong PINs** wrong PINs in
 a row (within 15 minutes), or 20 in a day, until you unlock it on the **Phones & computers** tab.
 If two people still share a PIN from before, that PIN can't sign in; give one of them a new PIN.
+
+## Role-based devices: each person's own access
+
+On a **role-based** phone or computer everyone signs in with their own PIN, as on a shared kiosk
+device, but then sees what **their own role** allows, on **their role's pages**. So one front desk
+computer can show the boiler controls to Maintenance and only the cabin locks to Housekeeping.
+
+| | Kiosk (the default) | Role-based |
+|---|---|---|
+| Access comes from | the device's role | the signed-in person's role, plus their own settings |
+| Pages come from | the device (**Pages on this phone**) | the person's role, or their own pages |
+| Who signs in | one person or team (optional PIN), or each person with their own PIN | each person, with their own PIN |
+
+To set one up:
+
+1. **Give people roles.** On the **Staff** tab, pick each person's **Role** on their card (or in
+   **Edit**). Roles work as staff groups: each person has one.
+2. **Choose each role's pages.** On the **Roles** tab, open the role and use **Pages**. (On the
+   **Layout** tab, **Choose devices** on a page or group also lists roles once you have a
+   role-based device.)
+3. **Make the device role-based.** In **Phones & computers → Edit**, set **Mode** to
+   **Role-based**, choose who may sign in, and tick **Hide names** if you want only a PIN pad.
+   Changing the mode signs everyone out of that device.
+
+**One person's own settings.** On the **Roles** tab, people are listed under their role (and under
+**People without a role**). Click someone, or **Access** on their Staff card, to change things just
+for them:
+
+- **Role**: which role they have.
+- **Pages**: **Same as their role**, or untick it and choose their own.
+- **Areas** and **Individual devices**: **Role** (the default: whatever their role gives), or
+  **Hidden**, **View** or **Control** just for them. Each device says what they get and why
+  ("Control from their Soaking setting", "Their role gives Control").
+- **Clear their settings** puts everything back to their role's. Click **Save** to keep changes.
+
+What someone gets, from least to most specific (the most specific wins):
+
+1. their role (a device's own setting or its area's, whichever is higher);
+2. items' own **Access on phones** on the layout pages they see;
+3. their own setting for an area the device is in (the higher one, if it's in several);
+4. their own setting for that device.
+
+Good to know:
+
+- A person's role and own settings only count on role-based devices. On a kiosk device the
+  device's role decides, whoever signs in.
+- Someone with no role sees only what their own settings give them. Deleting a role leaves its
+  people with no role.
+- The header shows who's signed in and their role ("Bob · Maintenance"), and the activity log
+  records their role.
+- Everything else about signing in works as on shared kiosk devices: hiding names, who may sign
+  in, wrong-PIN locks, signing out after the idle time, and Connecteam's clocked-in check.
+- **Preview** on the Layout tab can show a role or a person: pick them under **As**.
 
 ## Connecteam: add staff and require clocking in (optional)
 
@@ -532,7 +601,7 @@ backups. The **Backup** tab adds backups of just Staff Access, and a way to move
 between systems.
 
 **Full backup.** **Download backup** saves one file with your settings, logo, areas, roles,
-layout, phones, staff and each phone's own arrangement. **Restore from a backup…** puts all of
+layout, phones, staff (with their roles and own settings) and each phone's own arrangement. **Restore from a backup…** puts all of
 that back:
 
 - Phones that were set up on this system keep working without re-pairing.
@@ -555,10 +624,13 @@ that back:
   **Save layout**. Whole-area items are matched to your areas by name.
 - **Import roles** and **Import staff** add to what's there. If a name already exists, you
   choose to **skip** it (the choice that's selected), **keep both** (the imported one gets
-  "(imported)" after its name), or **replace** it. Areas (for roles) and phones (for staff) are
-  matched by name.
-- Replacing staff uses the file's PINs, and anyone whose PIN changes is signed out. Someone you've
-  turned off stays off, even if the file has them on.
+  "(imported)" after its name), or **replace** it. Areas, roles, pages and page groups are matched
+  by name, and so are phones (for staff). Anything with no match here is listed after the import.
+  Pages with no match are left out, never replaced by every page.
+- Replacing staff uses the file's PINs, roles, pages and own settings, and anyone whose PIN
+  changes is signed out. Someone you've turned off stays off, even if the file has them on. A file
+  from before 0.7.0 has no roles or own settings for people, so replacing from one leaves theirs as
+  they are.
 
 Keep these files private. Staff and phone PINs are included only in scrambled form (they can't
 be read back directly), but PINs are short, so someone with the file could work them out by

@@ -5,7 +5,7 @@
   const state = { settings: {}, roles: [], devices: [], staff: [], areas: [], hasLogo: false };
   let entities = null;
   let haAreas = [];
-  let editing = null; // { id, name, entities: {entity_id: level}, dirty }
+  let editing = null; // Roles tab: { kind: "role"|"person", id, name, entities, areas, pages, dirty, ... }
   let oldestActivity = null;
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -308,6 +308,7 @@
     renderStaff();
     renderAreaSettings();
     renderRoleList();
+    refreshEditing();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -335,7 +336,7 @@
         layoutDraft = null;
       }
       if (editing?.dirty) {
-        if (!await askConfirm("Discard unsaved role changes?", "Discard")) return;
+        if (!await askConfirm("Discard unsaved changes on the Roles tab?", "Discard")) return;
         editing = null;
         renderRoleEditor();
         renderRoleList();
@@ -397,7 +398,7 @@
           await api("DELETE", `api/devices/${d.id}/link`);
           await load();
         }, "Unlinked.") }, "Unlink"));
-      } else if (d.signin_mode !== "staff") {
+      } else if (d.signin_mode === "phone") {
         actions.push(h("button", { class: "btn", onclick: () => linkUser(d) }, "Link HA user"));
       }
       if (d.status !== "revoked") {
@@ -419,17 +420,22 @@
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
               d.kind === "computer" ? h("span", { class: "badge computer" }, "Computer") : null,
-              d.signin_mode === "staff"
-                ? h("span", { class: "badge shared" }, d.pin_only ? "Shared \u00b7 PIN only" : "Shared \u00b7 staff sign in")
-                : d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
+              d.signin_mode === "role"
+                ? h("span", { class: "badge shared" }, d.pin_only ? "Role-based \u00b7 PIN only" : "Role-based")
+                : d.signin_mode === "staff"
+                  ? h("span", { class: "badge shared" }, d.pin_only ? "Shared \u00b7 PIN only" : "Shared \u00b7 staff sign in")
+                  : d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
               d.ha_user ? h("span", {
                 class: d.ha_link_error ? "badge locked" : "badge linked",
                 title: d.ha_link_error || "Actions show in Home Assistant as this user",
               }, d.ha_link_error ? `HA user ${d.ha_user}: link broken` : `HA user: ${d.ha_user}`) : null,
               h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`)),
-            d.status !== "revoked" && phonePagesText(d) ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
-              d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null),
-          h("label", { class: "inline-select" }, "Role", roleSelect)),
+            d.status !== "revoked" && d.signin_mode !== "role" && phonePagesText(d)
+              ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
+                d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null),
+          d.signin_mode === "role"
+            ? h("span", { class: "inline-select" }, "Each person\u2019s own role and pages")
+            : h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
     }));
   }
@@ -447,9 +453,9 @@
     }, okText);
   }
 
-  function fillRoleOptions(select, selected) {
+  function fillRoleOptions(select, selected, none = "No role (sees nothing)") {
     select.replaceChildren(
-      h("option", { value: "" }, "No role (sees nothing)"),
+      h("option", { value: "" }, none),
       ...state.roles.map((r) => h("option", { value: r.id, selected: r.id === selected }, r.name)));
   }
 
@@ -495,15 +501,7 @@
     const layout = state.layout;
     if (!(layout?.pages || []).length) return null;
     if (d.layout_pages == null) return "All pages";
-    const names = d.layout_pages.map((id) => {
-      if (id === "more") return "More";
-      if (id.startsWith("group:")) {
-        const group = (layout.page_groups || []).find((g) => `group:${g.id}` === id);
-        return group && `${group.name} (group)`;
-      }
-      return layout.pages.find((p) => p.id === id)?.name;
-    }).filter(Boolean);
-    return names.length ? names.join(", ") : "None";
+    return choiceNames(d.layout_pages) || "None";
   }
 
   function pinNote(text) {
@@ -534,8 +532,12 @@
       ? (d.has_pin ? "Enter a new PIN to change it, or leave blank and tick below to remove it."
         : pinNote("Optional, 4 to 8 digits."))
       : pinNote("Optional, 4 to 8 digits. Staff enter it when opening the app.");
+    // Kiosk: the device's own role and pages (shown to one person or team, or to whoever signs
+    // in). Role-based: everyone signs in and gets their own role's (signin_mode "role").
+    const accessMode = form.elements["access_mode"];
+    accessMode.value = d?.signin_mode === "role" ? "role" : "kiosk";
     const mode = form.elements["signin_mode"];
-    mode.value = d?.signin_mode || "phone";
+    mode.value = d?.signin_mode === "staff" ? "staff" : "phone";
     form.elements["staff_all"].checked = d ? !!d.staff_all : true;
     form.elements["pin_only"].checked = !!d?.pin_only;
     const pick = $("[data-staff-list]", dialog);
@@ -546,21 +548,25 @@
     orderResetRow(dialog, d, "devices");
     const pageOptions = layoutPageOptions();
     const chosenPages = d?.layout_pages ?? null;
-    $("[data-pages-pick]", dialog).hidden = !pageOptions.length;
-    $("[data-pages-none]", dialog).hidden = pageOptions.length > 0;
     form.elements["pages_all"].checked = chosenPages === null;
     const pagesList = $("[data-pages-list]", dialog);
     pagesList.replaceChildren(...pageOptions.map((o) => h("label", { class: "check" },
       h("input", { type: "checkbox", value: o.id, checked: chosenPages === null || chosenPages.includes(o.id) }),
       o.name)));
     const syncMode = () => {
-      const shared = mode.value === "staff";
+      const roleBased = accessMode.value === "role";
+      const shared = roleBased || mode.value === "staff";
+      dialog.querySelectorAll("[data-kiosk-only]").forEach((el) => { el.hidden = roleBased; });
+      $("[data-role-hint]", dialog).hidden = !roleBased;
       form.elements["pin"].closest("label").hidden = shared;
       $("#clear-pin")?.closest("label").toggleAttribute("hidden", shared);
       $("[data-staff-pick]", dialog).hidden = !shared;
       pick.hidden = form.elements["staff_all"].checked;
+      $("[data-pages-pick]", dialog).hidden = roleBased || !pageOptions.length;
+      $("[data-pages-none]", dialog).hidden = roleBased || pageOptions.length > 0;
       pagesList.hidden = form.elements["pages_all"].checked;
     };
+    accessMode.onchange = syncMode;
     mode.onchange = syncMode;
     form.elements["staff_all"].onchange = syncMode;
     form.elements["pages_all"].onchange = syncMode;
@@ -573,11 +579,14 @@
     syncMode();
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
-      const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null,
-        kind: kindSelect.value };
-      body.signin_mode = mode.value;
-      if (mode.value === "staff") body.pin_only = form.elements["pin_only"].checked;
-      if (pageOptions.length) {
+      const roleBased = accessMode.value === "role";
+      const shared = roleBased || mode.value === "staff";
+      const body = { name: form.elements["name"].value, kind: kindSelect.value };
+      // A role-based device keeps its kiosk role and pages for if it's switched back.
+      if (!roleBased) body.role_id = form.elements["role_id"].value || null;
+      body.signin_mode = roleBased ? "role" : mode.value;
+      if (shared) body.pin_only = form.elements["pin_only"].checked;
+      if (pageOptions.length && !roleBased) {
         const all = form.elements["pages_all"].checked;
         const ticked = [...pagesList.querySelectorAll("input:checked")].map((i) => i.value);
         const was = (id) => chosenPages === null || chosenPages.includes(id);
@@ -592,7 +601,7 @@
             : [...ticked, ...(chosenPages || []).filter((id) => !offered.has(id) && known.has(id))];
         }
       }
-      if (mode.value === "staff") {
+      if (shared) {
         body.staff_all = form.elements["staff_all"].checked;
         body.staff_ids = [...pick.querySelectorAll("input:checked")].map((i) => Number(i.value));
       } else {
@@ -683,8 +692,19 @@
   // ---------------------------------------------------------------- staff
 
   function phonesFor(m) {
-    return state.devices.filter((d) => d.signin_mode === "staff" && d.status !== "revoked" &&
+    return state.devices.filter((d) => d.signin_mode !== "phone" && d.status !== "revoked" &&
       (d.staff_all || d.staff_ids.includes(m.id))).map((d) => d.name);
+  }
+
+  // A person's own changes to their role, in a few words ("" if none).
+  function ownChangesText(m) {
+    const parts = [];
+    const devices = Object.keys(m.entities || {}).length;
+    const areas = Object.keys(m.areas || {}).length;
+    if (areas) parts.push(`${areas} area${areas === 1 ? "" : "s"}`);
+    if (devices) parts.push(`${devices} device${devices === 1 ? "" : "s"}`);
+    if (m.layout_pages) parts.push("own pages");
+    return parts.join(", ");
   }
 
   function renderStaff() {
@@ -699,7 +719,15 @@
       const status = m.status === "disabled" ? ["Inactive", "revoked"]
         : m.locked ? ["Locked for now (wrong PINs)", "locked"] : ["Active", "active"];
       const phones = phonesFor(m);
-      const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit")];
+      const roleSelect = h("select", { "aria-label": `Role for ${m.name}` });
+      fillRoleOptions(roleSelect, m.role_id, "No role");
+      roleSelect.addEventListener("change", () => run(async () => {
+        await api("PATCH", `api/staff/${m.id}`, { role_id: roleSelect.value || null });
+        await load();
+      }, `${m.name}'s role changed. It applies on role-based devices within a few seconds.`));
+      const own = ownChangesText(m);
+      const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit"),
+        h("button", { class: "btn", onclick: () => openPersonAccess(m.id) }, "Access")];
       if (m.locked) {
         actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
           await api("POST", `api/staff/${m.id}/unlock`);
@@ -736,7 +764,9 @@
               h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
             h("div", { class: "meta" }, phones.length
               ? `Can sign in on: ${phones.join(", ")}`
-              : "Not on any shared phone yet"))),
+              : "Not on any shared phone yet"),
+            own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null),
+          h("label", { class: "inline-select" }, "Role", roleSelect)),
         h("div", { class: "card-actions" }, actions));
     }));
   }
@@ -778,6 +808,7 @@
     $("[data-title]", dialog).textContent = m ? `Edit ${m.name}`
       : ctUser ? "Add from Connecteam" : "Add staff member";
     form.elements["name"].value = m ? m.name : ctUser ? ctUser.name.slice(0, 40) : "";
+    fillRoleOptions(form.elements["role_id"], m ? m.role_id : null, "No role");
     form.elements["pin"].required = !m;
     $("[data-pin-hint]", dialog).textContent = m
       ? "Leave blank to keep their current PIN."
@@ -815,7 +846,7 @@
     orderResetRow(dialog, m, "staff");
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
-      const body = { name: form.elements["name"].value };
+      const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
       const pin = form.elements["pin"].value.trim();
       if (pin) body.pin = pin;
       if (m) body.active = form.elements["active"].checked;
@@ -875,21 +906,47 @@
 
   // ---------------------------------------------------------------- roles
 
+  // The Roles tab edits one thing at a time (editing.kind): a role, or one person's own changes
+  // to what their role gives them on role-based devices. People are listed under their role.
+
+  function roleCounts(r) {
+    const count = Object.keys(r.entities).length;
+    const areaCount = Object.keys(r.areas).length;
+    const access = [`${count} device${count === 1 ? "" : "s"}`];
+    if (areaCount) access.push(`${areaCount} area${areaCount === 1 ? "" : "s"}`);
+    const users = [];
+    if (r.device_count) users.push(`${r.device_count} kiosk device${r.device_count === 1 ? "" : "s"}`);
+    if (r.staff_count) users.push(`${r.staff_count} ${r.staff_count === 1 ? "person" : "people"}`);
+    return [access.join(" · "), users.length ? `Used by ${users.join(" · ")}` : ""];
+  }
+
   function renderRoleList() {
     const list = $("#role-list");
-    list.replaceChildren(...state.roles.map((r) => {
-      const count = Object.keys(r.entities).length;
-      const areaCount = Object.keys(r.areas).length;
-      const parts = [`${count} device${count === 1 ? "" : "s"}`];
-      if (areaCount) parts.push(`${areaCount} area${areaCount === 1 ? "" : "s"}`);
-      parts.push(`${r.device_count} phone${r.device_count === 1 ? "" : "s"}`);
-      return h("li", null, h("button", {
-        class: editing?.id === r.id ? "role-item active" : "role-item",
-        onclick: () => openRole(r.id),
-      }, h("span", { class: "role-name" }, r.name),
-      h("span", { class: "role-meta" }, parts.join(" · "))));
-    }));
-    if (!state.roles.length) list.replaceChildren(h("li", { class: "empty small" }, "No roles yet."));
+    const active = (kind, id) => editing?.kind === kind && editing.id === id;
+    const person = (m) => h("li", null, h("button", {
+      class: active("person", m.id) ? "role-item person-item active" : "role-item person-item",
+      onclick: () => openPerson(m.id),
+    }, h("span", { class: "role-name" }, m.name),
+    h("span", { class: "role-meta" }, [ownChangesText(m) || "Same as role",
+      m.status === "disabled" ? "inactive" : ""].filter(Boolean).join(" · "))));
+    const blocks = state.roles.map((r) => {
+      const [access, users] = roleCounts(r);
+      const people = state.staff.filter((m) => m.role_id === r.id);
+      return h("li", { class: "role-block" },
+        h("button", { class: active("role", r.id) ? "role-item active" : "role-item", onclick: () => openRole(r.id) },
+          h("span", { class: "role-name" }, r.name),
+          h("span", { class: "role-meta" }, access),
+          users ? h("span", { class: "role-meta" }, users) : null),
+        people.length ? h("ul", { class: "role-people", "aria-label": `People with ${r.name}` }, people.map(person)) : null);
+    });
+    const loose = state.staff.filter((m) => !m.role_id);
+    if (loose.length) {
+      blocks.push(h("li", { class: "role-block" },
+        h("div", { class: "role-people-head" }, "People without a role"),
+        h("ul", { class: "role-people" }, loose.map(person))));
+    }
+    list.replaceChildren(...blocks);
+    if (!blocks.length) list.replaceChildren(h("li", { class: "empty small" }, "No roles yet."));
   }
 
   async function loadEntities() {
@@ -905,12 +962,51 @@
     if (!$("#tab-layout").hidden) renderLayoutEditor();
   }
 
-  async function openRole(id) {
-    if (editing?.dirty && editing.id !== id && !await askConfirm("Discard unsaved changes?", "Discard")) return;
+  function roleEditing(id) {
     const role = state.roles.find((r) => r.id === id);
-    editing = { id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
-      dirty: false, filter: "", area: "", onlySelected: false };
+    return role && { kind: "role", id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
+      pages: role.layout_pages ?? null, dirty: false, filter: "", area: "", onlySelected: false };
+  }
+
+  function personEditing(id) {
+    const m = state.staff.find((x) => x.id === id);
+    return m && { kind: "person", id, name: m.name, role_id: m.role_id ?? null, entities: { ...m.entities },
+      areas: { ...m.areas }, pages: m.layout_pages ?? null, dirty: false, filter: "", area: "", onlySelected: false };
+  }
+
+  // Switching to something else in the editor: unsaved changes need a yes first.
+  async function canLeaveEditor(kind, id) {
+    if (!editing?.dirty || (editing.kind === kind && editing.id === id)) return true;
+    return askConfirm("Discard unsaved changes?", "Discard");
+  }
+
+  async function openRole(id) {
+    if (!await canLeaveEditor("role", id)) return;
+    editing = roleEditing(id);
     renderRoleList();
+    renderRoleEditor();
+  }
+
+  async function openPerson(id) {
+    if (!await canLeaveEditor("person", id)) return;
+    editing = personEditing(id);
+    renderRoleList();
+    renderRoleEditor();
+  }
+
+  // The Staff tab's Access button.
+  function openPersonAccess(id) {
+    selectTab("roles");
+    openPerson(id);
+  }
+
+  // After a reload: an editor with no unsaved changes shows what's saved now (a role changed on
+  // the Staff tab, say), so saving it later can't put old settings back.
+  function refreshEditing() {
+    if (!editing || editing.dirty) return;
+    const { filter, area, onlySelected } = editing;
+    const fresh = editing.kind === "person" ? personEditing(editing.id) : roleEditing(editing.id);
+    editing = fresh ? { ...fresh, filter, area, onlySelected } : null;
     renderRoleEditor();
   }
 
@@ -924,15 +1020,23 @@
     });
   });
 
-  function setLevel(entityId, level) {
-    if (level === "none") delete editing.entities[entityId];
-    else editing.entities[entityId] = level;
+  function markEditing() {
     editing.dirty = true;
     $("#save-role")?.removeAttribute("disabled");
   }
 
+  // A role leaves a device out with "none"; a person's own setting goes back to their role's
+  // with "role" (their "none" hides it from them).
+  function setLevel(entityId, level) {
+    if (level === (editing.kind === "person" ? "role" : "none")) delete editing.entities[entityId];
+    else editing.entities[entityId] = level;
+    markEditing();
+  }
+
   const RANK = { none: 0, view: 1, control: 2 };
-  const LABELS = { none: "Hidden", view: "View", control: "Control" };
+  const LABELS = { none: "Hidden", view: "View", control: "Control", role: "Role" };
+  const ROLE_LEVELS = ["none", "view", "control"];
+  const PERSON_LEVELS = ["role", "none", "view", "control"];
 
   // The strongest access this role gets to a device through its areas, and which area gives it.
   function accessFromAreas(e) {
@@ -945,15 +1049,44 @@
     return best;
   }
 
-  // Always three equal-width buttons so the choices line up down the page. Options a device
-  // can't have (Control on a sensor) are shown greyed out instead of being left out.
-  function segmented(options, current, label, onPick) {
+  // What a role gives one device: the higher of its own setting and its areas'.
+  function roleGives(roleId, e) {
+    const role = state.roles.find((r) => r.id === roleId);
+    let level = role?.entities[e.entity_id] || "none";
+    for (const id of e.area_ids || []) {
+      const lv = role?.areas[id] || "none";
+      if (RANK[lv] > RANK[level]) level = lv;
+    }
+    return level === "control" && !e.controllable ? "view" : level;
+  }
+
+  // What the person being edited gets for one device, and why: their own setting for it, else
+  // their own setting for one of its areas (the higher), else their role's.
+  function personGets(e) {
+    const own = editing.entities[e.entity_id];
+    const base = roleGives(editing.role_id, e);
+    let fromArea = null;
+    for (const id of e.area_ids || []) {
+      const lv = editing.areas[id];
+      if (lv && (!fromArea || RANK[lv] > RANK[fromArea.level])) {
+        fromArea = { level: lv, area: state.areas.find((a) => a.id === id) };
+      }
+    }
+    const cap = (lv) => (lv === "control" && !e.controllable ? "view" : lv);
+    if (own) return { level: cap(own), why: `Their role gives ${LABELS[base]}` };
+    if (fromArea) return { level: cap(fromArea.level), why: `${LABELS[cap(fromArea.level)]} from their ${fromArea.area?.name || "area"} setting` };
+    return { level: base, why: editing.role_id ? `${LABELS[base]} from their role` : "Hidden: they have no role" };
+  }
+
+  // Equal-width buttons so the choices line up down the page. Options a device can't have
+  // (Control on a sensor) are shown greyed out instead of being left out.
+  function segmented(options, current, label, onPick, all = ROLE_LEVELS) {
     const wrap = h("div", { class: "seg", role: "radiogroup", "aria-label": label });
-    for (const opt of ["none", "view", "control"]) {
+    for (const opt of all) {
       const allowed = options.includes(opt);
       const btn = h("button", {
         type: "button", role: "radio", "aria-checked": String(current === opt), class: `seg-${opt}`,
-        disabled: !allowed, title: allowed ? null : "This kind of device can only be viewed",
+        disabled: !allowed, title: allowed ? (opt === "role" ? "Same as their role" : null) : "This kind of device can only be viewed",
       }, LABELS[opt]);
       btn.addEventListener("click", () => {
         wrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-checked", String(b === btn)));
@@ -964,45 +1097,59 @@
     return wrap;
   }
 
-  function levelControl(e) {
-    const options = e.controllable ? ["none", "view", "control"] : ["none", "view"];
+  function levelControl(e, onPicked = () => {}) {
+    if (editing.kind === "person") {
+      const options = e.controllable ? PERSON_LEVELS : ["role", "none", "view"];
+      return segmented(options, editing.entities[e.entity_id] || "role", `Access to ${e.name}`,
+        (level) => { setLevel(e.entity_id, level); updateCount(); onPicked(); }, PERSON_LEVELS);
+    }
+    const options = e.controllable ? ROLE_LEVELS : ["none", "view"];
     return segmented(options, editing.entities[e.entity_id] || "none", `Access to ${e.name}`,
       (level) => {
         setLevel(e.entity_id, level);
         updateCount();
+        onPicked();
       });
   }
 
   function updateCount() {
     const n = Object.keys(editing.entities).length;
     const el = $("#role-count");
-    if (el) el.textContent = `${n} device${n === 1 ? "" : "s"} selected`;
+    if (!el) return;
+    el.textContent = editing.kind === "person"
+      ? `${n} device${n === 1 ? "" : "s"} set just for them`
+      : `${n} device${n === 1 ? "" : "s"} selected`;
   }
 
   function areaSection(redraw) {
+    const person = editing.kind === "person";
     if (!state.areas.length) {
       return h("div", { class: "role-areas empty-areas" },
         h("h3", { class: "editor-sub" }, "Areas"),
-        h("p", { class: "hint" }, "Create areas such as \u201cSoaking Area\u201d in ",
+        h("p", { class: "hint" }, "Create areas such as “Soaking Area” in ",
           h("button", { type: "button", class: "linkish", onclick: () => selectTab("settings") }, "Settings"),
           " to give access to a whole area at once."));
     }
+    const role = person && state.roles.find((r) => r.id === editing.role_id);
     return h("div", { class: "role-areas" },
       h("h3", { class: "editor-sub" }, "Areas"),
-      h("p", { class: "hint" }, "Covers every device in the area, including ones added later. ",
-        "A device gets whichever is higher: its area\u2019s setting or its own setting below."),
+      h("p", { class: "hint" }, person
+        ? "Their setting for an area replaces what their role gives for every device in it, including " +
+          "ones added later. A setting for a single device (below) beats it."
+        : "Covers every device in the area, including ones added later. " +
+          "A device gets whichever is higher: its area’s setting or its own setting below."),
       state.areas.map((a) => h("div", { class: "entity-row" },
         h("div", { class: "entity-text" },
           h("div", { class: "entity-name" }, a.name),
-          h("div", { class: "entity-id" }, areaSummary(a))),
-        segmented(["none", "view", "control"], editing.areas[a.id] || "none", `Access to ${a.name}`,
-          (level) => {
-            if (level === "none") delete editing.areas[a.id];
+          h("div", { class: "entity-id" }, areaSummary(a)),
+          person ? h("div", { class: "via" }, `Their role: ${LABELS[role?.areas[a.id] || "none"]}`) : null),
+        segmented(person ? PERSON_LEVELS : ROLE_LEVELS, editing.areas[a.id] || (person ? "role" : "none"),
+          `Access to ${a.name}`, (level) => {
+            if (level === (person ? "role" : "none")) delete editing.areas[a.id];
             else editing.areas[a.id] = level;
-            editing.dirty = true;
-            $("#save-role")?.removeAttribute("disabled");
+            markEditing();
             redraw();
-          }))));
+          }, person ? PERSON_LEVELS : ROLE_LEVELS))));
   }
 
   function areaSummary(a) {
@@ -1010,22 +1157,39 @@
     const parts = [];
     if (names.length) parts.push(`Home Assistant: ${names.join(", ")}`);
     if (a.entities.length) parts.push(`${a.entities.length} added device${a.entities.length === 1 ? "" : "s"}`);
-    return parts.join(" \u00b7 ") || "Empty";
+    return parts.join(" · ") || "Empty";
   }
 
-  function renderRoleEditor() {
-    const box = $("#role-editor");
-    if (!editing) {
-      box.replaceChildren(h("div", { class: "empty" },
-        "Pick a role, or create one like “Maintenance” or “Housekeeping.”"));
-      return;
+  // Pages for a role (null: every page) or a person (null: their role's). Ticking the box shows
+  // the list, where page groups stand for all of their pages.
+  function pagePicker(value, allLabel, onChange) {
+    const options = layoutPageOptions();
+    if (!options.length) {
+      return h("p", { class: "hint" }, "No pages yet, so everyone gets the automatic layout. Build pages on the ",
+        h("button", { type: "button", class: "linkish", onclick: () => selectTab("layout") }, "Layout"), " tab.");
     }
-    const nameInput = h("input", { value: editing.name, maxlength: "60", "aria-label": "Role name" });
-    nameInput.addEventListener("input", () => {
-      editing.name = nameInput.value;
-      editing.dirty = true;
-      $("#save-role").removeAttribute("disabled");
-    });
+    const all = h("input", { type: "checkbox", checked: value === null });
+    const boxes = options.map((o) => ({ o, input: h("input", { type: "checkbox", value: o.id,
+      checked: value === null || value.includes(o.id) }) }));
+    const list = h("div", { class: "staff-checks" }, boxes.map(({ o, input }) => h("label", { class: "check" }, input, o.name)));
+    list.hidden = value === null;
+    const emit = () => {
+      if (all.checked) return onChange(null);
+      // Keep choices this list doesn't show (More while it's switched off, or a page that's only
+      // in the unsaved layout) so saving here doesn't quietly drop them.
+      const offered = new Set(options.map((o) => o.id));
+      const known = knownChoices();
+      onChange([...boxes.filter((b) => b.input.checked).map((b) => b.o.id),
+        ...(value || []).filter((id) => !offered.has(id) && known.has(id))]);
+    };
+    all.addEventListener("change", () => { list.hidden = all.checked; emit(); });
+    list.addEventListener("change", emit);
+    return h("div", { class: "staff-pick page-pick" }, h("label", { class: "check" }, all, allLabel), list);
+  }
+
+  // The devices list with its filters, for a role or a person.
+  function deviceListSection() {
+    const person = editing.kind === "person";
     const search = h("input", { type: "search", placeholder: "Search devices", value: editing.filter });
     const areas = entities ? [...new Set(entities.map((e) => e.area).filter(Boolean))].sort() : [];
     const areaSel = h("select", { "aria-label": "Area" }, h("option", { value: "" }, "All areas"),
@@ -1061,13 +1225,24 @@
           drawList();
           updateCount();
         };
+        const bulkLevels = person ? PERSON_LEVELS : ROLE_LEVELS;
         return h("div", { class: "area-group" },
           h("div", { class: "area-head" }, h("h4", null, area),
-            h("div", { class: "bulk" }, "Set all:",
-              h("button", { type: "button", class: "linkish", onclick: bulk("none") }, "Hidden"),
-              h("button", { type: "button", class: "linkish", onclick: bulk("view") }, "View"),
-              h("button", { type: "button", class: "linkish", onclick: bulk("control") }, "Control"))),
+            h("div", { class: "bulk" }, "Set all:", bulkLevels.map((lv) =>
+              h("button", { type: "button", class: "linkish", onclick: bulk(lv) }, LABELS[lv])))),
           list.map((e) => {
+            let note = null;
+            if (person) {
+              note = h("div", { class: "via" });
+              const refresh = () => { note.textContent = personGets(e).why; };
+              refresh();
+              return h("div", { class: "entity-row" },
+                h("div", { class: "entity-text" },
+                  h("div", { class: "entity-name" }, e.name),
+                  h("div", { class: "entity-id", title: e.entity_id }, `${e.entity_id} · ${e.state}`),
+                  note),
+                levelControl(e, refresh));
+            }
             const via = accessFromAreas(e);
             return h("div", { class: "entity-row" },
               h("div", { class: "entity-text" },
@@ -1084,36 +1259,64 @@
     search.addEventListener("input", () => { editing.filter = search.value; drawList(); });
     areaSel.addEventListener("change", () => { editing.area = areaSel.value; drawList(); });
     only.addEventListener("change", () => { editing.onlySelected = only.checked; drawList(); });
+    const filters = h("div", { class: "filters" }, search, areaSel,
+      h("label", { class: "check" }, only, person ? "Only their own settings" : "Only selected"),
+      h("span", { class: "count", id: "role-count" }),
+      h("button", { type: "button", class: "linkish", onclick: () => { entities = null; drawList(); loadEntities(); } },
+        "Reload devices"));
+    return { filters, listBox, drawList };
+  }
+
+  function renderRoleEditor() {
+    const box = $("#role-editor");
+    if (!editing) {
+      box.replaceChildren(h("div", { class: "empty" },
+        "Pick a role, or create one like “Maintenance” or “Housekeeping.” Pick a person under a role to " +
+        "change their access just for them."));
+      return;
+    }
+    if (editing.kind === "person") {
+      renderPersonEditor();
+      return;
+    }
+    const nameInput = h("input", { value: editing.name, maxlength: "60", "aria-label": "Role name" });
+    nameInput.addEventListener("input", () => {
+      editing.name = nameInput.value;
+      markEditing();
+    });
+    const { filters, listBox, drawList } = deviceListSection();
+    const body = () => ({ name: editing.name, entities: editing.entities, areas: editing.areas,
+      layout_pages: editing.pages });
 
     const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save role");
     save.addEventListener("click", () => run(async () => {
-      await api("PUT", `api/roles/${editing.id}`,
-        { name: editing.name, entities: editing.entities, areas: editing.areas });
+      await api("PUT", `api/roles/${editing.id}`, body());
       editing.dirty = false;
       save.setAttribute("disabled", "");
       await load();
-    }, "Role saved. Phones pick up the change within a few seconds."));
+    }, "Role saved. Phones and people pick up the change within a few seconds."));
     const dup = h("button", { class: "btn" }, "Duplicate");
     dup.addEventListener("click", async () => {
       const name = await askText(editing.dirty
         ? "Name for the copy. It gets your unsaved changes; this role stays as it was last saved."
-        : "Name for the copy. No phones move to it until you pick it on a phone.", "", `${editing.name} (copy)`);
+        : "Name for the copy. No phones or people move to it until you choose it for them.", "", `${editing.name} (copy)`);
       if (!name) return;
       run(async () => {
         const { id } = await api("POST", `api/roles/${editing.id}/duplicate`, { name });
-        if (editing.dirty) {
-          await api("PUT", `api/roles/${id}`, { name, entities: editing.entities, areas: editing.areas });
-        }
+        if (editing.dirty) await api("PUT", `api/roles/${id}`, { ...body(), name });
         editing.dirty = false;
         await load();
         openRole(id);
-      }, `Created ${name}. Pick it on a phone under Phones → Edit.`);
+      }, `Created ${name}. Choose it for a device (Phones & computers → Edit) or a person (Staff).`);
     });
     const del = h("button", { class: "btn danger" }, "Delete role");
     del.addEventListener("click", async () => {
       const role = state.roles.find((r) => r.id === editing.id);
-      const extra = role?.device_count ? ` ${role.device_count} phone(s) will lose all access.` : "";
-      if (!await askConfirm(`Delete the ${editing.name} role?${extra}`, "Delete role")) return;
+      const extra = [
+        role?.device_count ? `${role.device_count} kiosk device${role.device_count === 1 ? "" : "s"} will lose all access.` : "",
+        role?.staff_count ? `${role.staff_count} ${role.staff_count === 1 ? "person" : "people"} will have no role ` +
+          "(on role-based devices they keep only their own settings)." : ""].filter(Boolean).join(" ");
+      if (!await askConfirm(`Delete the ${editing.name} role?${extra ? ` ${extra}` : ""}`, "Delete role")) return;
       run(async () => {
         await api("DELETE", `api/roles/${editing.id}`);
         editing = null;
@@ -1129,16 +1332,89 @@
       h("p", { class: "hint" },
         "View lets staff see a device’s status. Control also lets them operate it. ",
         "Sensors can only be viewed. Anything left Hidden doesn’t exist as far as the phone is concerned."),
+      h("h3", { class: "editor-sub" }, "Pages"),
+      h("p", { class: "hint" }, "What people with this role see when they sign in on a role-based device. " +
+        "Kiosk devices choose their own pages (Phones & computers → Edit)."),
+      pagePicker(editing.pages, "All pages, including ones you add later", (pages) => {
+        editing.pages = pages;
+        markEditing();
+      }),
       areaSection(drawList),
       h("h3", { class: "editor-sub" }, "Individual devices"),
-      h("div", { class: "filters" }, search, areaSel,
-        h("label", { class: "check" }, only, "Only selected"),
-        h("span", { class: "count", id: "role-count" }),
-        h("button", { type: "button", class: "linkish", onclick: () => { entities = null; drawList(); loadEntities(); } },
-          "Reload devices")),
+      filters,
       listBox);
     updateCount();
     drawList();
+  }
+
+  function renderPersonEditor() {
+    const box = $("#role-editor");
+    const m = state.staff.find((x) => x.id === editing.id);
+    if (!m) {
+      editing = null;
+      renderRoleEditor();
+      return;
+    }
+    const role = state.roles.find((r) => r.id === editing.role_id);
+    const roleSelect = h("select", { "aria-label": `Role for ${m.name}` });
+    fillRoleOptions(roleSelect, editing.role_id, "No role");
+    roleSelect.addEventListener("change", () => {
+      editing.role_id = roleSelect.value ? Number(roleSelect.value) : null;
+      markEditing();
+      renderPersonEditor();
+    });
+    const { filters, listBox, drawList } = deviceListSection();
+    const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save");
+    save.addEventListener("click", () => run(async () => {
+      await api("PATCH", `api/staff/${editing.id}`, { role_id: editing.role_id, layout_pages: editing.pages,
+        entities: editing.entities, areas: editing.areas });
+      editing.dirty = false;
+      await load();
+    }, `Saved. ${m.name}'s access on role-based devices changes within a few seconds.`));
+    const clear = h("button", { class: "btn" }, "Clear their settings");
+    clear.addEventListener("click", () => {
+      editing.entities = {};
+      editing.areas = {};
+      editing.pages = null;
+      markEditing();
+      renderPersonEditor();
+    });
+    const rolePages = role?.layout_pages == null ? "all pages" : choiceNames(role.layout_pages) || "no pages";
+
+    box.replaceChildren(
+      h("div", { class: "editor-head" },
+        h("div", { class: "role-name-field" }, "Person", h("div", { class: "person-name" }, m.name)),
+        h("div", { class: "editor-actions" }, clear, save)),
+      h("label", { class: "inline-select person-role" }, "Role", roleSelect),
+      h("p", { class: "hint" }, `On role-based devices ${m.name} gets ` +
+        (role ? `what the ${role.name} role allows` : "only what you set here, as they have no role") +
+        ", with the settings below on top. Their own settings beat their role and items' access on the layout. " +
+        "On kiosk devices the device’s role decides, not theirs."),
+      h("h3", { class: "editor-sub" }, "Pages"),
+      pagePicker(editing.pages, `Same as their role (${rolePages})`, (pages) => {
+        editing.pages = pages;
+        markEditing();
+      }),
+      areaSection(drawList),
+      h("h3", { class: "editor-sub" }, "Individual devices"),
+      filters,
+      listBox);
+    updateCount();
+    drawList();
+  }
+
+  // A page choice in words ("Tubs, Pool staff (group), More"; "" for none).
+  function choiceNames(choice) {
+    const layout = state.layout || {};
+    const names = choice.map((id) => {
+      if (id === "more") return "More";
+      if (id.startsWith("group:")) {
+        const group = (layout.page_groups || []).find((g) => `group:${g.id}` === id);
+        return group && `${group.name} (group)`;
+      }
+      return (layout.pages || []).find((p) => p.id === id)?.name;
+    }).filter(Boolean);
+    return names.join(", ");
   }
 
   window.addEventListener("beforeunload", (e) => {
@@ -1766,42 +2042,60 @@
   }
 
   // Devices given a page (its ID) or a page group ("group:<id>"), or every page.
+  // Phones and computers that choose their own pages are kiosk devices. A role-based device shows
+  // each person their role's pages (or their own), so for those, pages are given to roles.
+  const kioskDevices = () => state.devices.filter((d) => d.status !== "revoked" && d.signin_mode !== "role");
+  const anyRoleBased = () => state.devices.some((d) => d.status !== "revoked" && d.signin_mode === "role");
+  const choiceShows = (choice, key) => choice == null || choice.includes(key);
+
   function phonesShowing(key) {
-    return state.devices.filter((d) => d.status !== "revoked" &&
-      (d.layout_pages == null || d.layout_pages.includes(key)));
+    return kioskDevices().filter((d) => choiceShows(d.layout_pages, key));
   }
 
   function shownOnText(key) {
-    const all = state.devices.filter((d) => d.status !== "revoked");
+    const all = kioskDevices();
     const on = phonesShowing(key);
-    if (!all.length) return "no devices set up yet";
-    if (on.length === all.length) return "all devices";
-    if (!on.length) return "no devices";
-    return on.map((d) => d.name).join(", ");
+    const kind = anyRoleBased() ? "kiosk devices" : "devices";
+    let text = !state.devices.some((d) => d.status !== "revoked") ? "no devices set up yet"
+      : !all.length || !on.length ? `no ${kind}`
+      : on.length === all.length ? `all ${kind}` : on.map((d) => d.name).join(", ");
+    if (anyRoleBased() && state.roles.length) {
+      const roles = state.roles.filter((r) => choiceShows(r.layout_pages, key));
+      text += ` \u00b7 roles: ${roles.length === state.roles.length ? "all"
+        : roles.map((r) => r.name).join(", ") || "none"}`;
+    }
+    return text;
   }
 
-  // Pick which devices show one page (key: its ID) or page group (key: "group:<id>"). Saved
-  // straight away (it's a device setting, not part of the layout draft).
+  // Pick which kiosk devices (and, with role-based devices about, which roles) show one page
+  // (key: its ID) or page group (key: "group:<id>"). Saved straight away: these are device and
+  // role settings, not part of the layout draft.
   function choosePhones(key, name) {
     const dialog = $("#item-dialog");
     const body = $("[data-body]", dialog);
     $("[data-error]", dialog).textContent = "";
-    $("[data-title]", dialog).textContent = `Devices that show \u201c${name}\u201d`;
-    const devices = state.devices.filter((d) => d.status !== "revoked");
-    const boxes = devices.map((d) => ({
-      d, input: h("input", { type: "checkbox", checked: d.layout_pages == null || d.layout_pages.includes(key) }),
-    }));
+    const withRoles = anyRoleBased() && state.roles.length > 0;
+    $("[data-title]", dialog).textContent = withRoles ? `Who sees \u201c${name}\u201d` : `Devices that show \u201c${name}\u201d`;
+    const box = (choice) => h("input", { type: "checkbox", checked: choiceShows(choice, key) });
+    const devices = kioskDevices().map((d) => ({ d, input: box(d.layout_pages) }));
+    const roles = withRoles ? state.roles.map((r) => ({ r, input: box(r.layout_pages) })) : [];
+    const these = key.startsWith("group:") ? "these pages" : "this page";
     body.onclick = null;
     body.oninput = null;
-    body.replaceChildren(devices.length
+    body.replaceChildren(devices.length || roles.length
       ? h("div", { class: "item-fields" },
-        h("p", { class: "hint" }, "Each phone or computer still only sees what its role allows on " +
-          (key.startsWith("group:") ? "these pages. " : "this page. ") +
-          "Unticking a device that shows all pages switches it to a fixed list of pages, so it " +
+        h("p", { class: "hint" }, `Everyone still only sees what their role allows on ${these}. ` +
+          "Unticking something that shows all pages switches it to a fixed list of pages, so it " +
           "won't get new pages automatically. Changes here are saved straight away."),
-        h("div", { class: "member-list" }, boxes.map(({ d, input }) => h("label", { class: "check pick-row" },
+        devices.length ? h("div", { class: "pick-head" }, withRoles ? "Kiosk devices" : "Devices") : null,
+        devices.length ? h("div", { class: "member-list" }, devices.map(({ d, input }) => h("label", { class: "check pick-row" },
           input, h("span", null, d.name, h("small", null,
-            ` \u00b7 ${d.role_name || "no role"} \u00b7 ${d.layout_pages == null ? "all pages" : "chosen pages"}`))))))
+            ` \u00b7 ${d.role_name || "no role"} \u00b7 ${d.layout_pages == null ? "all pages" : "chosen pages"}`))))) : null,
+        roles.length ? h("div", { class: "pick-head" }, "Roles, for people on role-based devices") : null,
+        roles.length ? h("div", { class: "member-list" }, roles.map(({ r, input }) => h("label", { class: "check pick-row" },
+          input, h("span", null, r.name, h("small", null,
+            ` \u00b7 ${r.staff_count} ${r.staff_count === 1 ? "person" : "people"} \u00b7 ` +
+            `${r.layout_pages == null ? "all pages" : "chosen pages"}`))))) : null)
       : h("p", { class: "hint" }, "Set up a phone or computer on the Phones & computers tab first."));
     const form = $("#item-form");
     // Enter on a checkbox would otherwise "click" the first button, which is Cancel.
@@ -1810,33 +2104,35 @@
     };
     form.onsubmit = (ev) => {
       if (ev.submitter?.value !== "save") return;
-      // A device that showed all pages keeps every page and group that could still exist (saved
+      // Something that showed all pages keeps every page and group that could still exist (saved
       // or in the unsaved draft) except this one, so discarding the draft later can't take
       // pages away from it. Pages and groups that no longer exist are dropped from lists.
       const known = knownChoices();
-      const changes = [];
-      for (const { d, input } of boxes) {
-        const shows = d.layout_pages == null || d.layout_pages.includes(key);
-        if (input.checked === shows) continue;
-        const current = (d.layout_pages ?? allChoices()).filter((id) => known.has(id));
-        const next = input.checked ? [...current, key] : current.filter((id) => id !== key);
-        changes.push([d, next]);
-      }
+      const next = (choice, checked) => {
+        const current = (choice ?? allChoices()).filter((id) => known.has(id));
+        return checked ? [...current, key] : current.filter((id) => id !== key);
+      };
+      const changes = [
+        ...devices.filter(({ d, input }) => input.checked !== choiceShows(d.layout_pages, key))
+          .map(({ d, input }) => [d.name, `api/devices/${d.id}`, "PATCH", next(d.layout_pages, input.checked)]),
+        ...roles.filter(({ r, input }) => input.checked !== choiceShows(r.layout_pages, key))
+          .map(({ r, input }) => [r.name, `api/roles/${r.id}`, "PATCH", next(r.layout_pages, input.checked)]),
+      ];
       if (!changes.length) return;
       run(async () => {
         const failed = [];
-        for (const [d, next] of changes) {
+        for (const [who, path, method, pages] of changes) {
           try {
-            await api("PATCH", `api/devices/${d.id}`, { layout_pages: next });
+            await api(method, path, { layout_pages: pages });
           } catch (err) {
-            failed.push(`${d.name} (${err.message})`);
+            failed.push(`${who} (${err.message})`);
           }
         }
         // Always refresh, so the screen matches what was actually saved.
         await load();
         renderLayoutEditor();
         if (failed.length) throw new Error(`Couldn't update ${failed.join(", ")}.`);
-      }, "Devices updated.");
+      }, roles.length ? "Saved." : "Devices updated.");
     };
     dialog.showModal();
   }
@@ -2088,26 +2384,41 @@
   // The staff app with the layout being edited, as a phone or a computer shows it. It runs in a
   // frame on the dashboard's own address, asks this page for the draft (staffPortalPreview),
   // shows live readings, and never sends a command.
-  const preview = { view: "phone", device: "" };
+  // as: "" (everything on the layout), "d:<id>" (a kiosk device), "r:<id>" (a role) or "s:<id>"
+  // (a person): role-based devices show each person their own view, so they're previewed by
+  // role or person.
+  const preview = { view: "phone", as: "" };
+  const previewAs = () => {
+    const [kind, id] = preview.as.split(":");
+    return { kind, id: Number(id) };
+  };
   const PREVIEW_SIZES = { phone: [390, 780], desktop: [1280, 800] };
 
   window.staffPortalPreview = () => {
     const d = draft();
     return {
       layout: { pages: d.pages, page_groups: d.page_groups, show_unplaced: d.show_unplaced !== false },
-      device_id: preview.device ? Number(preview.device) : null,
+      device_id: previewAs().kind === "d" ? previewAs().id : null,
+      role_id: previewAs().kind === "r" ? previewAs().id : null,
+      staff_id: previewAs().kind === "s" ? previewAs().id : null,
     };
   };
 
   function openPreview() {
     const dialog = $("#preview-dialog");
     const select = $("#preview-device");
-    const devices = state.devices.filter((d) => d.status !== "revoked");
+    const devices = kioskDevices();
+    const people = state.staff.filter((m) => m.status !== "disabled");
     select.replaceChildren(h("option", { value: "" }, "Everything on the layout"),
-      ...devices.map((d) => h("option", { value: d.id }, `${d.name} (${d.role_name || "no role"})`)));
-    if (!devices.some((d) => String(d.id) === preview.device)) preview.device = "";
-    select.value = preview.device;
-    select.onchange = () => { preview.device = select.value; loadPreview(); };
+      devices.length ? h("optgroup", { label: "Kiosk devices" }, devices.map((d) =>
+        h("option", { value: `d:${d.id}` }, `${d.name} (${d.role_name || "no role"})`))) : null,
+      state.roles.length ? h("optgroup", { label: "Roles, on role-based devices" }, state.roles.map((r) =>
+        h("option", { value: `r:${r.id}` }, r.name))) : null,
+      people.length ? h("optgroup", { label: "People, on role-based devices" }, people.map((m) =>
+        h("option", { value: `s:${m.id}` }, `${m.name} (${m.role_name || "no role"})`))) : null);
+    if (![...select.options].some((o) => o.value === preview.as)) preview.as = "";
+    select.value = preview.as;
+    select.onchange = () => { preview.as = select.value; loadPreview(); };
     for (const btn of dialog.querySelectorAll("[data-view]")) {
       btn.onclick = () => { preview.view = btn.dataset.view; loadPreview(); };
     }
@@ -2120,13 +2431,20 @@
     for (const btn of dialog.querySelectorAll("[data-view]")) {
       btn.setAttribute("aria-checked", String(btn.dataset.view === preview.view));
     }
-    const device = state.devices.find((d) => String(d.id) === preview.device);
-    $("[data-preview-note]", dialog).textContent = (draft().dirty ? "Showing your unsaved changes. " : "") +
+    const { kind, id } = previewAs();
+    const device = kind === "d" && state.devices.find((d) => d.id === id);
+    const role = kind === "r" && state.roles.find((r) => r.id === id);
+    const person = kind === "s" && state.staff.find((m) => m.id === id);
+    $("[data-preview-note]", dialog).textContent = (draft().dirty ? "Showing your unsaved layout changes. " : "") +
       (device ? `What ${device.name} shows, with its role and pages. `
+        : role ? `What someone with the ${role.name} role sees on a role-based device, before anyone's own settings. `
+        : person ? `What ${person.name} sees on a role-based device, with their role and their own saved settings. `
         : "Everything on the layout, as a device allowed to control all of it would show it. ") +
       "Readings are live. Tapping a control doesn't change anything.";
     const query = new URLSearchParams({ view: preview.view });
-    if (preview.device) query.set("device", preview.device);
+    if (device) query.set("device", id);
+    if (role) query.set("role", id);
+    if (person) query.set("staff", id);
     $("[data-frame]", dialog).src = `preview?${query}`;
     fitPreview();
   }
@@ -2282,10 +2600,10 @@
     // A role open in the editor that the import just replaced must show the imported access,
     // or saving it would quietly put the old access back.
     let reloaded = false;
-    if (kind === "roles" && editing && mode === "replace" &&
+    if (editing && editing.kind === (kind === "roles" ? "role" : "person") && mode === "replace" &&
         clashes.some((n) => String(n).trim().toLowerCase() === editing.name.trim().toLowerCase())) {
       editing.dirty = false;
-      if (state.roles.some((r) => r.id === editing.id)) openRole(editing.id);
+      refreshEditing();
       reloaded = true;
     }
     const notes = [`${result.added} added`, result.replaced && `${result.replaced} replaced`,
@@ -2293,10 +2611,12 @@
     const extra = [
       result.missing_areas?.length && `No area here called ${result.missing_areas.join(", ")}; that access was left out.`,
       result.missing_phones?.length && `No phone here called ${result.missing_phones.join(", ")}.`,
+      result.missing_roles?.length && `No role here called ${result.missing_roles.join(", ")}, so those people kept the role they had (or have none).`,
+      result.missing_pages?.length && `No page or page group here called ${result.missing_pages.join(", ")}; check those pages in Roles.`,
       result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
       result.kept_off?.length && `${result.kept_off.join(", ")} stayed turned off.`,
     ].filter(Boolean).join(" ");
-    toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? "The role open in the editor was reloaded." : ""]
+    toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? `The ${kind === "roles" ? "role" : "person"} open on the Roles tab was reloaded.` : ""]
       .filter(Boolean).join(" "));
     return false;
   }

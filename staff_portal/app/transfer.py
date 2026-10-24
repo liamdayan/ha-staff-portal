@@ -18,20 +18,27 @@ import os
 import re
 import time
 
-from layout import clean_layout, clean_phone_order, clean_phone_pages
+from db import page_choice
+from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
+                    clean_phone_pages)
 from permissions import controllable, offered
 
 FORMAT = "staff-portal"
-BACKUP_SCHEMA = 1
+BACKUP_SCHEMA = 2          # 2: role pages, people's roles, pages and own changes (0.7.0)
+READABLE_SCHEMAS = (1, 2)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members", "backup": "a full backup"}
 PIN_HASH_RE = re.compile(r"^[0-9a-f]{32}\$[0-9a-f]{128}$")
 TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 OWNER_RE = re.compile(r"^([ds]):(\d{1,9})$")
 LEVELS = ("view", "control")
+OVERRIDE_LEVELS = ("none", "view", "control")   # a person's own changes ('none' = Hidden)
 DEVICE_STATUSES = ("pending", "active", "locked", "revoked")
 STAFF_STATUSES = ("active", "disabled", "locked")
 IMPORT_MODES = ("replace", "copy", "skip")
 MAX_ROWS = 5000          # per table in a backup, or entries in an export
+# Tables that link things (a role's devices, a person's own settings...) grow with everything
+# else multiplied together: a few dozen roles or people with hundreds of settings each.
+MAX_LINK_ROWS = 200_000
 MAX_LOGO_BYTES = 6 * 1024 * 1024
 KEEP_SAFETY_BACKUPS = 5
 SAFETY_NAME_RE = re.compile(r"^before-restore-\d{8}-\d{6}\.json$")
@@ -56,12 +63,12 @@ def _name(value, limit: int = 60) -> str:
     return str(value or "").strip()[:limit]
 
 
-def _rows(data: dict, key: str) -> list:
+def _rows(data: dict, key: str, limit: int = MAX_ROWS) -> list:
     value = data.get(key) or []
     if not isinstance(value, list):
         raise ValueError(f"The backup's {key} section is damaged.")
-    if len(value) > MAX_ROWS:
-        raise ValueError(f"The backup has too many {key} (more than {MAX_ROWS}).")
+    if len(value) > limit:
+        raise ValueError(f"The backup has too many {key} (more than {limit}).")
     return [row for row in value if isinstance(row, dict)]
 
 
@@ -96,6 +103,89 @@ def _unique(name: str, taken: set[str], limit: int) -> str:
 def _connecteam_id(value) -> str | None:
     value = str(value).strip() if value not in (None, "") else ""
     return value if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value) else None
+
+
+def _page_names(layout: dict, choice: list[str] | None) -> list[dict] | None:
+    """A page choice by name, for a file that may be opened on another system (page IDs
+    differ between systems): [{"page": name} | {"group": name} | {"more": True}], or None for
+    "not chosen" (every page, or a person's role's pages)."""
+    if choice is None:
+        return None
+    pages = {p["id"]: p["name"] for p in layout.get("pages", [])}
+    groups = {g["id"]: g["name"] for g in layout.get("page_groups", [])}
+    named = []
+    for entry in choice:
+        if entry == MORE_PAGE_ID:
+            named.append({"more": True})
+        elif entry.startswith(GROUP_PREFIX) and entry[len(GROUP_PREFIX):] in groups:
+            named.append({"group": groups[entry[len(GROUP_PREFIX):]]})
+        elif entry in pages:
+            named.append({"page": pages[entry]})
+    return named
+
+
+def _page_ids(layout: dict, named, missing: set[str]) -> list[str] | None:
+    """A page choice from a file (by name) for this system's layout. Names with no match here
+    are left out and noted in `missing`. A damaged value means no pages, never every page,
+    because pages can carry extra access (an item's own access setting)."""
+    if named is None:
+        return None
+    if not isinstance(named, list):
+        return []
+    pages = {p["name"].lower(): p["id"] for p in layout.get("pages", [])}
+    groups = {g["name"].lower(): g["id"] for g in layout.get("page_groups", [])}
+    ids: list[str] = []
+    for entry in named[:MAX_PHONE_PAGES]:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("more") is True:
+            found = MORE_PAGE_ID
+        elif isinstance(entry.get("group"), str):
+            group_id = groups.get(entry["group"].strip().lower())
+            found = f"{GROUP_PREFIX}{group_id}" if group_id else None
+            if not found:
+                missing.add(_name(entry["group"], 30))
+        elif isinstance(entry.get("page"), str):
+            found = pages.get(entry["page"].strip().lower())
+            if not found:
+                missing.add(_name(entry["page"], 30))
+        else:
+            continue
+        if found and found not in ids:
+            ids.append(found)
+    return ids
+
+
+def _override_levels(raw, area_ids: dict[str, int], missing_areas: set[str]) -> tuple[dict, dict]:
+    """A person's own changes from a file: ({entity_id: level}, {area_id: level}), with areas
+    matched by name."""
+    raw = raw if isinstance(raw, dict) else {}
+    entities_in = raw.get("entities") if isinstance(raw.get("entities"), dict) else {}
+    areas_in = raw.get("areas") if isinstance(raw.get("areas"), dict) else {}
+    entities = {eid: ("view" if lvl == "control" and not controllable(eid) else lvl)
+                for eid, lvl in list(entities_in.items())[:MAX_ROWS]
+                if isinstance(eid, str) and offered(eid) and lvl in OVERRIDE_LEVELS}
+    areas = {}
+    for area_name, lvl in list(areas_in.items())[:MAX_ROWS]:
+        if lvl not in OVERRIDE_LEVELS:
+            continue
+        area_id = area_ids.get(str(area_name).lower())
+        if area_id:
+            areas[area_id] = lvl
+        else:
+            missing_areas.add(_name(area_name, 40))
+    return entities, areas
+
+
+def _write_overrides(db, staff_id: int, entities: dict, areas: dict) -> None:
+    """Replace a person's own changes, without committing."""
+    c = db.conn
+    c.execute("DELETE FROM staff_entities WHERE staff_id = ?", (staff_id,))
+    c.execute("DELETE FROM staff_areas WHERE staff_id = ?", (staff_id,))
+    c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
+                  [(staff_id, eid, lvl) for eid, lvl in entities.items()])
+    c.executemany("INSERT INTO staff_areas (staff_id, area_id, level) VALUES (?, ?, ?)",
+                  [(staff_id, aid, lvl) for aid, lvl in areas.items()])
 
 
 def _all_or_nothing(db, work) -> dict:
@@ -134,9 +224,11 @@ def export_layout(db, version: str) -> dict:
 
 def export_roles(db, version: str) -> dict:
     area_names = {a["id"]: a["name"] for a in db.areas()}
+    layout = db.layout()
     return _envelope("roles", version, roles=[
         {"name": r["name"], "entities": r["entities"],
-         "areas": {area_names[a]: lvl for a, lvl in r["areas"].items() if a in area_names}}
+         "areas": {area_names[a]: lvl for a, lvl in r["areas"].items() if a in area_names},
+         "pages": _page_names(layout, r["layout_pages"])}
         for r in db.roles()])
 
 
@@ -147,12 +239,22 @@ def export_staff(db, version: str) -> dict:
     for staff_id, device_id in db.conn.execute("SELECT staff_id, device_id FROM staff_devices"):
         if device_id in phones:
             allowed.setdefault(staff_id, []).append(phones[device_id])
+    roles = {r["id"]: r["name"] for r in db.conn.execute("SELECT id, name FROM roles")}
+    area_names = {a["id"]: a["name"] for a in db.areas()}
+    layout = db.layout()
+
+    def overrides(staff_id):
+        entities, areas = db.staff_overrides(staff_id)
+        return {"entities": entities,
+                "areas": {area_names[a]: lvl for a, lvl in areas.items() if a in area_names}}
     return _envelope("staff", version, staff=[
         {"name": r["name"], "pin_hash": r["pin_hash"], "enabled": r["status"] != "disabled",
          "phones": sorted(allowed.get(r["id"], [])),
-         "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"])}
+         "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"]),
+         "role": roles.get(r["role_id"]), "pages": _page_names(layout, page_choice(r["layout_pages"])),
+         "overrides": overrides(r["id"])}
         for r in db.conn.execute("""SELECT id, name, pin_hash, status, connecteam_user_id,
-                                    require_clock_in FROM staff ORDER BY name""")])
+                                    require_clock_in, role_id, layout_pages FROM staff ORDER BY name""")])
 
 
 # ---------------------------------------------------------------- imports (merge into what's here)
@@ -168,7 +270,8 @@ def import_roles(db, data, mode: str) -> dict:
 def _import_roles(db, rows: list, mode: str) -> dict:
     area_ids = {a["name"].lower(): a["id"] for a in db.areas()}
     existing = {r["name"].lower(): r for r in db.roles()}
-    result = {"added": 0, "replaced": 0, "skipped": 0, "missing_areas": set()}
+    layout = db.layout()
+    result = {"added": 0, "replaced": 0, "skipped": 0, "missing_areas": set(), "missing_pages": set()}
     for raw in rows:
         name = _name(raw.get("name"))
         entities_in = raw.get("entities") if isinstance(raw.get("entities"), dict) else {}
@@ -188,17 +291,33 @@ def _import_roles(db, rows: list, mode: str) -> dict:
         if match and mode == "skip":
             result["skipped"] += 1
             continue
+        # Files from before roles had pages leave a replaced role's pages as they are.
+        pages = _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP
         if match and mode == "replace":
             _write_role(db, match["id"], match["name"], entities, areas)
+            _write_pages(db, "roles", match["id"], pages)
             result["replaced"] += 1
             continue
         if match:
             name = _unique(name, set(existing), 60)
         role_id = _write_role(db, None, name, entities, areas)
+        _write_pages(db, "roles", role_id, pages)
         existing[name.lower()] = {"id": role_id, "name": name}
         result["added"] += 1
     result["missing_areas"] = sorted(result["missing_areas"])
+    result["missing_pages"] = sorted(result["missing_pages"])
     return result
+
+
+_KEEP = object()   # left out of the file: keep what's here
+
+
+def _write_pages(db, table: str, row_id: int, pages) -> None:
+    """Set a role's or person's page choice, without committing (_KEEP: leave it)."""
+    assert table in ("roles", "staff")
+    if pages is not _KEEP:
+        db.conn.execute(f"UPDATE {table} SET layout_pages = ? WHERE id = ?",
+                        (None if pages is None else json.dumps(pages), row_id))
 
 
 def import_staff(db, data, mode: str) -> dict:
@@ -214,8 +333,12 @@ def _import_staff(db, rows: list, mode: str) -> dict:
         "SELECT id, name FROM devices WHERE status != 'revoked'")}
     existing = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM staff")}
     current = {r["id"]: r for r in db.conn.execute("SELECT id, status, pin_hash FROM staff")}
+    roles = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM roles")}
+    area_ids = {a["name"].lower(): a["id"] for a in db.areas()}
+    layout = db.layout()
     result = {"added": 0, "replaced": 0, "skipped": 0, "bad_pin": 0, "missing_phones": set(),
-              "kept_off": [], "signed_out": []}
+              "kept_off": [], "signed_out": [], "missing_roles": set(), "missing_pages": set(),
+              "missing_areas": set()}
     for raw in rows:
         name = _name(raw.get("name"), 40)
         pin_hash = str(raw.get("pin_hash") or "")
@@ -265,11 +388,36 @@ def _import_staff(db, rows: list, mode: str) -> dict:
         db.conn.executemany(
             "INSERT OR IGNORE INTO staff_devices (staff_id, device_id) VALUES (?, ?)",
             [(staff_id, d) for d in device_ids])
-    result["missing_phones"] = sorted(result["missing_phones"])
+        # Their role (matched by name), own pages and own changes, for role-based devices.
+        # Files from before these existed leave a replaced person's as they are, and a role
+        # with no match here leaves their current role.
+        role_name = _name(raw.get("role")) if isinstance(raw.get("role"), str) else ""
+        if role_name and role_name.lower() in roles:
+            db.conn.execute("UPDATE staff SET role_id = ? WHERE id = ?", (roles[role_name.lower()], staff_id))
+        elif role_name:
+            result["missing_roles"].add(role_name)
+        elif "role" in raw:
+            db.conn.execute("UPDATE staff SET role_id = NULL WHERE id = ?", (staff_id,))
+        _write_pages(db, "staff", staff_id,
+                     _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP)
+        if "overrides" in raw:
+            _write_overrides(db, staff_id, *_override_levels(raw["overrides"], area_ids, result["missing_areas"]))
+    for key in ("missing_phones", "missing_roles", "missing_pages", "missing_areas"):
+        result[key] = sorted(result[key])
     return result
 
 
 # ---------------------------------------------------------------- full backup and restore
+
+def _stored_pages(raw) -> str | None:
+    """A page choice from a backup (stored JSON text, or a list) as it's stored here. Damaged
+    means no pages, never every page."""
+    try:
+        pages = clean_phone_pages(page_choice(raw))
+    except ValueError:
+        pages = []   # more than a phone can have: damaged
+    return None if pages is None else json.dumps(pages)
+
 
 def make_backup(db, branding, version: str) -> dict:
     rows = lambda sql: [dict(r) for r in db.conn.execute(sql)]
@@ -285,15 +433,17 @@ def make_backup(db, branding, version: str) -> dict:
         areas=rows("SELECT id, name, sort_order, created_at FROM areas"),
         area_entities=rows("SELECT area_id, entity_id FROM area_entities"),
         area_ha_areas=rows("SELECT area_id, ha_area_id FROM area_ha_areas"),
-        roles=rows("SELECT id, name, created_at FROM roles"),
+        roles=rows("SELECT id, name, created_at, layout_pages FROM roles"),
         role_entities=rows("SELECT role_id, entity_id, level FROM role_entities"),
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, pin_only, layout_pages, created_at, last_seen
                         FROM devices WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
-                      require_clock_in FROM staff"""),
+                      require_clock_in, role_id, layout_pages FROM staff"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
+        staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
+        staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
     )
 
@@ -314,7 +464,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
     up again, so a tampered backup can't plant a working phone and an old one can't bring back
     a revoked phone."""
     check_file(data, "backup")
-    if data.get("schema") != BACKUP_SCHEMA:
+    if data.get("schema") not in READABLE_SCHEMAS:
         raise ValueError("That backup was made by a newer version of Staff Portal. Update the add-on first.")
 
     settings_in = data.get("settings") if isinstance(data.get("settings"), dict) else {}
@@ -344,9 +494,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "sort_order": order if isinstance(order, int) and not isinstance(order, bool) else 0,
                       "created_at": _time(row.get("created_at"), time.time())})
     area_ids = {a["id"] for a in areas}
-    area_entities = {(r["area_id"], r["entity_id"]) for r in _rows(data, "area_entities")
+    area_entities = {(r["area_id"], r["entity_id"]) for r in _rows(data, "area_entities", MAX_LINK_ROWS)
                      if r.get("area_id") in area_ids and offered(str(r.get("entity_id") or ""))}
-    area_ha_areas = {(r["area_id"], r["ha_area_id"]) for r in _rows(data, "area_ha_areas")
+    area_ha_areas = {(r["area_id"], r["ha_area_id"]) for r in _rows(data, "area_ha_areas", MAX_LINK_ROWS)
                      if r.get("area_id") in area_ids and isinstance(r.get("ha_area_id"), str)
                      and 0 < len(r["ha_area_id"]) <= 100}
 
@@ -356,13 +506,14 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         if not name or name in names or any(r["id"] == role_id for r in roles):
             raise ValueError("The backup has a damaged or repeated role.")
         names.add(name)
-        roles.append({"id": role_id, "name": name, "created_at": _time(row.get("created_at"), time.time())})
+        roles.append({"id": role_id, "name": name, "created_at": _time(row.get("created_at"), time.time()),
+                      "layout_pages": _stored_pages(row.get("layout_pages"))})
     role_ids = {r["id"] for r in roles}
     role_entities = {(r["role_id"], r["entity_id"]): _level(r["entity_id"], r["level"])
-                     for r in _rows(data, "role_entities")
+                     for r in _rows(data, "role_entities", MAX_LINK_ROWS)
                      if r.get("role_id") in role_ids and offered(str(r.get("entity_id") or ""))
                      and r.get("level") in LEVELS}
-    role_areas = {(r["role_id"], r["area_id"]): r["level"] for r in _rows(data, "role_areas")
+    role_areas = {(r["role_id"], r["area_id"]): r["level"] for r in _rows(data, "role_areas", MAX_LINK_ROWS)
                   if r.get("role_id") in role_ids and r.get("area_id") in area_ids
                   and r.get("level") in LEVELS}
 
@@ -383,8 +534,18 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "created_at": _time(row.get("created_at"), time.time()),
                       "last_seen": _time(row.get("last_seen")),
                       "connecteam_user_id": link,
-                      "require_clock_in": 1 if link and row.get("require_clock_in") in (1, True) else 0})
+                      "require_clock_in": 1 if link and row.get("require_clock_in") in (1, True) else 0,
+                      "role_id": row.get("role_id") if row.get("role_id") in role_ids else None,
+                      "layout_pages": _stored_pages(row.get("layout_pages"))})
     staff_ids = {m["id"] for m in staff}
+    staff_entities = {(r["staff_id"], r["entity_id"]): ("view" if r["level"] == "control" and not controllable(r["entity_id"])
+                                                         else r["level"])
+                      for r in _rows(data, "staff_entities", MAX_LINK_ROWS)
+                      if r.get("staff_id") in staff_ids and offered(str(r.get("entity_id") or ""))
+                      and r.get("level") in OVERRIDE_LEVELS}
+    staff_areas = {(r["staff_id"], r["area_id"]): r["level"] for r in _rows(data, "staff_areas", MAX_LINK_ROWS)
+                   if r.get("staff_id") in staff_ids and r.get("area_id") in area_ids
+                   and r.get("level") in OVERRIDE_LEVELS}
 
     devices, needs_setup = [], []
     for row in _rows(data, "devices"):
@@ -403,29 +564,22 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             needs_setup.append(name)
         if status in ("pending", "revoked"):
             token_hash = None
-        pages = row.get("layout_pages")
-        if isinstance(pages, str):
-            try:
-                pages = json.loads(pages)
-            except ValueError:
-                pages = None
-        pages = clean_phone_pages(pages if isinstance(pages, list) else None)
         role_id = row.get("role_id") if row.get("role_id") in role_ids else None
         devices.append({"id": device_id, "name": name, "role_id": role_id, "status": status,
                         "kind": "computer" if row.get("kind") == "computer" else "phone",
                         "token_hash": token_hash, "pin_hash": pin_hash,
-                        "signin_mode": "staff" if row.get("signin_mode") == "staff" else "phone",
+                        "signin_mode": row.get("signin_mode") if row.get("signin_mode") in ("staff", "role") else "phone",
                         "staff_all": 0 if row.get("staff_all") in (0, False) else 1,
                         "pin_only": 1 if row.get("pin_only") in (1, True) else 0,
-                        "layout_pages": json.dumps(pages) if pages is not None else None,
+                        "layout_pages": _stored_pages(row.get("layout_pages")),
                         "created_at": _time(row.get("created_at"), time.time()),
                         "last_seen": _time(row.get("last_seen"))})
     device_ids = {d["id"] for d in devices}
-    staff_devices = {(r["staff_id"], r["device_id"]) for r in _rows(data, "staff_devices")
+    staff_devices = {(r["staff_id"], r["device_id"]) for r in _rows(data, "staff_devices", MAX_LINK_ROWS)
                      if r.get("staff_id") in staff_ids and r.get("device_id") in device_ids}
 
     phone_orders = {}
-    for row in _rows(data, "phone_orders"):
+    for row in _rows(data, "phone_orders", MAX_LINK_ROWS):
         match = OWNER_RE.match(str(row.get("owner") or ""))
         if not match or int(match[2]) not in (device_ids if match[1] == "d" else staff_ids):
             continue
@@ -440,6 +594,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
             "roles": roles, "role_entities": role_entities, "role_areas": role_areas,
             "staff": staff, "devices": devices, "staff_devices": sorted(staff_devices),
+            "staff_entities": staff_entities, "staff_areas": staff_areas,
             "phone_orders": phone_orders, "needs_setup": needs_setup,
             "exported_at": _time(data.get("exported_at"), time.time())}
 

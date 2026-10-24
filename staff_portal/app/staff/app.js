@@ -416,12 +416,17 @@
     };
   }
 
-  function setSubtitle(staffName) {
-    const parts = me.shared && staffName
-      ? [staffName, me.role || "No role assigned"]
-      : [me.role || "No role assigned", me.device];
+  // role: the role behind what's on screen. On a role-based device that's the signed-in
+  // person's own (sent with the readings); before anyone signs in there, just the device's name.
+  function setSubtitle(staffName, role = me.role) {
+    const roleText = role || "No role assigned";
+    const parts = staffName && (me.shared || me.role_based) ? [staffName, roleText]
+      : me.role_based ? [me.device]
+      : [roleText, me.device];
     document.getElementById("bar-sub").textContent = parts.filter(Boolean).join(" · ");
   }
+
+  const currentRole = () => (lastData && "role" in lastData ? lastData.role : me?.role);
 
   function start(info) {
     me = info;
@@ -474,7 +479,7 @@
       return;
     }
     live = true;
-    setSubtitle(res.data.staff_name);
+    setSubtitle(res.data.staff_name, "role" in res.data ? res.data.role : me.role);
     try {
       render(res.data);
     } finally {
@@ -507,15 +512,18 @@
       if (!data.entities.length) {
         show(h("div", { class: "center message" },
           h("h1", null, "Nothing here yet"),
-          h("p", null, `Your manager hasn't given this ${word()} access to anything.`)));
+          h("p", null, me?.role_based ? "Your manager hasn't given you access to anything yet."
+            : `Your manager hasn't given this ${word()} access to anything.`)));
         render.shape = null;
         return;
       }
       if (data.layout && !data.layout.pages.length) {
         show(h("div", { class: "center message" },
           h("h1", null, `Nothing on this ${word()} yet`),
-          h("p", null, `None of this ${word()}'s pages have anything it's allowed to see. ` +
-            `Ask your manager to check the ${word()}'s pages and role.`)));
+          h("p", null, me?.role_based
+            ? "None of your pages have anything you're allowed to see. Ask your manager to check your role and pages."
+            : `None of this ${word()}'s pages have anything it's allowed to see. ` +
+              `Ask your manager to check the ${word()}'s pages and role.`)));
         render.shape = null;
         return;
       }
@@ -879,7 +887,7 @@
       h("div", { class: "desk-foot" },
         h("span", { class: "desk-avatar", "aria-hidden": "true" }, who.trim().charAt(0).toUpperCase() || "?"),
         h("div", { class: "desk-who" }, h("div", { class: "desk-who-name" }, who),
-          h("div", { class: "desk-who-sub" }, [me?.shared ? me?.device : null, me?.role].filter(Boolean).join(" \u00b7 "))),
+          h("div", { class: "desk-who-sub" }, [me?.shared ? me?.device : null, currentRole()].filter(Boolean).join(" \u00b7 "))),
         lockBtn));
     const actions = lastData?.can_reorder
       ? h("button", { class: "desk-action", type: "button", onclick: openRearrange }, "\u21c5 Rearrange") : null;

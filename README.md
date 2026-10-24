@@ -43,14 +43,19 @@ system.
 ### Access control
 
 - **Roles** give each device **Hidden**, **View** or **Control**, one by one or a whole area at
-  a time. Roles can be duplicated to make variations.
+  a time, and choose pages. Roles can be duplicated to make variations.
+- **Kiosk or role-based devices:** a kiosk device shows what its own role allows. On a
+  role-based device each person signs in and gets their own role's access and pages, so one
+  shared computer can show different things to Maintenance and Housekeeping.
+- **Per-person settings:** on role-based devices, raise or lower access to an area or a single
+  device, or choose different pages, for one person without changing their role.
 - **Areas:** group devices your way ("Soaking area", "Mechanical"), from whole Home Assistant
   areas and/or single devices.
 - **Layout overrides:** an item on a page can raise or lower access for every device that shows
   that page.
 - **The add-on enforces all access, not just the screen.** Every action is checked against the
-  device's role and validated, with sensible ranges for setpoints and the entity's own options
-  for dropdowns.
+  device's role (or the signed-in person's, on role-based devices) and validated, with sensible
+  ranges for setpoints and the entity's own options for dropdowns.
 - **Connecteam (optional):** add staff from your Connecteam user list with their kiosk code as
   their PIN, and only let them sign in while they're clocked in.
 - **Activity log** of every action and every blocked attempt. Actions can also show in Home
@@ -60,13 +65,16 @@ system.
 
 - **Phones & computers:** add, revoke, re-pair, unlock, link to a Home Assistant user, and choose
   which pages or page groups each one shows.
-- **Staff:** people with personal PINs for shared devices.
+- **Staff:** people with personal PINs for shared devices, each with a role.
+- **Roles:** each role's access and pages, with its people listed under it; click a person to
+  give them their own settings.
 - **Layout editor:** pages, headings, single devices, whole areas and group cards. Drag to
   reorder, duplicate items or whole pages, and set per-item access.
 - **Page groups:** bundle pages (such as "Pool staff") and give them to devices together. A
   device also gets pages added to its groups later. Duplicate a whole group with its pages.
-- **Preview:** see the layout as a phone or a computer would, unsaved changes included, either
-  everything on it or exactly what one device would show. Tapping a control there sends nothing.
+- **Preview:** see the layout as a phone or a computer would, unsaved changes included: everything
+  on it, or exactly what one device, role or person would see. Tapping a control there sends
+  nothing.
 - **Branding:** property name, home-screen name, brand color and logo.
 - **Backup tab:**
   - a full backup and restore, with automatic undo copies;

@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS phone_orders (
     owner TEXT PRIMARY KEY,
     data TEXT NOT NULL
 );
+
+-- One person's own changes to what their role gives them, used on role-based devices: a level
+-- for a device, or for every device in an area. 'none' takes the device away (Hidden).
+CREATE TABLE IF NOT EXISTS staff_entities (
+    staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL,
+    level TEXT NOT NULL CHECK (level IN ('none', 'view', 'control')),
+    PRIMARY KEY (staff_id, entity_id)
+);
+CREATE TABLE IF NOT EXISTS staff_areas (
+    staff_id INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+    area_id INTEGER NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('none', 'view', 'control')),
+    PRIMARY KEY (staff_id, area_id)
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -115,6 +130,8 @@ MIGRATIONS = {
         "ha_link_error": "TEXT",
         # 'phone': the phone itself is the user (optional phone PIN).
         # 'staff': shared phone, each staff member signs in with their own PIN.
+        # 'role': role-based, each person signs in and gets their own role's access and pages
+        # (and their own overrides) instead of the device's. 'phone' and 'staff' are kiosk modes.
         "signin_mode": "TEXT NOT NULL DEFAULT 'phone'",
         # In 'staff' mode: 1 = every active staff member may sign in, 0 = only staff_devices.
         "staff_all": "INTEGER NOT NULL DEFAULT 1",
@@ -142,6 +159,15 @@ MIGRATIONS = {
         # clocked in on Connecteam's time clock.
         "connecteam_user_id": "TEXT",
         "require_clock_in": "INTEGER NOT NULL DEFAULT 0",
+        # Their role on role-based devices, and their own page choice there (JSON like a
+        # phone's; NULL = their role's pages).
+        "role_id": "INTEGER REFERENCES roles(id) ON DELETE SET NULL",
+        "layout_pages": "TEXT",
+    },
+    "roles": {
+        # Pages for people with this role on role-based devices (JSON like a phone's choice;
+        # NULL = every page). Kiosk devices choose their own pages.
+        "layout_pages": "TEXT",
     },
 }
 
@@ -188,6 +214,20 @@ def check_pin(pin: str, stored: str) -> bool:
     salt_hex, digest_hex = stored.split("$", 1)
     digest = hashlib.scrypt(pin.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
     return secrets.compare_digest(digest.hex(), digest_hex)
+
+
+def page_choice(raw) -> list[str] | None:
+    """A stored page choice (a phone's, a role's or a person's): None when nothing is stored,
+    otherwise page IDs and page groups ("group:<id>"). A damaged value means no pages rather
+    than every page, so it can never widen what anyone sees. Takes the stored JSON text or an
+    already-read list."""
+    if raw is None or raw == "":
+        return None
+    try:
+        value = raw if isinstance(raw, list) else json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [str(i) for i in value] if isinstance(value, list) else []
 
 
 class Database:
@@ -261,9 +301,14 @@ class Database:
         for role in roles:
             role["entities"] = self.role_entities(role["id"])
             role["areas"] = self.role_areas(role["id"])
+            role["layout_pages"] = page_choice(role["layout_pages"])
+            # Devices that use the role themselves: role-based devices take each person's.
             role["device_count"] = self.conn.execute(
-                "SELECT COUNT(*) FROM devices WHERE role_id = ? AND status != 'revoked'",
+                "SELECT COUNT(*) FROM devices WHERE role_id = ? AND status != 'revoked' AND signin_mode != 'role'",
                 (role["id"],),
+            ).fetchone()[0]
+            role["staff_count"] = self.conn.execute(
+                "SELECT COUNT(*) FROM staff WHERE role_id = ? AND status != 'disabled'", (role["id"],),
             ).fetchone()[0]
         return roles
 
@@ -274,7 +319,13 @@ class Database:
         role = dict(row)
         role["entities"] = self.role_entities(role_id)
         role["areas"] = self.role_areas(role_id)
+        role["layout_pages"] = page_choice(role["layout_pages"])
         return role
+
+    def set_role_pages(self, role_id: int, pages: list[str] | None) -> None:
+        self.conn.execute("UPDATE roles SET layout_pages = ? WHERE id = ?",
+                          (None if pages is None else json.dumps(pages), role_id))
+        self.conn.commit()
 
     def role_areas(self, role_id: int) -> dict[int, str]:
         rows = self.conn.execute("SELECT area_id, level FROM role_areas WHERE role_id = ?", (role_id,))
@@ -294,9 +345,11 @@ class Database:
         return cur.lastrowid
 
     def duplicate_role(self, role_id: int, name: str) -> int:
-        """A new role with the same device and area settings. Phones stay on the original."""
+        """A new role with the same device, area and page settings. Phones and people stay on
+        the original."""
         new_id = self.create_role(name)
         self.update_role(new_id, name, self.role_entities(role_id), self.role_areas(role_id))
+        self.set_role_pages(new_id, self.role(role_id)["layout_pages"])
         return new_id
 
     def update_role(self, role_id: int, name: str, entities: dict[str, str],
@@ -424,12 +477,33 @@ class Database:
 
     def staff_list(self) -> list[dict]:
         result = []
-        for r in self.conn.execute("SELECT * FROM staff ORDER BY name COLLATE NOCASE"):
+        for r in self.conn.execute(
+                """SELECT s.*, r.name AS role_name FROM staff s LEFT JOIN roles r ON r.id = s.role_id
+                   ORDER BY s.name COLLATE NOCASE"""):
             m = dict(r)
             m.pop("pin_hash")
             m.pop("ha_refresh_token")
+            m["layout_pages"] = page_choice(m["layout_pages"])
+            m["entities"], m["areas"] = self.staff_overrides(m["id"])
             result.append(m)
         return result
+
+    def staff_overrides(self, staff_id: int) -> tuple[dict[str, str], dict[int, str]]:
+        """One person's own changes to their role: ({entity_id: level}, {area_id: level})."""
+        entities = {r["entity_id"]: r["level"] for r in self.conn.execute(
+            "SELECT entity_id, level FROM staff_entities WHERE staff_id = ?", (staff_id,))}
+        areas = {r["area_id"]: r["level"] for r in self.conn.execute(
+            "SELECT area_id, level FROM staff_areas WHERE staff_id = ?", (staff_id,))}
+        return entities, areas
+
+    def set_staff_overrides(self, staff_id: int, entities: dict[str, str], areas: dict[int, str]) -> None:
+        self.conn.execute("DELETE FROM staff_entities WHERE staff_id = ?", (staff_id,))
+        self.conn.execute("DELETE FROM staff_areas WHERE staff_id = ?", (staff_id,))
+        self.conn.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
+                              [(staff_id, eid, lvl) for eid, lvl in entities.items()])
+        self.conn.executemany("INSERT INTO staff_areas (staff_id, area_id, level) VALUES (?, ?, ?)",
+                              [(staff_id, aid, lvl) for aid, lvl in areas.items()])
+        self.conn.commit()
 
     def staff(self, staff_id: int) -> dict | None:
         row = self.conn.execute("SELECT * FROM staff WHERE id = ?", (staff_id,)).fetchone()
@@ -473,7 +547,7 @@ class Database:
     def update_staff(self, staff_id: int, **fields) -> None:
         allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
                    "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
-                   "require_clock_in"}
+                   "require_clock_in", "role_id", "layout_pages"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -559,24 +633,31 @@ class Database:
             for table in ("devices", "staff")
         }
         try:
-            for table in ("phone_orders", "staff_devices", "role_areas", "role_entities",
-                          "area_entities", "area_ha_areas", "devices", "staff", "roles", "areas"):
+            for table in ("phone_orders", "staff_devices", "staff_entities", "staff_areas",
+                          "role_areas", "role_entities", "area_entities", "area_ha_areas",
+                          "devices", "staff", "roles", "areas"):
                 c.execute(f"DELETE FROM {table}")
             c.executemany("INSERT INTO areas (id, name, sort_order, created_at) VALUES (?, ?, ?, ?)",
                           [(a["id"], a["name"], a["sort_order"], a["created_at"]) for a in snap["areas"]])
             c.executemany("INSERT INTO area_entities (area_id, entity_id) VALUES (?, ?)", snap["area_entities"])
             c.executemany("INSERT INTO area_ha_areas (area_id, ha_area_id) VALUES (?, ?)", snap["area_ha_areas"])
-            c.executemany("INSERT INTO roles (id, name, created_at) VALUES (?, ?, ?)",
-                          [(r["id"], r["name"], r["created_at"]) for r in snap["roles"]])
+            c.executemany("INSERT INTO roles (id, name, created_at, layout_pages) VALUES (?, ?, ?, ?)",
+                          [(r["id"], r["name"], r["created_at"], r["layout_pages"]) for r in snap["roles"]])
             c.executemany("INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_entities"].items()])
             c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_areas"].items()])
             c.executemany(
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
-                   connecteam_user_id, require_clock_in) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   connecteam_user_id, require_clock_in, role_id, layout_pages)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
-                  m["connecteam_user_id"], m["require_clock_in"]) for m in snap["staff"]])
+                  m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"])
+                 for m in snap["staff"]])
+            c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
+                          [(*k, v) for k, v in snap["staff_entities"].items()])
+            c.executemany("INSERT INTO staff_areas (staff_id, area_id, level) VALUES (?, ?, ?)",
+                          [(*k, v) for k, v in snap["staff_areas"].items()])
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
                    staff_all, layout_pages, created_at, last_seen, kind, pin_only)
