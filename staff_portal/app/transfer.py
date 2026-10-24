@@ -279,7 +279,7 @@ def make_backup(db, branding, version: str) -> dict:
         role_entities=rows("SELECT role_id, entity_id, level FROM role_entities"),
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
-                        staff_all, layout_pages, created_at, last_seen
+                        staff_all, pin_only, layout_pages, created_at, last_seen
                         FROM devices WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in FROM staff"""),
@@ -394,6 +394,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
                         "token_hash": token_hash, "pin_hash": pin_hash,
                         "signin_mode": "staff" if row.get("signin_mode") == "staff" else "phone",
                         "staff_all": 0 if row.get("staff_all") in (0, False) else 1,
+                        "pin_only": 1 if row.get("pin_only") in (1, True) else 0,
                         "layout_pages": json.dumps(pages) if pages is not None else None,
                         "created_at": _time(row.get("created_at"), time.time()),
                         "last_seen": _time(row.get("last_seen"))})

@@ -268,9 +268,8 @@
         <legend>Home Assistant logbook</legend>
         <label class="check-row"><input type="checkbox" name="ha_logbook">
           <span>Add staff actions to Home Assistant's logbook
-          <small>Shows entries like “Main Boiler set to 140° by Maintenance phone (Staff Portal).”
-          Phones linked to a Home Assistant user don't need this; Home Assistant already credits
-          that user.</small></span></label>
+          <small>Shows entries like “Main Boiler set to 140° by Bob (Maintenance phone) via Staff Portal”
+          for everyone, including phones and people linked to a Home Assistant user.</small></span></label>
       </fieldset>
       <fieldset>
         <legend>Security</legend>
@@ -301,6 +300,11 @@
         <option value="staff">Shared: each person signs in with their own PIN</option>
       </select></label>
     <div class="staff-pick" data-staff-pick hidden>
+      <label class="check-row"><input type="checkbox" name="pin_only">
+        <span>Hide names: people just type their PIN
+        <small>The sign-in screen shows only a PIN pad, and their PIN says who they are. Every
+        person needs their own PIN. Wrong PINs lock this device after the number set in
+        Settings.</small></span></label>
       <label class="check"><input type="checkbox" name="staff_all"> Everyone on the Staff tab</label>
       <div class="staff-checks" data-staff-list></div>
       <p class="hint" data-no-staff>Add people on the Staff tab first.</p>

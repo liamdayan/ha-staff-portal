@@ -285,6 +285,14 @@ and they're signed out automatically after the idle time set in **Settings**.
   that stays signed in. Wrong PINs across several names lock the **phone** until you unlock it,
   so PINs can't be guessed by switching names.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
+- Everyone needs their own PIN: a PIN someone else already uses is refused.
+
+**Hide names (PIN only).** Tick **Hide names: people just type their PIN** under **Who uses it**
+to skip the list of names. The device shows only a PIN pad, and the PIN says who's signing in.
+The device never receives the list of names. Because a wrong guess could match anyone, wrong
+PINs count against the device, which locks after **Lock phone after wrong PINs** wrong PINs in
+a row (within 15 minutes) until you unlock it on the **Phones & computers** tab. If two people
+still share a PIN from before, that PIN can't sign in; give one of them a new PIN.
 
 ## Connecteam: add staff and require clocking in (optional)
 
@@ -373,13 +381,14 @@ Every staff action is always recorded in **Staff Access → Activity**. You can 
 up in Home Assistant's own **Logbook**, in one of two ways.
 
 **Logbook entries (on by default).** The add-on adds an entry for each action, for example
-"Main Boiler set to 140° by Maintenance phone (Staff Portal)". Turn this off under
-**Settings → Home Assistant logbook**.
+"Main Boiler set to 140° by Bob (Maintenance phone) via Staff Portal", for everyone, linked or
+not. Turn this off under **Settings → Home Assistant logbook**.
 
 **Link a phone or a staff member to a Home Assistant user.** Home Assistant then credits that
 user directly,
 the same as if they had tapped it in the Home Assistant app: "Porch Light turned off triggered
-by action light.turn_off by Maintenance." Linked phones don't get the extra logbook entry.
+by action light.turn_off by Maintenance." The add-on's own logbook entry (with the device and
+exact setting) is added as well, unless you turn logbook entries off.
 
 1. In Home Assistant, create a user for it under **Settings → People → Users → Add user**
    (for a shared phone, something like *Maintenance*). Leave **Administrator** off.
@@ -433,6 +442,9 @@ Always on:
   touched, even with the app left open on the screen.
 - Each phone can send up to 60 actions a minute, and one action per device each second, so a
   stuck button or a script can't flood your equipment.
+- Double taps are ignored: the same command from the same phone within 5 seconds isn't sent
+  again or logged again, and switching something on or off that already is does nothing. The
+  app also ignores taps on a control while its last command is still being sent.
 - Giving a role a whole area doesn't include a device's hidden or configuration controls (like
   "Restart controller" or "Child lock"). To give access to one of those, add it to the area by
   hand in **Settings → Areas**, or set it on the role directly.

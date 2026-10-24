@@ -108,6 +108,8 @@ MIGRATIONS = {
         "signin_mode": "TEXT NOT NULL DEFAULT 'phone'",
         # In 'staff' mode: 1 = every active staff member may sign in, 0 = only staff_devices.
         "staff_all": "INTEGER NOT NULL DEFAULT 1",
+        # In 'staff' mode: 1 = no list of names; people just type their PIN.
+        "pin_only": "INTEGER NOT NULL DEFAULT 0",
         # JSON list of layout page IDs this phone shows ("more" = the More page).
         # NULL means every page, including pages added later.
         "layout_pages": "TEXT",
@@ -379,7 +381,7 @@ class Database:
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
-                   "layout_pages", "failed_at"}
+                   "layout_pages", "failed_at", "pin_only"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -427,6 +429,12 @@ class Database:
                    WHERE sd.device_id = ? AND s.status != 'disabled'
                    ORDER BY s.name COLLATE NOCASE""", (device["id"],))
         return [dict(r) for r in rows]
+
+    def staff_pins(self, device: dict | None = None) -> list[tuple[int, str]]:
+        """(id, pin_hash) of the active staff allowed on a shared device (or of everyone)."""
+        ids = {m["id"] for m in self.staff_for_device(device)} if device else None
+        return [(r["id"], r["pin_hash"]) for r in self.conn.execute("SELECT id, pin_hash FROM staff")
+                if ids is None or r["id"] in ids]
 
     def staff_allowed_on(self, staff_id: int, device: dict) -> bool:
         return any(m["id"] == staff_id for m in self.staff_for_device(device))
@@ -538,11 +546,11 @@ class Database:
                   m["connecteam_user_id"], m["require_clock_in"]) for m in snap["staff"]])
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
-                   staff_all, layout_pages, created_at, last_seen, kind)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   staff_all, layout_pages, created_at, last_seen, kind, pin_only)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
                   d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
-                  d["kind"]) for d in snap["devices"]])
+                  d["kind"], d["pin_only"]) for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
             kept = set()

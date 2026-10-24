@@ -28,7 +28,8 @@ system.
 
   They're set up with a link instead of a QR code.
 - **Shared devices:** each person taps or clicks their name and enters their own PIN, so every
-  action is recorded under their name. People are signed out after an idle time you set.
+  action is recorded under their name, or (per device) just types their PIN with no names
+  shown. People are signed out after an idle time you set.
 - **Hold to unlock controls:** controls stay locked until someone presses and holds, and lock
   again after 10 quiet minutes. Checking a temperature can't switch something by accident.
 - **Group cards** (such as "Tub 1") show key readings at a glance and open into a screen with all

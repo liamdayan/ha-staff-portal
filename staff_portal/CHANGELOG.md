@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.17
+
+- **Hide names (PIN only)** for shared phones and computers (**Edit → Who uses it**): the
+  sign-in screen shows only a PIN pad, and the PIN says who's signing in. The device never
+  receives the list of names. Wrong PINs lock the device after the usual limit.
+- Each person must have their own PIN: a PIN someone else already uses is refused.
+- **Fixed:** double taps sent a command twice (two "turn off" entries a second or two apart).
+  The same command from the same device within 5 seconds is now ignored and not logged, an
+  on/off command for something already in that state does nothing, and the app ignores taps on
+  a control while its command is being sent.
+- Home Assistant logbook entries ("… by Bob (Maintenance phone) via Staff Portal") are written for
+  people and phones linked to a Home Assistant user too, not only unlinked ones.
+
 ## 0.6.16
 
 Connecteam: made sure Staff Access stays well inside Connecteam's API limits, which apply per

@@ -520,8 +520,31 @@ def authenticate(request: web.Request, need_unlock: bool = True,
 # than a person could tap.
 ACTIONS_PER_MINUTE = 60
 ENTITY_MIN_INTERVAL = 1.0
+REPEAT_WINDOW = 5.0          # the same command again this soon is a double tap: ignored
 recent_actions: dict[int, list[float]] = {}
 last_entity_action: dict[tuple[int, str], float] = {}
+last_command: dict[tuple[int, str], tuple[str, str, float]] = {}   # (service, call, when)
+
+# On/off commands for something already in that state do nothing, so they aren't sent or logged.
+ALREADY = {"turn_on": "on", "turn_off": "off"}
+
+
+def repeated(device_id: int, entity_id: str, service: str, call: dict, state: dict | None) -> bool:
+    """Whether this command would change nothing: the same one from this device a moment ago,
+    or switching something on/off that already is."""
+    now = time.time()
+    if len(last_command) > 5000:
+        for key, (_, _, t) in list(last_command.items()):
+            if now - t > 60:
+                del last_command[key]
+    signature = json.dumps(call, sort_keys=True, default=str)
+    prev = last_command.get((device_id, entity_id))
+    if prev and prev[0] == service and prev[1] == signature and now - prev[2] < REPEAT_WINDOW:
+        return True
+    if ALREADY.get(service) and len(call) == 1 and (state or {}).get("state") == ALREADY[service]:
+        return True
+    last_command[(device_id, entity_id)] = (service, signature, now)
+    return False
 
 
 def phone_too_busy(device_id: int) -> bool:
@@ -565,14 +588,17 @@ async def api_me(request: web.Request):
     device, _ = authenticate(request, need_unlock=False)
     s = db.settings()
     shared = device["signin_mode"] == "staff"
+    pin_only = shared and bool(device["pin_only"])
     return web.json_response({
         "device": device["name"],
         "kind": device["kind"],
         "role": device["role_name"],
         "shared": shared,
+        # PIN-only devices never get the list of names.
+        "pin_only": pin_only,
         "staff": [{"id": m["id"], "name": m["name"],
                    "off_clock": clock_block(m) is not None}
-                  for m in db.staff_for_device(device)] if shared else [],
+                  for m in db.staff_for_device(device)] if shared and not pin_only else [],
         "pin_required": shared or bool(device["pin_hash"]),
         "property_name": s["property_name"],
         "app_name": s["app_name"],
@@ -587,8 +613,15 @@ async def api_unlock(request: web.Request):
     # latest wrong-PIN count and lock state; reading the device before awaiting the body let
     # thousands of held-open requests share one stale count and never trigger the lock.
     data = await read_json(request)
+    device, _ = authenticate(request, need_unlock=False)
+    if device["signin_mode"] == "staff" and device["pin_only"]:
+        # One attempt at a time per device: matching a PIN against everyone is deliberately
+        # slow work, and each attempt must see the previous one's wrong-PIN count.
+        lock = pin_only_locks.setdefault(device["id"], asyncio.Lock())
+        async with lock:
+            return await unlock_by_pin(request, data)
     # Someone who must be clocked in and looks clocked out may have just clocked in: ask
-    # Connecteam now, before the device is read, so the rest stays synchronous (see above).
+    # Connecteam now, before the device is read again, so the rest stays synchronous (see above).
     await recheck_clock(data.get("staff_id"))
     device, _ = authenticate(request, need_unlock=False)
     pin = str(data.get("pin", ""))
@@ -623,20 +656,7 @@ async def api_unlock(request: web.Request):
     if member["status"] == "locked" or (member["locked_until"] or 0) > now:
         return bad_request(locked_msg, 403, staff_locked=True)
     if check_pin(pin, member["pin_hash"]):
-        # Only this person's own count is cleared. The phone's count isn't, so signing in as
-        # yourself can't be used to keep guessing other people's PINs.
-        blocked = clock_block(member)
-        if blocked:
-            db.update_staff(member["id"], failed_pins=0)
-            db.log(actor_name(device, member), "Blocked sign-in: not clocked in"
-                   if blocked == "clocked_out" else "Blocked sign-in: time clock unavailable",
-                   role=device["role_name"], ok=False, ip=ip)
-            return bad_request(CLOCK_MESSAGES[blocked].format(name=member["name"]), 403,
-                               clock=blocked)
-        db.update_staff(member["id"], failed_pins=0, locked_until=None, last_seen=now)
-        db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
-        return web.json_response({"session": new_session(device, member),
-                                  "staff_name": member["name"]})
+        return staff_signed_in(device, member, ip)
 
     attempts = member["failed_pins"] + 1
     # Also count per phone, so cycling through names can't be used to guess PINs. The count
@@ -658,6 +678,74 @@ async def api_unlock(request: web.Request):
         return bad_request(locked_msg, 403, staff_locked=True)
     db.update_staff(member["id"], failed_pins=attempts)
     return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
+
+
+def staff_signed_in(device: dict, member: dict, ip: str) -> web.Response:
+    """The right PIN for a staff member on a shared device: sign them in, unless they must be
+    clocked in and aren't. Only this person's own wrong-PIN count is cleared. The device's
+    count isn't, so signing in as yourself can't be used to keep guessing other people's PINs."""
+    blocked = clock_block(member)
+    if blocked:
+        db.update_staff(member["id"], failed_pins=0)
+        db.log(actor_name(device, member), "Blocked sign-in: not clocked in"
+               if blocked == "clocked_out" else "Blocked sign-in: time clock unavailable",
+               role=device["role_name"], ok=False, ip=ip)
+        return bad_request(CLOCK_MESSAGES[blocked].format(name=member["name"]), 403,
+                           clock=blocked)
+    db.update_staff(member["id"], failed_pins=0, locked_until=None, last_seen=time.time())
+    db.log(actor_name(device, member), "Signed in", role=device["role_name"], ip=ip)
+    return web.json_response({"session": new_session(device, member),
+                              "staff_name": member["name"]})
+
+
+pin_only_locks: dict[int, asyncio.Lock] = {}
+
+
+async def unlock_by_pin(request: web.Request, data: dict) -> web.Response:
+    """Sign-in on a PIN-only shared device: whoever's PIN it is. With no name chosen, a guess
+    could match anyone, so wrong PINs count against the device, which locks after the normal
+    limit (not three times it, as when people pick their name first)."""
+    device, _ = authenticate(request, need_unlock=False)   # fresh, now that it's our turn
+    pin = str(data.get("pin", ""))
+    ip = client_ip(request)
+    max_attempts = db.setting_int("max_pin_attempts")
+    candidates = db.staff_pins(device)
+    matches = await asyncio.to_thread(
+        lambda: [sid for sid, stored in candidates if parse_pin(pin) and check_pin(pin, stored)])
+    if len(matches) > 1:
+        db.log(device["name"], "Blocked sign-in: PIN used by more than one person",
+               role=device["role_name"], ok=False, ip=ip)
+        return bad_request("That PIN belongs to more than one person, so it can't be used here. "
+                           "Ask your manager to give each person their own PIN.", 403)
+    member = db.staff(matches[0]) if matches else None
+    if member:
+        if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
+            return bad_request(f"{member['name']} is locked for a while after too many wrong PINs. "
+                               "Try again later, or ask your manager to unlock you.", 403,
+                               staff_locked=True)
+        await recheck_clock(member["id"])
+        device, _ = authenticate(request, need_unlock=False)
+        return staff_signed_in(device, db.staff(member["id"]), ip)
+    now = time.time()
+    quiet = now - (device["failed_at"] or 0) > PIN_FAILURE_MEMORY
+    attempts = (0 if quiet else device["failed_pins"]) + 1
+    if attempts >= max_attempts:
+        db.update_device(device["id"], failed_pins=attempts, failed_at=now, status="locked")
+        db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
+               ok=False, ip=ip)
+        return bad_request("locked", 423)
+    db.update_device(device["id"], failed_pins=attempts, failed_at=now)
+    return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
+
+
+async def pin_taken(pin: str, except_id: int | None = None) -> bool:
+    """Whether another staff member already has this PIN. PINs must be unique, because on
+    PIN-only devices the PIN alone says who someone is."""
+    others = [(sid, stored) for sid, stored in db.staff_pins() if sid != except_id]
+    return await asyncio.to_thread(lambda: any(check_pin(pin, stored) for _, stored in others))
+
+
+PIN_TAKEN = "Someone else already uses that PIN. Give each person their own PIN."
 
 
 def new_session(device: dict, member: dict | None) -> str:
@@ -770,11 +858,13 @@ async def api_action(request: web.Request):
     try:
         states = await ha.states()
         domain, service, call = build_service_call(entity_id, action, params, states.get(entity_id))
+        if repeated(device["id"], entity_id, service, call, states.get(entity_id)):
+            return web.json_response({"ok": True, "unchanged": True})
         # Only commands that would really reach the device count towards the per-device pause.
         if entity_too_soon(device["id"], entity_id):
             return bad_request("That was changed a moment ago. Wait a second and try again.", 429)
         last_entity_action[(device["id"], entity_id)] = time.time()
-        as_user = await send_command(device, member, domain, service, call)
+        await send_command(device, member, domain, service, call)
     except ActionRejected as err:
         return bad_request(str(err))
     except HomeAssistantError as err:
@@ -784,8 +874,9 @@ async def api_action(request: web.Request):
         return bad_request("The system didn't accept that. Try again.", 502)
     detail = ", ".join(f"{k}={v}" for k, v in call.items() if k != "entity_id") or None
     db.log(actor, action, role=device["role_name"], entity_id=entity_id, detail=detail, ip=ip)
-    # Commands sent as a linked user are already credited to them in Home Assistant's logbook.
-    if not as_user and db.settings().get("ha_logbook") == "1":
+    # Written for linked users too: Home Assistant credits them, but this entry also says
+    # which device and what exactly was set.
+    if db.settings().get("ha_logbook") == "1":
         name = (states.get(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
         who = f"{member['name']} ({device['name']})" if member else device["name"]
         # The command already worked: write the logbook entry in the background so a slow or
@@ -1245,7 +1336,8 @@ async def admin_create_device(request: web.Request):
     if pages is not None:
         db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
-        db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0)
+        db.update_device(device_id, signin_mode="staff", staff_all=1 if data.get("staff_all", True) else 0,
+                         pin_only=1 if data.get("pin_only") else 0)
         if isinstance(data.get("staff_ids"), list):
             known = {m["id"] for m in db.staff_list()}
             db.set_device_staff(device_id, [int(i) for i in data["staff_ids"] if int(i) in known])
@@ -1275,6 +1367,9 @@ async def admin_update_device(request: web.Request):
         end_sessions = end_sessions or fields["signin_mode"] != device["signin_mode"]
     if "staff_all" in data:
         fields["staff_all"] = 1 if data["staff_all"] else 0
+    if "pin_only" in data:
+        fields["pin_only"] = 1 if data["pin_only"] else 0
+        end_sessions = end_sessions or fields["pin_only"] != device["pin_only"]
     if "layout_pages" in data:
         pages = clean_phone_pages(data["layout_pages"])
         fields["layout_pages"] = None if pages is None else json.dumps(pages)
@@ -1405,6 +1500,8 @@ async def admin_create_staff(request: web.Request):
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
     pin = (await kiosk_pin(link.get("connecteam_user_id")) if data.get("use_kiosk_code")
            else data.get("pin"))
+    if await pin_taken(require_pin(pin)):
+        return bad_request(PIN_TAKEN)
     try:
         staff_id = db.create_staff(name, require_pin(pin))
     except sqlite3.IntegrityError:
@@ -1428,6 +1525,8 @@ async def admin_update_staff(request: web.Request):
     pin = (await kiosk_pin(link.get("connecteam_user_id", member["connecteam_user_id"]))
            if data.get("use_kiosk_code") else data.get("pin"))
     if pin:
+        if await pin_taken(require_pin(pin), member["id"]):
+            return bad_request(PIN_TAKEN)
         fields["pin_hash"] = hash_pin(require_pin(pin))
         fields["failed_pins"] = 0
     if "active" in data:

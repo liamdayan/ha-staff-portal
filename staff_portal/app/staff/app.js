@@ -268,7 +268,7 @@
       return;
     }
     me = res.data;
-    if (!me.shared) return showPin(null);
+    if (!me.shared || me.pin_only) return showPin(null);
     if (!me.staff.length) {
       return message("No one can sign in yet",
         `Ask your manager to add you as a staff member for this ${word()}.`, true);
@@ -301,6 +301,10 @@
       back.hidden = false;
       back.textContent = `Not ${member.name}?`;
       back.addEventListener("click", () => showWho());
+    } else if (me?.pin_only) {
+      // Shared device without names: the PIN says who's signing in.
+      node.querySelector("h1").textContent = "Enter your PIN";
+      node.querySelector("[data-sub]").textContent = `${me.device} \u00b7 your own PIN signs you in`;
     }
     let pin = "";
     let busy = false;
@@ -1011,13 +1015,17 @@
       lockedNudge();
       return;
     }
+    // One command at a time per tile: extra taps while it's being sent are ignored.
+    if (tile.sending) return;
     if (confirmText && !window.confirm(confirmText)) return;
     keepUnlocked();
+    tile.sending = true;
     tile.busy = true;
     tile.el.classList.add("working");
     const res = await api("POST", "/api/action", { entity_id: tile.entity.entity_id, action, params });
     tile.el.classList.remove("working");
     tile.busy = false;
+    tile.sending = false;
     if (res.status === 200) {
       setTimeout(refresh, 600);
     } else if (!handleAuthError(res)) {

@@ -420,7 +420,7 @@
               h("span", { class: `badge ${cls}` }, label),
               d.kind === "computer" ? h("span", { class: "badge computer" }, "Computer") : null,
               d.signin_mode === "staff"
-                ? h("span", { class: "badge shared" }, "Shared \u00b7 staff sign in")
+                ? h("span", { class: "badge shared" }, d.pin_only ? "Shared \u00b7 PIN only" : "Shared \u00b7 staff sign in")
                 : d.has_pin ? h("span", { class: "badge" }, "PIN") : null,
               d.ha_user ? h("span", {
                 class: d.ha_link_error ? "badge locked" : "badge linked",
@@ -507,6 +507,7 @@
     const mode = form.elements["signin_mode"];
     mode.value = d?.signin_mode || "phone";
     form.elements["staff_all"].checked = d ? !!d.staff_all : true;
+    form.elements["pin_only"].checked = !!d?.pin_only;
     const pick = $("[data-staff-list]", dialog);
     pick.replaceChildren(...state.staff.map((m) => h("label", { class: "check" },
       h("input", { type: "checkbox", value: m.id, checked: !!d?.staff_ids.includes(m.id) }),
@@ -545,6 +546,7 @@
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null,
         kind: kindSelect.value };
       body.signin_mode = mode.value;
+      if (mode.value === "staff") body.pin_only = form.elements["pin_only"].checked;
       if (pageOptions.length) {
         const all = form.elements["pages_all"].checked;
         const ticked = [...pagesList.querySelectorAll("input:checked")].map((i) => i.value);
