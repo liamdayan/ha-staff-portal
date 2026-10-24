@@ -1853,8 +1853,10 @@
     return new Promise((resolve) => {
       const dialog = $("#choice-dialog");
       $("[data-message]", dialog).textContent = message;
-      $("[data-choices]", dialog).replaceChildren(...choices.map(([value, label, sub]) =>
-        h("button", { class: "choice", value }, h("strong", null, label), sub ? h("span", null, sub) : null)));
+      // The first choice gets the focus (so Enter picks it): list the safest one first.
+      $("[data-choices]", dialog).replaceChildren(...choices.map(([value, label, sub, cls]) =>
+        h("button", { class: cls ? `choice ${cls}` : "choice", value },
+          h("strong", null, label), sub ? h("span", null, sub) : null)));
       dialog.returnValue = "";
       dialog.onclose = () => resolve(choices.some(([v]) => v === dialog.returnValue) ? dialog.returnValue : null);
       dialog.showModal();
@@ -1954,11 +1956,12 @@
       const shown = clashes.slice(0, 5).join(", ") + (clashes.length > 5 ? `, and ${clashes.length - 5} more` : "");
       mode = await askChoice(`${clashes.length} ${clashes.length === 1 ? word[0] : word[1]} in the file already ` +
         `exist${clashes.length === 1 ? "s" : ""} here: ${shown}. What should happen to ${clashes.length === 1 ? "it" : "them"}?`, [
+        ["skip", "Skip them", `Keep yours and only add the ${word[1]} that are new.`],
+        ["copy", "Keep both", "Add the file's version with “(imported)” after the name."],
         ["replace", "Replace them", kind === "roles"
           ? "Use the file's access settings. Phones keep their role."
-          : "Use the file's PIN and settings. Their Home Assistant link is kept."],
-        ["copy", "Keep both", "Add the file's version with “(imported)” after the name."],
-        ["skip", "Skip them", `Keep yours and only add the ${word[1]} that are new.`],
+          : "Use the file's PIN and settings. Anyone whose PIN changes is signed out, people you've " +
+            "turned off stay off, and Home Assistant links are kept.", "danger"],
       ]);
       if (!mode) return false;
     }
@@ -1979,6 +1982,7 @@
       result.missing_areas?.length && `No area here called ${result.missing_areas.join(", ")}; that access was left out.`,
       result.missing_phones?.length && `No phone here called ${result.missing_phones.join(", ")}.`,
       result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
+      result.kept_off?.length && `${result.kept_off.join(", ")} stayed turned off.`,
     ].filter(Boolean).join(" ");
     toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? "The role open in the editor was reloaded." : ""]
       .filter(Boolean).join(" "));
@@ -1994,10 +1998,19 @@
     const info = await api("POST", "api/restore/preview", { backup: file });
     const counts = [`${info.roles} role${info.roles === 1 ? "" : "s"}`, `${info.devices} phone${info.devices === 1 ? "" : "s"}`,
       `${info.staff} staff member${info.staff === 1 ? "" : "s"}`, `${info.pages} layout page${info.pages === 1 ? "" : "s"}`];
+    // Phones this system didn't sign in (another system's backup, a revoked phone, an edited
+    // file) come back needing setup.
+    const setup = info.needs_setup || [];
+    const setupNote = !setup.length ? ""
+      : `\n\n${setup.length === 1 ? `${setup[0]} needs` : `${setup.length} phones and computers need`} ` +
+        `to be set up again after this restore${setup.length === 1 ? "" : ` (${setup.slice(0, 8).join(", ")}` +
+        `${setup.length > 8 ? ", \u2026" : ""})`}, because ${setup.length === 1 ? "it wasn't" : "they weren't"} ` +
+        "signed in on this system.";
     const ok = await askConfirm(
       `Restore the backup of ${info.property_name || "Staff Access"} from ${fullDate(info.exported_at)}?\n\n` +
       `It has ${counts.join(", ")}. Everything in Staff Access now (settings, roles, layout, phones and staff) ` +
-      "is replaced; the activity log stays. A copy of the current setup is saved first, so you can undo this.",
+      "is replaced; the activity log stays. A copy of the current setup is saved first, so you can undo this." +
+      setupNote,
       "Replace and restore");
     if (!ok) return false;
     await api("POST", "api/restore", { backup: file });

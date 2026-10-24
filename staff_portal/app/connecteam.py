@@ -54,6 +54,9 @@ LOW_MINUTE_LEFT = 10         # pause for the minute when the account has fewer l
 CLOCKS_TTL = 6 * 3600        # how long the list of time clocks is reused
 USERS_TTL = 5 * 60           # how long the user list is reused
 MAX_FORCE_GAP = 15 * 60      # on-demand checks slow to this while Connecteam keeps failing
+FORCED_SHARE = 0.75          # on-demand checks stop at this share of the daily cap, keeping the
+                             # rest for the scheduled ones
+MAX_RETRY_AFTER = 24 * 3600  # never wait longer than this when Connecteam asks us to slow down
 MAX_SHIFT_HOURS = 24         # an open shift older than this doesn't count (a forgotten clock-out)
 
 
@@ -153,9 +156,11 @@ class Connecteam:
                             ("day_left", "x-ratelimit-day-remaining"),
                             ("day_reset", "x-ratelimit-day-reset")):
             try:
-                self.limits[key] = int(float(h[header]))
-            except (KeyError, ValueError):
-                pass
+                value = int(float(h[header]))
+            except (KeyError, ValueError, OverflowError):
+                continue
+            if 0 <= value < 10 ** 12:   # ignore nonsense rather than act on it
+                self.limits[key] = value
         now = time.time()
         left, limit = self.limits.get("day_left"), self.limits.get("day_limit")
         if left is not None and limit and left < limit * LOW_DAY_SHARE:
@@ -177,9 +182,11 @@ class Connecteam:
         wait = min(3600, 60 * 2 ** min(self.failures - 1, 6))
         try:
             wait = max(wait, int(float(resp.headers.get("Retry-After", 0))))
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
-        until = max(time.time() + wait, self._reset_time("minute_reset", 0))
+        wait = min(wait, MAX_RETRY_AFTER)   # one odd reply mustn't stop checks for good
+        until = min(max(time.time() + wait, self._reset_time("minute_reset", 0)),
+                    time.time() + MAX_RETRY_AFTER)
         self._pause(until, "Connecteam asked Staff Access to slow down (too many requests); "
                            f"waiting {round((until - time.time()) / 60)} min.")
         return ConnecteamError(self.pause_reason)
@@ -219,7 +226,8 @@ class Connecteam:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
             raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
         ttl = body.get("expires_in") if isinstance(body.get("expires_in"), (int, float)) else 86400
-        self._token = (str(body["access_token"]), time.time() + max(60, ttl - 300))
+        ttl = min(max(ttl, 360), 86400) if ttl == ttl else 86400   # sane, and not NaN
+        self._token = (str(body["access_token"]), time.time() + ttl - 300)
         self._token_for = creds
         return self._token[0]
 
@@ -327,7 +335,8 @@ class Connecteam:
             for entry in _first_list(data, "timeActivitiesByUsers"):
                 if not isinstance(entry, dict) or entry.get("userId") is None:
                     continue
-                for shift in entry.get("shifts") or []:
+                shifts = entry.get("shifts")
+                for shift in shifts if isinstance(shifts, list) else []:
                     if isinstance(shift, dict) and _is_open(shift, now):
                         on_clock.add(str(entry["userId"]))
         return on_clock
@@ -350,6 +359,8 @@ class Connecteam:
             gap = min(MAX_FORCE_GAP, FORCE_GAP * 2 ** min(self.failures, 5))
             if force and now - self._last_attempt < gap:
                 return
+            if force and self.usage()["count"] >= self.daily_cap() * FORCED_SHARE:
+                return   # the rest of today's share is for the scheduled checks
             self._last_attempt = now   # paced from here, even if nothing is sent below
             if admin:
                 self.halted = None
@@ -371,6 +382,10 @@ class Connecteam:
                 if self.last_error != str(err):
                     log.warning("Connecteam: %s", err)
                 self.last_error = str(err)
+            except Exception as err:  # noqa: BLE001 - a malformed reply must not reach a request
+                self.failures += 1
+                log.warning("Connecteam sent a reply Staff Access couldn't read: %r", err)
+                self.last_error = "Connecteam sent a reply Staff Access couldn't read."
 
     def status(self, user_id: str | None) -> str:
         """'in', 'out', or 'unknown' (no answer since well past when the next check was due)."""

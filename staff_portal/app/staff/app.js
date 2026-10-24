@@ -202,7 +202,12 @@
     }
 
     if (code) {
-      if (isStandalone() || isDesktop() || session.get("use_browser")) return enroll(code);
+      // Set up straight away only when a person clearly started it: the installed app's first
+      // launch, or after tapping "Use it in this browser". Anywhere else it takes a click, so
+      // something that merely opens links (an email security scanner, say) can't use up the
+      // one-time code.
+      if (isStandalone() || session.get("use_browser")) return enroll(code);
+      if (isDesktop()) return showSetup(code);
       return showInstall(code);
     }
     message(`This ${word()} isn't set up`,
@@ -220,6 +225,21 @@
     local.set(TOKEN_KEY, res.data.token);
     history.replaceState(null, "", "/");
     boot();
+  }
+
+  function showSetup(code) {
+    live = false;
+    const node = fromTemplate("tpl-message");
+    node.querySelector("[data-title]").textContent = `Set up this ${word()}`;
+    node.querySelector("[data-body]").textContent =
+      `This setup link works once. After setup, this ${word()} opens your team's controls ` +
+      "with the access your manager chose.";
+    node.querySelector(".message").append(h("button", {
+      class: "btn primary",
+      onclick: (ev) => { ev.currentTarget.disabled = true; enroll(code); },
+    }, `Set up this ${word()}`));
+    document.getElementById("bar").hidden = true;
+    show(node);
   }
 
   function showInstall(code) {
@@ -417,8 +437,12 @@
     }
     live = true;
     setSubtitle(res.data.staff_name);
-    render(res.data);
-    if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
+    try {
+      render(res.data);
+    } finally {
+      // Keep updating even if drawing this answer went wrong.
+      if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
+    }
   }
 
   // view: which layout page is open, and which group card's detail screen (if any).
@@ -466,7 +490,10 @@
       render.pageId = view.pageId;
       if (keepScroll) window.scrollTo(0, keepScroll);
     }
-    for (const t of tiles.values()) t.refresh(byId);
+    for (const t of tiles.values()) {
+      // One device with odd data mustn't blank the rest of the screen.
+      try { t.refresh(byId); } catch (err) { console.error("Couldn't update a tile", err); }
+    }
     updateFolds();
     drawLock();
     const updated = screen.querySelector("[data-updated]");
@@ -1109,6 +1136,12 @@
       `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[key]}</svg>`;
   }
 
+  // A list of options from Home Assistant, keeping only proper text entries: a malformed
+  // attribute (a string, a number) mustn't break the tile.
+  function strings(list) {
+    return Array.isArray(list) ? list.filter((s) => typeof s === "string") : [];
+  }
+
   function cap(s) {
     s = String(s).replace(/_/g, " ");
     return s.charAt(0).toUpperCase() + s.slice(1);
@@ -1249,7 +1282,7 @@
         const hasTarget = a.temperature != null;
         stepper.hidden = !canControl() || !hasTarget;
         target.textContent = hasTarget ? withUnit(num(a.temperature), "°") : "";
-        const modes = a[modeKey] || [];
+        const modes = strings(a[modeKey]);
         mode.hidden = !canControl() || modes.length < 2;
         const current = d === "climate" ? e.state : a.operation_mode;
         if (mode.options.length !== modes.length) {
@@ -1294,7 +1327,7 @@
       controls.append(choice);
       build = (e) => {
         choice.hidden = !canControl();
-        const options = e.attributes.options || [];
+        const options = strings(e.attributes.options);
         if (choice.options.length !== options.length) {
           choice.replaceChildren(...options.map((o) => h("option", { value: o }, o)));
         }

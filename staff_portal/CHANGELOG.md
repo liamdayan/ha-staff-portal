@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.6.19
+
+Fixes from a security review.
+
+**Sign-in**
+
+- **Fixed:** wrong PINs on shared phones and computers could be paced (a few every 15 minutes) so
+  the device never locked, which let someone holding the device keep guessing PINs indefinitely.
+  20 wrong PINs on one device within 24 hours now lock it until you unlock it, however slowly
+  they come. Unlocking it clears the count.
+- **Fixed:** checking PINs ran on the add-on's main thread, so repeated sign-ins could make the
+  whole add-on (staff app and dashboard) unresponsive. PIN checks now run separately, one at a
+  time per device, and each device can try to sign in at most 15 times a minute.
+- **Fixed:** with Connecteam on, anyone holding a phone could make the add-on ask Connecteam
+  about a clocked-out person without knowing their PIN, using up your daily share of requests.
+  Connecteam is now only asked after a correct PIN, and sign-ins stop asking once three quarters
+  of the day's share is used, keeping the rest for the hourly checks.
+
+**Backups and imports**
+
+- **Fixed:** restoring a backup trusted every phone credential in the file, so an edited backup
+  could add a working phone, and an older backup brought back phones you had revoked since (a lost
+  phone, for example). A restore now keeps a phone signed in only if this system set it up and
+  hasn't revoked it. Any other phone needs setting up again, and the restore warning names them
+  first. Undoing a restore still keeps phones signed in.
+- **Fixed:** a restore could set or clear the Connecteam Client Secret. It never changes it now.
+- **Fixed:** importing staff with **Replace** turned people you had turned off back on. They stay
+  off now, and anyone whose PIN the import changes is signed out. **Skip** is now the selected
+  choice, and **Replace** is listed last, in red.
+
+**Staff app**
+
+- **Fixed:** a command that failed in Home Assistant, retried within 3 seconds, was taken for a
+  double tap and showed as done without being sent.
+- **Fixed:** idle connections were held open for up to an hour, so someone on your network could
+  tie up the add-on by opening a lot of them. Idle and slow connections are now closed after
+  15 seconds, and a request must arrive within 10 seconds (2 minutes on the dashboard, for large
+  backups).
+- **Fixed:** opening a computer's setup link set it up immediately, so an email link scanner (or
+  anyone who opened the link first) could use up the one-time link. Computers now show a
+  **Set up this computer** button.
+- **Fixed:** a device whose options Home Assistant reported in an unexpected format could accept
+  a partial match, give a server error, or stop the screen updating. One unusual device no longer
+  affects the rest of the screen.
+- Error responses now carry the same security headers as everything else.
+
+**Dashboard**
+
+- Every change needs the dashboard's anti-forgery header, including from the add-on's own
+  computer (this only matters if you run it in plain Docker behind a proxy).
+- Requests from Home Assistant users who aren't admins no longer each cause a lookup of all
+  users in Home Assistant.
+- More than 200 wrong setup codes in 10 minutes from any addresses pause setup briefly.
+
+**Add-on**
+
+- Updated to Python 3.13 on Alpine 3.24 (the previous base image hadn't been updated since
+  May 2025) and Pillow 13.0.0, which fixes many image-decoding security issues, including
+  critical ones in JPEG decoding.
+- Logos can be PNG, JPEG or WebP. GIF uploads are no longer accepted.
+- Connecteam: a "slow down" reply makes Staff Access wait at most 24 hours, and an unexpected
+  reply from Connecteam can no longer cause a server error.
+- The docs now say clearly that backups and staff exports contain PIN hashes that short PINs
+  can be worked out from offline, so keep those files private.
+
 ## 0.6.18
 
 - Repeated taps are ignored for 3 seconds instead of 5, so the same command can be sent again

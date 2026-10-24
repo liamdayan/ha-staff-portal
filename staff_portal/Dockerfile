@@ -1,4 +1,6 @@
-FROM python:3.12-alpine3.20
+# A maintained tag: Docker rebuilds it with security fixes, and Supervisor builds the add-on
+# from it on install and update. Move to a newer Alpine before this one's support ends.
+FROM python:3.13-alpine3.24
 
 WORKDIR /app
 COPY requirements.txt .

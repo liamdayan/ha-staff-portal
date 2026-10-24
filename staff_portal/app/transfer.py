@@ -213,7 +213,9 @@ def _import_staff(db, rows: list, mode: str) -> dict:
     phones = {r["name"].lower(): r["id"] for r in db.conn.execute(
         "SELECT id, name FROM devices WHERE status != 'revoked'")}
     existing = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM staff")}
-    result = {"added": 0, "replaced": 0, "skipped": 0, "bad_pin": 0, "missing_phones": set()}
+    current = {r["id"]: r for r in db.conn.execute("SELECT id, status, pin_hash FROM staff")}
+    result = {"added": 0, "replaced": 0, "skipped": 0, "bad_pin": 0, "missing_phones": set(),
+              "kept_off": [], "signed_out": []}
     for raw in rows:
         name = _name(raw.get("name"), 40)
         pin_hash = str(raw.get("pin_hash") or "")
@@ -235,9 +237,17 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             result["skipped"] += 1
             continue
         if staff_id and mode == "replace":
+            old = current[staff_id]
+            if old["status"] == "disabled" and status != "disabled":
+                # Someone you turned off stays off: an older file (or one from another
+                # property) mustn't quietly let them back in.
+                status = "disabled"
+                result["kept_off"].append(name)
             db.conn.execute(
                 """UPDATE staff SET pin_hash = ?, status = ?, failed_pins = 0, locked_until = NULL
                    WHERE id = ?""", (pin_hash, status, staff_id))
+            if pin_hash != old["pin_hash"] or status == "disabled":
+                result["signed_out"].append(staff_id)   # a new PIN means signing in again
             result["replaced"] += 1
         else:
             if staff_id:
@@ -295,13 +305,22 @@ def backup_summary(data: dict) -> dict:
             "pages": len((data.get("layout") or {}).get("pages") or [])}
 
 
-def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> dict:
-    """Validate a whole backup before anything is replaced. Raises ValueError."""
+def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
+                 known_tokens: set[tuple[int, str]]) -> dict:
+    """Validate a whole backup before anything is replaced. Raises ValueError.
+
+    known_tokens: (device ID, token hash) pairs this system issued and hasn't revoked. A phone
+    only stays signed in if its pair is one of them; any other phone in the file has to be set
+    up again, so a tampered backup can't plant a working phone and an old one can't bring back
+    a revoked phone."""
     check_file(data, "backup")
     if data.get("schema") != BACKUP_SCHEMA:
         raise ValueError("That backup was made by a newer version of Staff Portal. Update the add-on first.")
 
     settings_in = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    # The Connecteam secret is write-only and never in a backup: a file can't set or clear it.
+    settings_in = {k: v for k, v in settings_in.items()
+                   if k not in ("connecteam_client_secret", "connecteam_clear_secret", "connecteam_usage")}
     settings = clean_settings(settings_in, current_settings)
     layout = clean_layout(data.get("layout") or {"pages": []})
 
@@ -367,18 +386,21 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
                       "require_clock_in": 1 if link and row.get("require_clock_in") in (1, True) else 0})
     staff_ids = {m["id"] for m in staff}
 
-    devices = []
+    devices, needs_setup = [], []
     for row in _rows(data, "devices"):
         device_id, name = _int(row.get("id"), "phone"), _name(row.get("name"))
         if not name or any(d["id"] == device_id for d in devices):
             raise ValueError("The backup has a damaged or repeated phone.")
         token_hash = row.get("token_hash") if TOKEN_HASH_RE.match(str(row.get("token_hash") or "")) else None
+        if token_hash and (device_id, token_hash) not in known_tokens:
+            token_hash = None   # not issued by this system, or revoked since
         pin_hash = row.get("pin_hash")
         if pin_hash is not None and not PIN_HASH_RE.match(str(pin_hash)):
             raise ValueError(f"The backup has a damaged PIN for the phone {name}.")
         status = row.get("status") if row.get("status") in DEVICE_STATUSES else "pending"
         if status in ("active", "locked") and not token_hash:
             status = "pending"  # nothing to sign in with: set it up again
+            needs_setup.append(name)
         if status in ("pending", "revoked"):
             token_hash = None
         pages = row.get("layout_pages")
@@ -418,7 +440,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo) -> di
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
             "roles": roles, "role_entities": role_entities, "role_areas": role_areas,
             "staff": staff, "devices": devices, "staff_devices": sorted(staff_devices),
-            "phone_orders": phone_orders,
+            "phone_orders": phone_orders, "needs_setup": needs_setup,
             "exported_at": _time(data.get("exported_at"), time.time())}
 
 

@@ -42,6 +42,10 @@ COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_LOGO_BYTES = 5 * 1024 * 1024
 PIN_FAILURE_MEMORY = 15 * 60  # a phone forgets wrong-PIN attempts after this quiet time
 STAFF_LOCK_SECONDS = 15 * 60  # how long a person is locked out after too many wrong PINs
+DAILY_WRONG_PINS = 20         # this many wrong PINs on a shared device within DAILY_WINDOW lock it
+DAILY_WINDOW = 24 * 3600
+UNLOCK_PER_MINUTE = 15        # sign-in attempts per device per minute
+MAX_SESSIONS = 5000           # PIN sessions kept in memory at most
 
 log = logging.getLogger("staff_portal")
 
@@ -226,19 +230,42 @@ def too_many_failures(ip: str, limit: int = 20, window: float = 600) -> bool:
     return count >= limit
 
 
-def record_failure(ip: str) -> None:
-    count, since = failures.get(ip, (0, time.time()))
+def record_failure(ip: str, window: float = 600) -> None:
+    now = time.time()
+    if len(failures) > 10_000:
+        # Addresses can be made up (another add-on can claim any forwarded address), so the
+        # table is kept bounded: old entries go first, and if that isn't enough, all of them.
+        for key, (_, since) in list(failures.items()):
+            if now - since > window:
+                del failures[key]
+        if len(failures) > 10_000:
+            failures.clear()
+    count, since = failures.get(ip, (0, now))
     failures[ip] = (count + 1, since)
+
+
+ANY_ADDRESS = "*"           # failures counted across every address
+ENROLL_FAILURES_ANYWHERE = 200
 
 
 def bad_request(message: str, status: int = 400, **extra) -> web.Response:
     return web.json_response({"error": message, **extra}, status=status)
 
 
+# How long a request body may take to arrive. A connection that sends its headers and then
+# trickles (or never sends) the body would otherwise be held open for good.
+BODY_SECONDS = web.AppKey("body_seconds", float)
+IDLE_SECONDS = 15   # idle connections (and ones that never finish their headers) are closed
+
+
 async def read_json(request: web.Request) -> dict:
     try:
-        data = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
+            data = await request.json()
+    except TimeoutError:
+        raise web.HTTPRequestTimeout(text="The request took too long to arrive.") from None
+    except (ValueError, RecursionError):
+        # Not JSON, not UTF-8, absurdly long numbers or deep nesting: all just a bad request.
         raise web.HTTPBadRequest(text="invalid JSON") from None
     if not isinstance(data, dict):
         raise web.HTTPBadRequest(text="expected an object")
@@ -572,12 +599,15 @@ def actor_name(device: dict, member: dict | None) -> str:
 
 async def api_enroll(request: web.Request):
     ip = client_ip(request)
-    if too_many_failures(ip):
+    # Per address, and across all addresses (an address can be faked from Home Assistant's
+    # own network, so the per-address limit alone isn't enough).
+    if too_many_failures(ip) or too_many_failures(ANY_ADDRESS, ENROLL_FAILURES_ANYWHERE):
         return bad_request("Too many attempts. Try again later.", 429)
     data = await read_json(request)
     claimed = db.claim_enroll_code(str(data.get("code", "")))
     if not claimed:
         record_failure(ip)
+        record_failure(ANY_ADDRESS)
         return bad_request("This setup code is invalid, already used, or expired.", 404)
     device, token = claimed
     db.log(device["name"], "Phone set up", ip=ip)
@@ -609,70 +639,125 @@ async def api_me(request: web.Request):
 
 
 async def api_unlock(request: web.Request):
-    # Read the body first. Everything after this line is synchronous, so each attempt sees the
-    # latest wrong-PIN count and lock state; reading the device before awaiting the body let
-    # thousands of held-open requests share one stale count and never trigger the lock.
+    # Read the body, then wait for this device's turn: sign-in attempts on one device run one at a
+    # time, so each sees the wrong-PIN count the previous one left (thousands of held-open
+    # requests once shared one stale count and never triggered the lock). The slow PIN checks run
+    # off the main thread, so a stream of sign-ins can't stall the rest of the add-on.
     data = await read_json(request)
     device, _ = authenticate(request, need_unlock=False)
-    if device["signin_mode"] == "staff" and device["pin_only"]:
-        # One attempt at a time per device: matching a PIN against everyone is deliberately
-        # slow work, and each attempt must see the previous one's wrong-PIN count.
-        lock = pin_only_locks.setdefault(device["id"], asyncio.Lock())
-        async with lock:
-            return await unlock_by_pin(request, data)
-    # Someone who must be clocked in and looks clocked out may have just clocked in: ask
-    # Connecteam now, before the device is read again, so the rest stays synchronous (see above).
-    await recheck_clock(data.get("staff_id"))
-    device, _ = authenticate(request, need_unlock=False)
-    pin = str(data.get("pin", ""))
+    if unlock_too_busy(device["id"]):
+        return bad_request("Too many sign-in attempts. Wait a minute and try again.", 429)
+    async with unlock_locks.setdefault(device["id"], asyncio.Lock()):
+        device, _ = authenticate(request, need_unlock=False)   # fresh, now that it's our turn
+        if device["signin_mode"] != "staff":
+            return await unlock_device(request, device, data)
+        if device["pin_only"]:
+            return await unlock_by_pin(request, device, data)
+        return await unlock_named(request, device, data)
+
+
+unlock_locks: dict[int, asyncio.Lock] = {}
+recent_unlocks: dict[int, list[float]] = {}
+
+
+def unlock_too_busy(device_id: int) -> bool:
+    """More sign-in attempts from one device in a minute than people really make."""
+    now = time.time()
+    times = [t for t in recent_unlocks.get(device_id, []) if now - t < 60]
+    busy = len(times) >= UNLOCK_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_unlocks[device_id] = times
+    return busy
+
+
+async def pin_matches(pin: str, stored: str | None) -> bool:
+    """check_pin off the main thread (it's deliberately slow). Malformed PINs never match."""
+    if not stored or not parse_pin(pin):
+        return False
+    return await asyncio.to_thread(check_pin, pin, stored)
+
+
+async def unlock_device(request: web.Request, device: dict, data: dict) -> web.Response:
+    """A phone or computer with its own PIN. Wrong PINs add up until it locks."""
+    if not device["pin_hash"]:
+        return web.json_response({"session": ""})
+    if await pin_matches(str(data.get("pin", "")), device["pin_hash"]):
+        db.update_device(device["id"], failed_pins=0)
+        return web.json_response({"session": new_session(device, None)})
+    max_attempts = db.setting_int("max_pin_attempts")
+    attempts = device["failed_pins"] + 1
+    if attempts >= max_attempts:
+        db.update_device(device["id"], failed_pins=attempts, status="locked")
+        db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
+               ok=False, ip=client_ip(request))
+        return bad_request("locked", 423)
+    db.update_device(device["id"], failed_pins=attempts)
+    return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
+
+
+def shared_wrong_pin(device: dict, ip: str, limit: int) -> tuple[int, web.Response | None]:
+    """Count a wrong PIN on a shared device. Returns (wrong PINs in a row, the "locked" response
+    if this one locked the device).
+
+    Two limits. `limit` wrong in a row locks it; that count is forgotten after a quiet spell,
+    so a day of ordinary typos doesn't. And DAILY_WRONG_PINS within DAILY_WINDOW lock it however
+    slowly they come, so guessing can't be paced to stay under the first limit forever."""
+    now = time.time()
+    quiet = now - (device["failed_at"] or 0) > PIN_FAILURE_MEMORY
+    attempts = (0 if quiet else device["failed_pins"]) + 1
+    since = device["failed_day_since"]
+    if not since or now - since > DAILY_WINDOW:
+        since, today = now, 1
+    else:
+        today = device["failed_day_count"] + 1
+    fields = {"failed_pins": attempts, "failed_at": now,
+              "failed_day_count": today, "failed_day_since": since}
+    if attempts >= limit or today >= DAILY_WRONG_PINS:
+        db.update_device(device["id"], status="locked", **fields)
+        db.log(device["name"], "Phone locked after wrong PINs" if attempts >= limit
+               else f"Phone locked after {today} wrong PINs in a day",
+               role=device["role_name"], ok=False, ip=ip)
+        return attempts, bad_request("locked", 423)
+    db.update_device(device["id"], **fields)
+    return attempts, None
+
+
+async def unlock_named(request: web.Request, device: dict, data: dict) -> web.Response:
+    """Shared device with a list of names: the person picked their name, then typed their PIN."""
     ip = client_ip(request)
     max_attempts = db.setting_int("max_pin_attempts")
-
-    if device["signin_mode"] != "staff":
-        if not device["pin_hash"]:
-            return web.json_response({"session": ""})
-        if check_pin(pin, device["pin_hash"]):
-            db.update_device(device["id"], failed_pins=0)
-            return web.json_response({"session": new_session(device, None)})
-        attempts = device["failed_pins"] + 1
-        if attempts >= max_attempts:
-            db.update_device(device["id"], failed_pins=attempts, status="locked")
-            db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
-                   ok=False, ip=ip)
-            return bad_request("locked", 423)
-        db.update_device(device["id"], failed_pins=attempts)
-        return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
-
-    # Shared phone: a staff member signs in with their own PIN.
     try:
         member = db.staff(int(data.get("staff_id")))
     except (TypeError, ValueError):
         member = None
     if not member or member["status"] == "disabled" or not db.staff_allowed_on(member["id"], device):
         return bad_request("Pick your name again.", 404)
-    now = time.time()
     locked_msg = (f"{member['name']} is locked for a while after too many wrong PINs. "
                   "Try again later, or ask your manager to unlock you.")
-    if member["status"] == "locked" or (member["locked_until"] or 0) > now:
+    if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
         return bad_request(locked_msg, 403, staff_locked=True)
-    if check_pin(pin, member["pin_hash"]):
-        return staff_signed_in(device, member, ip)
+    ok = await pin_matches(str(data.get("pin", "")), member["pin_hash"])
+    # Fresh: an attempt on another device may have changed this person's count meanwhile.
+    member = db.staff(member["id"])
+    if not member or member["status"] == "disabled":
+        return bad_request("Pick your name again.", 404)
+    if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
+        return bad_request(locked_msg, 403, staff_locked=True)
+    if ok:
+        # Only a proven PIN may cost a Connecteam request (someone who just clocked in).
+        await recheck_clock(member["id"])
+        return staff_signed_in(device, db.staff(member["id"]), ip)
 
     attempts = member["failed_pins"] + 1
-    # Also count per phone, so cycling through names can't be used to guess PINs. The count
-    # is forgotten after a quiet spell with no wrong PINs.
-    quiet = now - (device["failed_at"] or 0) > PIN_FAILURE_MEMORY
-    phone_attempts = (0 if quiet else device["failed_pins"]) + 1
-    if phone_attempts >= max_attempts * 3:
-        db.update_device(device["id"], failed_pins=phone_attempts, failed_at=now, status="locked")
-        db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
-               ok=False, ip=ip)
-        return bad_request("locked", 423)
-    db.update_device(device["id"], failed_pins=phone_attempts, failed_at=now)
+    # Also counted per device, so cycling through names can't be used to guess PINs.
+    _, locked = shared_wrong_pin(device, ip, max_attempts * 3)
+    if locked:
+        return locked
     if attempts >= max_attempts:
         # A temporary lock that doesn't end their sessions on other phones, so wrong guesses
         # can't be used to shut a colleague out.
-        db.update_staff(member["id"], failed_pins=0, locked_until=now + STAFF_LOCK_SECONDS)
+        db.update_staff(member["id"], failed_pins=0, locked_until=time.time() + STAFF_LOCK_SECONDS)
         db.log(actor_name(device, member), "Locked for a while after wrong PINs",
                role=device["role_name"], ok=False, ip=ip)
         return bad_request(locked_msg, 403, staff_locked=True)
@@ -698,43 +783,33 @@ def staff_signed_in(device: dict, member: dict, ip: str) -> web.Response:
                               "staff_name": member["name"]})
 
 
-pin_only_locks: dict[int, asyncio.Lock] = {}
-
-
-async def unlock_by_pin(request: web.Request, data: dict) -> web.Response:
+async def unlock_by_pin(request: web.Request, device: dict, data: dict) -> web.Response:
     """Sign-in on a PIN-only shared device: whoever's PIN it is. With no name chosen, a guess
     could match anyone, so wrong PINs count against the device, which locks after the normal
     limit (not three times it, as when people pick their name first)."""
-    device, _ = authenticate(request, need_unlock=False)   # fresh, now that it's our turn
     pin = str(data.get("pin", ""))
     ip = client_ip(request)
     max_attempts = db.setting_int("max_pin_attempts")
-    candidates = db.staff_pins(device)
+    candidates = db.staff_pins(device) if parse_pin(pin) else []
     matches = await asyncio.to_thread(
-        lambda: [sid for sid, stored in candidates if parse_pin(pin) and check_pin(pin, stored)])
+        lambda: [sid for sid, stored in candidates if check_pin(pin, stored)])
     if len(matches) > 1:
         db.log(device["name"], "Blocked sign-in: PIN used by more than one person",
                role=device["role_name"], ok=False, ip=ip)
         return bad_request("That PIN belongs to more than one person, so it can't be used here. "
                            "Ask your manager to give each person their own PIN.", 403)
     member = db.staff(matches[0]) if matches else None
-    if member:
+    if member and member["status"] != "disabled":
         if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
             return bad_request(f"{member['name']} is locked for a while after too many wrong PINs. "
                                "Try again later, or ask your manager to unlock you.", 403,
                                staff_locked=True)
+        # Only a proven PIN may cost a Connecteam request (someone who just clocked in).
         await recheck_clock(member["id"])
-        device, _ = authenticate(request, need_unlock=False)
         return staff_signed_in(device, db.staff(member["id"]), ip)
-    now = time.time()
-    quiet = now - (device["failed_at"] or 0) > PIN_FAILURE_MEMORY
-    attempts = (0 if quiet else device["failed_pins"]) + 1
-    if attempts >= max_attempts:
-        db.update_device(device["id"], failed_pins=attempts, failed_at=now, status="locked")
-        db.log(device["name"], "Phone locked after wrong PINs", role=device["role_name"],
-               ok=False, ip=ip)
-        return bad_request("locked", 423)
-    db.update_device(device["id"], failed_pins=attempts, failed_at=now)
+    attempts, locked = shared_wrong_pin(device, ip, max_attempts)
+    if locked:
+        return locked
     return bad_request(f"Wrong PIN. {max_attempts - attempts} tries left.", 403)
 
 
@@ -750,7 +825,17 @@ PIN_TAKEN = "Someone else already uses that PIN. Give each person their own PIN.
 
 def new_session(device: dict, member: dict | None) -> str:
     session = secrets.token_urlsafe(24)
-    pin_sessions[session] = (device["id"], time.time(), member["id"] if member else None)
+    now = time.time()
+    if len(pin_sessions) >= MAX_SESSIONS:
+        # Forget sessions that have timed out; if there are still too many, the oldest go.
+        timeout = db.setting_int("pin_timeout_minutes") * 60
+        for key, (_, used, _) in list(pin_sessions.items()):
+            if now - used > timeout:
+                del pin_sessions[key]
+        oldest = sorted(pin_sessions, key=lambda k: pin_sessions[k][1])
+        for key in oldest[:len(pin_sessions) - MAX_SESSIONS + 1]:
+            del pin_sessions[key]
+    pin_sessions[session] = (device["id"], now, member["id"] if member else None)
     return session
 
 
@@ -830,9 +915,11 @@ async def recheck_clock(staff_id) -> None:
 
 
 async def api_action(request: web.Request):
-    session = pin_sessions.get(request.headers.get("X-Session", ""))
-    if session and session[2]:
-        await recheck_clock(session[2])
+    device, member = authenticate(request, active=True)
+    if member and clock_block(member):
+        # Signed in, but the last check didn't find them on the clock: they may have just
+        # clocked in, so ask Connecteam (at most every 30 seconds) before refusing.
+        await recheck_clock(member["id"])
     device, member = authenticate(request, active=True, control=True)
     data = await read_json(request)
     entity_id = str(data.get("entity_id", ""))
@@ -869,6 +956,10 @@ async def api_action(request: web.Request):
         return bad_request(str(err))
     except HomeAssistantError as err:
         log.warning("Service call failed: %s", err)
+        # It never reached the device, so trying again straight away is a retry, not a double
+        # tap: it must be sent (and not refused as too soon).
+        last_command.pop((device["id"], entity_id), None)
+        last_entity_action.pop((device["id"], entity_id), None)
         db.log(actor, action, role=device["role_name"], entity_id=entity_id,
                detail=str(err)[:200], ok=False, ip=ip)
         return bad_request("The system didn't accept that. Try again.", 502)
@@ -926,33 +1017,49 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
     return False
 
 
+STAFF_SECURITY_HEADERS = {
+    "Content-Security-Policy":
+        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def add_staff_headers(request: web.Request, headers) -> None:
+    for key, value in STAFF_SECURITY_HEADERS.items():
+        headers.setdefault(key, value)
+    if request.path.startswith("/api/"):
+        headers["Cache-Control"] = "no-store"
+    elif request.path.startswith("/static/"):
+        headers["Cache-Control"] = "no-cache"  # always check for a newer version
+
+
 @web.middleware
 async def staff_headers(request: web.Request, handler):
     note_tunnel_source(request)
-    if (db.settings().get("phones_via_tunnel_only") == "1"
-            and not from_tunnel(request.remote)):
-        # Direct connections from the local network are refused; only the Cloudflare Tunnel
-        # (the add-on, or a tunnel computer listed in Settings) may pass phones through.
-        response = web.Response(status=403, text="Staff Portal is only available through the "
-                                                 "property's secure address.")
-    else:
-        response = await handler(request)
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
-    )
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    if request.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
-    elif request.path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-cache"  # always check for a newer version
+    try:
+        if (db.settings().get("phones_via_tunnel_only") == "1"
+                and not from_tunnel(request.remote)):
+            # Direct connections from the local network are refused; only the Cloudflare Tunnel
+            # (the add-on, or a tunnel computer listed in Settings) may pass phones through.
+            response = web.Response(status=403, text="Staff Portal is only available through the "
+                                                     "property's secure address.")
+        else:
+            response = await handler(request)
+    except web.HTTPException as exc:
+        # Errors (signed out, locked, bad request...) get the same protective headers.
+        add_staff_headers(request, exc.headers)
+        raise
+    except (ValueError, UnicodeError):
+        response = bad_request("That request couldn't be read.")
+    add_staff_headers(request, response.headers)
     return response
 
 
 def staff_app() -> web.Application:
     app = web.Application(middlewares=[staff_headers], client_max_size=64 * 1024)
+    app[BODY_SECONDS] = 10.0
     app.router.add_get("/", staff_index)
     app.router.add_get("/e/{code}", staff_enroll_page)
     app.router.add_get("/manifest.webmanifest", staff_manifest)
@@ -983,15 +1090,16 @@ def setup_url(code: str | None) -> str | None:
 
 
 def device_pages(device: dict) -> list[str] | None:
-    """Layout pages chosen for a phone, or None for every page."""
+    """Layout pages chosen for a phone, or None for every page. A damaged value means no
+    pages rather than every page, so it can never widen what a phone sees."""
     raw = device.get("layout_pages")
     if not raw:
         return None
     try:
         value = json.loads(raw)
     except ValueError:
-        return None
-    return [str(i) for i in value] if isinstance(value, list) else None
+        return []
+    return [str(i) for i in value] if isinstance(value, list) else []
 
 
 def device_payload() -> list[dict]:
@@ -1396,12 +1504,14 @@ async def admin_device_action(request: web.Request):
             """UPDATE devices SET status = 'revoked', token_hash = NULL, enroll_code = NULL
                WHERE id = ?""", (device["id"],))
         db.conn.commit()
+        db.revoke_tokens(device["id"])   # and no backup can bring it back
         db.log(who, f"Revoked phone {device['name']}")
     elif action == "reenroll":
         db.new_enroll_code(device["id"])
         db.log(who, f"New setup code for {device['name']}")
     elif action == "unlock":
-        db.update_device(device["id"], status="active", failed_pins=0)
+        db.update_device(device["id"], status="active", failed_pins=0, failed_day_count=0,
+                         failed_day_since=None)
         db.log(who, f"Unlocked phone {device['name']}")
     else:
         raise web.HTTPNotFound()
@@ -1694,6 +1804,8 @@ async def admin_import(request: web.Request):
         result = importer(db, data.get("file"), str(data.get("mode") or ""))
     except ValueError as err:
         return bad_request(str(err))
+    for staff_id in result.pop("signed_out", []):
+        staff_sessions_end(staff_id)   # their PIN changed, or they're turned off
     db.log(admin_name(request), f"Imported {kind}",
            detail=f"{result['added']} added, {result['replaced']} replaced, {result['skipped']} skipped")
     return web.json_response(result)
@@ -1707,16 +1819,16 @@ async def admin_backup(request: web.Request):
 async def check_backup(data) -> dict:
     # Decoding the logo is image work, so keep it off the event loop.
     return await asyncio.to_thread(transfer.clean_backup, data, clean_settings, db.settings(),
-                                   branding.clean_logo)
+                                   branding.clean_logo, db.known_tokens())
 
 
 async def admin_restore_preview(request: web.Request):
     data = (await read_json(request)).get("backup")
     try:
-        await check_backup(data)
+        snap = await check_backup(data)
     except ValueError as err:
         return bad_request(str(err))
-    return web.json_response(transfer.backup_summary(data))
+    return web.json_response({**transfer.backup_summary(data), "needs_setup": snap["needs_setup"]})
 
 
 async def admin_restore(request: web.Request):
@@ -1766,15 +1878,19 @@ async def admin_safety_backup(request: web.Request):
 
 
 async def admin_upload_logo(request: web.Request):
-    reader = await request.multipart()
-    field = await reader.next()
-    if not field or field.name != "logo":
-        return bad_request("No file received.")
     raw = bytearray()
-    while chunk := await field.read_chunk(64 * 1024):
-        raw.extend(chunk)
-        if len(raw) > MAX_LOGO_BYTES:
-            return bad_request("That file is too big. Use an image under 5 MB.", 413)
+    try:
+        async with asyncio.timeout(60):
+            reader = await request.multipart()
+            field = await reader.next()
+            if not field or field.name != "logo":
+                return bad_request("No file received.")
+            while chunk := await field.read_chunk(64 * 1024):
+                raw.extend(chunk)
+                if len(raw) > MAX_LOGO_BYTES:
+                    return bad_request("That file is too big. Use an image under 5 MB.", 413)
+    except TimeoutError:
+        return bad_request("The upload took too long. Try again.", 408)
     try:
         await asyncio.to_thread(branding.save_logo, bytes(raw))
     except Exception:
@@ -1807,11 +1923,12 @@ async def admin_guard(request: web.Request, handler):
         if not admin:
             return web.Response(status=403, text="Only Home Assistant administrators can open "
                                                  "Staff Access.")
-        # Changes must come from the dashboard itself: it sends this header, which another
-        # website can't add to a request without the browser blocking it.
-        if request.method not in ("GET", "HEAD") and request.headers.get(
-                "X-Requested-With") != "staff-portal":
-            return web.Response(status=403, text="Request blocked.")
+    # Changes must come from the dashboard itself: it sends this header, which another website
+    # can't add to a request without the browser blocking it. Checked for local connections
+    # too, in case the dashboard is put behind a proxy on the same computer.
+    if request.method not in ("GET", "HEAD") and request.headers.get(
+            "X-Requested-With") != "staff-portal":
+        return web.Response(status=403, text="Request blocked.")
     try:
         response = await handler(request)
     except ValueError:
@@ -1824,6 +1941,7 @@ async def admin_guard(request: web.Request, handler):
 def admin_app() -> web.Application:
     # Room for a full backup with its logo.
     app = web.Application(middlewares=[admin_guard], client_max_size=16 * 1024 * 1024)
+    app[BODY_SECONDS] = 120.0   # a 16 MB backup over a slow connection
     app.router.add_get("/", admin_index)
     app.router.add_static("/static/", os.path.join(HERE, "admin"))
     app.router.add_get("/logo.png", logo)
@@ -1868,14 +1986,28 @@ def admin_app() -> web.Application:
     return app
 
 
+def raise_file_limit() -> None:
+    """Allow as many open connections as the system lets us (often 1024 by default), so it takes
+    far more connections to run out."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = hard if hard != resource.RLIM_INFINITY else max(soft, 65536)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ImportError, ValueError, OSError) as err:
+        log.info("Couldn't raise the open-file limit: %s", err)
+
+
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     await ha.start()
     await connecteam.start()
     clock_task = asyncio.create_task(connecteam.run())
+    raise_file_limit()
     runners = []
     for app, port in ((admin_app(), ADMIN_PORT), (staff_app(), STAFF_PORT)):
-        runner = web.AppRunner(app, access_log=None)
+        runner = web.AppRunner(app, access_log=None, keepalive_timeout=IDLE_SECONDS)
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port).start()
         runners.append(runner)

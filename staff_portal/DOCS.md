@@ -243,11 +243,12 @@ phones: a role, layout pages, PINs, per-person sign-in and locked controls all w
    pick a role. For a computer several people use, set **Who uses it** to **Shared** so each
    person signs in with their own PIN (they can type it on the keyboard).
 2. A setup link appears instead of a QR code. Click **Copy link** and open it in the browser on
-   that computer (Chrome, Edge, Safari or Firefox). Whoever opens it first gets access, so only
+   that computer (Chrome, Edge, Safari or Firefox). Whoever sets it up first gets access, so only
    open it on the computer you're setting up.
-3. Staff Portal opens, signed in. In Chrome or Edge, use **Install app** from the browser's menu
-   to give it its own window and icon, or just bookmark it. It stays signed in in that browser
-   until you revoke it.
+3. Click **Set up this computer** on the page that opens. It waits for that click, so an email
+   security scanner that opens links can't use up the one-time link. In Chrome or Edge, use
+   **Install app** from the browser's menu to give it its own window and icon, or just bookmark
+   it. It stays signed in in that browser until you revoke it.
 
 On a computer the staff app works like a desktop app rather than a big phone:
 
@@ -284,6 +285,9 @@ and they're signed out automatically after the idle time set in **Settings**.
   Staff tab). The lock only stops new sign-ins; if they're already signed in on another phone,
   that stays signed in. Wrong PINs across several names lock the **phone** until you unlock it,
   so PINs can't be guessed by switching names.
+- However slowly they come, **20 wrong PINs on one shared phone or computer within 24 hours lock
+  it** until you unlock it on the **Phones & computers** tab (the activity log says why). This stops
+  someone with the device guessing a few PINs at a time, forever.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
 - Everyone needs their own PIN: a PIN someone else already uses is refused.
 
@@ -291,8 +295,8 @@ and they're signed out automatically after the idle time set in **Settings**.
 to skip the list of names. The device shows only a PIN pad, and the PIN says who's signing in.
 The device never receives the list of names. Because a wrong guess could match anyone, wrong
 PINs count against the device, which locks after **Lock phone after wrong PINs** wrong PINs in
-a row (within 15 minutes) until you unlock it on the **Phones & computers** tab. If two people
-still share a PIN from before, that PIN can't sign in; give one of them a new PIN.
+a row (within 15 minutes), or 20 in a day, until you unlock it on the **Phones & computers** tab.
+If two people still share a PIN from before, that PIN can't sign in; give one of them a new PIN.
 
 ## Connecteam: add staff and require clocking in (optional)
 
@@ -356,14 +360,17 @@ a small, steady share:
 - With one time clock, hourly checks are 24 requests a day. Add one for each sign-in or control
   by someone the last check didn't find clocked in, typically the start of each shift. With many
   time clocks it checks less often if needed, so regular checks stay under 15% of your daily limit.
-- Those extra checks happen at most every 30 seconds, and less often while Connecteam is failing.
+- Those extra checks happen only after someone types their correct PIN (or uses a control while
+  signed in), so a wrong PIN, or someone just holding a phone, never costs a request. They happen
+  at most every 30 seconds (less often while Connecteam is failing) and stop once three quarters
+  of the day's share is used, keeping the rest for the hourly checks.
 - Its own hard limits: 20 requests a minute, and a fifth of your account's daily limit (2,000 on
   Expert) per day, counted across add-on restarts. At the cap it pauses until midnight UTC.
 - It reads Connecteam's rate-limit headers. If your account (from any integration) has less than
   10% of its daily requests left, or is close to the per-minute limit, Staff Access pauses until
   the limit resets.
 - If Connecteam says "too many requests", it waits as long as Connecteam asks (at least a
-  minute, doubling each time) and never retries straight away.
+  minute, doubling each time, and never more than 24 hours) and never retries straight away.
 - If Connecteam rejects the keys or the app is missing a scope, it stops all automatic requests
   until you save the Connecteam settings again or click **Test connection**.
 - Requests identify themselves as Staff Portal (in the User-Agent).
@@ -415,7 +422,9 @@ How it works and what to know:
 ## Security settings
 
 PINs are never stored as typed. Each PIN is scrambled with scrypt and its own random salt, so
-nobody can read PINs back, even from a backup.
+they can't simply be read back. PINs are short, though, so someone with a copy of a backup or
+staff export could work them out by trying every combination on their own computer, where the
+wrong-PIN limits don't apply. Keep backups and exports private, like passwords.
 
 Under **Settings → Phone security**:
 
@@ -442,6 +451,13 @@ Always on:
   touched, even with the app left open on the screen.
 - Each phone can send up to 60 actions a minute, and one action per device each second, so a
   stuck button or a script can't flood your equipment.
+- Each phone or computer can try to sign in at most 15 times a minute, and shared ones lock after
+  20 wrong PINs in a day. Checking a PIN is deliberately slow work, done off to the side so a
+  stream of sign-ins can't slow everything else down.
+- Connections that sit idle for 15 seconds, or that send a request too slowly, are closed, so
+  nobody can tie the add-on up by opening lots of connections and doing nothing with them.
+- A setup code can't be guessed (and each works once). Repeated wrong setup codes slow down that
+  address, and 200 in 10 minutes from anywhere pause setup for everyone for a while.
 - Double taps are ignored: the same command from the same phone within 3 seconds isn't sent
   again or logged again, and switching something on or off that already is does nothing. The
   app also ignores taps on a control while its last command is still being sent.
@@ -462,7 +478,9 @@ The app also runs as a plain Docker container. Set `HA_URL` (such as
 `http://192.168.1.50:8123`) and `HA_TOKEN` (a long-lived token from an admin user), mount a
 volume at `/data`, and publish port 8787 for staff. The admin dashboard listens on port 8099
 and only accepts connections from the addresses in `ADMIN_ALLOWED_IPS` (default
-`172.30.32.2,127.0.0.1`), so put it behind something you trust before exposing it.
+`172.30.32.2,127.0.0.1`), so put it behind something you trust before exposing it. Every change
+(anything other than reading) must carry the header `X-Requested-With: staff-portal`, as the
+dashboard itself does, so another website can't make changes through an admin's browser.
 
 ## Backups, export and import
 
@@ -474,8 +492,13 @@ between systems.
 layout, phones, staff and each phone's own arrangement. **Restore from a backup…** puts all of
 that back:
 
-- Phones that were set up keep working without re-pairing.
+- Phones that were set up on this system keep working without re-pairing.
+- A phone or computer that wasn't signed in on this system needs setting up again after the
+  restore: one from another system's backup, one you've revoked since the backup was made, or
+  one added to the file by someone else. The restore warning lists them first. So an old backup
+  can't bring back a lost phone you revoked, and an edited file can't add a working phone.
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
+- The Connecteam Client Secret is never in a backup and a restore never changes it.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - The activity log stays as it is.
@@ -488,8 +511,12 @@ that back:
 - **Import layout** loads the file into the Layout tab so you can check it, then click
   **Save layout**. Whole-area items are matched to your areas by name.
 - **Import roles** and **Import staff** add to what's there. If a name already exists, you
-  choose to **replace** it, **keep both** (the imported one gets "(imported)" after its name), or
-  **skip** it. Areas (for roles) and phones (for staff) are matched by name.
+  choose to **skip** it (the choice that's selected), **keep both** (the imported one gets
+  "(imported)" after its name), or **replace** it. Areas (for roles) and phones (for staff) are
+  matched by name.
+- Replacing staff uses the file's PINs, and anyone whose PIN changes is signed out. Someone you've
+  turned off stays off, even if the file has them on.
 
 Keep these files private. Staff and phone PINs are included only in scrambled form (they can't
-be read back), but someone with the file could try to guess them offline.
+be read back directly), but PINs are short, so someone with the file could work them out by
+trying every combination offline.

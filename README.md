@@ -73,13 +73,17 @@ system.
 - Only Home Assistant **administrators** can open the dashboard.
 - **Staff devices** hold a random token, which is stored hashed on the server.
 - **PINs** are scrambled with scrypt and a salt, and never stored readable.
-- **Wrong PINs** lock a person temporarily, or the device after repeated failures.
-- **Speed limits** apply to actions, failed setup codes and error reports.
+- **Wrong PINs** lock a person temporarily, or the device after repeated failures, including a
+  daily limit that slow, paced guessing can't get around.
+- **Speed limits** apply to sign-ins, actions, failed setup codes and error reports, and idle or
+  slow connections are closed.
 - **Strict security headers:** a Content Security Policy and protection against cross-site
   requests.
 - **Optional:** require a PIN on every device, and only allow phones in through your Cloudflare
   Tunnel (with the tunnel's address detected for you).
-- **Backup files** never include Home Assistant sign-ins or pending setup codes.
+- **Backup files** never include Home Assistant sign-ins, pending setup codes or the Connecteam
+  secret. A restore only keeps phones signed in that this system set up and hasn't revoked, so an
+  old or edited backup can't bring back or add a working phone.
 
 ## Screenshots
 

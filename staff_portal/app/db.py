@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS role_areas (
     level TEXT NOT NULL CHECK (level IN ('view', 'control')),
     PRIMARY KEY (role_id, area_id)
 );
+-- Every device token this system has issued and not since revoked (by hash). A restore only
+-- keeps a phone signed in if its token is here, so a tampered backup can't add a working phone
+-- and an old backup can't bring back a phone that was revoked. Survives restores, so undoing
+-- one keeps phones signed in.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    token_hash TEXT PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    issued_at REAL
+);
+
 -- A phone's own arrangement (or, on shared phones, one staff member's): JSON
 -- {"pages": [page IDs], "items": {page ID: [item IDs]}}. Owner is "d:<device id>" or "s:<staff id>".
 CREATE TABLE IF NOT EXISTS phone_orders (
@@ -116,6 +126,10 @@ MIGRATIONS = {
         # When this phone's shared-sign-in failure count was last increased; the count is
         # forgotten after a quiet spell rather than reset by someone else signing in.
         "failed_at": "REAL",
+        # Wrong PINs on a shared device in the current 24-hour window, and when it started.
+        # Unlike failed_pins this isn't forgotten after a quiet spell.
+        "failed_day_count": "INTEGER NOT NULL DEFAULT 0",
+        "failed_day_since": "REAL",
         # 'phone' or 'computer' (a front desk PC, say). Same app and rules; it only changes how
         # the device is set up and described.
         "kind": "TEXT NOT NULL DEFAULT 'phone'",
@@ -192,6 +206,10 @@ class Database:
             self.conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
             )
+        # Phones signed in before device_tokens existed (or set up by an older version).
+        self.conn.execute(
+            """INSERT OR IGNORE INTO device_tokens (token_hash, device_id, issued_at)
+               SELECT token_hash, id, ? FROM devices WHERE token_hash IS NOT NULL""", (time.time(),))
         self.conn.commit()
 
     # Settings
@@ -381,7 +399,7 @@ class Database:
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
-                   "layout_pages", "failed_at", "pin_only"}
+                   "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -477,6 +495,7 @@ class Database:
                status = 'pending', failed_pins = 0 WHERE id = ?""",
             (code, time.time() + ttl, device_id),
         )
+        self.conn.execute("DELETE FROM device_tokens WHERE device_id = ?", (device_id,))
         self.conn.commit()
         return code
 
@@ -492,8 +511,20 @@ class Database:
                status = 'active', last_seen = ? WHERE id = ?""",
             (hash_token(token), time.time(), row["id"]),
         )
+        self.conn.execute("INSERT OR REPLACE INTO device_tokens (token_hash, device_id, issued_at) "
+                          "VALUES (?, ?, ?)", (hash_token(token), row["id"], time.time()))
         self.conn.commit()
         return dict(row), token
+
+    def revoke_tokens(self, device_id: int) -> None:
+        """Forget every token issued to a device, so no backup can bring it back."""
+        self.conn.execute("DELETE FROM device_tokens WHERE device_id = ?", (device_id,))
+        self.conn.commit()
+
+    def known_tokens(self) -> set[tuple[int, str]]:
+        """(device ID, token hash) for every token this system issued and hasn't revoked."""
+        return {(r["device_id"], r["token_hash"])
+                for r in self.conn.execute("SELECT device_id, token_hash FROM device_tokens")}
 
     def device_by_token(self, token: str) -> dict | None:
         row = self.conn.execute(
@@ -510,6 +541,7 @@ class Database:
     def delete_device(self, device_id: int) -> None:
         self.conn.execute("DELETE FROM phone_orders WHERE owner = ?", (f"d:{device_id}",))
         self.conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        self.conn.execute("DELETE FROM device_tokens WHERE device_id = ?", (device_id,))
         self.conn.commit()
 
     # Restoring a backup
@@ -522,7 +554,8 @@ class Database:
         c = self.conn
         links = {
             table: {r["id"]: r for r in c.execute(
-                f"SELECT id, name, ha_user, ha_refresh_token, ha_link_error FROM {table}")}
+                f"SELECT id, name, ha_user, ha_refresh_token, ha_link_error"
+                f"{', token_hash' if table == 'devices' else ''} FROM {table}")}
             for table in ("devices", "staff")
         }
         try:
@@ -557,6 +590,8 @@ class Database:
             for table, rows in (("devices", snap["devices"]), ("staff", snap["staff"])):
                 for row in rows:
                     old = links[table].get(row["id"])
+                    if table == "devices" and old and old["token_hash"] != row["token_hash"]:
+                        continue   # not the same signed-in phone, so not its Home Assistant user
                     if old and old["name"] == row["name"] and old["ha_refresh_token"]:
                         kept.add(old["ha_refresh_token"])
                         c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,

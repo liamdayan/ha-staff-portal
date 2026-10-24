@@ -8,7 +8,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 MAX_LOGO_PX = 1024
 # Refuse huge images before decoding them: a small compressed file can expand to gigabytes.
 MAX_SOURCE_PIXELS = 25_000_000
-LOGO_FORMATS = ["PNG", "JPEG", "WEBP", "GIF"]
+# Formats a logo may be uploaded in. GIF isn't one: logos are stored as PNG anyway, and GIF
+# decoding has had denial-of-service bugs.
+LOGO_FORMATS = ["PNG", "JPEG", "WEBP"]
 
 
 def hex_to_rgb(value: str, fallback=(255, 255, 255)):

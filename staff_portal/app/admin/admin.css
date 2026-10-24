@@ -497,3 +497,4 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .ct-user:disabled { opacity: 0.55; cursor: default; }
 .ct-user small { color: var(--muted); }
 #ct-dialog input[type="search"][hidden] { display: none; }
+.choice.danger strong { color: var(--danger); }

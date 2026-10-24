@@ -19,6 +19,8 @@ import aiohttp
 log = logging.getLogger("staff_portal")
 
 WS_MAX_MESSAGE = 64 * 1024 * 1024  # aiohttp's default (4 MB) is too small for big registries
+ADMIN_REFRESH_GAP = 5      # seconds between lookups of Home Assistant's users
+NOT_ADMIN_SECONDS = 10     # how long "this user isn't an admin" is remembered
 
 # Rendered as JSON so Home Assistant's template whitespace handling can't change the layout.
 # Lists line up by position: "areas"[i] is the area ID (or null) of "ids"[i].
@@ -74,6 +76,8 @@ class HomeAssistant:
         self._tucked_away: set[str] = set()
         self._admins: set[str] = set()
         self._admins_at = float("-inf")
+        self._not_admins: dict[str, float] = {}   # user ID -> when we last found it isn't one
+        self._admin_lookup = asyncio.Lock()
         self._core: str | None = None
         self._user_tokens: dict[str, tuple[str, float]] = {}  # refresh token -> (access, expiry)
 
@@ -173,17 +177,31 @@ class HomeAssistant:
                 if isinstance(e, dict) and (e.get("entity_category") or e.get("hidden_by"))}
 
     async def is_admin(self, user_id: str) -> bool:
-        """Whether a Home Assistant user is an active administrator. Cached for a minute;
-        an unknown ID triggers one fresh lookup (someone may have just been made admin)."""
-        stale = time.monotonic() - self._admins_at > 60
-        if stale or user_id not in self._admins:
-            users = await self.ws_command({"type": "config/auth/list"})
-            self._admins = {
-                u["id"] for u in users
-                if isinstance(u, dict) and u.get("is_active") and not u.get("system_generated")
-                and (u.get("is_owner") or "system-admin" in (u.get("group_ids") or []))}
-            self._admins_at = time.monotonic()
-        return user_id in self._admins
+        """Whether a Home Assistant user is an active administrator. Admins are cached for a
+        minute. Anyone else triggers a fresh lookup (they may have just been made admin), but
+        at most one lookup runs at a time, none within ADMIN_REFRESH_GAP of the last, and a "no"
+        is remembered for NOT_ADMIN_SECONDS: requests from non-admins can't make the add-on
+        query Home Assistant over and over."""
+        now = time.monotonic()
+        if user_id in self._admins and now - self._admins_at <= 60:
+            return True
+        if now - self._not_admins.get(user_id, float("-inf")) < NOT_ADMIN_SECONDS:
+            return False
+        async with self._admin_lookup:
+            if time.monotonic() - self._admins_at > ADMIN_REFRESH_GAP:
+                users = await self.ws_command({"type": "config/auth/list"})
+                self._admins = {
+                    u["id"] for u in users
+                    if isinstance(u, dict) and u.get("is_active") and not u.get("system_generated")
+                    and (u.get("is_owner") or "system-admin" in (u.get("group_ids") or []))}
+                self._admins_at = time.monotonic()
+        if user_id in self._admins:
+            self._not_admins.pop(user_id, None)
+            return True
+        if len(self._not_admins) > 1000:
+            self._not_admins.clear()
+        self._not_admins[user_id] = time.monotonic()
+        return False
 
     async def areas(self, max_age: float = 300.0) -> dict[str, str]:
         """{entity_id: Home Assistant area name} for entities that have an area."""

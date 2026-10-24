@@ -4,6 +4,7 @@ Staff never send raw service calls. They pick an action from this table, and eve
 parameter is checked against the entity's own limits before anything reaches Home Assistant.
 """
 
+import math
 import re
 
 # Parameter specs:
@@ -79,6 +80,15 @@ class ActionRejected(Exception):
     pass
 
 
+def _bound(value, default: float) -> float:
+    """A min/max reported by Home Assistant, or our default if it isn't a usable number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def build_service_call(entity_id: str, action: str, params: dict, state: dict | None):
     """Validate a staff request and return (domain, service, data) for Home Assistant."""
     domain = domain_of(entity_id)
@@ -95,17 +105,20 @@ def build_service_call(entity_id: str, action: str, params: dict, state: dict | 
             _, min_attr, max_attr, lo, hi = spec
             try:
                 num = float(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ActionRejected(f"'{name}' must be a number") from None
-            lo = attrs.get(min_attr, lo) if min_attr else lo
-            hi = attrs.get(max_attr, hi) if max_attr else hi
+            # The device's own limits, if Home Assistant reports sensible ones.
+            lo = _bound(attrs.get(min_attr), lo) if min_attr else lo
+            hi = _bound(attrs.get(max_attr), hi) if max_attr else hi
             if not lo <= num <= hi:
-                raise ActionRejected(f"'{name}' must be between {lo} and {hi}")
+                raise ActionRejected(f"'{name}' must be between {lo:g} and {hi:g}")
             data[name] = int(num) if num.is_integer() else num
         elif spec[0] == "choice":
-            choices = attrs.get(spec[1]) or []
-            if value not in choices:
-                raise ActionRejected(f"'{value}' is not a valid {name}")
+            # Only one of the device's listed options. If Home Assistant doesn't report a proper
+            # list, nothing is accepted (a string "list" would otherwise match any part of it).
+            choices = attrs.get(spec[1])
+            if not isinstance(value, str) or not isinstance(choices, list) or value not in choices:
+                raise ActionRejected(f"'{str(value)[:40]}' is not a valid {name}")
             data[name] = value
     return domain, action, data
 
