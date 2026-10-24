@@ -4,6 +4,8 @@
   const TOKEN_KEY = "staff_device_token";
   const SESSION_KEY = "staff_pin_session";
   const POLL_MS = 5000;
+  const FAST_POLL_MS = 1500;   // while a change is waiting to be confirmed by the device
+  const CONFIRM_MS = 90000;    // how long a change may take to show up before we say so
 
   const local = storage(() => window.localStorage);
   const session = storage(() => window.sessionStorage);
@@ -120,7 +122,7 @@
   async function previewApi(path) {
     if (path === "/api/action") {
       toast("Preview: nothing was sent to your equipment.");
-      return { status: 200, data: { ok: true } };
+      return { status: 200, data: { ok: true, unchanged: true } };   // so nothing waits for it
     }
     const headers = { "Content-Type": "application/json", "X-Requested-With": "staff-portal" };
     let request;
@@ -484,7 +486,7 @@
       render(res.data);
     } finally {
       // Keep updating even if drawing this answer went wrong.
-      if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, POLL_MS);
+      if (document.visibilityState === "visible") pollTimer = setTimeout(refresh, expected.size ? FAST_POLL_MS : POLL_MS);
     }
   }
 
@@ -494,7 +496,79 @@
   const view = { pageId: session.get("page"), detail: null };
   let lastData = null;
 
+  // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
+  // new setting at their next check-in, seconds later. Until then the tile keeps showing what
+  // was asked for, marked "Updating…", instead of jumping back to the old setting.
+  // entity_id -> { fields: Map(key -> { want, was, earlier }), until }, where key is "state"
+  // or "a:<attribute>".
+  const expected = new Map();
+  const latest = new Map();   // entity_id -> the entity as Home Assistant last reported it
+
+  // What a command changes when it works, as [[key, value]], or [] for commands whose result
+  // shows straight away or can't be predicted.
+  function changeOf(entity, action, params) {
+    switch (action) {
+      case "set_temperature": return [["a:temperature", params.temperature]];
+      case "set_hvac_mode": return [["state", params.hvac_mode]];
+      case "set_operation_mode": return [["state", params.operation_mode], ["a:operation_mode", params.operation_mode]];
+      case "set_value": return [["state", params.value]];
+      case "select_option": return [["state", params.option]];
+      case "turn_on":
+      case "turn_off": return TOGGLES.has(entity.domain) ? [["state", action === "turn_on" ? "on" : "off"]] : [];
+      default: return [];
+    }
+  }
+
+  const fieldOf = (e, key) => (key === "state" ? e.state : e.attributes?.[key.slice(2)]);
+  const sameValue = (a, b) => a === b ||
+    (a != null && b != null && a !== "" && b !== "" && Number(a) === Number(b));
+
+  function expectChange(entity, action, params) {
+    const reported = latest.get(entity.entity_id);
+    const change = changeOf(entity, action, params);
+    if (!reported || !change.length) return;
+    const entry = expected.get(entity.entity_id) || { fields: new Map() };
+    for (const [key, want] of change) {
+      const old = entry.fields.get(key);
+      entry.fields.set(key, { want, was: old ? old.was : fieldOf(reported, key),
+        earlier: old ? [...old.earlier, old.want] : [] });
+    }
+    entry.until = Date.now() + CONFIRM_MS;
+    expected.set(entity.entity_id, entry);
+  }
+
+  // The entity as tiles should show it, with changes still on their way filled in. A change
+  // counts as arrived once the device reports what was asked, or anything new that isn't an
+  // earlier step (a unit may round a setpoint, or someone may have changed it since).
+  function withExpected(e) {
+    latest.set(e.entity_id, e);
+    const entry = expected.get(e.entity_id);
+    if (!entry) return e;
+    for (const [key, f] of entry.fields) {
+      const now = fieldOf(e, key);
+      if (sameValue(now, f.want) || (!sameValue(now, f.was) && !f.earlier.some((v) => sameValue(now, v)))) {
+        entry.fields.delete(key);
+      }
+    }
+    if (!entry.fields.size || e.state === "unavailable") {
+      expected.delete(e.entity_id);
+      return e;
+    }
+    if (Date.now() > entry.until) {
+      expected.delete(e.entity_id);
+      toast(`${e.name} hasn't confirmed the change yet. Check it again in a moment.`, true);
+      return e;
+    }
+    const shown = { ...e, attributes: { ...e.attributes }, waiting: true };
+    for (const [key, f] of entry.fields) {
+      if (key === "state") shown.state = String(f.want);
+      else shown.attributes[key.slice(2)] = f.want;
+    }
+    return shown;
+  }
+
   function render(data) {
+    data.entities = data.entities.map(withExpected);
     lastData = data;
     lock.enabled = !!data.control_lock;
     lock.minutes = data.control_lock_minutes || 10;
@@ -1102,6 +1176,7 @@
     tile.busy = false;
     tile.sending = false;
     if (res.status === 200) {
+      if (!res.data.unchanged) expectChange(tile.entity, action, params);
       setTimeout(refresh, 600);
     } else if (!handleAuthError(res)) {
       toast(res.data.error || "That didn't work.", true);
@@ -1430,6 +1505,8 @@
       tile.el.classList.toggle("off", e.state === "unavailable");
       build(e);
       tile.el.classList.toggle("controllable", canControl());
+      tile.el.classList.toggle("waiting", !!e.waiting);
+      if (e.waiting) status.textContent = [status.textContent, "Updating\u2026"].filter(Boolean).join(" \u00b7 ");
     };
     return tile;
   }
@@ -1560,11 +1637,18 @@
     }
   });
 
+  // The screen turning off (into a pocket, say) or switching to another app locks the controls
+  // straight away, so nothing can be pressed by accident while it's out of sight.
+  const lockWhenHidden = () => { if (lock.enabled && lock.until) relock(); };
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") drawLock();
     if (document.visibilityState === "visible" && live) refresh();
-    else if (document.visibilityState === "hidden") clearTimeout(pollTimer);
+    else if (document.visibilityState === "hidden") {
+      clearTimeout(pollTimer);
+      lockWhenHidden();
+    }
   });
+  window.addEventListener("pagehide", lockWhenHidden);
 
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault();

@@ -254,11 +254,20 @@ locked until they're unlocked on purpose. Readings always work.
   screen for about a second. A quick tap doesn't unlock.
 - Controls lock again after 10 minutes with no control used (each use restarts the 10 minutes),
   when someone taps **Lock now**, or when the phone asks for a PIN or someone signs out.
+- They also lock straight away when the screen turns off or the app goes to the background
+  (switching to another app, or another browser tab on a computer), so a phone put in a pocket
+  comes back locked.
 - The lock button only shows on screens that have controls.
 - Change the time, or turn this off, under **Settings → Staff phones → Lock controls until staff
   unlock them**. Phones pick up the change within a few seconds.
 
 This guards against slips, not people: what a phone may do still comes from its role.
+
+**Devices that report changes late.** Some devices, such as minisplit heat pumps, only tell Home
+Assistant about a new setting at their next check-in, seconds later. Until they do, the phone keeps
+showing the setting staff chose (temperature, mode, level or on/off), marked **Updating…**, and
+checks more often until the device confirms. If the device still hasn't confirmed after 90
+seconds, the phone shows the device's actual setting again and says the change wasn't confirmed.
 
 ## Rearranging on the phone
 

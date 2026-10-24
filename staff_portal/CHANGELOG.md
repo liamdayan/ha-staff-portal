@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1
+
+- **Controls lock when the screen turns off.** As soon as the phone's screen goes off or the app
+  goes to the background (another app, or another browser tab on a computer), the controls lock,
+  so a phone that's been in a pocket comes back locked.
+- **Fixed: thermostat changes looked slow or ignored.** Devices that report a new setting late,
+  such as minisplits, made the tile jump back to the old temperature or mode until the device
+  checked in, sometimes many seconds later. The tile now keeps the setting staff chose, marked
+  **Updating…**, checks every 1.5 seconds until the device confirms it, and says so if it still
+  hasn't after 90 seconds. The same goes for setpoints, dropdowns and on/off switches.
+
 ## 0.7.0
 
 **Kiosk and role-based devices**

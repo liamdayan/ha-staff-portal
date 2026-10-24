@@ -31,7 +31,10 @@ system.
   action is recorded under their name, or (per device) just types their PIN with no names
   shown. People are signed out after an idle time you set.
 - **Hold to unlock controls:** controls stay locked until someone presses and holds, and lock
-  again after 10 quiet minutes. Checking a temperature can't switch something by accident.
+  again after 10 quiet minutes or as soon as the screen turns off. Checking a temperature can't
+  switch something by accident.
+- **Changes stay put:** with devices that report back slowly (such as minisplits), the new
+  setting stays on screen, marked "Updating…", until the device confirms it.
 - **Group cards** (such as "Tub 1") show key readings at a glance and open into a screen with all
   of its readings and controls. Named dividers split that screen into sections.
 - **Foldable headings:** a folded heading shows how many cards it holds, and turns orange if one
