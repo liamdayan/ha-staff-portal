@@ -927,7 +927,7 @@
       class: active("person", m.id) ? "role-item person-item active" : "role-item person-item",
       onclick: () => openPerson(m.id),
     }, h("span", { class: "role-name" }, m.name),
-    h("span", { class: "role-meta" }, [ownChangesText(m) || "Same as role",
+    h("span", { class: "role-meta" }, [ownChangesText(m) || (m.role_id ? "Same as role" : "No access yet"),
       m.status === "disabled" ? "inactive" : ""].filter(Boolean).join(" · "))));
     const blocks = state.roles.map((r) => {
       const [access, users] = roleCounts(r);
