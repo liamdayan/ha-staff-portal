@@ -1660,11 +1660,11 @@
       markLayoutDirty();
       renderLayoutEditor();
     };
-    const moveIn = others.length ? h("select", {
+    const moveIn = others.length ? h("span", { class: "inline-select" }, h("select", {
       "aria-label": "Move a page into this group",
       onchange: (e) => regroup(d.pages.find((p) => p.id === e.target.value), group.id),
     }, h("option", { value: "" }, "Move a page here\u2026"),
-    ...others.map((p) => h("option", { value: p.id }, groupOf(p, d) ? `${p.name} (from ${groupOf(p, d).name})` : p.name))) : null;
+    ...others.map((p) => h("option", { value: p.id }, groupOf(p, d) ? `${p.name} (from ${groupOf(p, d).name})` : p.name)))) : null;
     box.replaceChildren(
       h("div", { class: "editor-head" },
         h("label", { class: "role-name-field" }, "Group name",
