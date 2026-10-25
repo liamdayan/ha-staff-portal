@@ -321,6 +321,12 @@ MIGRATIONS = {
         # NULL = none).
         "wristbands": "TEXT",
     },
+    "departments": {
+        # Whether people in it must be clocked in on Connecteam to sign in: 1 = everyone, 0 = no
+        # one, NULL = each person's own setting. A person's own, set by hand, still wins
+        # (Database.clock_in_rule).
+        "clock_in": "INTEGER",
+    },
 }
 
 DEFAULT_SETTINGS = {
@@ -432,7 +438,7 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
                 "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
                 "connecteam_note", "pin_length"}
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
-                     "card_lockout"}
+                     "card_lockout", "clock_in"}
 
 # One row of each log table as backups carry it: a section's "columns" are these fields, in this
 # order. Tuples rather than dicts because a full log is tens of thousands of rows, and a backup
@@ -775,6 +781,25 @@ class Database:
     def department(self, department_id) -> dict | None:
         return next((d for d in self.departments() if d["id"] == department_id), None)
 
+    def department_clock_ins(self) -> dict[int, int]:
+        """{department ID: its clock-in rule} for the departments that set one (1 or 0)."""
+        return dict(self.conn.execute(
+            "SELECT id, clock_in FROM departments WHERE clock_in IS NOT NULL").fetchall())
+
+    def clock_in_rule(self, member: dict, rules: dict | None = None) -> tuple[bool, str]:
+        """Whether this person must be clocked in on Connecteam to sign in, and where that comes
+        from: "person" (an admin set theirs by hand, which beats their department), "department"
+        (their department sets it for everyone in it) or "default" (their own setting, which the
+        Connecteam sync keeps in line with "People added this way must be clocked in"). The one
+        place the rule is worked out. rules: department_clock_ins(), when checking many people."""
+        if member.get("clock_in_set"):
+            return bool(member.get("require_clock_in")), "person"
+        rule = (self.department_clock_ins() if rules is None else rules).get(
+            member.get("department_id"))
+        if rule is not None:
+            return bool(rule), "department"
+        return bool(member.get("require_clock_in")), "default"
+
     def create_department(self, name: str, **fields) -> int:
         next_order = self.conn.execute(
             "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM departments").fetchone()[0]
@@ -910,7 +935,8 @@ class Database:
 
     def staff_for_device(self, device: dict) -> list[dict]:
         """Active staff members allowed to sign in on a shared phone."""
-        cols = "s.id, s.name, s.connecteam_user_id, s.require_clock_in"
+        cols = ("s.id, s.name, s.connecteam_user_id, s.require_clock_in, s.clock_in_set, "
+                "s.department_id")
         if device["staff_all"]:
             rows = self.conn.execute(
                 f"SELECT {cols} FROM staff s WHERE status != 'disabled' ORDER BY name COLLATE NOCASE")
@@ -1077,11 +1103,11 @@ class Database:
                 c.execute("DELETE FROM departments")
                 c.executemany(
                     """INSERT INTO departments (id, name, sort_order, smart_group_id, role_id,
-                       card_access, card_days, card_lockout, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       card_access, card_days, card_lockout, created_at, clock_in)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [(d["id"], d["name"], d["sort_order"], d["smart_group_id"], d["role_id"],
-                      d["card_access"], d["card_days"], d["card_lockout"], d["created_at"])
-                     for d in snap["departments"]])
+                      d["card_access"], d["card_days"], d["card_lockout"], d["created_at"],
+                      d.get("clock_in")) for d in snap["departments"]])
             else:
                 by_name = {r["name"].casefold(): r["id"] for r in snap["roles"]}
                 c.executemany("UPDATE departments SET role_id = ? WHERE id = ?", [

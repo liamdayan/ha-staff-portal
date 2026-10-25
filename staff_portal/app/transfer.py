@@ -14,9 +14,10 @@ What files never contain:
 - The door list (it comes from TT Hotel). Only the door names and hiding chosen here travel, and
   land on doors the system already has.
 (A migration file, migrate.py, carries all of these, encrypted.)
-Departments (with their key card templates) are in backups; a backup from before departments
-leaves the ones here as they are. The activity log and the record of wristbands and key cards
-made are in backups from 0.8.6 (schema 4), and a restore adds them to the ones here.
+Departments (with their key card templates and clock-in rules) are in backups; a backup from
+before departments leaves the ones here as they are. The activity log and the record of
+wristbands and key cards made are in backups from 0.8.6 (schema 4), and a restore adds them to
+the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
 """
@@ -206,6 +207,26 @@ def card_days(value, default: int = 30) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return max(1, min(MAX_CARD_DAYS, value))
+
+
+def clock_in_rule(value) -> int | None:
+    """A department's clock-in rule: 1 (everyone in it must be clocked in to sign in), 0 (no one
+    in it needs to) or None (each person's own setting). Raises ValueError for anything else."""
+    if value is None or value == "":
+        return None
+    if value in (True, "1"):
+        return 1
+    if value in (False, "0"):
+        return 0
+    raise ValueError("Choose a clock-in rule from the list.")
+
+
+def _file_clock_in(value) -> int | None:
+    """A department's clock-in rule from a file: damaged means each person's own setting."""
+    try:
+        return clock_in_rule(value)
+    except ValueError:
+        return None
 
 
 def _stored_card_access(raw) -> str | None:
@@ -412,12 +433,14 @@ def export_staff(db, version: str) -> dict:
          "enabled": r["status"] != "disabled",
          "phones": sorted(allowed.get(r["id"], [])),
          "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"]),
+         "clock_in_set": bool(r["clock_in_set"]),
          "role": roles.get(r["role_id"]), "pages": _page_names(layout, page_choice(r["layout_pages"])),
          "overrides": overrides(r["id"]), "wristbands": permission_choice(r["wristbands"]),
          "department": departments.get(r["department_id"])}
         for r in db.conn.execute("""SELECT id, name, pin_hash, pin_length, status,
-                                    connecteam_user_id, require_clock_in, role_id, layout_pages,
-                                    wristbands, department_id FROM staff ORDER BY name""")])
+                                    connecteam_user_id, require_clock_in, clock_in_set, role_id,
+                                    layout_pages, wristbands, department_id FROM staff
+                                    ORDER BY name""")])
 
 
 def export_departments(db, version: str) -> dict:
@@ -427,7 +450,8 @@ def export_departments(db, version: str) -> dict:
     return _envelope("departments", version, departments=[
         {"name": d["name"], "smart_group_id": d["smart_group_id"], "role": roles.get(d["role_id"]),
          "card_access": d["card_access"], "card_days": d["card_days"],
-         "card_lockout": bool(d["card_lockout"])}
+         "card_lockout": bool(d["card_lockout"]),
+         "clock_in": None if d["clock_in"] is None else bool(d["clock_in"])}
         for d in db.departments()])
 
 
@@ -572,8 +596,10 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             link = _connecteam_id(raw.get("connecteam_user_id"))
             if link and not db.conn.execute("SELECT 1 FROM staff WHERE connecteam_user_id = ?",
                                             (link,)).fetchone():
-                db.conn.execute("UPDATE staff SET connecteam_user_id = ?, require_clock_in = ? WHERE id = ?",
-                                (link, 0 if raw.get("require_clock_in") is False else 1, staff_id))
+                db.conn.execute("""UPDATE staff SET connecteam_user_id = ?, require_clock_in = ?,
+                                   clock_in_set = ? WHERE id = ?""",
+                                (link, 0 if raw.get("require_clock_in") is False else 1,
+                                 1 if raw.get("clock_in_set") is True else 0, staff_id))
             existing[name.lower()] = staff_id
             result["added"] += 1
         db.conn.executemany(
@@ -644,9 +670,14 @@ def _import_departments(db, rows: list, mode: str) -> dict:
             group = None
         values = (group, role_id, _stored_card_access(raw.get("card_access")),
                   card_days(raw.get("card_days")), 0 if raw.get("card_lockout") is False else 1)
+        # Its clock-in rule (files from before it leave a replaced department's as it is).
+        clock_in = _file_clock_in(raw.get("clock_in"))
         if match and mode == "replace":
             db.conn.execute("""UPDATE departments SET smart_group_id = ?, role_id = ?, card_access = ?,
                                card_days = ?, card_lockout = ? WHERE id = ?""", (*values, match["id"]))
+            if "clock_in" in raw:
+                db.conn.execute("UPDATE departments SET clock_in = ? WHERE id = ?",
+                                (clock_in, match["id"]))
             dept_id = match["id"]
             result["replaced"] += 1
         else:
@@ -656,8 +687,9 @@ def _import_departments(db, rows: list, mode: str) -> dict:
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM departments").fetchone()[0]
             dept_id = db.conn.execute(
                 """INSERT INTO departments (name, sort_order, smart_group_id, role_id, card_access,
-                   card_days, card_lockout, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (name, order, *values, time.time())).lastrowid
+                   card_days, card_lockout, created_at, clock_in)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (name, order, *values, time.time(), clock_in)).lastrowid
             existing[name.lower()] = {"id": dept_id, "name": name, "smart_group_id": group}
             result["added"] += 1
         if group:
@@ -703,7 +735,7 @@ def make_backup(db, branding, version: str) -> dict:
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
                       connecteam_note, pin_length FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
-                            card_days, card_lockout, created_at FROM departments"""),
+                            card_days, card_lockout, created_at, clock_in FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
@@ -840,7 +872,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                 "card_access": _stored_card_access(row.get("card_access")),
                 "card_days": card_days(row.get("card_days")),
                 "card_lockout": 0 if row.get("card_lockout") in (0, False) else 1,
-                "created_at": _time(row.get("created_at"), time.time())})
+                "created_at": _time(row.get("created_at"), time.time()),
+                # Backups from before the department clock-in rule: each person's own setting.
+                "clock_in": _file_clock_in(row.get("clock_in"))})
     department_ids = {d["id"] for d in departments or []}
     flag = lambda value: 1 if value in (1, True) else 0
 

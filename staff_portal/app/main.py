@@ -112,9 +112,10 @@ def connecteam_settings() -> tuple[bool, str, str, str, int]:
 
 def connecteam_wanted() -> bool:
     """Whether anyone needs the time clock checked (so Connecteam isn't asked for nothing)."""
-    return db.conn.execute(
-        "SELECT 1 FROM staff WHERE connecteam_user_id IS NOT NULL AND require_clock_in = 1 "
-        "AND status != 'disabled' LIMIT 1").fetchone() is not None
+    rules = db.department_clock_ins()
+    return any(db.clock_in_rule(dict(r), rules)[0] for r in db.conn.execute(
+        "SELECT require_clock_in, clock_in_set, department_id FROM staff "
+        "WHERE connecteam_user_id IS NOT NULL AND status != 'disabled'"))
 
 
 def load_connecteam_usage() -> dict:
@@ -225,15 +226,17 @@ def encoder_auto_wanted() -> bool:
 discovery = Discovery(lambda: encoder_networks(), lambda: encoder_auto_wanted())
 
 
-def needs_clock_in(member: dict | None) -> bool:
-    """Whether this person may only sign in while clocked in (and Connecteam is turned on)."""
-    return bool(member and member.get("connecteam_user_id") and member.get("require_clock_in")
-                and connecteam_settings()[0])
+def needs_clock_in(member: dict | None, rules: dict | None = None) -> bool:
+    """Whether this person may only sign in while clocked in (and Connecteam is turned on): their
+    own rule if set by hand, else their department's, else their own (db.clock_in_rule).
+    rules: db.department_clock_ins(), when checking many people."""
+    return bool(member and member.get("connecteam_user_id") and connecteam_settings()[0]
+                and db.clock_in_rule(member, rules)[0])
 
 
-def clock_block(member: dict | None) -> str | None:
+def clock_block(member: dict | None, rules: dict | None = None) -> str | None:
     """None if this person may be signed in now, else 'clocked_out' or 'clock_unknown'."""
-    if not needs_clock_in(member):
+    if not needs_clock_in(member, rules):
         return None
     status = connecteam.status(member["connecteam_user_id"])
     return None if status == "in" else ("clocked_out" if status == "out" else "clock_unknown")
@@ -911,6 +914,7 @@ async def api_me(request: web.Request):
     s = db.settings()
     shared = is_shared(device)
     pin_only = shared and bool(device["pin_only"])
+    rules = db.department_clock_ins()
     return web.json_response({
         "device": device["name"],
         "kind": device["kind"],
@@ -921,7 +925,7 @@ async def api_me(request: web.Request):
         # PIN-only devices never get the list of names.
         "pin_only": pin_only,
         "staff": [{"id": m["id"], "name": m["name"],
-                   "off_clock": clock_block(m) is not None}
+                   "off_clock": clock_block(m, rules) is not None}
                   for m in db.staff_for_device(device)] if shared and not pin_only else [],
         "pin_required": shared or bool(device["pin_hash"]),
         "property_name": s["property_name"],
@@ -2516,9 +2520,19 @@ def departments_view() -> list[dict]:
             for d in db.departments()]
 
 
+def clock_in_view(m: dict, rules: dict) -> dict:
+    """A person's clock-in rule for the Staff tab: whether they must be clocked in (clock_in),
+    where that comes from (clock_in_from: person, department or default) and, if so, whether
+    they're on the clock now (clock)."""
+    required, source = db.clock_in_rule(m, rules)
+    return {"clock_in": required, "clock_in_from": source,
+            "clock": connecteam.status(m["connecteam_user_id"]) if needs_clock_in(m, rules) else None}
+
+
 async def admin_state(request: web.Request):
     owners = db.phone_order_owners()
     key_counts = db.active_key_card_counts()
+    rules = db.department_clock_ins()
     return web.json_response({
         "settings": public_settings(),
         "connecteam": connecteam_state(),
@@ -2530,7 +2544,7 @@ async def admin_state(request: web.Request):
         "devices": device_payload(),
         "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
                    "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time(),
-                   "clock": connecteam.status(m["connecteam_user_id"]) if needs_clock_in(m) else None,
+                   **clock_in_view(m, rules),
                    "key_cards": key_counts.get(m["id"], 0)}
                   for m in db.staff_list()],
         "areas": db.areas(),
@@ -3010,7 +3024,15 @@ def clean_department(data: dict, current: dict | None) -> dict:
         fields["card_days"] = transfer.card_days(int(value))
     if "card_lockout" in data:
         fields["card_lockout"] = 1 if data["card_lockout"] in (True, 1, "1", "on") else 0
+    if "clock_in" in data:
+        fields["clock_in"] = transfer.clock_in_rule(data["clock_in"])
     return fields
+
+
+# What a department's clock-in rule says, for the activity log.
+DEPARTMENT_CLOCK_IN = {None: "clock-in: each person's own setting",
+                       1: "clock-in: everyone must be clocked in to sign in",
+                       0: "clock-in: no one needs to clock in"}
 
 
 async def admin_create_department(request: web.Request):
@@ -3023,7 +3045,9 @@ async def admin_create_department(request: web.Request):
         dept_id = db.create_department(**fields)
     except sqlite3.IntegrityError:
         return bad_request("A department with that name already exists.")
-    db.log(admin_name(request), f"Created department {fields['name']}")
+    clock_in = fields.get("clock_in")
+    db.log(admin_name(request), f"Created department {fields['name']}",
+           detail=None if clock_in is None else DEPARTMENT_CLOCK_IN[clock_in])
     return web.json_response({"id": dept_id})
 
 
@@ -3040,7 +3064,9 @@ async def admin_update_department(request: web.Request):
         db.update_department(dept["id"], **fields)
     except sqlite3.IntegrityError:
         return bad_request("A department with that name already exists.")
-    db.log(admin_name(request), f"Updated department {fields.get('name', dept['name'])}")
+    clock_in = fields.get("clock_in", dept["clock_in"])
+    db.log(admin_name(request), f"Updated department {fields.get('name', dept['name'])}",
+           detail=None if clock_in == dept["clock_in"] else DEPARTMENT_CLOCK_IN[clock_in])
     if "smart_group_id" in fields or "role_id" in fields:
         if staff_sync_enabled():
             sync_staff_soon()   # people move in or out (the user list is cached)
@@ -3700,6 +3726,11 @@ async def admin_create_staff(request: web.Request):
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
     role_id = parse_role(data.get("role_id"))
     department_id = parse_department(data.get("department_id"))
+    if "require_clock_in" in data and link.get("connecteam_user_id"):
+        # Not what their department says: theirs, set by hand, which beats the department's.
+        rule = db.department_clock_ins().get(department_id)
+        if rule is not None and rule != link["require_clock_in"]:
+            link["clock_in_set"] = 1
     pin = (await kiosk_pin(link.get("connecteam_user_id")) if data.get("use_kiosk_code")
            else data.get("pin"))
     if await pin_taken(require_pin(pin)):
@@ -3758,15 +3789,13 @@ async def admin_update_staff(request: web.Request):
         # dialog unchanged keeps the note, so the sync can still turn them back on.
         fields["connecteam_note"] = None
     fields.update(link)
-    # A change made here by hand stays: the Connecteam sync leaves it alone from then on.
-    if "require_clock_in" in link and link["require_clock_in"] != member["require_clock_in"]:
-        fields["clock_in_set"] = 1
     if "role_id" in data:
         fields["role_id"] = parse_role(data["role_id"])
         if fields["role_id"] != member["role_id"]:
             fields["role_set"] = 1
     if "department_id" in data:
         fields["department_id"] = parse_department(data["department_id"])
+    clock_in_fields(member, data, fields)
     try:
         if "layout_pages" in data:
             pages = clean_phone_pages(data["layout_pages"])   # None: their role's pages
@@ -3788,12 +3817,30 @@ async def admin_update_staff(request: web.Request):
     if "pin_hash" in fields or fields.get("status") == "disabled":
         staff_sessions_end(member["id"])
     detail = None
-    if "clock_in_set" in fields:   # the per-person clock-in override changed
-        detail = ("must be clocked in to sign in" if link["require_clock_in"]
+    if fields.get("clock_in_set"):   # the per-person clock-in override changed
+        detail = ("must be clocked in to sign in" if fields["require_clock_in"]
                   else "may sign in without clocking in")
+    elif "clock_in_set" in fields:
+        detail = "clock-in rule from their department"
     db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}",
            detail=detail)
     return web.json_response({"ok": True})
+
+
+def clock_in_fields(member: dict, data: dict, fields: dict) -> None:
+    """The clock-in rule from a staff form, into fields. The switch (on their row, or in Edit)
+    sets this person's own rule by hand, which beats their department's and which the Connecteam
+    sync leaves alone, but only when it differs from the rule they'd have anyway (with the
+    department they're moving to): sending the switch unchanged changes nothing. clock_in_set:
+    false is Use the department's setting."""
+    wanted = fields.pop("require_clock_in", None)
+    if "clock_in_set" in data and not data["clock_in_set"]:
+        if member["clock_in_set"]:
+            fields["clock_in_set"] = 0
+        return
+    after = {**member, "department_id": fields.get("department_id", member["department_id"])}
+    if wanted is not None and bool(wanted) != db.clock_in_rule(after)[0]:
+        fields.update(require_clock_in=wanted, clock_in_set=1)
 
 
 def staff_overrides_from(data: dict, staff_id: int) -> tuple[dict, dict] | None:
