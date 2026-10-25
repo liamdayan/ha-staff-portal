@@ -874,6 +874,18 @@
   <ol class="job-dots" data-dots aria-label="Progress"></ol>
   <p class="hint job-meta" data-meta></p>
   <p class="hint job-conn" data-conn hidden>Can't reach Staff Access right now. Still trying…</p>
+  <p class="hint job-here" data-here hidden aria-live="polite"></p>
+  <div class="dialog-actions job-actions" data-actions></div>
+</dialog>
+
+<!-- This computer: the card encoder on the computer the dashboard is open on, while it connects. -->
+<dialog id="here-dialog" class="job-dialog">
+  <div class="job-eyebrow">Card encoder on this computer</div>
+  <div class="job-visual" data-visual aria-hidden="true"></div>
+  <div class="job-say" aria-live="polite">
+    <h2 class="job-prompt" data-prompt></h2>
+    <p class="hint here-note" data-note></p>
+  </div>
   <div class="dialog-actions job-actions" data-actions></div>
 </dialog>
 

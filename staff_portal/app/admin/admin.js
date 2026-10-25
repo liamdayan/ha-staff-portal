@@ -3656,6 +3656,675 @@
   $("#sync-staff").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
   $("#ct-sync").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
 
+  // ---------------------------------------------------------------- key cards: this computer's encoder
+
+  // This computer (the one you're using): the card encoder plugged into the computer this
+  // dashboard is open on, with nothing set up. While a card dialog uses it, this page does what
+  // the staff app does in This computer (USB) mode (app.js wbLink): it holds a link to the add-on
+  // (a WebSocket through Home Assistant, opened with a one-time ticket) and a connection to TT
+  // Hotel's SN Web Socket on this computer, and passes each encoder request from the one to the
+  // other, one at a time. Only the requests and fields in HERE_RELAYED pass; anything else is
+  // dropped. The encoder's key from TT Hotel (hotelInfo) passes through this page in those
+  // requests: it's never logged or kept, and SN Web Socket's copy of it in each answer is left
+  // out of what goes back.
+  //
+  // The messages (encoder.LocalRelay has the add-on's side). From the add-on: {"type": "linked"}
+  // once it has taken the link (through ingress the WebSocket opens before it does), {"type":
+  // "call", "request": {"function", "requestId", ...}}, and {"type": "closing", "why"} before it
+  // closes the link ("replaced": a newer link of yours took over; "not_allowed"; "stopping").
+  // To it: {"type": "reply", "reply": <SN Web Socket's answer>}, and {"type": "status",
+  // "helper", "version"} on linking, on every change, every HERE_STATUS_MS and whenever a request
+  // can't be passed on (helper: "ready", "unreachable", "blocked" or null while not known).
+
+  const HERE = "here";
+  // SN Web Socket on this computer: localhost as well, for one that only listens on IPv6 (::1).
+  const HERE_HELPER_URLS = ["ws://127.0.0.1:8102", "ws://localhost:8102"];
+  const HERE_TICKET_PATH = "api/encoder/ticket";  // a one-time pass for the link (about 30 seconds)
+  const HERE_LINK_PATH = "api/encoder/link";      // the link: a WebSocket through ingress
+  const HERE_RETRY_MS = [1000, 30000];        // waits before linking again: the first, the longest
+  const HERE_HELPER_RETRY_MS = [2000, 30000]; // ...and before trying SN Web Socket again
+  const HERE_STEADY_MS = 15000;       // lasted this long: the next retry waits the first wait again
+  const HERE_OPEN_MS = 8000;          // SN Web Socket gets this long to accept a connection...
+  const HERE_ASKING_OPEN_MS = 60000;  // ...or this long where the browser may ask whether it may
+  const HERE_ASKING_AFTER_MS = 1500;  // a connection still waiting this long: the browser is asking
+  const HERE_ANSWERED_MS = 2000;      // answered in the site settings instead: start over after this
+  const HERE_CALL_MS = 15000;         // ...and this long to answer (as long as the add-on waits)
+  const HERE_STATUS_MS = 30000;       // the add-on hears how SN Web Socket is at least this often
+  const HERE_LINGER_MS = 120000;      // kept open this long after a card dialog, for the next card
+  const HERE_MAX = 256 * 1024;        // largest message passed on either way (the add-on's limit)
+  const HERE_TEXT = 16384;            // longest text in a request (an encoder key is a few hundred)
+  const HERE_QUEUE = 8;               // requests waiting their turn (the add-on sends one at once)
+  // Chrome and Edge ask once whether a site may "access other apps and services on this device"
+  // (Apps on device in the site settings). Its name since version 145, then the one before it.
+  const HERE_PERMISSIONS = ["loopback-network", "local-network-access"];
+  // The SN Web Socket requests the add-on's encoder runner makes, with the type of each of their
+  // fields: the staff app's WB_RELAYED, kept in step with encoder.py's RELAY_FUNCTIONS. A request
+  // or field not listed here is never passed on.
+  const HERE_RELAYED = {
+    CE_DisconnectComm: {},
+    GetDeviceInfo: { transformCardNo: "boolean" },
+    CE_ConnectComm: { portname: "string" },
+    CE_GetCardID: {},
+    CE_InitCardEncoder: { hotelInfo: "string" },
+    CE_SetSectors: { sectors: "string" },
+    CE_InitCard: { hotelInfo: "string" },
+    CE_ClearCard: { hotelInfo: "string" },
+    CE_WriteCard: { hotelInfo: "string", buildNo: "number", floorNo: "number", mac: "string",
+      timestamp: "number", allowLockOut: "boolean" },
+    CE_ReadCard: { hotelInfo: "string" },
+    CE_CancelCard: { hotelInfo: "string", cardNo: "string", timestamp: "number" },
+    CE_ReadCancellationInfo: { hotelInfo: "string" },
+    CE_Beep: { voiceLen: "number", interval: "number", voiceCount: "number" },
+    CE_GetVersion: {},
+  };
+
+  // The link while this page holds it (hereHold opens it): to the add-on (ws; state "connecting",
+  // "open", "lost", "refused" or "replaced") and to SN Web Socket (helper).
+  let here = null;
+  let herePermission = null;        // the browser's local network permission, once asked (a promise)
+  let hereJob = null;               // the card job using it, while its progress dialog is open
+  const hereWatchers = new Set();   // the open dialogs' redraws, called on every change
+
+  // Hold the link, opening it if it isn't open: a card dialog is about to use it.
+  function hereHold() {
+    if (here) {
+      clearTimeout(here.linger);
+      here.linger = null;
+      return;
+    }
+    here = {
+      ws: null, state: "connecting", closing: null, reason: null, timer: null,
+      delay: HERE_RETRY_MS[0], openedAt: 0, beat: null, queue: [], calling: false, linger: null,
+      helper: { ws: null, url: null, state: "connecting", version: null, timer: null,
+        delay: HERE_HELPER_RETRY_MS[0], trying: null, pending: null, permission: null,
+        opening: null },
+    };
+    hereConnect(here);
+    hereHelperConnect(here);
+  }
+
+  // Done with it for now: it closes after HERE_LINGER_MS unless it's held again meanwhile.
+  function hereRelease() {
+    const link = here;
+    if (!link || link.linger) return;
+    link.linger = setTimeout(() => {
+      if (here === link) hereStop();
+    }, HERE_LINGER_MS);
+  }
+
+  function hereStop() {
+    const link = here;
+    here = null;
+    clearTimeout(link.timer);
+    clearTimeout(link.linger);
+    clearInterval(link.beat);
+    clearTimeout(link.helper.timer);
+    link.queue = [];
+    const ws = link.ws;
+    link.ws = null;
+    try { ws?.close(1000); } catch { /* already closing */ }
+    link.helper.opening?.close();   // a connection still waiting (on the browser's question, say)
+    hereHelperDrop(link);
+    hereChanged();
+  }
+
+  function hereChanged() {
+    for (const redraw of [...hereWatchers]) redraw();
+  }
+
+  // Link to the add-on: a one-time pass first (an ordinary dashboard request, so Home Assistant
+  // checks it's you), then the WebSocket with it, since a browser can't send a WebSocket any
+  // other credentials.
+  async function hereConnect(link) {
+    clearTimeout(link.timer);
+    let pass = null;
+    try {
+      pass = await api("POST", HERE_TICKET_PATH, {});
+    } catch (err) {
+      if (here !== link || link.ws) return;
+      // Refused (Wristbands turned off, say): say why, and try again only after a while.
+      link.state = [403, 409].includes(err.status) ? "refused" : "lost";
+      link.reason = link.state === "refused" ? err.message : null;
+      if (link.state === "refused") link.delay = HERE_RETRY_MS[1];
+      hereRetry(link);
+      return;
+    }
+    if (here !== link || link.ws) return;   // stopped, or linked by another try meanwhile
+    if (typeof pass?.ticket !== "string" || !pass.ticket) {
+      link.state = "lost";
+      hereRetry(link);
+      return;
+    }
+    const address = new URL(`${HERE_LINK_PATH}?ticket=${encodeURIComponent(pass.ticket)}`, location.href);
+    address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+    let ws;
+    try {
+      ws = new WebSocket(address.href);
+    } catch {
+      link.state = "lost";
+      hereRetry(link);
+      return;
+    }
+    link.ws = ws;
+    link.closing = null;
+    ws.addEventListener("message", (ev) => {
+      if (link.ws === ws) hereMessage(link, ev.data);
+    });
+    ws.addEventListener("close", (ev) => {
+      if (link.ws === ws) hereClosed(link, ev.code);
+    });
+  }
+
+  function hereClosed(link, code) {
+    link.ws = null;
+    clearInterval(link.beat);
+    link.queue = [];   // nobody to answer now: the add-on gives up on them by itself
+    const why = link.closing || { 4000: "replaced", 4003: "not_allowed" }[code];
+    link.closing = null;
+    if (why === "replaced") {
+      // Opened in another window or tab (or on another computer) of yours, which has the encoder
+      // now. Taken back only when asked (Use it here: hereResume), never by itself, since that
+      // would fail a card being made there.
+      link.state = "replaced";
+      hereChanged();
+      return;
+    }
+    if (why === "not_allowed") {
+      link.state = "refused";
+      link.reason = "Staff Access closed the link to this computer's encoder. Check that Wristbands " +
+        "is turned on, then try again.";
+      link.delay = HERE_RETRY_MS[1];
+    } else {
+      if (link.openedAt && Date.now() - link.openedAt >= HERE_STEADY_MS) link.delay = HERE_RETRY_MS[0];
+      link.state = "lost";
+    }
+    link.openedAt = 0;
+    hereRetry(link);
+  }
+
+  // Link again after a wait that doubles each time (with a little jitter).
+  function hereRetry(link) {
+    clearTimeout(link.timer);
+    const wait = link.delay * (0.75 + Math.random() / 2);
+    link.delay = Math.min(link.delay * 2, HERE_RETRY_MS[1]);
+    link.timer = setTimeout(() => hereConnect(link), wait);
+    hereChanged();
+  }
+
+  // Use it here: take the encoder back from the window that took it over.
+  function hereResume() {
+    const link = here;
+    if (link?.state !== "replaced") return;
+    link.state = "connecting";
+    link.delay = HERE_RETRY_MS[0];
+    hereConnect(link);
+    hereChanged();
+  }
+
+  function hereSend(link, message) {
+    if (link.ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      link.ws.send(JSON.stringify(message));
+    } catch { /* closing: its close event follows */ }
+  }
+
+  // Tell the add-on how SN Web Socket is (and that this link is still here), in its words:
+  // connecting, or waiting for the browser's permission, is null (not known yet), and a question
+  // nobody answered is blocked (until someone does).
+  function hereReport(link) {
+    const state = link.helper.state === "unanswered" ? "blocked" : link.helper.state;
+    hereSend(link, { type: "status", version: link.helper.version,
+      helper: ["ready", "unreachable", "blocked"].includes(state) ? state : null });
+  }
+
+  // A message from the add-on. A request that isn't allowed is dropped, never passed on.
+  function hereMessage(link, text) {
+    const message = hereParse(text);
+    if (message?.type === "linked") {
+      link.state = "open";
+      link.reason = null;
+      link.openedAt = Date.now();
+      hereReport(link);
+      clearInterval(link.beat);
+      link.beat = setInterval(() => hereReport(link), HERE_STATUS_MS);
+      hereChanged();
+    } else if (message?.type === "closing") {
+      link.closing = typeof message.why === "string" ? message.why : null;
+    } else if (message?.type === "call") {
+      const request = hereRequest(message.request);
+      if (!request || link.queue.length >= HERE_QUEUE) {
+        // Never the request itself: it may hold the encoder's key.
+        console.warn(request ? "This computer's encoder: too many requests at once; one was dropped"
+          : "This computer's encoder: dropped a request that isn't allowed");
+        return;
+      }
+      link.queue.push({ request, ws: link.ws });
+      hereRelayNext(link);
+    }
+  }
+
+  // A JSON object from a WebSocket message, or null for anything else (or anything too big).
+  function hereParse(text) {
+    if (typeof text !== "string" || text.length > HERE_MAX) return null;
+    try {
+      const value = JSON.parse(text);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The request to pass on to SN Web Socket, rebuilt from only what HERE_RELAYED allows, or null
+  // if it asks for anything else (another function, another field, a value of the wrong type).
+  function hereRequest(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const name = raw.function;
+    const id = raw.requestId;
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(HERE_RELAYED, name) ||
+        typeof id !== "string" || !id.length || id.length > 100) {
+      return null;
+    }
+    const fields = HERE_RELAYED[name];
+    const request = { function: name, requestId: id };
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === "function" || key === "requestId") continue;
+      const type = Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : null;
+      if (!type || typeof value !== type) return null;
+      if (type === "string" && value.length > HERE_TEXT) return null;
+      if (type === "number" && !Number.isFinite(value)) return null;
+      request[key] = value;
+    }
+    return request;
+  }
+
+  // Pass the waiting requests to SN Web Socket one at a time, each answer back to the add-on
+  // (over the link the request came on: a newer link never gets an older link's answers).
+  // Without an answer, the add-on hears how SN Web Socket is instead.
+  async function hereRelayNext(link) {
+    if (link.calling) return;
+    link.calling = true;
+    while (here === link && link.queue.length) {
+      const { request, ws } = link.queue.shift();
+      const reply = await hereHelperCall(link, request);
+      if (link.ws !== ws) continue;
+      if (reply) hereSend(link, { type: "reply", reply });
+      else hereReport(link);
+    }
+    link.calling = false;
+  }
+
+  // One request to SN Web Socket: its answer, or null when it couldn't be asked or didn't
+  // answer in time.
+  async function hereHelperCall(link, request) {
+    const helper = link.helper;
+    if (!(helper.ws || await hereHelperConnect(link))) return null;
+    const ws = helper.ws;
+    if (!ws) return null;   // closed meanwhile
+    return new Promise((resolve) => {
+      const finish = (reply) => {
+        clearTimeout(timer);
+        if (helper.pending?.finish === finish) helper.pending = null;
+        resolve(reply);
+      };
+      const timer = setTimeout(() => {
+        finish(null);
+        // Start afresh, so a late answer can't be taken for the next request's.
+        if (helper.ws === ws) hereHelperDrop(link, true);
+      }, HERE_CALL_MS);
+      helper.pending = { name: request.function, id: request.requestId, finish };
+      try {
+        ws.send(JSON.stringify(request));
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  // Something from SN Web Socket: the answer to the request waiting for one (by its requestId,
+  // or by function for SN Web Socket's own errors, which leave that out), else ignored.
+  function hereHelperMessage(link, text) {
+    const reply = hereParse(text);
+    if (!reply) return;
+    const helper = link.helper;
+    const version = reply.snWebSocketVersion;
+    if (typeof version === "string" && version !== helper.version && /^[\x20-\x7e]{1,40}$/.test(version)) {
+      helper.version = version;
+      hereReport(link);
+    }
+    const pending = helper.pending;
+    if (!pending) return;
+    const ownError = !("requestId" in reply) && reply.function === pending.name &&
+      reply.errorCode != null && reply.errorCode !== 0;
+    if (reply.requestId !== pending.id && !ownError) return;
+    delete reply.hotelInfo;   // SN Web Socket repeats the request, encoder key and all
+    pending.finish(reply);
+  }
+
+  // Connect to SN Web Socket: the address that worked last time first, then the other. Resolves
+  // to whether it worked; a failure is tried again later, waiting longer each time, except a
+  // question from the browser that nobody answered (as the staff app's wbHelperConnect).
+  function hereHelperConnect(link) {
+    const helper = link.helper;
+    if (helper.trying) return helper.trying;
+    clearTimeout(helper.timer);
+    helper.trying = (async () => {
+      // A browser that's asking holds the connection until it's answered, while an SN Web Socket
+      // that isn't running is refused at once: a connection still waiting after a moment means
+      // it's asking.
+      const askable = hereNetworkState(await hereNetworkPermission()) === "prompt";
+      const asking = askable ? setTimeout(() => hereHelperSet(link, "asking"), HERE_ASKING_AFTER_MS) : 0;
+      let asked = false;
+      try {
+        for (const address of new Set([helper.url, ...HERE_HELPER_URLS].filter(Boolean))) {
+          const tried = Date.now();
+          const ws = await hereHelperOpen(helper, address, askable ? HERE_ASKING_OPEN_MS : HERE_OPEN_MS);
+          if (here !== link) {
+            ws?.close();
+            return false;
+          }
+          if (ws) {
+            hereHelperAttach(link, ws, address);
+            return true;
+          }
+          // Held, then refused: the browser asked and nobody answered, or the question was
+          // closed. The other address would only ask again.
+          if (askable && Date.now() - tried >= HERE_ASKING_AFTER_MS) {
+            asked = true;
+            break;
+          }
+        }
+      } finally {
+        clearTimeout(asking);
+      }
+      helper.permission = hereNetworkState(await hereNetworkPermission());   // Block answers it too
+      if (here !== link) return false;
+      if (helper.permission === "denied") {
+        hereHelperSet(link, "blocked");
+      } else if (asked && helper.permission !== "granted") {
+        hereHelperSet(link, "unanswered");   // Try again asks again; it isn't asked by itself
+        return false;
+      } else if (asked) {
+        helper.delay = HERE_HELPER_RETRY_MS[0];   // allowed in the site settings meanwhile
+        hereHelperSet(link, "connecting");
+      } else {
+        hereHelperSet(link, "unreachable");
+      }
+      hereHelperRetry(link);
+      return false;
+    })().finally(() => { helper.trying = null; });
+    return helper.trying;
+  }
+
+  // Try again (in a dialog): connect to SN Web Socket now, starting over from the first wait.
+  function hereHelperTryAgain() {
+    const link = here;
+    if (!link || link.helper.ws || link.helper.trying) return;
+    link.helper.delay = HERE_HELPER_RETRY_MS[0];
+    hereHelperSet(link, "connecting");
+    hereHelperConnect(link);
+  }
+
+  // A WebSocket to SN Web Socket once it's open, or null if it can't be opened in time (or
+  // helper.opening, the connection waiting meanwhile, is closed).
+  function hereHelperOpen(helper, address, wait) {
+    return new Promise((resolve) => {
+      let ws;
+      try {
+        ws = new WebSocket(address);
+      } catch {
+        resolve(null);   // refused by the browser outright
+        return;
+      }
+      helper.opening = ws;
+      const timer = setTimeout(() => ws.close(), wait);   // its close event says no
+      const done = (result) => {
+        clearTimeout(timer);
+        if (helper.opening === ws) helper.opening = null;
+        resolve(result);
+      };
+      ws.addEventListener("open", () => done(ws), { once: true });
+      ws.addEventListener("close", () => done(null), { once: true });
+    });
+  }
+
+  function hereHelperAttach(link, ws, address) {
+    const helper = link.helper;
+    const openedAt = Date.now();
+    helper.ws = ws;
+    helper.url = address;
+    ws.addEventListener("message", (ev) => {
+      if (helper.ws === ws) hereHelperMessage(link, ev.data);
+    });
+    ws.addEventListener("close", () => {
+      if (helper.ws !== ws) return;   // closed on purpose
+      helper.ws = null;
+      helper.pending?.finish(null);
+      if (here !== link) return;
+      // SN Web Socket closed or restarted: connect again straight away, unless it closed as soon
+      // as it opened, which waits longer each time instead.
+      hereHelperSet(link, "connecting");
+      if (Date.now() - openedAt >= HERE_STEADY_MS) {
+        helper.delay = HERE_HELPER_RETRY_MS[0];
+        hereHelperConnect(link);
+      } else {
+        hereHelperRetry(link);
+      }
+    });
+    hereHelperSet(link, "ready");
+  }
+
+  // Close the connection to SN Web Socket, and with `again`, connect afresh. A request still
+  // waiting gets no answer.
+  function hereHelperDrop(link, again = false) {
+    const helper = link.helper;
+    const ws = helper.ws;
+    helper.ws = null;
+    try { ws?.close(); } catch { /* already closing */ }
+    helper.pending?.finish(null);
+    if (again && here === link) {
+      hereHelperSet(link, "connecting");
+      hereHelperConnect(link);
+    }
+  }
+
+  function hereHelperRetry(link) {
+    const helper = link.helper;
+    clearTimeout(helper.timer);
+    const wait = helper.delay * (0.75 + Math.random() / 2);
+    helper.delay = Math.min(helper.delay * 2, HERE_HELPER_RETRY_MS[1]);
+    helper.timer = setTimeout(() => {
+      if (here === link) hereHelperConnect(link);
+    }, wait);
+  }
+
+  function hereHelperSet(link, state) {
+    if (link.helper.state === state) return;
+    link.helper.state = state;
+    hereReport(link);
+    hereChanged();
+  }
+
+  // The browser's permission for this site to reach this computer's own apps, under each name it
+  // knows (none in browsers without it). Allowing it connects straight away.
+  function hereNetworkPermission() {
+    if (!herePermission) {
+      herePermission = (async () => {
+        const found = [];
+        for (const name of HERE_PERMISSIONS) {
+          try {
+            const status = await navigator.permissions.query({ name });
+            status.addEventListener("change", hereNetworkChanged);
+            found.push(status);
+          } catch { /* not a permission this browser has */ }
+        }
+        return found;
+      })();
+    }
+    return herePermission;
+  }
+
+  // Allowed or blocked: connect now. Changing the site settings leaves a connection waiting for
+  // the question, so it's started over if it's still waiting a moment later.
+  function hereNetworkChanged() {
+    const link = here;
+    if (!link || link.helper.ws) return;
+    const opening = link.helper.opening;
+    if (!opening) {
+      hereHelperConnect(link);
+      return;
+    }
+    setTimeout(() => {
+      if (link.helper.opening === opening) opening.close();
+    }, HERE_ANSWERED_MS);
+  }
+
+  // Those as one state: blocked under any name is blocked, allowed only when allowed under
+  // every name, and null in browsers that have none of them.
+  function hereNetworkState(statuses) {
+    const states = statuses.map((status) => status.state);
+    if (!states.length) return null;
+    return states.includes("denied") ? "denied"
+      : states.every((s) => s === "granted") ? "granted" : "prompt";
+  }
+
+  // This computer's encoder in plain words, for the dialogs: { ready, busy (still connecting:
+  // nothing to do but wait), title, note, action: [label, onclick] }.
+  function hereView() {
+    if (!window.isSecureContext) {
+      // Browsers only let a secure page reach the encoder: not Home Assistant at http://<IP>.
+      return { title: "Open Home Assistant at its https address to use this computer's encoder",
+        note: "This page was opened at a plain http:// address, and the browser only lets a secure " +
+          "page reach the card encoder." };
+    }
+    const link = here;
+    if (!link) return { busy: true, title: "Connecting to the card encoder on this computer…" };
+    const helper = link.helper.state;
+    if (link.state === "replaced") {
+      return { title: "Connected in another window",
+        note: "Staff Access is using this card encoder in another window or tab (or on another computer " +
+          "you're signed in on).",
+        action: ["Use it here", hereResume] };
+    }
+    if (helper === "blocked") {
+      return { title: "This browser is blocking the card encoder",
+        note: "Click the icon at the left of the address bar and allow Apps on device for this site " +
+          "(Local network access in older versions). It connects by itself once it's allowed.",
+        action: ["Try again", hereHelperTryAgain] };
+    }
+    if (helper === "unanswered") {
+      return { title: "Allow this site to reach the card encoder",
+        note: "The browser asked whether this site may access other apps and services on this device, " +
+          "which is how it reaches the card encoder. Click Try again, then choose Allow.",
+        action: ["Try again", hereHelperTryAgain] };
+    }
+    if (helper === "asking") {
+      return { busy: true, title: "Choose Allow when the browser asks",
+        note: "The browser is asking whether this site may access other apps and services on this " +
+          "device, which is how it reaches the card encoder: choose Allow. If the question has gone, " +
+          "click the icon at the left of the address bar." };
+    }
+    if (helper === "unreachable") {
+      // The browser only asks once SN Web Socket is running, and one blocking the site without
+      // saying so refuses just as quickly: unless it's allowed, it may be either.
+      return { title: "SN Web Socket isn't running on this computer",
+        note: "Start TT Hotel's SN Web Socket on this computer (the one this browser is on), with the " +
+          "card encoder plugged in. It connects by itself once it's running." +
+          (link.helper.permission !== "granted" ? " The browser then asks whether this site may access " +
+            "other apps and services on this device: choose Allow. If SN Web Socket is running already, " +
+            "check that Apps on device isn't blocked for this site (the icon at the left of the address " +
+            "bar)." : ""),
+        action: ["Try again", hereHelperTryAgain] };
+    }
+    if (link.state === "refused") {
+      return { title: "The card encoder can't be connected", note: link.reason || "Reload this page and try again." };
+    }
+    if (link.state === "lost") {
+      return { busy: true, title: "Connecting to Staff Access…", note: "Can't reach Staff Access right now. Still trying…" };
+    }
+    if (link.state !== "open" || helper !== "ready") {
+      return { busy: true, title: "Connecting to the card encoder on this computer…" };
+    }
+    return { ready: true, title: "Card encoder ready",
+      note: link.helper.version ? `SN Web Socket ${link.helper.version}` : "" };
+  }
+
+  // This computer, in the list of card encoders to choose from.
+  function hereWords() {
+    if (!window.isSecureContext) return "Needs Home Assistant opened at its https address.";
+    return "The encoder plugged into the computer you're using, with SN Web Socket running on it." +
+      (here && hereView().ready ? " Connected now." : "");
+  }
+
+  // This computer: open its link and wait in a dialog, in plain words, until the encoder is ready.
+  // Resolves with "ready", "other" (choose another encoder: offered when there is one) or null
+  // (cancelled).
+  function hereReady(others) {
+    if (window.isSecureContext) hereHold();
+    if (hereView().ready) return Promise.resolve("ready");
+    return new Promise((resolve) => {
+      const dialog = $("#here-dialog");
+      const part = (key) => $(`[data-${key}]`, dialog);
+      let result = null;
+      let look = null;
+      let keys = null;
+      const button = (label, cls, onclick) => h("button", { type: "button", class: cls, onclick }, label);
+      const draw = () => {
+        const v = hereView();
+        if (v.ready) {
+          result = "ready";
+          dialog.close();
+          return;
+        }
+        part("prompt").textContent = v.title;
+        part("note").textContent = v.note || "";
+        const next = v.busy ? "busy" : "problem";
+        if (next !== look) {
+          look = next;
+          const visual = part("visual");
+          visual.className = v.busy ? "job-visual" : "job-visual alert";
+          fill(visual, v.busy ? h("div", { class: "spinner" }) : h("span", { class: "job-symbol" }, "!"));
+        }
+        const now = `${v.action?.[0] || ""}|${others}`;
+        if (now === keys) return;
+        keys = now;
+        const act = v.action && button(v.action[0], "btn primary", v.action[1]);
+        fill(part("actions"), others ? button("Use another encoder", "btn", () => {
+          result = "other";
+          dialog.close();
+        }) : null, button("Cancel", "btn", () => dialog.close()), act);
+        (act || $(".btn", part("actions")))?.focus();
+      };
+      hereWatchers.add(draw);
+      dialog.onclose = () => {
+        hereWatchers.delete(draw);
+        if (result !== "ready") hereRelease();
+        resolve(result);
+      };
+      draw();
+      dialog.showModal();
+    });
+  }
+
+  // A card job on This computer, its link ready. A job of yours still unfinished there is shown
+  // instead, to finish or stop first (null).
+  async function postHereJob(path, body) {
+    try {
+      const { job } = await api("POST", path, { ...body, encoder: HERE });
+      hereJob = job.id;
+      return job;
+    } catch (err) {
+      if (!err.data?.job) {
+        hereRelease();
+        throw err;
+      }
+      hereJob = err.data.job.id;
+      toast(err.message, true);
+      await showJob(err.data.job, "Card job on this computer");
+      await afterCardJob();
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------- key cards: encoders and progress
 
   const JOB_POLL_MS = 1000;
@@ -3695,30 +4364,34 @@
     return s.busy ? "Making cards right now" : s.error ? `Problem: ${s.error}` : s.connected ? "Working" : "";
   }
 
-  // Which encoder to use: the only one, or the one the admin picks (null if they cancel).
+  // Which encoder to use: This computer (the one this dashboard is open on) first, then each
+  // computer's. Resolves with HERE, a computer's ID, or null if they cancel. With no computer's
+  // encoder set up, it's This computer.
   async function pickEncoder(list = cardEncoders()) {
-    if (!list.length) {
-      throw new Error("No computer has a card encoder yet. In Phones & computers, edit the front-desk " +
-        "computer and set its Card encoder to This computer (USB).");
-    }
-    if (list.length === 1) return list[0].device_id;
+    if (!list.length) return HERE;
     const picked = await askChoice("Which card encoder? Have the card ready next to it.",
-      list.map((e) => [String(e.device_id), e.name, encoderWords(e)]));
-    return picked == null ? null : Number(picked);
+      [[HERE, "This computer (the one you're using)", hereWords()],
+        ...list.map((e) => [String(e.device_id), e.name, encoderWords(e)])]);
+    return picked == null || picked === HERE ? picked : Number(picked);
   }
 
   // Starts a card job on an encoder the admin picks. Returns the job, or null if they cancelled.
   async function postCardJob(path, body) {
-    let deviceId = await pickEncoder();
-    if (deviceId == null) return null;
-    try {
-      return (await api("POST", path, { ...body, device_id: deviceId })).job;
-    } catch (err) {
-      if (!err.data?.encoders?.length) throw err;
-      // The computers changed meanwhile: ask again from the add-on's own list.
-      deviceId = await pickEncoder(err.data.encoders);
-      if (deviceId == null) return null;
-      return (await api("POST", path, { ...body, device_id: deviceId })).job;
+    let list = cardEncoders();
+    for (;;) {
+      const choice = await pickEncoder(list);
+      if (choice == null) return null;
+      if (choice === HERE) {
+        const ready = await hereReady(list.length > 0);
+        if (ready === "other") continue;
+        return ready === "ready" ? postHereJob(path, body) : null;
+      }
+      try {
+        return (await api("POST", path, { ...body, device_id: choice })).job;
+      } catch (err) {
+        if (!err.data?.encoders?.length) throw err;
+        list = err.data.encoders;   // the computers changed meanwhile: ask again from the add-on's list
+      }
     }
   }
 
@@ -3731,6 +4404,22 @@
       const v = { job, phase: undefined, mode: null, timer: null, acting: false, lost: 0, rev: 0 };
       const active = () => JOB_ACTIVE.has(v.job.status);
       const button = (label, cls, onclick) => h("button", { type: "button", class: cls, onclick }, label);
+      const usesHere = job.id === hereJob;   // This computer: its link's trouble shows too
+
+      // The job's own Try again connects to SN Web Socket again, so only Use it here is offered.
+      const drawHere = () => {
+        const line = part("here");
+        const hv = usesHere && active() ? hereView() : null;
+        line.hidden = !hv || !!hv.ready;
+        const act = hv?.action?.[1] === hereResume ? hv.action : null;
+        const key = line.hidden ? "" : `${hv.title}|${hv.note}|${act?.[0]}`;
+        if (key === line.dataset.key) return;
+        line.dataset.key = key;
+        if (!line.hidden) {
+          fill(line, h("strong", null, hv.title), hv.note ? ` ${hv.note}` : null,
+            act ? [" ", button(act[0], "linkish", act[1])] : null);
+        }
+      };
 
       const draw = () => {
         const j = v.job;
@@ -3758,6 +4447,7 @@
         part("meta").textContent = [expiry && j.expires_label && `Works until ${j.expires_label}`, j.summary]
           .filter(Boolean).join(" · ");
         part("conn").hidden = v.lost < JOB_LOST_AFTER;
+        drawHere();
         const mode = j.status === "needs_attention" ? "attention" : active() ? "active" : "finished";
         if (mode === v.mode) return;
         v.mode = mode;
@@ -3833,8 +4523,14 @@
       dialog.onclose = () => {
         clearTimeout(v.timer);
         v.rev += 1;
+        if (usesHere) {
+          hereWatchers.delete(draw);
+          hereJob = null;
+          hereRelease();
+        }
         resolve(v.job);
       };
+      if (usesHere) hereWatchers.add(draw);
       draw();
       dialog.showModal();
       part("prompt").focus();
