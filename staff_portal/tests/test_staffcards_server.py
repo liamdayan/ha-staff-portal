@@ -953,3 +953,29 @@ def test_remote_lock_out_waits_for_our_own_minute_cap(tmp_path, monkeypatch):
             assert {lo["lock_id"]: (lo["status"], lo["tries"]) for lo in card["lockouts"]} == {
                 900: ("done", 1), 101: ("done", 1)}
     run(scenario())
+
+
+def test_sync_fills_in_missing_pin_lengths_once(tmp_path, monkeypatch):
+    async def scenario():
+        p = Portal(tmp_path)
+        connecteam_on(p)
+        users = [ct_user(901, "Eve", code="90123"), ct_user(902, "Ivy", code="9020")]
+        async with FakeConnecteam(users) as ct, p:
+            await sync(p)
+            eve, ivy = by_name(p, "Eve"), by_name(p, "Ivy")
+            # As if their PINs were set before lengths were recorded; Ivy's PIN was changed by
+            # hand, so her kiosk code isn't her PIN any more.
+            p.db.update_staff(eve["id"], pin_length=None)
+            p.db.update_staff(ivy["id"], pin_hash=main.hash_pin("1234"), pin_length=None,
+                              pin_from_connecteam=0)
+            main.pin_length_tried.clear()
+            await sync(p)
+            assert p.db.staff(eve["id"])["pin_length"] == 5
+            assert p.db.staff(ivy["id"])["pin_length"] is None
+            # A kiosk code that isn't the PIN is only checked once.
+            checks = []
+            real = main.check_pin
+            monkeypatch.setattr(main, "check_pin", lambda *a: checks.append(a) or real(*a))
+            await sync(p)
+            assert not any(code == "9020" for code, _ in checks)
+    run(scenario())

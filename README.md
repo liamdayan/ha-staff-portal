@@ -22,14 +22,19 @@ system.
 - **Phones:** set up by scanning a QR code, installed to the home screen with your logo and name,
   and signed in until you revoke them.
 - **Computers** such as front-desk PCs get a desktop layout:
-  - a sidebar with the pages and keyboard shortcuts (1 to 9);
+  - a sidebar with tools (such as Wristbands) at the top, then the pages and keyboard shortcuts
+    (1 to 9);
   - compact device rows;
   - card details in a side panel.
 
   They're set up with a link instead of a QR code.
 - **Shared devices:** each person taps or clicks their name and enters their own PIN, so every
   action is recorded under their name, or (per device) just types their PIN with no names
-  shown. People are signed out after an idle time you set.
+  shown. New shared computers hide names by default.
+- **Quick sign-in:** the PIN pad signs in by itself as soon as the PIN is typed, with no OK
+  button to press.
+- **Idle sign-out** after a time you set, separately for phones (which stay with their owner)
+  and computers (which people walk away from).
 - **Hold to unlock controls:** controls stay locked until someone presses and holds, and lock
   again after 10 quiet minutes or as soon as the screen turns off. Checking a temperature can't
   switch something by accident.
@@ -59,22 +64,52 @@ system.
 - **The add-on enforces all access, not just the screen.** Every action is checked against the
   device's role (or the signed-in person's, on role-based devices) and validated, with sensible
   ranges for setpoints and the entity's own options for dropdowns.
-- **Connecteam (optional):** add staff from your Connecteam user list with their kiosk code as
-  their PIN, and only let them sign in while they're clocked in.
-- **Wristbands (optional):** with TT Hotel locks, staff at a front-desk computer make RFID
-  wristbands and key cards on the desk's card encoder: day passes for a party, overnight
-  wristbands for their rooms until checkout, and staff cards. The day-pass end and checkout
-  times are adjustable. Each role decides which cards and doors, every card is recorded with who
-  made it, and **Look up a wristband** shows who it's for and what it opens. TT Hotel requests
-  stay well inside its free plan.
+- **Connecteam (optional):**
+  - add everyone from your Connecteam user list automatically, with their kiosk code as their
+    PIN, and turn people off when they're archived there;
+  - **departments** follow your Connecteam Smart Groups and give people their role;
+  - only let people sign in while they're clocked in, with a per-person switch for anyone who
+    shouldn't need to be.
 - **Activity log** of every action and every blocked attempt. Actions can also show in Home
   Assistant's logbook, or be credited to a linked Home Assistant user.
+
+### Wristbands and key cards (optional, for TT Hotel locks)
+
+Staff at a front-desk computer make RFID wristbands and key cards on the desk's TT Hotel card
+encoder, without opening TT Hotel's own software.
+
+- **Day passes:** enter the guest's name and party size; the wristbands open the doors you
+  choose until the end time you set (8 PM by default).
+- **Overnight wristbands:** pick the room and checkout date; they work until your checkout
+  time (11 AM by default).
+- **Staff cards:** a single door, whole floors, whole buildings, or every door, until a date.
+- **Look up a wristband:** set it on the encoder to see what's on the card, who it was made
+  for, by whom and until when, and wipe it with **Revoke**.
+- **Card log** of every card made, with who made it, searchable by name or card number.
+- **Permissions per role and person:** which kinds of card someone may make, and which doors
+  (all, a building, a floor or single doors), down to the longest stay and how long a staff
+  card may last.
+- **Make key card** from the Staff tab, using the person's department template (doors, how many
+  days, deadbolt override), to replace their card or add another.
+- **Key cards list** with **Revoke** (wipe a card that's handed back) and **Report lost**: a lost
+  card notice written on a spare card with a door-by-door checklist, a replacement card that
+  cancels the old one at each door it's used, or (experimental, gateway doors only, after a
+  one-time test) remote lock-out.
+- **Connecting the encoder:** **This computer (USB)**, the default, connects through the
+  Wristbands page on the computer the encoder is plugged into, so nothing has to be set up on
+  the network. A fixed address, or **Automatic** search with an encoder you confirm, are there
+  for other setups.
+- **TT Hotel requests stay well inside its free plan:** at most one request per batch of cards,
+  doors synced every few hours, a monthly cap far below TT Hotel's limit, and requests stop at
+  once if TT Hotel says to.
 
 ### Admin dashboard (Home Assistant sidebar → Staff Access)
 
 - **Phones & computers:** add, revoke, re-pair, unlock, link to a Home Assistant user, and choose
   which pages or page groups each one shows.
-- **Staff:** people with personal PINs for shared devices, each with a role.
+- **Staff:** people with personal PINs for shared devices, each with a role and department, a
+  clock-in switch, and **Make key card**; plus the **Key cards** list.
+- **Departments:** linked to Connecteam Smart Groups, each with a role and a key card template.
 - **Roles:** each role's access and pages, with its people listed under it; click a person to
   give them their own settings.
 - **Layout editor:** pages, headings, single devices, whole areas and group cards. Drag to
@@ -84,7 +119,11 @@ system.
 - **Preview:** see the layout as a phone or a computer would, unsaved changes included: everything
   on it, or exactly what one device, role or person would see. Tapping a control there sends
   nothing.
-- **Branding:** property name, home-screen name, brand color and logo.
+- **Wristbands:** TT Hotel connection and its monthly request count, the door list (rename or
+  hide doors), day-pass and overnight doors, the end and checkout times, staff card defaults,
+  and every card made.
+- **Branding:** property name (shown in the staff app instead of "Staff Portal"), home-screen
+  name, brand color and logo.
 - **Backup tab:**
   - a full backup and restore, with automatic undo copies;
   - export and import of the layout, roles and staff on their own.
@@ -102,6 +141,11 @@ system.
   requests.
 - **Optional:** require a PIN on every device, and only allow phones in through your Cloudflare
   Tunnel (with the tunnel's address detected for you).
+- **Key cards:** each role and person may only make the cards and doors they're allowed, checked
+  by the add-on on every request, and every card is recorded with who made it. TT Hotel's
+  encoder key never reaches a browser except the front-desk computer the encoder is plugged
+  into, and only while it's making or looking up a card. The add-on never sends it to an encoder
+  you haven't set up or confirmed.
 - **Backup files** never include Home Assistant sign-ins, pending setup codes, the Connecteam
   secret or the TT Hotel secret and password. A restore only keeps phones signed in that this
   system set up and hasn't revoked, so an old or edited backup can't bring back or add a working
@@ -136,6 +180,9 @@ recommended.
 3. Point your tunnel at port **8787**, and enter its https address under
    **Staff Access → Settings**.
 4. Create a role, add a phone or computer, and scan the QR code or open the setup link.
+5. For wristbands and key cards (optional): install TT Hotel's free **SN Web Socket** on the
+   front-desk computer the card encoder is plugged into, enter your TT Hotel integration details
+   on the **Wristbands** tab, and give your front-desk role wristband permissions.
 
 The full guide is in [staff_portal/DOCS.md](staff_portal/DOCS.md), which is also shown on the
 add-on's **Documentation** tab. It covers tunnels, roles, areas, layouts, shared devices, locked

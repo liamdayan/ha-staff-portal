@@ -102,15 +102,22 @@ def helper(ip):
 def test_resolution_rules():
     one, two = helper("192.168.1.50"), helper("192.168.1.60")
     assert resolve([], None) == (None, "none")
-    assert resolve([], "192.168.1.50") == (None, "none")
-    # Exactly one found: every Automatic computer uses it.
-    assert resolve([one], None) == (one, "ok")
-    # Several: the one chosen for the computer, else someone has to choose.
+    assert resolve([], "192.168.1.50") == (None, "missing")
+    # Never one an admin hasn't confirmed, even when it's the only one found: anything on the
+    # network can greet like SN Web Socket, and the encoder is sent the hotel key.
+    assert resolve([one], None) == (None, "choose")
     assert resolve([one, two], None) == (None, "choose")
+    # The confirmed one, wherever it is in the list.
     assert resolve([one, two], "192.168.1.60") == (two, "ok")
-    # The chosen one moved: back to the only one found, or ask again if there are several.
-    assert resolve([two], "192.168.1.50") == (two, "ok")
-    assert resolve([one, helper("192.168.1.70")], "192.168.1.60") == (None, "choose")
+    assert resolve([one], "192.168.1.50") == (one, "ok")
+    # The confirmed one isn't found: "not found", never whatever else answered.
+    assert resolve([two], "192.168.1.50") == (None, "missing")
+    assert resolve([one, helper("192.168.1.70")], "192.168.1.60") == (None, "missing")
+    # Discovery.resolve() uses what was found last.
+    found = Discovery(lambda: None, lambda: False)
+    found.helpers = [one]
+    assert found.resolve(None) == (None, "choose")
+    assert found.resolve("192.168.1.50") == (one, "ok")
 
 
 # ---------------------------------------------------------------- searching
@@ -177,13 +184,16 @@ def test_search_finds_sn_web_socket_without_touching_the_encoder(loopback_search
                     break
                 await asyncio.sleep(0.02)
             assert sim.sockets == 0
-            assert found.resolve(None)[0]["ip"] == "127.0.0.1"
+            # Found, but only used once it's confirmed.
+            assert found.resolve(None) == (None, "choose")
+            assert found.resolve("127.0.0.1")[0]["ip"] == "127.0.0.1"
         finally:
             await sim.stop()
         # It's gone: the next search says so.
         found._admin_at = float("-inf")
         state = await found.find()
         assert state["helpers"] == [] and state["error"] is None
+        assert found.resolve("127.0.0.1") == (None, "missing")
     run(scenario())
 
 

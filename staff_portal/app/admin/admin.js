@@ -9,6 +9,7 @@
   let oldestActivity = null;
   let wbDoors = null;   // TT Hotel's doors as last synced (api/wristbands/doors), loaded when needed
   let wbDirty = false;  // Wristbands tab: settings changed but not saved yet
+  let linkWatcher = null; // the open computer editor's { redraw, fast } for the encoder link check
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
@@ -443,7 +444,7 @@
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
               d.kind === "computer" ? h("span", { class: "badge computer" }, "Computer") : null,
-              d.kind === "computer" && d.encoder_mode !== "off" ? encoderBadge(d) : null,
+              h("span", { class: "encoder-slot", "data-encoder-badge": d.id }, cardEncoderBadge(d)),
               d.signin_mode === "role"
                 ? h("span", { class: "badge shared" }, d.pin_only ? "Role-based \u00b7 PIN only" : "Role-based")
                 : d.signin_mode === "staff"
@@ -457,10 +458,7 @@
             d.status !== "revoked" && d.signin_mode !== "role" && phonePagesText(d)
               ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
                 d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null,
-            d.kind === "computer" && d.encoder_mode === "auto" && d.status !== "revoked"
-              ? h("div", { class: "meta" }, `Card encoder: ${d.encoder_text}`) : null,
-            // Worked out by the add-on: why the Wristbands page won't show on this computer.
-            d.wristbands_note ? h("div", { class: "meta wb-note" }, d.wristbands_note) : null),
+            h("div", { "data-encoder-info": d.id }, cardEncoderInfo(d))),
           d.signin_mode === "role"
             ? h("span", { class: "inline-select" }, "Each person\u2019s own role and pages")
             : h("label", { class: "inline-select" }, "Role", roleSelect)),
@@ -552,14 +550,22 @@
       const word = kindSelect.value === "computer" ? "computer" : "phone";
       dialog.querySelectorAll("[data-word]").forEach((el) => { el.textContent = word; });
       form.elements["name"].placeholder = word === "computer" ? "Front desk computer" : "Maintenance phone";
-      // A card encoder plugs into a computer. Offered once Wristbands is on (or one is already set).
-      encoderBox.hidden = word !== "computer" || !(wristbandsOn() || (d && d.encoder_mode !== "off"));
+      // A card encoder plugs into a computer. Offered once Wristbands is on (or one is already
+      // set: This computer (USB) is every new computer's own default, so it doesn't count).
+      encoderBox.hidden = word !== "computer" ||
+        !(wristbandsOn() || (d && !["off", "local"].includes(d.encoder_mode)));
     };
     let pinOnlyTouched = false;   // ticked or unticked by hand: changing Type leaves it be
+    let encoderTouched = false;   // chosen by hand: changing Type leaves it be
     kindSelect.onchange = () => {
       syncKind();
       // A new computer hides names by default (Hide names starts ticked); a phone shows them.
       if (!d && !pinOnlyTouched) form.elements["pin_only"].checked = kindSelect.value === "computer";
+      // ...and its card encoder is the one plugged into it; a phone has none.
+      if (!d && !encoderTouched) {
+        encoderMode.value = kindSelect.value === "computer" ? "local" : "off";
+        syncEncoder();
+      }
     };
     syncKind();
     form.elements["name"].value = d ? d.name : "";
@@ -587,38 +593,76 @@
     orderResetRow(dialog, d, "devices");
     form.elements["encoder_url"].value = d?.encoder_url || "";
     form.elements["encoder_port"].value = d?.encoder_port || "";
-    // Card encoder: Off, Automatic (the add-on finds SN Web Socket on the network) or an address
-    // typed in (which always wins).
+    // Card encoder: This computer (USB) (reached through the staff app open on this computer; a
+    // new computer's default), Off, Automatic (SN Web Socket found on the network, used only once
+    // confirmed) or an address typed in (which always wins).
     const encoderMode = form.elements["encoder_mode"];
-    encoderMode.value = d?.encoder_mode || "off";
-    const autoChoice = form.elements["encoder_auto_ip"];
-    autoChoice.replaceChildren();
+    encoderMode.value = d ? d.encoder_mode || "off" : kindSelect.value === "computer" ? "local" : "off";
+    // Automatic: the encoder confirmed with Use this encoder. On a computer already added that's
+    // saved straight away; a new one keeps it until Save.
+    let autoIp = d?.encoder_auto_ip || "";
     const findResult = $("[data-encoder-find-result]", dialog);
     findResult.textContent = "";
     findResult.classList.remove("form-error");
+    // The device as last loaded: a reload (or the link check) replaces the objects in the list.
+    const current = () => (d && state.devices.find((x) => x.id === d.id)) || d;
+    const useHelper = (helper) => {
+      const name = form.elements["name"].value.trim() || d?.name || "this computer";
+      return run(async () => {
+        if (!await askUseHelper(name, helper)) return false;
+        if (!d) {
+          autoIp = helper.ip;
+          renderAuto();
+          return false;   // saved with the computer
+        }
+        await saveHelper(d, helper);
+        d = current();
+        autoIp = d.encoder_auto_ip || "";
+        encoderMode.value = "auto";
+        syncEncoder();
+      }, `Saved: ${d?.name || name} uses the card encoder at ${helper.ip}.`);
+    };
     const renderAuto = () => {
       const disc = state.wristbands?.discovery || {};
-      const found = disc.helpers || [];
-      const keep = autoChoice.options.length ? autoChoice.value : (d?.encoder_auto_ip || "");
-      autoChoice.replaceChildren(
-        h("option", { value: "" }, found.length > 1 ? "Choose one\u2026" : "The only one found"),
-        ...found.map((f) => h("option", { value: f.ip }, f.version ? `${f.ip} (SN Web Socket ${f.version})` : f.ip)),
-        keep && !found.some((f) => f.ip === keep)
-          ? h("option", { value: keep }, `${keep} (not found in the last search)`) : null);
-      autoChoice.value = keep;
-      $("[data-encoder-choice]", dialog).hidden = found.length < 2 && !keep;
-      $("[data-encoder-auto-status]", dialog).textContent = autoStatus(disc, autoChoice.value);
+      const saved = !!d && current().encoder_mode === "auto" && autoIp === (current().encoder_auto_ip || "");
+      $("[data-encoder-auto-status]", dialog).textContent = autoStatus(disc, autoIp, saved);
+      fill($("[data-encoder-helpers]", dialog),
+        helperRows(disc.helpers || [], autoIp, saved ? "In use" : "Chosen", useHelper));
+    };
+    const renderLocal = () => {
+      const line = $("[data-encoder-local-status]", dialog);
+      const now = current();
+      const [text, look] = !now || now.encoder_mode !== "local"
+        ? ["After saving, sign in on this computer and open Wristbands: the encoder connects then.", ""]
+        : linkStatus(now, "this computer");
+      line.textContent = text;
+      line.className = `hint link-status ${look}`.trim();
     };
     const syncEncoder = () => {
       const chosen = encoderMode.value;
+      $("[data-encoder-local]", dialog).hidden = chosen !== "local";
       $("[data-encoder-auto]", dialog).hidden = chosen !== "auto";
       $("[data-encoder-address]", dialog).hidden = chosen !== "address";
       $("[data-encoder-port]", dialog).hidden = chosen === "off";
       renderAuto();
+      renderLocal();
     };
-    encoderMode.onchange = syncEncoder;
-    autoChoice.onchange = renderAuto;
+    encoderMode.onchange = () => {
+      encoderTouched = true;
+      syncEncoder();
+    };
     syncEncoder();
+    // While it's open, the link check (checkLinks) redraws what this computer's encoder is doing:
+    // all of it when something changed, else just the link's words (its "last connected").
+    linkWatcher = {
+      redraw: (changed) => {
+        if (encoderBox.hidden) return;
+        if (changed) syncEncoder();
+        else renderLocal();
+      },
+      fast: () => !encoderBox.hidden && encoderMode.value === "local" && current()?.encoder_mode === "local",
+    };
+    if (linkWatcher.fast()) scheduleLinkCheck(LINK_CHECK_EDITING_MS);
     const findButton = $("[data-encoder-find]", dialog);
     findButton.onclick = async () => {
       findButton.disabled = true;
@@ -640,6 +684,8 @@
       return !port || /^auto(matic)?$/i.test(port) ? "auto" : port;
     };
     // Tests what's saved: the add-on connects to the encoder, reads its version and lets it go.
+    // This computer (USB) goes through the staff app on that computer, so Wristbands must be open
+    // there (the add-on says so if it isn't).
     const encoderResult = $("[data-encoder-result]", dialog);
     const showResult = (text, isError) => {
       encoderResult.textContent = text;
@@ -652,12 +698,12 @@
       const typed = form.elements["encoder_url"].value.trim().replace(/\/+$/, "");
       const chosen = encoderMode.value;
       if (chosen === "off") {
-        showResult("Choose Automatic or enter an address first.", true);
+        showResult("Choose This computer (USB) or Automatic, or enter an address first.", true);
         return;
       }
       if (chosen !== d.encoder_mode || encoderPort() !== (d.encoder_port || "auto") ||
           (chosen === "address" && typed !== d.encoder_url) ||
-          (chosen === "auto" && autoChoice.value !== (d.encoder_auto_ip || ""))) {
+          (chosen === "auto" && autoIp !== (d.encoder_auto_ip || ""))) {
         showResult("Save first: Test encoder uses the saved card encoder and port.", true);
         return;
       }
@@ -710,6 +756,7 @@
     }
     syncMode();
     dialog.onclose = () => {
+      linkWatcher = null;
       if (dialog.returnValue !== "save") return;
       const roleBased = accessMode.value === "role";
       const shared = roleBased || mode.value === "staff";
@@ -736,7 +783,7 @@
       if (!encoderBox.hidden) {
         body.encoder_mode = encoderMode.value;
         if (encoderMode.value === "address") body.encoder_url = form.elements["encoder_url"].value.trim();
-        if (encoderMode.value === "auto") body.encoder_auto_ip = autoChoice.value || null;
+        if (encoderMode.value === "auto") body.encoder_auto_ip = autoIp || null;
         body.encoder_port = encoderPort();
       } else if (d && d.encoder_mode !== "off" && kindSelect.value !== "computer") {
         body.encoder_mode = "off"; // a phone has no card encoder
@@ -2389,16 +2436,84 @@
 
   // ------------------------------------------------ card encoders
 
+  const isLocal = (address) => String(address || "").startsWith("local:");
+
+  // Whether a computer's card shows its encoder. This computer (USB) is every new computer's own
+  // default, so it says nothing while Wristbands is off.
+  const showsEncoder = (d) => d.kind === "computer" && d.encoder_mode !== "off" &&
+    (d.encoder_mode !== "local" || wristbandsOn());
+
   // A computer's card encoder on its card in Phones & computers.
   function encoderBadge(d) {
+    const s = state.wristbands?.encoders?.[d.encoder_address] || {};
+    if (d.encoder_mode === "local") {
+      // This computer (USB): its browser link first, as nothing works without it.
+      const link = d.encoder_link || {};
+      const [text, cls] = !link.link ? ["Card encoder: not connected", ""]
+        : ["blocked", "unreachable"].includes(link.helper) ? ["Card encoder: problem", "locked"]
+        : s.busy ? ["Card encoder: making cards", "active"]
+        : s.error ? ["Card encoder: problem", "locked"]
+        : link.helper === "ready" ? ["Card encoder: connected", "active"]
+        : ["Card encoder: connecting", "pending"];
+      return h("span", { class: `badge ${cls}`.trim(), title: (link.link && s.error) || linkStatus(d)[0] }, text);
+    }
     if (!d.encoder_address) {
       return h("span", { class: "badge", title: d.encoder_text || "" }, "Card encoder: not found");
     }
-    const s = state.wristbands?.encoders?.[d.encoder_address] || {};
     const [text, cls] = s.error ? ["Card encoder: problem", "locked"]
       : s.busy ? ["Card encoder: making cards", "active"]
       : s.connected ? ["Card encoder", "active"] : ["Card encoder", ""];
     return h("span", { class: `badge ${cls}`.trim(), title: s.error || d.encoder_text || d.encoder_address }, text);
+  }
+
+  const cardEncoderBadge = (d) => (showsEncoder(d) ? encoderBadge(d) : null);
+
+  // Under a computer's name in Phones & computers: its card encoder (Automatic and This computer
+  // (USB), which change on their own), and why Wristbands won't show on it, worked out by the add-on.
+  function cardEncoderInfo(d) {
+    const shown = d.status !== "revoked" && showsEncoder(d);
+    const line = !shown ? null
+      : d.encoder_mode === "auto" ? `Card encoder: ${d.encoder_text}`
+      : d.encoder_mode === "local" ? `Card encoder: This computer (USB), ${linkWords(d)}` : null;
+    return [line ? h("div", { class: "meta" }, line) : null,
+      d.wristbands_note && (d.encoder_mode !== "local" || wristbandsOn())
+        ? h("div", { class: "meta wb-note" }, d.wristbands_note) : null];
+  }
+
+  // " (SN Web Socket 2.1)" once SN Web Socket has said its version through the link, else "".
+  const helperVersion = (link) => (link.helper_version
+    ? ` (SN Web Socket ${String(link.helper_version).slice(0, 40)})` : "");
+
+  // This computer (USB): the computer's browser link in a few words, after "This computer (USB), ".
+  function linkWords(d) {
+    const link = d.encoder_link || {};
+    if (!link.link) {
+      return `not connected${link.last_seen ? ` (last connected ${ago(link.last_seen).toLowerCase()})` : ""}`;
+    }
+    if (link.helper === "ready") return `connected${helperVersion(link)}`;
+    if (link.helper === "blocked") return "blocked by the browser on it";
+    if (link.helper === "unreachable") return "SN Web Socket isn't answering on it";
+    return "Wristbands is open on it, checking SN Web Socket";
+  }
+
+  // This computer (USB): the computer's browser link in a sentence, and how it looks ("ok",
+  // "warn" or ""). `where` names the computer ("this computer" in its own editor).
+  function linkStatus(d, where = d.name) {
+    const link = d.encoder_link || {};
+    if (!link.link) {
+      return [`Not connected: it connects while someone signed in on ${where} has Wristbands open` +
+        `${link.last_seen ? ` (last connected ${ago(link.last_seen).toLowerCase()})` : ""}.`, ""];
+    }
+    if (link.helper === "ready") return [`Connected${helperVersion(link)}.`, "ok"];
+    if (link.helper === "blocked") {
+      return [`Wristbands is open on ${where}, but the browser there is blocking the encoder. Allow this ` +
+        "site to access devices on your local network (the browser asks, or use the site settings next " +
+        "to the address bar).", "warn"];
+    }
+    if (link.helper === "unreachable") {
+      return [`Wristbands is open on ${where}, but SN Web Socket isn't answering there: is it running?`, "warn"];
+    }
+    return [`Wristbands is open on ${where}; checking SN Web Socket there…`, ""];
   }
 
   // Why no one can use a computer's encoder, or how it was when last used.
@@ -2408,6 +2523,10 @@
     const s = state.wristbands?.encoders?.[d.encoder_address];
     if (s?.busy) return h("div", { class: "via" }, "Making cards now.");
     if (s?.error) return h("div", { class: "via access-note" }, `Problem: ${s.error}`);
+    if (d.encoder_mode === "local") {
+      const [text, look] = linkStatus(d);
+      return h("div", { class: look === "ok" ? "via" : look ? "via access-note" : "entity-id" }, text);
+    }
     if (s?.connected) {
       return h("div", { class: "via" }, `Working${s.checked_at ? `, last checked ${ago(s.checked_at).toLowerCase()}` : ""}.`);
     }
@@ -2425,18 +2544,56 @@
       : `No encoder found on ${where}. Check that SN Web Socket is running on the front-desk computer.`;
   }
 
-  // An Automatic encoder in the computer editor: what it uses, or why it has none yet.
-  function autoStatus(disc, chosenIp) {
-    if (disc.scanning) return "Looking for encoders\u2026";
-    if (disc.error) return disc.error;
-    if (!disc.scanned_at) return "Not looked for yet. Click Find encoders (it takes a few seconds).";
+  // An Automatic encoder in the computer editor: the one it uses, or why it has none. It only
+  // ever uses the one confirmed with Use this encoder (`saved`: confirmed and saved, not just
+  // chosen in the editor), never one it found by itself.
+  function autoStatus(disc, chosenIp, saved) {
+    if (disc.scanning) return "Looking for encoders…";
+    if (chosenIp && !saved) return `Uses the encoder at ${chosenIp} once you click Save.`;
     const found = disc.helpers || [];
     const where = (disc.networks || []).join(", ");
-    const searched = `searched ${ago(disc.scanned_at).toLowerCase()}`;
+    const searched = disc.scanned_at ? `searched ${ago(disc.scanned_at).toLowerCase()}` : "";
+    // The one in use still is after a search that didn't work: the add-on keeps what it found.
+    if (chosenIp && found.some((f) => f.ip === chosenIp)) return `Uses the encoder at ${chosenIp} (${searched}).`;
+    if (disc.error) return disc.error;
+    if (!disc.scanned_at) {
+      return chosenIp ? `Uses the encoder at ${chosenIp} once it's found. Not looked for since the add-on ` +
+        "started: click Find encoders." : "Not looked for yet. Click Find encoders (it takes a few seconds).";
+    }
+    if (chosenIp) {
+      return `The encoder you chose (${chosenIp}) wasn't found on ${where} (${searched}), so this computer ` +
+        "has none for now. Check that SN Web Socket is running on it, then click Find encoders. If its " +
+        "address changed, choose it again below: Staff Access never switches to another one by itself.";
+    }
     if (!found.length) return `No encoder found on ${where} (${searched}). Check that SN Web Socket is running on this computer, then click Find encoders.`;
-    const match = found.find((f) => f.ip === chosenIp) || (found.length === 1 ? found[0] : null);
-    if (match) return `Automatic: ${match.ip} (${searched}).`;
-    return `Automatic: ${found.length} found on ${where}, choose the one at this desk.`;
+    return `Found ${plural(found.length, "encoder")} on ${where} (${searched}). Click Use this encoder on ` +
+      "the one running on this computer: none is used until you do.";
+  }
+
+  // Automatic: each SN Web Socket helper found, with Use this encoder, or a badge on the one
+  // chosen (listed even when the last search didn't find it).
+  function helperRows(found, chosen, chosenWord, use) {
+    const rows = found.map((f) => ({ ip: f.ip, version: f.version, missing: false }));
+    if (chosen && !found.some((f) => f.ip === chosen)) rows.push({ ip: chosen, version: null, missing: true });
+    return rows.map((f) => h("div", { class: "helper-row" },
+      h("span", null, f.ip,
+        f.version ? h("small", null, `SN Web Socket ${String(f.version).slice(0, 40)}`) : null,
+        f.missing ? h("small", null, "not found in the last search") : null),
+      f.ip === chosen ? h("span", { class: `badge ${f.missing ? "locked" : "active"}` }, chosenWord)
+        : h("button", { type: "button", class: "btn", onclick: () => use(f) }, "Use this encoder")));
+  }
+
+  // Automatic only uses an encoder an admin confirmed: anything on the network could answer like
+  // SN Web Socket, and the encoder is sent TT Hotel's key for it each time cards are made.
+  function askUseHelper(name, helper) {
+    return askConfirm(`Use the card encoder at ${helper.ip} for ${name}? Staff Access sends it the encoder ` +
+      "key from TT Hotel each time cards are made there, so check that this is the address of the " +
+      "computer the encoder is plugged into (in Windows: Settings → Network & internet).", "Use this encoder");
+  }
+
+  async function saveHelper(d, helper) {
+    await api("PATCH", `api/devices/${d.id}`, { encoder_mode: "auto", encoder_auto_ip: helper.ip });
+    await load();
   }
 
   async function findEncoders() {
@@ -2448,7 +2605,7 @@
   $("#wb-find-encoders").addEventListener("click", (e) => {
     const button = e.currentTarget;
     button.disabled = true;
-    $("#wb-discovery").textContent = "Looking for encoders\u2026 this takes a few seconds.";
+    $("#wb-discovery").textContent = "Looking for encoders… this takes a few seconds.";
     run(async () => {
       try {
         toast(foundText((await findEncoders()).discovery));
@@ -2461,7 +2618,7 @@
 
   function renderDiscovery() {
     const disc = state.wristbands?.discovery || {};
-    $("#wb-discovery").textContent = disc.scanning ? "Looking for encoders\u2026"
+    $("#wb-discovery").textContent = disc.scanning ? "Looking for encoders…"
       : disc.scanned_at || disc.error
         ? `${disc.scanned_at ? `Last looked ${ago(disc.scanned_at).toLowerCase()}. ` : ""}${foundText(disc)}`
         : "Not looked for since the add-on started.";
@@ -2473,15 +2630,23 @@
     const computers = state.devices.filter((d) => d.encoder_mode !== "off" && d.status !== "revoked");
     if (!computers.length) {
       box.replaceChildren(h("p", { class: "hint" }, "No computer has a card encoder yet. On the front-desk " +
-        "computer's card in Phones & computers, click Edit and set Card encoder to Automatic."));
+        "computer's card in Phones & computers, click Edit and set Card encoder to This computer (USB)."));
       return;
     }
+    const found = state.wristbands?.discovery?.helpers || [];
     box.replaceChildren(...computers.map((d) => h("div", { class: "area-row" },
       h("div", { class: "entity-text" },
         h("div", { class: "entity-name" }, d.name),
         h("div", { class: "entity-id", title: d.encoder_address || "" },
           `${d.encoder_text} · port: ${d.encoder_port || "Automatic"}`),
-        encoderNote(d)),
+        encoderNote(d),
+        // Automatic with no encoder in use: the ones found, to confirm the one at this desk.
+        d.encoder_mode === "auto" && !d.encoder_address && found.length
+          ? h("div", { class: "helper-list" }, helperRows(found, d.encoder_auto_ip, "Chosen", (f) =>
+            run(async () => {
+              if (!await askUseHelper(d.name, f)) return false;
+              await saveHelper(d, f);
+            }, `Saved: ${d.name} uses the card encoder at ${f.ip}.`))) : null),
       h("div", { class: "area-actions" },
         h("button", { type: "button", class: "btn", onclick: () => testEncoder(d) }, "Test encoder"),
         h("button", { type: "button", class: "btn", onclick: () => editPhone(d) }, "Edit")))));
@@ -2496,6 +2661,77 @@
         await load();
       }
     });
+  }
+
+  // ------------------------------------------------ encoder links (This computer (USB))
+  // Such an encoder connects only while Wristbands is open on its computer, so while one is on
+  // screen (Phones & computers, Wristbands, or its editor) the dashboard asks the add-on again
+  // every so often and redraws just the encoder parts, never the rest of the page.
+
+  const LINK_CHECK_MS = 15000;          // often enough to see someone open Wristbands at the desk
+  const LINK_CHECK_EDITING_MS = 4000;   // its editor is open: someone is probably setting it up
+  // What says how a computer's encoder is now (all worked out by the add-on).
+  const LINK_FIELDS = ["encoder_text", "encoder_address", "encoder_link", "wristbands_note"];
+  let linkTimer = null;
+  let linkChecking = false;
+
+  function linkCheckWanted() {
+    if (document.visibilityState !== "visible" || !wristbandsOn()) return false;
+    if (!state.devices.some((d) => d.encoder_mode === "local" && d.status !== "revoked")) return false;
+    return !!linkWatcher || !$("#tab-phones").hidden || !$("#tab-wristbands").hidden;
+  }
+
+  // How the encoders are now, leaving out what changes by itself (when last seen or checked).
+  function encoderSignature() {
+    const strip = (o) => (o && typeof o === "object" ? { ...o, last_seen: null, checked_at: null } : o);
+    return JSON.stringify([state.devices.map((d) => [d.id, ...LINK_FIELDS.map((k) => strip(d[k]))]),
+      Object.entries(state.wristbands?.encoders || {}).map(([url, s]) => [url, strip(s)]),
+      state.wristbands?.discovery || null]);
+  }
+
+  // Each computer card's encoder badge and lines, drawn again in place.
+  function redrawEncoderSlots() {
+    const byId = new Map(state.devices.map((d) => [String(d.id), d]));
+    document.querySelectorAll("[data-encoder-badge]").forEach((slot) => {
+      const d = byId.get(slot.dataset.encoderBadge);
+      if (d) fill(slot, cardEncoderBadge(d));
+    });
+    document.querySelectorAll("[data-encoder-info]").forEach((slot) => {
+      const d = byId.get(slot.dataset.encoderInfo);
+      if (d) fill(slot, cardEncoderInfo(d));
+    });
+  }
+
+  function scheduleLinkCheck(ms) {
+    clearTimeout(linkTimer);
+    linkTimer = setTimeout(checkLinks, ms);
+  }
+
+  // Never throws: a check that fails is just tried again later.
+  async function checkLinks() {
+    if (linkChecking) return;   // the check under way schedules the next
+    linkChecking = true;
+    try {
+      if (linkCheckWanted()) {
+        const data = await api("GET", "api/state");
+        const before = encoderSignature();
+        const fresh = new Map((data.devices || []).map((x) => [x.id, x]));
+        for (const d of state.devices) {
+          const now = fresh.get(d.id);
+          if (now) for (const key of LINK_FIELDS) d[key] = now[key];
+        }
+        state.wristbands = { ...state.wristbands, encoders: data.wristbands?.encoders || {},
+          discovery: data.wristbands?.discovery || {} };
+        const changed = encoderSignature() !== before;
+        redrawEncoderSlots();
+        if (changed) renderEncoderList();
+        linkWatcher?.redraw(changed);
+      }
+    } catch { /* the add-on didn't answer: the next check tries again */ }
+    linkChecking = false;
+    let wait = LINK_CHECK_MS;
+    try { if (linkWatcher?.fast()) wait = LINK_CHECK_EDITING_MS; } catch { /* the usual wait */ }
+    scheduleLinkCheck(wait);
   }
 
   // ------------------------------------------------ doors
@@ -2980,8 +3216,18 @@
     return [...found.values()];
   }
 
+  // How an encoder is now, for choosing one. This computer (USB) connects through the staff app
+  // on that computer, so it says Wristbands must be open there (a job waits for it until then).
   function encoderWords(e) {
-    const s = state.wristbands?.encoders?.[e.address] || e.status || {};
+    const d = state.devices.find((x) => x.id === e.device_id);
+    const address = e.address || d?.encoder_address;
+    const s = state.wristbands?.encoders?.[address] || e.status || {};
+    if (isLocal(address)) {
+      const link = d?.encoder_link || s;
+      const now = s.busy ? "Making cards right now" : !link.link ? "Not connected now"
+        : link.helper === "ready" ? "Connected now" : "Wristbands is open there, but the encoder isn't ready";
+      return `This computer (USB): Wristbands must be open on it. ${now}.`;
+    }
     return s.busy ? "Making cards right now" : s.error ? `Problem: ${s.error}` : s.connected ? "Working" : "";
   }
 
@@ -2989,7 +3235,7 @@
   async function pickEncoder(list = cardEncoders()) {
     if (!list.length) {
       throw new Error("No computer has a card encoder yet. In Phones & computers, edit the front-desk " +
-        "computer and set its Card encoder to Automatic.");
+        "computer and set its Card encoder to This computer (USB).");
     }
     if (list.length === 1) return list[0].device_id;
     const picked = await askChoice("Which card encoder? Have the card ready next to it.",
@@ -4655,4 +4901,5 @@
     try { tab = sessionStorage.getItem("tab") || tab; } catch { /* ignore */ }
     selectTab(tab);
   }).catch((err) => toast(err.message, true));
+  scheduleLinkCheck(LINK_CHECK_MS);
 })();

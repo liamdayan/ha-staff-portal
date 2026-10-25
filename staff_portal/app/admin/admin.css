@@ -488,6 +488,21 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .copy-row input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .badge.computer { color: var(--view); }
 
+/* Card encoders. A slot is redrawn in place as a This computer (USB) link comes and goes, so
+   the rest of the card (an open role menu, say) is left alone. */
+.encoder-slot { display: contents; }
+.link-status.ok { color: var(--ok); }
+.link-status.warn { color: var(--warn); }
+.helper-list { display: grid; gap: 6px; margin-top: 6px; }
+.helper-list:empty { display: none; }
+.helper-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px;
+  flex-wrap: wrap; padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 12px;
+  font-size: 14px; }
+.helper-row > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.helper-row small { color: var(--muted); margin-left: 6px; }
+/* The long choices in Type and Card encoder fit a phone-width editor instead of widening it. */
+#phone-form, #phone-form label { grid-template-columns: minmax(0, 1fr); }
+
 /* Connecteam */
 .head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .ct-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }

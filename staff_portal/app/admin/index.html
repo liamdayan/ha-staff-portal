@@ -119,7 +119,7 @@
     <div class="section-head"><h2>Wristbands</h2></div>
     <p class="hint wb-intro">Staff signed in on a front-desk computer make TT Hotel wristbands and key
       cards on the card encoder plugged into it. Set up your TT Hotel account and the defaults here,
-      set each front-desk computer's card encoder (Automatic is easiest) in <button class="linkish"
+      set each front-desk computer's card encoder (This computer (USB) is easiest) in <button class="linkish"
       data-goto="phones">Phones &amp; computers</button> → Edit, and choose who may make which cards on the
       <button class="linkish" data-goto="roles">Roles</button> tab. Every card is recorded with who made it.</p>
     <form id="wb-form" class="settings">
@@ -264,11 +264,13 @@
       <fieldset>
         <legend>Card encoders</legend>
         <p class="hint">Each front-desk computer with an encoder runs TT Hotel's free <b>SN Web Socket</b>
-          helper. In Phones &amp; computers → Edit, set its <b>Card encoder</b> to <b>Automatic</b>
-          and Staff Access finds it on the networks in Home Assistant's network setting (or the ones
-          entered under Advanced), even if its address changes. Or enter its address. Staff Access
-          connects to the encoder itself, so it works through your Cloudflare Tunnel too. Between
-          jobs the encoder is free for the TT Hotel program.</p>
+          helper. With <b>This computer (USB)</b> (the default for new computers), Staff Access
+          reaches the encoder through the staff app open on that computer, so it connects while
+          someone signed in there has <b>Wristbands</b> open, and Staff Access never connects to it
+          over your network. For other setups, <b>Automatic</b> looks for SN Web Socket on the networks in Home
+          Assistant's network setting (or the ones entered under Advanced) and uses only the one you
+          confirm with <b>Use this encoder</b>, or enter its <b>Address</b>. Between jobs the encoder
+          is free for the TT Hotel program.</p>
         <div class="ct-status">
           <span id="wb-discovery" class="hint"></span>
           <button class="btn" type="button" id="wb-find-encoders">Find encoders</button>
@@ -585,16 +587,24 @@
       <label>Card encoder <small>For making wristbands, on the encoder plugged into this computer
         (TT Hotel's SN Web Socket helper must be running on it).</small>
         <select name="encoder_mode">
+          <option value="local">This computer (USB): plugged into this computer</option>
           <option value="off">Off: no card encoder</option>
           <option value="auto">Automatic: find it on the network</option>
           <option value="address">Address: enter this computer's address</option>
         </select></label>
+      <div data-encoder-local hidden>
+        <p class="hint">Staff Access reaches the encoder through the staff app open on this computer:
+          it connects while someone signed in here has <b>Wristbands</b> open, and Staff Access never
+          connects to it over your network. The first time, Chrome or Edge asks whether the staff app may access
+          devices on your local network: choose <b>Allow</b>.</p>
+        <p class="hint link-status" data-encoder-local-status></p>
+      </div>
       <div data-encoder-auto hidden>
         <p class="hint" data-encoder-auto-status></p>
-        <label data-encoder-choice hidden>Which encoder <small>More than one computer runs SN Web Socket.
-          Choose the one at this desk. If its address changes, Staff Access looks for it at the same
-          address again, and uses whichever one is found if only one is.</small>
-          <select name="encoder_auto_ip"></select></label>
+        <div class="helper-list" data-encoder-helpers></div>
+        <p class="hint">Staff Access only uses an encoder you confirm with <b>Use this encoder</b>, and
+          never switches to another one by itself. Give this computer a fixed IP address (a DHCP
+          reservation in your router) so it's found at the same address after a restart.</p>
         <div class="ct-status">
           <span class="hint" data-encoder-find-result></span>
           <button class="btn" type="button" data-encoder-find>Find encoders</button>

@@ -1,9 +1,19 @@
 """The card encoder: TT Hotel's "SN Web Socket" helper on the front-desk computer, and the job
 runner that makes wristbands and key cards on it.
 
-The add-on talks to the encoder, never the browser: SN Web Socket (a free TT Hotel program on
-the computer the USB encoder is plugged into) listens on ws://<computer>:8102 and passes each
-request to the encoder's driver. The hotel key (hotelInfo) never reaches a browser.
+SN Web Socket (a free TT Hotel program on the computer the USB encoder is plugged into) listens
+on ws://<computer>:8102 and passes each request to the encoder's driver. It's reached one of two
+ways, with the same requests and answers either way:
+
+- Over the network (a typed address, or Automatic): the add-on connects to it itself
+  (SNWebSocket). The hotel key (hotelInfo) never reaches a browser.
+- This computer (USB): the add-on never connects to the computer. The staff app open on it keeps
+  a WebSocket to the add-on (its link, served by main.py) and passes each request on to SN Web
+  Socket at ws://127.0.0.1:8102 on that same computer, and the answers back (LocalRelay and
+  RelaySocket). Only RELAY_FUNCTIONS are ever sent that way. The hotel key passes through that
+  signed-in browser while a card is made or looked up, and crosses the local network only as the
+  staff app's own traffic does (encrypted through the tunnel; not when the computer opens the
+  staff app at its plain http LAN address, which "only through the tunnel" refuses).
 
 SN Web Socket answers each request with the request's own fields plus "errorCode" (and "data"),
 so a "requestId" sent with a request comes back with its answer; anything else (the greeting
@@ -37,6 +47,10 @@ in between.
 Progress is saved through an injected on_update(job_id, job_fields, card_fields) callback (the
 database lives on the event loop; this module never imports it), and hotelInfo comes from an
 injected hotel_info(fresh=...) coroutine.
+
+A computer in This computer (USB) mode has one runner of its own, at the address "local:<its
+device ID>". A job that starts while its link isn't connected waits for it (card_wait) and then
+needs attention; a link that drops during a job is a failed card like any other.
 """
 
 import asyncio
@@ -75,7 +89,18 @@ HOTEL_INFO_EXPIRED = 13
 UNREACHABLE = -1000          # SN Web Socket couldn't be reached
 NO_REPLY = -1001             # ...or didn't answer in time
 BUSY = -1002                 # the encoder is making cards for someone else
+NO_LINK = -1003              # This computer (USB): Wristbands isn't open on that computer
 UNEXPECTED = -9              # an answer without an errorCode (SN Web Socket's "exception" code)
+LOCAL_PREFIX = "local:"      # a computer in This computer (USB) mode: "local:<device ID>"
+LOCAL_RE = re.compile(r"^local:([1-9]\d{0,11})$")
+MAX_RELAYS = 1000            # computers' links kept at once (one per computer)
+# The only requests the add-on ever sends through a computer's browser (This computer (USB)):
+# the ones the runner below uses, and nothing else. The staff app forwards this list only.
+RELAY_FUNCTIONS = frozenset({
+    "CE_DisconnectComm", "GetDeviceInfo", "CE_ConnectComm", "CE_GetCardID",
+    "CE_InitCardEncoder", "CE_SetSectors", "CE_InitCard", "CE_ClearCard", "CE_WriteCard",
+    "CE_ReadCard", "CE_CancelCard", "CE_ReadCancellationInfo", "CE_Beep", "CE_GetVersion"})
+HELPER_STATES = ("ready", "unreachable", "blocked")   # what a browser says of SN Web Socket
 
 ERROR_MESSAGES = {
     0: "Success",
@@ -132,6 +157,7 @@ ERROR_MESSAGES = {
     UNREACHABLE: "Can't reach SN Web Socket on the encoder's computer",
     NO_REPLY: "SN Web Socket didn't answer in time",
     BUSY: "The card encoder is busy making cards",
+    NO_LINK: "Wristbands isn't open on the encoder's computer",
 }
 
 QUEUED_MESSAGE = "Waiting for the encoder…"
@@ -213,6 +239,9 @@ def failure_message(code: int, card_type: str) -> str:
     if code == NO_REPLY:
         return ("The card encoder's computer stopped answering. Check that SN Web Socket is "
                 "running, then try again.")
+    if code == NO_LINK:
+        return ("Open Wristbands on the card encoder's computer to connect the encoder, then try "
+                "again.")
     if code in (1003, 16):
         return "The card encoder isn't plugged in. Check the USB cable, then try again."
     if code in (1, 1004, 26, 28):
@@ -262,8 +291,39 @@ def _reply_code(reply: dict) -> int:
         return UNEXPECTED
     try:
         return int(code)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # 1e400 reads as infinity
         return UNEXPECTED
+
+
+def _answers(reply, request_id: str, function: str) -> bool:
+    """Whether an answer from SN Web Socket is the one to this request: it repeats the
+    requestId, or (SN Web Socket's own errors leave the requestId out) it's an error for the
+    same function."""
+    if not isinstance(reply, dict):
+        return False
+    if reply.get("requestId") == request_id:
+        return True
+    return ("requestId" not in reply and reply.get("function") == function
+            and reply.get("errorCode") not in (None, 0))
+
+
+def _helper_version(value, known: str | None) -> str | None:
+    """SN Web Socket's version from an answer (or a browser's word for it), else what was
+    known."""
+    if isinstance(value, str) and value.strip() and value.isprintable():
+        return value.strip()[:40]
+    return known
+
+
+def local_address(device_id: int) -> str:
+    """The address of a computer in This computer (USB) mode: one runner per computer."""
+    return f"{LOCAL_PREFIX}{int(device_id)}"
+
+
+def local_device(url) -> int | None:
+    """The computer a "local:<device ID>" address belongs to, else None."""
+    match = LOCAL_RE.match(url) if isinstance(url, str) else None
+    return int(match[1]) if match else None
 
 
 def _reason(err: BaseException) -> str:
@@ -276,77 +336,33 @@ def _reason(err: BaseException) -> str:
     return "connection failed"
 
 
-class SNWebSocket:
-    """One encoder address. The WebSocket opens on the first request and stays open until
-    close(); requests go one at a time."""
+class SNCommands:
+    """The requests Staff Portal makes of SN Web Socket, whichever way it's reached: exchange()
+    is the transport's own (SNWebSocket over the network, RelaySocket through a computer's
+    browser link)."""
 
-    def __init__(self, url: str, session: aiohttp.ClientSession, *, timeout: float = CALL_TIMEOUT):
-        self.url = url
-        self.timeout = timeout
-        self._session = session
-        self._ws: aiohttp.ClientWebSocketResponse | None = None
-        self._lock = asyncio.Lock()
-        self.helper_version: str | None = None   # SN Web Socket's version, from its answers
+    url = ""
+    helper_version: str | None = None   # SN Web Socket's version, from its answers
 
     @property
     def is_open(self) -> bool:
-        return self._ws is not None and not self._ws.closed
+        return False
 
-    async def _open(self) -> aiohttp.ClientWebSocketResponse:
-        if self.is_open:
-            return self._ws
-        try:
-            self._ws = await asyncio.wait_for(
-                self._session.ws_connect(self.url, timeout=aiohttp.ClientWSTimeout(ws_close=5),
-                                         max_msg_size=MAX_MESSAGE), CONNECT_TIMEOUT)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
-            raise EncoderError(UNREACHABLE, "connect", _reason(err)) from None
-        return self._ws
+    @property
+    def linked(self) -> bool:
+        """Whether requests can be sent now: only a computer's browser link can be missing."""
+        return True
 
     async def exchange(self, function: str, **params) -> tuple[int, dict]:
         """Send one request; (errorCode, answer) without judging the code."""
-        async with self._lock:
-            ws = await self._open()
-            request_id = f"sp-{_SESSION_TAG}-{next(_request_ids)}"
-            loop = asyncio.get_running_loop()
-            try:
-                await ws.send_json({"function": function, "requestId": request_id, **params})
-                deadline = loop.time() + self.timeout
-                while True:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                    msg = await asyncio.wait_for(ws.receive(), remaining)
-                    if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
-                                    aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        raise ConnectionResetError("closed")
-                    if msg.type != aiohttp.WSMsgType.TEXT:
-                        continue
-                    try:
-                        reply = json.loads(msg.data)
-                    except ValueError:
-                        continue
-                    if not isinstance(reply, dict):
-                        continue
-                    if reply.get("requestId") == request_id:
-                        break
-                    if ("requestId" not in reply and reply.get("function") == function
-                            and reply.get("errorCode") not in (None, 0)):
-                        break   # SN Web Socket's own errors leave out the requestId
-            except asyncio.TimeoutError:
-                await self._drop()
-                raise EncoderError(NO_REPLY, function) from None
-            except (aiohttp.ClientError, OSError, RuntimeError) as err:
-                await self._drop()
-                raise EncoderError(UNREACHABLE, function, _reason(err)) from None
-        if isinstance(reply.get("snWebSocketVersion"), str):
-            self.helper_version = reply["snWebSocketVersion"][:40]
-        return _reply_code(reply), reply
+        raise NotImplementedError
 
     async def ping(self) -> None:
         """Check that SN Web Socket answers, without touching the encoder."""
-        async with self._lock:
-            await self._open()
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        """Done with it for now (after every job)."""
 
     async def call(self, function: str, **params) -> dict:
         """Send one request and return the answer; EncoderError unless errorCode is 0."""
@@ -461,6 +477,74 @@ class SNWebSocket:
             text = f"SN Web Socket {self.helper_version}" + (f"; {text}" if text else "")
         return " ".join(text.split())[:200] or "unknown"
 
+
+class SNWebSocket(SNCommands):
+    """One encoder address on the network. The WebSocket opens on the first request and stays
+    open until close(); requests go one at a time."""
+
+    def __init__(self, url: str, session: aiohttp.ClientSession, *, timeout: float = CALL_TIMEOUT):
+        self.url = url
+        self.timeout = timeout
+        self._session = session
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._lock = asyncio.Lock()
+        self.helper_version: str | None = None   # SN Web Socket's version, from its answers
+
+    @property
+    def is_open(self) -> bool:
+        return self._ws is not None and not self._ws.closed
+
+    async def _open(self) -> aiohttp.ClientWebSocketResponse:
+        if self.is_open:
+            return self._ws
+        try:
+            self._ws = await asyncio.wait_for(
+                self._session.ws_connect(self.url, timeout=aiohttp.ClientWSTimeout(ws_close=5),
+                                         max_msg_size=MAX_MESSAGE), CONNECT_TIMEOUT)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
+            raise EncoderError(UNREACHABLE, "connect", _reason(err)) from None
+        return self._ws
+
+    async def exchange(self, function: str, **params) -> tuple[int, dict]:
+        """Send one request; (errorCode, answer) without judging the code."""
+        async with self._lock:
+            ws = await self._open()
+            request_id = f"sp-{_SESSION_TAG}-{next(_request_ids)}"
+            loop = asyncio.get_running_loop()
+            try:
+                await ws.send_json({"function": function, "requestId": request_id, **params})
+                deadline = loop.time() + self.timeout
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    msg = await asyncio.wait_for(ws.receive(), remaining)
+                    if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        raise ConnectionResetError("closed")
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        reply = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if _answers(reply, request_id, function):
+                        break
+            except asyncio.TimeoutError:
+                await self._drop()
+                raise EncoderError(NO_REPLY, function) from None
+            except (aiohttp.ClientError, OSError, RuntimeError) as err:
+                await self._drop()
+                raise EncoderError(UNREACHABLE, function, _reason(err)) from None
+        self.helper_version = _helper_version(reply.get("snWebSocketVersion"),
+                                              self.helper_version)
+        return _reply_code(reply), reply
+
+    async def ping(self) -> None:
+        """Check that SN Web Socket answers, without touching the encoder."""
+        async with self._lock:
+            await self._open()
+
     async def _drop(self) -> None:
         ws, self._ws = self._ws, None
         if ws is not None:
@@ -472,6 +556,194 @@ class SNWebSocket:
     async def close(self) -> None:
         async with self._lock:
             await self._drop()
+
+
+class LocalRelay:
+    """The browser link of one computer in This computer (USB) mode: the staff app open on it
+    keeps a WebSocket to the add-on and passes requests on to SN Web Socket at 127.0.0.1:8102 on
+    the same computer. One link at a time: a newer one replaces the old.
+
+    The web server owns the WebSocket: attach(send) when one opens (send is a coroutine taking
+    one message, a dict), feed(link, message) with each message its browser sends, and
+    detach(link) when it closes. Messages to the browser are {"type": "call", "request": <an SN
+    Web Socket request>}. From the browser, {"type": "reply", "reply": <SN Web Socket's answer>}
+    (a bare answer is taken too) and {"type": "status", "helper": "ready" | "unreachable" |
+    "blocked" | null (not known yet), "version": <SN Web Socket's version, if known>}; the
+    browser answers every request with one or the other ("unreachable" or "blocked" ends the
+    wait at once). name(device_id) gives the computer's name for messages. Call from the event
+    loop."""
+
+    def __init__(self, device_id: int, name=None):
+        self.device_id = device_id
+        self.url = local_address(device_id)
+        self._name = name
+        self._send = None                 # the link's send coroutine; None while there's none
+        self._link = 0                    # the link's number (0: none)
+        self._numbers = itertools.count(1)
+        self._lock = asyncio.Lock()       # one request at a time, as over the network
+        # The request in flight: (requestId, function, its answer to come).
+        self._pending: tuple[str, str, asyncio.Future] | None = None
+        self.connected_at: float | None = None
+        self.last_seen: float | None = None    # when the browser last sent anything
+        self.helper: str | None = None         # one of HELPER_STATES; None until the browser says
+        self.helper_version: str | None = None
+
+    # ------------------------------------------------------------ the link
+
+    @property
+    def connected(self) -> bool:
+        return self._send is not None
+
+    def attach(self, send) -> int:
+        """A link opened: it replaces any other (whose request in flight fails). Returns its
+        number, for feed() and detach()."""
+        self._fail(NO_LINK, "replaced by a newer link")
+        self._link = next(self._numbers)
+        self._send = send
+        self.connected_at = self.last_seen = time.time()
+        self.helper = None   # until this browser says, or SN Web Socket answers through it
+        return self._link
+
+    def detach(self, link: int) -> None:
+        """A link closed. Nothing happens unless it's the current one."""
+        if not link or link != self._link:
+            return
+        self._link, self._send = 0, None
+        self.helper = None
+        self._fail(NO_LINK, "the link closed")
+
+    def feed(self, link: int, message) -> None:
+        """One message from a link's browser. Anything unexpected is ignored; never raises."""
+        if not link or link != self._link or not isinstance(message, dict):
+            return
+        self.last_seen = time.time()
+        kind = message.get("type")
+        if kind == "status":
+            helper = message.get("helper")
+            if helper in HELPER_STATES or (helper is None and "helper" in message):
+                self.helper = helper   # None: not known yet (connecting, or the browser asking)
+            self.helper_version = _helper_version(message.get("version"), self.helper_version)
+            if helper in ("unreachable", "blocked"):
+                self._fail(UNREACHABLE, helper)   # no point waiting for an answer
+            return
+        if kind == "reply":
+            reply = message.get("reply")
+        elif kind is None and ("function" in message or "errorCode" in message):
+            reply = message
+        else:
+            return
+        if not isinstance(reply, dict):
+            return
+        self.helper = "ready"   # SN Web Socket answered through it
+        self.helper_version = _helper_version(reply.get("snWebSocketVersion"),
+                                              self.helper_version)
+        pending = self._pending
+        if pending and not pending[2].done() and _answers(reply, pending[0], pending[1]):
+            pending[2].set_result(reply)
+
+    def state(self) -> dict:
+        """{"link", "connected_at", "last_seen", "helper", "helper_version"}."""
+        return {"link": self.connected, "connected_at": self.connected_at,
+                "last_seen": self.last_seen, "helper": self.helper,
+                "helper_version": self.helper_version}
+
+    # ------------------------------------------------------------ wording
+
+    def name(self) -> str:
+        try:
+            name = self._name(self.device_id) if self._name else None
+        except Exception as err:  # noqa: BLE001 - only for the wording
+            log.warning("Couldn't read the name of computer %s: %r", self.device_id, err)
+            name = None
+        name = " ".join(str(name or "").split())[:60]
+        return name or "the card encoder's computer"
+
+    def missing_message(self) -> str:
+        return f"Open Wristbands on {self.name()} to connect the encoder"
+
+    def summary(self) -> str:
+        """The link and SN Web Socket in a few words, for the dashboard."""
+        if not self.connected:
+            return self.missing_message()
+        if self.helper == "blocked":
+            return (f"The browser on {self.name()} is blocking the encoder. Allow this site to "
+                    "access devices on your local network")
+        if self.helper == "unreachable":
+            return f"Can't reach SN Web Socket on {self.name()}: is it running?"
+        if self.helper == "ready":
+            version = f" (SN Web Socket {self.helper_version})" if self.helper_version else ""
+            return f"Connected{version}"
+        return f"Wristbands is open on {self.name()}; checking SN Web Socket there"
+
+    # ------------------------------------------------------------ requests
+
+    async def exchange(self, function: str, params: dict, timeout: float) -> tuple[int, dict]:
+        """Send one request through the link; (errorCode, answer) as SNWebSocket.exchange."""
+        if function not in RELAY_FUNCTIONS:
+            raise EncoderError(2, function, "not sent through a browser")
+        async with self._lock:
+            send = self._send
+            if send is None:
+                raise EncoderError(NO_LINK, function)
+            request_id = f"sp-{_SESSION_TAG}-{next(_request_ids)}"
+            answer = asyncio.get_running_loop().create_future()
+            self._pending = (request_id, function, answer)
+            try:
+                try:
+                    await asyncio.wait_for(send({"type": "call", "request": {
+                        "function": function, "requestId": request_id, **params}}), timeout)
+                except Exception:  # noqa: BLE001 - closing, closed or stuck: no link to send on
+                    raise EncoderError(NO_LINK, function, "the link closed") from None
+                try:
+                    reply = await asyncio.wait_for(answer, timeout)
+                except asyncio.TimeoutError:
+                    raise EncoderError(NO_REPLY, function) from None
+            finally:
+                self._pending = None
+                if answer.done() and not answer.cancelled():
+                    answer.exception()   # seen, even when nobody waited for it (a Stop, say)
+        return _reply_code(reply), reply
+
+    def check(self) -> None:
+        """Raise EncoderError unless the link is there and SN Web Socket wasn't said to be out of
+        reach."""
+        if not self.connected:
+            raise EncoderError(NO_LINK, "ping")
+        if self.helper in ("unreachable", "blocked"):
+            raise EncoderError(UNREACHABLE, "ping", self.helper)
+
+    def _fail(self, code: int, detail: str) -> None:
+        pending = self._pending
+        if pending is not None and not pending[2].done():
+            pending[2].set_exception(EncoderError(code, pending[1], detail))
+
+
+class RelaySocket(SNCommands):
+    """SN Web Socket through a computer's browser link (This computer (USB)): the same requests
+    and answers as SNWebSocket. close() only forgets: the link belongs to the browser."""
+
+    def __init__(self, relay: LocalRelay, *, timeout: float = CALL_TIMEOUT):
+        self.relay = relay
+        self.url = relay.url
+        self.timeout = timeout
+
+    @property
+    def helper_version(self) -> str | None:
+        return self.relay.helper_version
+
+    @property
+    def is_open(self) -> bool:
+        return self.relay.connected
+
+    @property
+    def linked(self) -> bool:
+        return self.relay.connected
+
+    async def exchange(self, function: str, **params) -> tuple[int, dict]:
+        return await self.relay.exchange(function, params, self.timeout)
+
+    async def ping(self) -> None:
+        self.relay.check()
 
 
 def _raw_records(data) -> list[dict]:
@@ -790,14 +1062,16 @@ class EncoderRunner:
     status, card_number, error, written_at}. It's a plain function, called on the event loop.
     hotel_info_expired() (optional) drops a cached hotelInfo the encoder called expired.
     lingering: the last card made on this encoder before the runner started (after a restart),
-    so it isn't overwritten unseen if it's still on the encoder."""
+    so it isn't overwritten unseen if it's still on the encoder. relay: a computer's browser
+    link (This computer (USB)) to reach SN Web Socket through, instead of the network."""
 
     def __init__(self, url: str, session: aiohttp.ClientSession, hotel_info, on_update, *,
                  poll: float = POLL_SECONDS, timeout: float = CALL_TIMEOUT,
                  attention_timeout: float = ATTENTION_TIMEOUT, hotel_info_expired=None,
-                 lingering: str | None = None):
+                 lingering: str | None = None, relay: LocalRelay | None = None):
         self.url = url
         self._session = session
+        self._relay = relay
         self._hotel_info = hotel_info
         self._on_update = on_update
         self._expired = hotel_info_expired or getattr(
@@ -882,12 +1156,41 @@ class EncoderRunner:
     def status(self) -> dict:
         """{"connected", "busy", "error", "checked_at"} for the Wristbands screen and the
         dashboard. Checks in the background that SN Web Socket still answers, at most every
-        PROBE_TTL seconds and never while a job runs."""
+        PROBE_TTL seconds and never while a job runs.
+
+        A computer in This computer (USB) mode adds "local": True, its link's state ("link",
+        "connected_at", "last_seen", "helper", "helper_version": LocalRelay.state()) and
+        "message" (LocalRelay.summary()). It's "connected" while the link is open and SN Web
+        Socket answered through it; nothing is checked in the background."""
         busy = self._busy()
+        relay = self._relay
+        if relay is not None:
+            return {"connected": relay.connected and relay.helper == "ready", "busy": busy,
+                    "error": self.error, "checked_at": self.checked_at, "local": True,
+                    **relay.state(), "message": relay.summary()}
         if not busy:
             self._start_probe()
         return {"connected": bool(self.connected or (self.reachable and not self.error)),
                 "busy": busy, "error": self.error, "checked_at": self.checked_at}
+
+    def explain(self, code: int, card_type: str = "day_pass") -> str:
+        """failure_message(), naming the computer when SN Web Socket is reached through its
+        browser link (This computer (USB))."""
+        relay = self._relay
+        if relay is None:
+            return failure_message(code, card_type)
+        if code == NO_LINK:
+            return f"{relay.missing_message()}, then try again."
+        if code == UNREACHABLE and relay.helper == "blocked":
+            return (f"The browser on {relay.name()} blocked the card encoder. Allow this site to "
+                    "access devices on your local network, then try again.")
+        if code == UNREACHABLE:
+            return (f"Can't reach SN Web Socket on {relay.name()}. Check that it's running, then "
+                    "try again.")
+        if code == NO_REPLY:
+            return (f"SN Web Socket on {relay.name()} stopped answering. Check that it's running "
+                    "and Wristbands is still open there, then try again.")
+        return failure_message(code, card_type)
 
     def start_lookup(self, *, port: str | None = None, card_wait: float = 60) -> None:
         """Read the card that will be put on the encoder (after any job ahead of it)."""
@@ -927,6 +1230,8 @@ class EncoderRunner:
         Raises EncoderError (BUSY while cards are being made)."""
         if self._busy():
             raise EncoderError(BUSY, "test")
+        if self._relay is not None and not self._relay.connected:
+            raise EncoderError(NO_LINK, "test")
         async with self._lock:
             socket = self._ws()
             try:
@@ -1005,21 +1310,28 @@ class EncoderRunner:
 
     def _note(self, err: EncoderError, card_type: str = "day_pass") -> None:
         """What an encoder problem means for the next attempt and for the status."""
-        if err.code in COMM_CODES or err.code in (UNREACHABLE, NO_REPLY):
+        unreachable = (UNREACHABLE, NO_REPLY, NO_LINK)
+        if err.code in COMM_CODES or err.code in unreachable:
             self._needs_reconnect = True
-        if err.code in (UNREACHABLE, NO_REPLY):
+        if err.code in unreachable:
             self.reachable = False
         elif err.code == HOTEL_INFO_EXPIRED and self._expired is not None:
             try:
                 self._expired()
             except Exception as exc:  # noqa: BLE001 - only a cache
                 log.warning("Couldn't drop the expired hotel key: %r", exc)
-        if err.code in COMM_CODES or err.code in (UNREACHABLE, NO_REPLY, 1, 1003, 1004, 11000):
-            self._set_status(False, failure_message(err.code, card_type))
+        if self._relay is not None and err.code in unreachable:
+            # The link's own state says why (status()), and it changes without a job.
+            self.connected = False
+            self.checked_at = time.time()
+        elif err.code in COMM_CODES or err.code in (*unreachable, 1, 1003, 1004, 11000):
+            self._set_status(False, self.explain(err.code, card_type))
 
-    def _ws(self) -> SNWebSocket:
+    def _ws(self) -> SNCommands:
         if self._socket is None:
-            self._socket = SNWebSocket(self.url, self._session, timeout=self._timeout)
+            self._socket = (RelaySocket(self._relay, timeout=self._timeout)
+                            if self._relay is not None
+                            else SNWebSocket(self.url, self._session, timeout=self._timeout))
         return self._socket
 
     async def _release(self) -> None:
@@ -1041,7 +1353,8 @@ class EncoderRunner:
             self._task = asyncio.get_running_loop().create_task(self._work())
 
     def _start_probe(self) -> None:
-        if self._closed or (self._probe_task and not self._probe_task.done()):
+        if self._closed or self._relay is not None or (
+                self._probe_task and not self._probe_task.done()):
             return
         if self.checked_at and time.time() - self.checked_at < PROBE_TTL:
             return
@@ -1140,7 +1453,7 @@ class EncoderRunner:
             except EncoderError as exc:
                 log.warning("Card job %s, %s %s: %s", job.id, noun, seq, exc)
                 self._note(exc, job.type)
-                failure = _Failure(failure_message(exc.code, job.type), exc.code)
+                failure = _Failure(self.explain(exc.code, job.type), exc.code)
             except Exception:  # noqa: BLE001 - shown as a failed card, never a crash
                 log.exception("Card job %s, %s %s failed unexpectedly", job.id, noun, seq)
                 doing = "clearing this" if job.kind == "revoke" else "making this"
@@ -1161,10 +1474,11 @@ class EncoderRunner:
             self._save(job, {"status": "running", "message": None})
 
     async def _prepare(self, job: _Job, first: bool) -> None:
-        """Before each card: connect if needed; set the encoder up once per job (and after a
-        reconnect)."""
+        """Before each card: connect if needed (through a computer's browser link, once it's
+        there); set the encoder up once per job (and after a reconnect)."""
         reconnected = False
         if self._needs_reconnect or not self._encoder_connected:
+            await self._wait_for_link(job)
             socket = self._ws()
             if self._encoder_connected:
                 await socket.disconnect_encoder()
@@ -1175,14 +1489,33 @@ class EncoderRunner:
             except EncoderError as err:
                 log.warning("Card encoder at %s: connecting failed: %s", self.url, err)
                 self._note(err, job.type)
-                message = failure_message(err.code, job.type)
-                self._set_status(False, message)
+                message = self.explain(err.code, job.type)
+                if self._relay is None or err.code not in (UNREACHABLE, NO_REPLY, NO_LINK):
+                    self._set_status(False, message)
                 raise _Failure(message, err.code) from None
             self._encoder_connected = True
             self._set_status(True, None)
             reconnected = True
         if first or reconnected:
             await self._configure(job)
+
+    async def _wait_for_link(self, job: _Job) -> None:
+        """This computer (USB): wait up to card_wait for the computer's browser link (Wristbands
+        open on it), then give up, so the job needs attention."""
+        relay = self._relay
+        if relay is None or relay.connected:
+            return
+        seq = job.current
+        self._set_live(job, "waiting_for_link", seq, relay.missing_message())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + job.card_wait
+        while not relay.connected:
+            if job.cancel or self._closed:
+                raise _Cancelled()
+            if loop.time() >= deadline:
+                raise _Failure(self.explain(NO_LINK, job.type), NO_LINK)
+            await self._sleep(job)
+        self._set_live(job, "waiting_for_card", seq, job.place_message(seq or 1))
 
     async def _configure(self, job: _Job) -> None:
         """Bind the encoder to the hotel and set the sectors. A failure only leaves a warning:
@@ -1462,6 +1795,8 @@ class EncoderRunner:
 
     async def _read_lookup(self, lookup: dict) -> None:
         port, card_wait = self._lookup_args
+        if not await self._link_for_lookup(lookup, card_wait):
+            return
         lookup["message"] = "Place the wristband on the encoder"
         socket = self._ws()
         try:
@@ -1519,24 +1854,70 @@ class EncoderRunner:
             lookup.update(state="done", message=message)
         except EncoderError as err:
             self._note(err)
-            lookup.update(state="error", message=failure_message(err.code, "day_pass"))
+            lookup.update(state="error", message=self.explain(err.code, "day_pass"))
+
+    async def _link_for_lookup(self, lookup: dict, card_wait: float) -> bool:
+        """This computer (USB): wait up to card_wait for the computer's browser link. False (and
+        the look-up ended) when it didn't come, or the look-up was stopped."""
+        relay = self._relay
+        if relay is None or relay.connected:
+            return True
+        lookup["message"] = relay.missing_message()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + card_wait
+        while not relay.connected:
+            if lookup["_stop"] or self._closed:
+                lookup.update(state="error", message="Look-up stopped.")
+                return False
+            if loop.time() >= deadline:
+                lookup.update(state="error", message=self.explain(NO_LINK, "day_pass"))
+                return False
+            self._lookup_wake.clear()
+            try:
+                await asyncio.wait_for(self._lookup_wake.wait(), self._poll)
+            except asyncio.TimeoutError:
+                pass
+        return True
 
 
 class Encoders:
     """Every encoder address in use: get(url) gives its runner. Call from the event loop.
-    last_card(url) (optional) gives the last card recently made on that encoder, or None."""
+    last_card(url) (optional) gives the last card recently made on that encoder, or None.
+
+    A computer in This computer (USB) mode is at local_address(its device ID), and reaches SN
+    Web Socket through relay(its device ID), its browser link. local_name(device_id) (optional)
+    gives that computer's name, for messages."""
 
     def __init__(self, hotel_info, on_update, *, poll: float = POLL_SECONDS,
                  timeout: float = CALL_TIMEOUT, attention_timeout: float = ATTENTION_TIMEOUT,
-                 hotel_info_expired=None, last_card=None):
+                 hotel_info_expired=None, last_card=None, local_name=None):
         self._hotel_info = hotel_info
         self._on_update = on_update
         self._last_card = last_card
+        self._local_name = local_name
         self._options = {"poll": poll, "timeout": timeout, "attention_timeout": attention_timeout,
                          "hotel_info_expired": hotel_info_expired}
         self._runners: dict[str, EncoderRunner] = {}
+        self._relays: dict[int, LocalRelay] = {}
         self._session: aiohttp.ClientSession | None = None
         self._closing: set[asyncio.Task] = set()
+
+    def relay(self, device_id: int) -> LocalRelay:
+        """A computer's browser link (one per computer, kept while the add-on runs)."""
+        relay = self._relays.get(device_id)
+        if relay is not None:
+            return relay
+        if len(self._relays) >= MAX_RELAYS:   # forget ones nothing uses
+            used = {r._relay for r in self._runners.values()}
+            for old_id, old in list(self._relays.items()):
+                if not old.connected and old not in used:
+                    del self._relays[old_id]
+        relay = self._relays[device_id] = LocalRelay(device_id, self._local_name)
+        return relay
+
+    def find_relay(self, device_id: int) -> LocalRelay | None:
+        """A computer's browser link, without starting one."""
+        return self._relays.get(device_id)
 
     def get(self, url: str) -> EncoderRunner:
         runner = self._runners.get(url)
@@ -1559,8 +1940,10 @@ class Encoders:
         except Exception as err:  # noqa: BLE001 - unknown just means nothing lingering
             log.warning("Couldn't read the last card made on an encoder: %r", err)
             lingering = None
+        device_id = local_device(url)
         runner = EncoderRunner(url, self._session, self._hotel_info, self._on_update,
-                               lingering=lingering, **self._options)
+                               lingering=lingering,
+                               relay=self.relay(device_id) if device_id else None, **self._options)
         self._runners[url] = runner
         return runner
 
@@ -1579,7 +1962,9 @@ class Encoders:
         return runner.live(job_id) if runner else None
 
     async def close_all(self) -> None:
+        """Stop every runner (after the web servers, so no link is open any more)."""
         runners, self._runners = list(self._runners.values()), {}
+        self._relays = {}
         for runner in runners:
             try:
                 await runner.close()

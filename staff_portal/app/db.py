@@ -244,13 +244,17 @@ MIGRATIONS = {
         # 1 = Automatic: no address typed, so the add-on finds SN Web Socket on the network
         # (discovery.py). A typed encoder_url always wins over it. 0 with no address = no encoder.
         "encoder_auto": "INTEGER NOT NULL DEFAULT 0",
-        # Automatic, when several helpers were found: the address of the one an admin chose for
-        # this computer (NULL = the only one found). Matched again after every search.
+        # Automatic: the address of the helper an admin confirmed for this computer (Use this
+        # encoder). NULL = none confirmed yet, so none is used. Matched again after every search.
         "encoder_auto_ip": "TEXT",
         # How many digits the device's own PIN has, recorded when it's set (PINs are stored
         # scrambled, so it can't be worked out later). NULL = not known: the PIN pad then waits
         # for a pause instead of signing in as soon as the last digit is typed.
         "pin_length": "INTEGER",
+        # 1 = This computer (USB): the encoder is plugged into this computer, and the staff app
+        # open on it passes requests to SN Web Socket on 127.0.0.1 (encoder.LocalRelay), so the
+        # add-on never connects to it. A typed encoder_url still wins; Automatic doesn't.
+        "encoder_local": "INTEGER NOT NULL DEFAULT 0",
     },
     "staff": {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
@@ -748,7 +752,8 @@ class Database:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
                    "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since",
-                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip", "pin_length"}
+                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip", "pin_length",
+                   "encoder_local"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -992,12 +997,12 @@ class Database:
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
                    staff_all, layout_pages, created_at, last_seen, kind, pin_only, encoder_url,
-                   encoder_port, encoder_auto, encoder_auto_ip, pin_length)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   encoder_port, encoder_auto, encoder_auto_ip, pin_length, encoder_local)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
                   d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
                   d["kind"], d["pin_only"], d["encoder_url"], d["encoder_port"], d["encoder_auto"],
-                  d["encoder_auto_ip"], d.get("pin_length"))
+                  d["encoder_auto_ip"], d.get("pin_length"), d.get("encoder_local", 0))
                  for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())

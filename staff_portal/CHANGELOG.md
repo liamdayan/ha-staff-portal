@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.8.4
+
+**Card encoders**
+
+- **New: This computer (USB), now the default for new computers.** The card encoder plugged into
+  a front-desk computer connects through the staff app open on that same computer, so nothing
+  has to be set up on the network: no IP address, no search, and Staff Access never connects to
+  the computer over the network. It connects while someone signed in there has **Wristbands**
+  open, with TT Hotel's SN Web Socket running. The first time, Chrome or Edge asks whether the
+  staff app may access devices on your local network: choose **Allow**. New phones still have no
+  card encoder, and computers already set up keep theirs.
+- The Wristbands header on that computer says **Encoder ready**, or what's wrong: SN Web Socket
+  isn't running, the browser is blocking local network access, or Wristbands is open in another
+  window (**Use it here** takes it back).
+- A job started while Wristbands isn't open on that computer, including **Make key card** from
+  the Staff tab, waits for it ("Open Wristbands on Front Desk PC to connect the encoder"), then
+  needs attention. Closing that tab during a job leaves it needing attention too; **Try again**
+  carries on once Wristbands is open there again.
+- **Test encoder** works for This computer (USB) too, through that computer's browser, and says
+  to open Wristbands there when it isn't open.
+- The dashboard shows each such computer's encoder as **connected** or **not connected** (with
+  when it was last connected), and updates it by itself while Phones & computers or Wristbands is
+  open.
+- **Changed: Automatic only uses an encoder you've confirmed.** **Find encoders** lists the SN
+  Web Socket helpers found, each with **Use this encoder**, and none is used until you click it,
+  even when only one is found. If the one you confirmed isn't found later, the computer says so
+  instead of switching to another. A safety improvement: the encoder is sent TT Hotel's encoder
+  key, so it should only ever go to one you've checked. Automatic computers set up before 0.8.4
+  that had picked one of several keep it; ones using the only encoder found need **Use this
+  encoder** once.
+
+**Backups**
+
+- Backups include each computer's This computer (USB) setting. Older backups still restore, with
+  each computer's card encoder as it was.
+
+**Signing in**
+
+- **Faster sign-in:** when a PIN's length isn't known, the PIN pad now signs in half a second
+  after the last digit instead of a second.
+- **The PIN pad signs in instantly for more people:** for people linked to Connecteam whose PIN is
+  their kiosk code, the staff sync now fills in their PIN's length, which wasn't recorded for PINs
+  set before 0.8.3.
+
 ## 0.8.3
 
 **Signing in**

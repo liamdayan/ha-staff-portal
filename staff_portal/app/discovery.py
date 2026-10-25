@@ -12,6 +12,11 @@ addresses) of each: a wider network is narrowed to the /24 around Home Assistant
 An admin can name the networks instead (the wb_scan_subnets setting). What's found is kept in
 memory, with when it was found.
 
+A helper found this way is only ever used once an admin has confirmed it for the computer (Use
+this encoder, which saves its address): anything on the network could greet like SN Web Socket,
+and the encoder is sent the hotel key. A confirmed helper that isn't found is "not found", never
+swapped for whatever else answered.
+
 Searches only run when asked: at startup and when an Automatic computer's encoder isn't found or
 stops answering (both only while something uses Automatic; the second at most every
 AUTO_SCAN_GAP), and from the dashboard's Find encoders button (at most every ADMIN_SCAN_GAP).
@@ -138,15 +143,15 @@ def greeting(text) -> str | None:
 
 
 def resolve(helpers: list[dict], chosen_ip: str | None) -> tuple[dict | None, str]:
-    """Which helper an Automatic computer uses, and why: (helper, "ok") for the one at the
-    address chosen for it, else the only one found; (None, "choose") when several were found and
-    none is at the chosen address; (None, "none") when nothing was found."""
+    """Which helper an Automatic computer uses, and why: (helper, "ok") only for the one at the
+    address an admin confirmed for it; (None, "missing") when that one wasn't found (whatever
+    else was); with none confirmed yet, (None, "choose") when any were found (an admin picks
+    one) and (None, "none") when nothing was."""
     if chosen_ip:
         for helper in helpers:
             if helper["ip"] == chosen_ip:
                 return helper, "ok"
-    if len(helpers) == 1:
-        return helpers[0], "ok"
+        return None, "missing"
     return None, "choose" if helpers else "none"
 
 

@@ -659,8 +659,8 @@ def make_backup(db, branding, version: str) -> dict:
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, pin_only, layout_pages, created_at, last_seen, encoder_url,
-                        encoder_port, encoder_auto, encoder_auto_ip, pin_length FROM devices
-                        WHERE status != 'deleted'"""),
+                        encoder_port, encoder_auto, encoder_auto_ip, pin_length, encoder_local
+                        FROM devices WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in, role_id, layout_pages, wristbands, department_id,
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
@@ -849,7 +849,10 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                         "encoder_port": port if encoder_port_ok(port) else None,
                         # Backups from before Automatic encoders have neither: Off.
                         "encoder_auto": 1 if row.get("encoder_auto") in (1, True) else 0,
-                        "encoder_auto_ip": encoder_ip(row.get("encoder_auto_ip"))})
+                        "encoder_auto_ip": encoder_ip(row.get("encoder_auto_ip")),
+                        # From before This computer (USB): the mode they had (Off, Automatic or
+                        # an address), as before.
+                        "encoder_local": 1 if row.get("encoder_local") in (1, True) else 0})
     device_ids = {d["id"] for d in devices}
     staff_devices = {(r["staff_id"], r["device_id"]) for r in _rows(data, "staff_devices", MAX_LINK_ROWS)
                      if r.get("staff_id") in staff_ids and r.get("device_id") in device_ids}

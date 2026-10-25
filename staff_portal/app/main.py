@@ -7,8 +7,9 @@ Staff phones never receive Home Assistant credentials. Every request is checked 
 phone's role before it is forwarded.
 
 Front-desk computers can also make TT Hotel key cards (Wristbands). The add-on, not the
-browser, talks to TT Hotel and to the card encoder on the desk, so neither the TT Hotel account
-nor the encoder ever has to be reachable from a phone or browser.
+browser, talks to TT Hotel, so the TT Hotel account is never reachable from a phone or browser.
+It reaches the card encoder on the desk either over the network, or (This computer (USB))
+through the staff app open on the computer the encoder is plugged into.
 """
 
 import asyncio
@@ -45,8 +46,10 @@ from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_ca
 import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
 from tthotel import TTHotel, TTHotelError
-from encoder import EncoderError, Encoders
-from discovery import Discovery, DiscoveryError, describe, ha_networks, parse_networks
+from encoder import (NO_LINK, NO_REPLY, UNREACHABLE, EncoderError, Encoders, local_address,
+                     local_device)
+from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, ha_networks,
+                       parse_networks)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -137,10 +140,11 @@ def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
 
 def tthotel_wanted() -> bool:
     """Whether anything needs TT Hotel's door list: Wristbands is on and some computer has a
-    card encoder, typed in or Automatic (so TT Hotel isn't asked for nothing)."""
+    card encoder, typed in, This computer (USB) or Automatic (so TT Hotel isn't asked for
+    nothing)."""
     return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
-        "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_auto = 1) "
-        "AND status != 'revoked' LIMIT 1").fetchone() is not None
+        "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_local = 1 "
+        "OR encoder_auto = 1) AND status != 'revoked' LIMIT 1").fetchone() is not None
 
 
 def load_setting_object(key: str) -> dict:
@@ -167,12 +171,22 @@ tthotel = TTHotel(
 
 
 # One runner per encoder address; each makes one job's cards at a time. The add-on reaches the
-# encoder through TT Hotel's SN Web Socket helper on the desk computer.
+# encoder through TT Hotel's SN Web Socket helper on the desk computer: over the network, or
+# (This computer (USB)) through the staff app open on that computer, whose runner is at
+# "local:<device ID>".
 LINGERING_CARD_SECONDS = 3600   # a card made this recently may still be on the encoder after a
                                 # restart, so it isn't overwritten until it's been taken off
+
+
+def computer_name(device_id: int) -> str | None:
+    device = db.device(device_id)
+    return device["name"] if device else None
+
+
 encoders = Encoders(tthotel.hotel_info, lambda *update: save_job_progress(*update),
                     hotel_info_expired=tthotel.hotel_info_expired,
-                    last_card=lambda url: db.wb_last_card(url, time.time() - LINGERING_CARD_SECONDS))
+                    last_card=lambda url: db.wb_last_card(url, time.time() - LINGERING_CARD_SECONDS),
+                    local_name=computer_name)
 
 # A computer whose card encoder is set to Automatic uses the SN Web Socket helper found on the
 # network (discovery.py) instead of a typed address: the staff app comes through the tunnel, so
@@ -203,7 +217,7 @@ def encoder_auto_wanted() -> bool:
     computer's card encoder is set to Automatic."""
     return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
         "SELECT 1 FROM devices WHERE encoder_auto = 1 AND encoder_url IS NULL "
-        "AND status != 'revoked' LIMIT 1").fetchone() is not None
+        "AND encoder_local = 0 AND status != 'revoked' LIMIT 1").fetchone() is not None
 
 
 discovery = Discovery(lambda: encoder_networks(), lambda: encoder_auto_wanted())
@@ -623,6 +637,11 @@ def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
 
 # ---------------------------------------------------------------- staff app
 
+# This computer (USB): the staff app reaches SN Web Socket on the computer it's open on. Only the
+# staff app's own pages may (the dashboard and its preview run on Home Assistant's address).
+LOCAL_HELPERS = f"ws://127.0.0.1:{SN_WEB_SOCKET_PORT} ws://localhost:{SN_WEB_SOCKET_PORT}"
+
+
 def render_staff_index(enroll_code: str | None = None, preview: bool = False) -> web.Response:
     """The staff app's page. preview: the copy shown in the dashboard's layout preview, served
     from the dashboard's address (so its links are relative) and framed by the dashboard."""
@@ -654,9 +673,10 @@ def render_staff_index(enroll_code: str | None = None, preview: bool = False) ->
     html = html.replace('<script src="/static/app.js"></script>',
                         f'<script nonce="{nonce}">\n{script}\n</script>')
     framed_by = "'self'" if preview else "'none'"   # only the dashboard may frame the preview
+    connect = "'self'" if preview else f"'self' {LOCAL_HELPERS}"   # 'self' takes same-origin wss
     csp = (f"default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-{nonce}'; "
-           f"script-src 'self' 'nonce-{nonce}'; connect-src 'self'; frame-ancestors {framed_by}; "
-           "base-uri 'none'; form-action 'none'")
+           f"script-src 'self' 'nonce-{nonce}'; connect-src {connect}; "
+           f"frame-ancestors {framed_by}; base-uri 'none'; form-action 'none'")
     return web.Response(text=html, content_type="text/html",
                         headers={"Cache-Control": "no-store", "Content-Security-Policy": csp,
                                  "X-Content-Type-Options": "nosniff"})
@@ -1104,6 +1124,7 @@ def new_session(device: dict, member: dict | None) -> str:
 async def api_signout(request: web.Request):
     device, member = authenticate(request)
     pin_sessions.pop(request.headers.get("X-Session", ""), None)
+    recheck_links(device["id"])   # this session's encoder link closes with it
     if member:
         db.log(actor_name(device, member), "Signed out", role=role_label(device, member))
     return web.json_response({"ok": True})
@@ -1123,6 +1144,7 @@ async def api_entities(request: web.Request):
     entities.sort(key=lambda e: (e["group_rank"], e["area"].lower(), e["name"].lower()))
     can_reorder = db.settings().get("allow_phone_reorder") == "1"
     order = db.phone_order(order_owner(device, member)) if can_reorder else None
+    offer_wristbands = bool(wristband_permissions(device, member)["types"])
     phone_layout = visible_layout(layout_data, allowed, layout, pages_for(device, member, layout_data))
     if phone_layout:
         phone_layout = apply_phone_order(phone_layout, order)
@@ -1138,8 +1160,10 @@ async def api_entities(request: web.Request):
         "control_lock_minutes": db.setting_int("control_lock_minutes"),
         "custom_order": bool(order),
         "order": order or {"pages": [], "items": {}},
-        # Whether to offer Wristbands (the page itself checks again on every request).
-        "wristbands": bool(wristband_permissions(device, member)["types"]),
+        # Whether to offer Wristbands (the page itself checks again on every request), and
+        # whether this computer's encoder is This computer (USB), reached through this app.
+        "wristbands": offer_wristbands,
+        "encoder_local": offer_wristbands and encoder_mode(device) == "local",
     })
 
 
@@ -1367,7 +1391,8 @@ async def wristband_caller(request: web.Request, change: bool = False,
     if limit and wristbands_too_busy(device["id"]):
         raise json_error(web.HTTPTooManyRequests,
                          "Too many requests at once. Wait a moment and try again.")
-    # From here on the device's encoder_url is the encoder it uses now, typed in or found.
+    # From here on the device's encoder_url is the encoder it uses now, typed in, found, or
+    # "local:<ID>" for This computer (USB) (local_device()), so encoder_mode() no longer applies.
     return {**device, "encoder_url": address}, member, perms
 
 
@@ -1482,12 +1507,16 @@ async def api_wristbands(request: web.Request):
     """What this person may make here, with the defaults to start from."""
     device, member, perms = await wristband_caller(request, limit=False)
     status = encoder_status(device["encoder_url"])
+    # This computer (USB): the app opens this computer's encoder link (POST /api/encoder/ticket,
+    # then GET /api/encoder/link) while Wristbands is open.
+    local = local_device(device["encoder_url"]) is not None
     zone = await wristband_zone()
     if zone is None:
         return web.json_response({"enabled": False, "reason": NO_TIME_ZONE, "encoder": status,
-                                  "types": {}, "doors": [], "see_all_cards": perms["see_all_cards"]})
+                                  "encoder_local": local, "types": {}, "doors": [],
+                                  "see_all_cards": perms["see_all_cards"]})
     options = wristbands.options(perms, wristband_doors(), db.settings(), time.time(), zone)
-    return web.json_response({**options, "encoder": status})
+    return web.json_response({**options, "encoder": status, "encoder_local": local})
 
 
 async def api_preview_wristbands(request: web.Request):
@@ -1768,22 +1797,30 @@ async def api_lookup_revoke(request: web.Request):
     return web.json_response({"job": job_view(db.wb_job(job_id), await wristband_zone())})
 
 
-# Which encoder a computer uses: Off, Automatic (found on the network) or a typed address.
+# Which encoder a computer uses: Off, This computer (USB) (plugged into it, reached through
+# the staff app open on it), Automatic (found on the network, once an admin confirms it) or a
+# typed address.
 
 def encoder_mode(device: dict) -> str:
-    """"address" (typed in; it always wins), "auto" or "off"."""
+    """"address" (typed in; it always wins), "local" (This computer (USB)), "auto" or "off"."""
     if device.get("encoder_url"):
         return "address"
+    if device.get("encoder_local"):
+        return "local"
     return "auto" if device.get("encoder_auto") else "off"
 
 
 def encoder_address(device: dict, rescan: bool = True) -> str | None:
-    """Where this computer's card encoder is now: the address typed in, else (Automatic) the SN
-    Web Socket helper found for it, else None. Spelled as transfer.encoder_url spells a typed
-    one, so one encoder still gets one runner. With `rescan`, an Automatic encoder that wasn't
-    found, or has stopped answering, has the network searched again (at most every 10 minutes,
-    and only while something uses Automatic)."""
+    """Where this computer's card encoder is now: the address typed in; "local:<its ID>" for
+    This computer (USB) (whether or not its link is connected now: a job waits for it); for
+    Automatic the SN Web Socket helper an admin confirmed for it, if it's found; else None.
+    Spelled as transfer.encoder_url spells a typed one, so one encoder still gets one runner.
+    With `rescan`, an Automatic encoder that wasn't found, or has stopped answering, has the
+    network searched again (at most every 10 minutes, and only while something uses
+    Automatic)."""
     mode = encoder_mode(device)
+    if mode == "local":
+        return local_address(device["id"])
     if mode != "auto":
         return device.get("encoder_url") if mode == "address" else None
     helper, why = discovery.resolve(device.get("encoder_auto_ip"))
@@ -1795,10 +1832,31 @@ def encoder_address(device: dict, rescan: bool = True) -> str | None:
     return url
 
 
+# This computer (USB) with its link open: SN Web Socket there as its browser last said, in the
+# dashboard's words (anything else: still connecting).
+LINK_WORDS = {"ready": "connected", "unreachable": "SN Web Socket isn't answering",
+              "blocked": "blocked by the browser"}
+
+
+def encoder_link(device: dict) -> dict | None:
+    """This computer (USB): the computer's browser link, {"link", "connected_at", "last_seen",
+    "helper", "helper_version", "message"} (from memory). None in other modes."""
+    if encoder_mode(device) != "local":
+        return None
+    relay = encoders.relay(device["id"])
+    return {**relay.state(), "message": relay.summary()}
+
+
 def encoder_text(device: dict) -> str | None:
-    """How a computer's encoder is set and what it resolves to, for the dashboard: "Automatic:
-    192.168.1.50", "Automatic: 2 found, choose one", ... None when it has none."""
+    """How a computer's encoder is set and what it resolves to, for the dashboard: "This
+    computer (USB): connected", "Automatic: 192.168.1.50", "Automatic: 2 found, choose one", ...
+    None when it has none."""
     mode = encoder_mode(device)
+    if mode == "local":
+        relay = encoders.find_relay(device["id"])
+        state = ("not connected" if relay is None or not relay.connected
+                 else LINK_WORDS.get(relay.helper, "connecting"))
+        return f"This computer (USB): {state}"
     if mode != "auto":
         return device["encoder_url"] if mode == "address" else None
     helper, why = discovery.resolve(device.get("encoder_auto_ip"))
@@ -1806,12 +1864,19 @@ def encoder_text(device: dict) -> str | None:
         return f"Automatic: {helper['ip']}"
     if discovery.scanning:
         return "Automatic: looking for encoders…"
+    # Found but not confirmed yet: the ones found are kept after a search that didn't work.
+    if why == "choose" and len(discovery.helpers) == 1:
+        return (f"Automatic: found {discovery.helpers[0]['ip']}. Click Use this encoder to "
+                "confirm it.")
+    if why == "choose":
+        return f"Automatic: {len(discovery.helpers)} found, choose one"
     if discovery.error:
         return f"Automatic: {discovery.error}"
     if discovery.scanned_at is None:
         return "Automatic: not looked for yet. Click Find encoders."
-    if why == "choose":
-        return f"Automatic: {len(discovery.helpers)} found, choose one"
+    if why == "missing":
+        return (f"Automatic: {device['encoder_auto_ip']} not found on "
+                f"{describe(discovery.networks)}")
     return f"Automatic: no encoder found on {describe(discovery.networks)}"
 
 
@@ -1822,11 +1887,16 @@ def wristbands_note(device: dict) -> str | None:
         return None
     mode = encoder_mode(device)
     if db.settings().get("wristbands_enabled") != "1":
+        # This computer (USB) is every new computer's default, so it says nothing either: a
+        # property that doesn't use Wristbands would see this on every computer.
         return ("Wristbands won't show here: Wristbands is turned off (Wristbands tab)."
-                if mode != "off" else None)
+                if mode not in ("off", "local") else None)
     if mode == "off":
         return "Wristbands won't show here: it has no card encoder (Edit → Card encoder)."
     if not encoder_address(device, rescan=False):
+        if discovery.resolve(device.get("encoder_auto_ip"))[1] == "choose" and discovery.helpers:
+            return ("Wristbands won't show here: confirm its card encoder first (Edit → Card "
+                    "encoder → Use this encoder).")
         return "Wristbands won't show here: its card encoder hasn't been found yet."
     if not is_shared(device):
         return ("Wristbands won't show here: in Kiosk mode for one person or team, no one signs "
@@ -1836,6 +1906,19 @@ def wristbands_note(device: dict) -> str | None:
         if not role or not (role["wristbands"] or {}).get("types"):
             return ("Wristbands won't show here: it's Shared, and its role can't make any "
                     "wristbands (Roles tab).")
+    link = encoder_link(device)
+    if link and not link["link"]:
+        # Wristbands shows (the encoder connects through it): say what's missing.
+        return ("Card encoder not connected: it connects while someone signed in here has "
+                "Wristbands open, with SN Web Socket running on this computer.")
+    if link and link["helper"] == "blocked":
+        return ("Card encoder: the browser on this computer is blocking it. Allow the staff app "
+                "to access devices on the local network when the browser asks.")
+    if link and link["helper"] == "unreachable":
+        return ("Card encoder: Wristbands is open on this computer, but SN Web Socket isn't "
+                "answering there. Check that it's running.")
+    # Still connecting, or the browser there is asking about local network access: the card
+    # says "checking SN Web Socket", which is all that's known yet.
     return None
 
 
@@ -2010,10 +2093,222 @@ def recover_wristband_jobs() -> None:
                ok=False)
 
 
+# ---------------------------------------------------------------- encoder links (staff app)
+# A computer whose card encoder is This computer (USB) is never connected to by the add-on.
+# The staff app open on it (someone signed in who may make wristbands, Wristbands open) keeps a
+# WebSocket to the add-on instead, GET /api/encoder/link, through the tunnel like any other
+# request, and passes each SN Web Socket request it's sent on to ws://127.0.0.1:8102 on the same
+# computer, and the answers back (encoder.LocalRelay has the messages). Browsers can't add the
+# device token to a WebSocket, so the app first gets a ticket from POST /api/encoder/ticket (with
+# its token and PIN session): good once, for LINK_TICKET_SECONDS, for that device and session.
+# One link per computer: a newer one replaces the old. A link closes when its PIN session ends
+# (signed out, idle, ended by an admin), or when the computer or person may no longer use it.
+
+LINK_TICKET_SECONDS = 30          # a ticket is used at once, so it needn't last
+LINK_TICKETS_PER_MINUTE = 12      # per device: reconnecting with backoff needs a few at most
+MAX_LINK_TICKETS = 1000           # tickets kept at once (the oldest go first)
+LINK_CHECK_SECONDS = 5.0          # an open link checks its session and access this often
+LINK_HEARTBEAT = 30.0             # WebSocket pings, so a link to a computer that's gone closes
+LINK_CLOSE_SECONDS = 5.0          # closing waits this long for the browser to agree
+MAX_LINK_MESSAGE = 256 * 1024     # a card's records with the hotel key fit many times over
+LINK_MESSAGES_PER_MINUTE = 1200   # polling for a card every 0.3 s is about 200 a minute
+# Close codes the app can act on: replaced by a newer link (don't reconnect on your own), the
+# PIN session ended (sign in again first), no longer allowed, too many messages, and the add-on
+# stopping (reconnect, with the usual backoff).
+LINK_REPLACED, LINK_SIGNED_OUT, LINK_NOT_ALLOWED, LINK_TOO_BUSY = 4000, 4001, 4003, 4008
+LINK_STOPPING = 1001
+NO_LINK_ACCESS = "This computer's card encoder can't be connected here."
+
+link_tickets: dict[str, tuple[int, str, int, float]] = {}   # ticket -> (device, session, person,
+                                                            #            expires at)
+recent_link_tickets: dict[int, list[float]] = {}
+
+
+@dataclasses.dataclass
+class EncoderLink:
+    """An open link: its number at the relay, its WebSocket, and the PIN session it's bound to."""
+    number: int
+    ws: web.WebSocketResponse
+    session: str
+    staff_id: int
+
+
+open_links: dict[int, EncoderLink] = {}   # device -> its link
+
+
+def link_refusal(device_id: int, session: str, staff_id: int) -> str | None:
+    """Why a computer's encoder link may not be (or stay) open: "signed_out" once the PIN
+    session it belongs to has ended (signed out, idle, ended by an admin), "not_allowed" when the
+    computer or the person may no longer use it (revoked or locked, not This computer (USB) any
+    more, no wristbands). None: it may."""
+    device = db.device(device_id)
+    if not device or device["status"] != "active":
+        return "not_allowed"
+    held = pin_sessions.get(session)
+    if (not held or held[0] != device_id or held[2] != staff_id
+            or time.time() - held[1] > pin_timeout(device)):
+        return "signed_out"
+    member = db.staff(staff_id)
+    if (not is_shared(device) or not member or member["status"] != "active"
+            or not db.staff_allowed_on(member["id"], device)):
+        return "signed_out"   # the app is asked for a PIN again too
+    if encoder_mode(device) != "local" or not wristband_permissions(device, member)["types"]:
+        return "not_allowed"
+    return None
+
+
+def link_tickets_too_busy(device_id: int) -> bool:
+    now = time.time()
+    times = [t for t in recent_link_tickets.get(device_id, []) if now - t < 60]
+    busy = len(times) >= LINK_TICKETS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_link_tickets[device_id] = times
+    return busy
+
+
+async def api_encoder_ticket(request: web.Request):
+    """A ticket to open this computer's encoder link with: {"ticket", "expires_in", "path"}."""
+    device, member = authenticate(request)
+    session = request.headers.get("X-Session", "")
+    if not member or link_refusal(device["id"], session, member["id"]):
+        raise json_error(web.HTTPForbidden, NO_LINK_ACCESS)
+    if link_tickets_too_busy(device["id"]):
+        raise json_error(web.HTTPTooManyRequests,
+                         "Too many requests at once. Wait a moment and try again.")
+    now = time.time()
+    if len(link_tickets) >= MAX_LINK_TICKETS:
+        for key, entry in list(link_tickets.items()):
+            if entry[3] < now:
+                del link_tickets[key]
+        for key in sorted(link_tickets, key=lambda k: link_tickets[k][3])[
+                :len(link_tickets) - MAX_LINK_TICKETS + 1]:
+            del link_tickets[key]
+    ticket = secrets.token_urlsafe(24)
+    link_tickets[ticket] = (device["id"], session, member["id"], now + LINK_TICKET_SECONDS)
+    return web.json_response({"ticket": ticket, "expires_in": LINK_TICKET_SECONDS,
+                              "path": "/api/encoder/link"})
+
+
+async def api_encoder_link(request: web.Request):
+    """This computer's encoder link (GET /api/encoder/link?ticket=...): a WebSocket for as long
+    as Wristbands is open. Only this computer's own card jobs, look-ups and tests use it."""
+    entry = link_tickets.pop(request.query.get("ticket", "")[:64], None)
+    if not entry or entry[3] < time.time():
+        raise json_error(web.HTTPUnauthorized, "Sign in again to connect the card encoder.")
+    device_id, session, staff_id, _ = entry
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        # Browsers can't send one on a WebSocket; anything that does must be this very device.
+        other = db.device_by_token(auth[7:])
+        if not other or other["id"] != device_id:
+            raise json_error(web.HTTPForbidden, NO_LINK_ACCESS)
+    if link_refusal(device_id, session, staff_id):
+        raise json_error(web.HTTPForbidden, NO_LINK_ACCESS)
+    # No compression: messages carry the hotel key, and they're small anyway.
+    ws = web.WebSocketResponse(heartbeat=LINK_HEARTBEAT, max_msg_size=MAX_LINK_MESSAGE,
+                               timeout=LINK_CLOSE_SECONDS, compress=False)
+    if not ws.can_prepare(request).ok:
+        return bad_request("Open this address as a WebSocket.")
+    await ws.prepare(request)
+    # Again: a sign-out or a change to the computer while the handshake went out isn't seen by
+    # recheck_links (it only knows open links). Nothing waits from here until the link is taken,
+    # so one that may not stay never replaces the computer's link in another window.
+    refusal = link_refusal(device_id, session, staff_id)
+    if refusal:
+        await ws.close(code=LINK_SIGNED_OUT if refusal == "signed_out" else LINK_NOT_ALLOWED,
+                       message=refusal.encode())
+        return ws
+    relay = encoders.relay(device_id)
+    number = relay.attach(ws.send_json)
+    link = EncoderLink(number, ws, session, staff_id)
+    old, open_links[device_id] = open_links.get(device_id), link
+    if old is not None:
+        close_link(old, LINK_REPLACED, "replaced")
+    log.info("Card encoder link opened on %s", relay.name())
+    try:
+        await serve_link(link, relay, device_id)
+    except Exception as err:  # noqa: BLE001 - a link that breaks just closes
+        log.warning("Card encoder link on %s failed: %r", relay.name(), err)
+    finally:
+        relay.detach(number)
+        if open_links.get(device_id) is link:
+            del open_links[device_id]
+        if not ws.closed:
+            await ws.close()
+        log.info("Card encoder link closed on %s", relay.name())
+    return ws
+
+
+async def serve_link(link: EncoderLink, relay, device_id: int) -> None:
+    """Hand the browser's messages to the relay until the link closes, checking its session and
+    access every LINK_CHECK_SECONDS. Messages are never logged: answers carry the hotel key."""
+    ws = link.ws
+    loop = asyncio.get_running_loop()
+    checked = window = loop.time()
+    count = 0
+    while True:
+        try:
+            msg = await ws.receive(timeout=LINK_CHECK_SECONDS)
+        except asyncio.TimeoutError:
+            msg = None
+        if msg is not None:
+            if msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSING, web.WSMsgType.CLOSED,
+                            web.WSMsgType.ERROR):
+                return
+            if loop.time() - window >= 60:
+                window, count = loop.time(), 0
+            count += 1
+            if count > LINK_MESSAGES_PER_MINUTE:
+                log.warning("Card encoder link on %s sent too many messages; closing it",
+                            relay.name())
+                await ws.close(code=LINK_TOO_BUSY, message=b"too many messages")
+                return
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except (ValueError, RecursionError):
+                    data = None
+                relay.feed(link.number, data)
+        if msg is None or loop.time() - checked >= LINK_CHECK_SECONDS:
+            checked = loop.time()
+            refusal = link_refusal(device_id, link.session, link.staff_id)
+            if refusal:
+                await ws.close(code=LINK_SIGNED_OUT if refusal == "signed_out"
+                               else LINK_NOT_ALLOWED, message=refusal.encode())
+                return
+
+
+def close_link(link: EncoderLink, code: int, why: str) -> None:
+    """Close a link in the background (its own handler then lets the relay go)."""
+    if not link.ws.closed:
+        background(link.ws.close(code=code, message=why.encode()), "close an encoder link")
+
+
+def recheck_links(device_id: int | None = None) -> None:
+    """Close the encoder links (of one computer, or all) that may not stay open, now rather
+    than at their next check: after a sign-out, or a change to a computer."""
+    for linked_id, link in list(open_links.items()):
+        if device_id is not None and linked_id != device_id:
+            continue
+        refusal = link_refusal(linked_id, link.session, link.staff_id)
+        if refusal:
+            close_link(link, LINK_SIGNED_OUT if refusal == "signed_out" else LINK_NOT_ALLOWED,
+                       refusal)
+
+
+async def close_all_links(app: web.Application) -> None:
+    """When the add-on stops: close every link, so stopping doesn't wait for them."""
+    links = list(open_links.values())
+    await asyncio.gather(*(link.ws.close(code=LINK_STOPPING, message=b"stopping")
+                           for link in links if not link.ws.closed), return_exceptions=True)
+
+
 STAFF_SECURITY_HEADERS = {
     "Content-Security-Policy":
         "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        f"connect-src 'self' {LOCAL_HELPERS}; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
@@ -2079,6 +2374,9 @@ def staff_app() -> web.Application:
     app.router.add_get("/api/wristbands/lookup", api_lookup)
     app.router.add_post(r"/api/wristbands/cards/{id:\d{1,12}}/revoke", api_revoke_card)
     app.router.add_post("/api/wristbands/lookup/revoke", api_lookup_revoke)
+    app.router.add_post("/api/encoder/ticket", api_encoder_ticket)
+    app.router.add_get("/api/encoder/link", api_encoder_link)
+    app.on_shutdown.append(close_all_links)
     return app
 
 
@@ -2118,6 +2416,7 @@ def device_payload() -> list[dict]:
         d["encoder_mode"] = encoder_mode(d)
         d["encoder_address"] = encoder_address(d, rescan=False)   # the one it uses now
         d["encoder_text"] = encoder_text(d)
+        d["encoder_link"] = encoder_link(d)   # This computer (USB): its browser link
         d["wristbands_note"] = wristbands_note(d)
     return devices
 
@@ -2288,6 +2587,9 @@ staff_sync_lock = asyncio.Lock()
 # staff ID -> fingerprint of (their PIN hash, kiosk code) last found to match, so the hourly sync
 # doesn't re-check every PIN (each check is deliberately slow). In memory only.
 kiosk_matches: dict[int, str] = {}
+# (person id -> fingerprint of PIN hash and kiosk code) pairs already tried for a missing PIN
+# length, so a kiosk code that isn't someone's PIN costs one slow check, not one every sync.
+pin_length_tried: dict[int, str] = {}
 
 
 def staff_sync_enabled() -> bool:
@@ -2340,6 +2642,29 @@ async def sync_connecteam_staff(fresh: bool = False) -> dict:
         return await apply_staff_sync(users)
 
 
+async def backfill_pin_lengths(users: list[dict], linked: dict) -> None:
+    """Record the PIN length of linked people whose PIN is their kiosk code but whose length
+    isn't known (PINs set before lengths were recorded), so the PIN pad can sign them in as soon
+    as the last digit is typed. Checking PINs is slow, so each pair is tried once, off the loop."""
+    todo = []
+    for u in users:
+        m = linked.get(u["id"])
+        code = u["kiosk_code"]
+        if not m or m["pin_length"] is not None or not code or pin_length(len(code)) is None:
+            continue
+        mark = kiosk_fingerprint(m["pin_hash"], code)
+        if pin_length_tried.get(m["id"]) != mark:
+            todo.append((m, code, mark))
+    if not todo:
+        return
+    same = await asyncio.to_thread(lambda: [check_pin(code, m["pin_hash"]) for m, code, _ in todo])
+    for (m, code, mark), ok in zip(todo, same):
+        pin_length_tried[m["id"]] = mark
+        current = db.staff(m["id"])
+        if ok and current and current["pin_hash"] == m["pin_hash"] and current["pin_length"] is None:
+            db.update_staff(m["id"], pin_length=len(code))
+
+
 async def apply_staff_sync(users: list[dict]) -> dict:
     counts = {"added": 0, "updated": 0, "turned_off": 0, "turned_on": 0, "no_code": 0}
     clock = 1 if db.settings().get("connecteam_auto_clock_in") == "1" else 0
@@ -2354,6 +2679,7 @@ async def apply_staff_sync(users: list[dict]) -> dict:
     new = [u for u in users if u["id"] not in linked]
     ours = [(u, linked[u["id"]]) for u in users
             if u["id"] in linked and linked[u["id"]]["connecteam_auto"]]
+    await backfill_pin_lengths(users, linked)
 
     # Kiosk codes: whose PIN each one already is. Checking PINs is slow, so it runs off the
     # event loop, and as little as it can: someone already added is only checked when the sync
@@ -3041,30 +3367,31 @@ def parse_pin(value) -> str | None:
     return pin or None
 
 
-SN_WEB_SOCKET_PORT = 8102   # where TT Hotel's SN Web Socket helper listens on the desk computer
-
-
-ENCODER_MODES = ("off", "auto", "address")
+ENCODER_MODES = ("off", "local", "auto", "address")
+MAX_ENCODER_URL = 300   # characters: ws://, a host name (at most 253) and a port
 
 
 def clean_encoder_fields(data: dict) -> dict:
-    """The card encoder from a device form, checked: encoder_mode ("off", "auto" or "address";
-    left out, a typed encoder_url alone decides, as before Automatic), encoder_url,
-    encoder_auto_ip (Automatic: the helper chosen when several were found; blank = the only
-    one) and encoder_port. The address may be typed as just the desk computer's IP address;
-    blank means no encoder. A blank or "auto" port lets the helper find the encoder itself."""
+    """The card encoder from a device form, checked: encoder_mode ("off", "local" for This
+    computer (USB), "auto" or "address"; left out, a typed encoder_url alone decides, as before
+    Automatic), encoder_url, encoder_auto_ip (Automatic: the helper an admin confirmed with Use
+    this encoder; blank = none yet, so none is used) and encoder_port. The address may be typed
+    as just the desk computer's IP address; blank means no encoder. A blank or "auto" port lets
+    the helper find the encoder itself."""
     fields = {}
     mode = data.get("encoder_mode")
     if mode is not None and mode not in ENCODER_MODES:
-        raise ValueError("Choose Off, Automatic or Address for the card encoder.")
+        raise ValueError("Choose Off, This computer (USB), Automatic or Address for the card "
+                         "encoder.")
     if mode is not None:
-        fields.update(encoder_url=None, encoder_auto=1 if mode == "auto" else 0)
+        fields.update(encoder_url=None, encoder_auto=1 if mode == "auto" else 0,
+                      encoder_local=1 if mode == "local" else 0)
         if mode != "auto":
             fields["encoder_auto_ip"] = None
     if "encoder_auto_ip" in data and mode in (None, "auto"):
         raw = str(data["encoder_auto_ip"] or "").strip()
-        if raw and not transfer.encoder_ip(raw):
-            raise ValueError("Choose one of the encoders found, or leave it on the only one.")
+        if raw and (len(raw) > 64 or not transfer.encoder_ip(raw)):
+            raise ValueError("Choose one of the encoders found.")
         fields["encoder_auto_ip"] = transfer.encoder_ip(raw)
     if mode == "address" and not str(data.get("encoder_url") or "").strip():
         raise ValueError("Enter the encoder's address, or choose Automatic.")
@@ -3074,7 +3401,7 @@ def clean_encoder_fields(data: dict) -> dict:
             url = "ws://" + url
         if url and not re.search(r":\d+$", url.split("://", 1)[1]):
             url += f":{SN_WEB_SOCKET_PORT}"
-        if url and not transfer.encoder_url(url):
+        if url and (len(url) > MAX_ENCODER_URL or not transfer.encoder_url(url)):
             raise ValueError("The encoder address must look like ws://192.168.1.50:8102, using "
                              "the address of the computer the encoder is plugged into.")
         fields["encoder_url"] = transfer.encoder_url(url) if url else None
@@ -3104,6 +3431,11 @@ async def admin_create_device(request: web.Request):
         encoder = clean_encoder_fields(data)
     except ValueError as err:
         return bad_request(str(err))
+    if (kind == "computer" and data.get("encoder_mode") is None
+            and not str(data.get("encoder_url") or "").strip()):
+        # A new computer's encoder is plugged into it, unless the form says otherwise. Phones
+        # have none.
+        encoder.update(encoder_local=1, encoder_auto=0, encoder_auto_ip=None)
     device_id = db.create_device(name, role_id, pin)
     if kind != "phone":
         db.update_device(device_id, kind=kind)
@@ -3163,14 +3495,20 @@ async def admin_update_device(request: web.Request):
         known = {m["id"] for m in db.staff_list()}
         db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known])
     if end_sessions:
-        for token, (dev_id, *_) in list(pin_sessions.items()):
-            if dev_id == device["id"]:
-                pin_sessions.pop(token, None)
+        end_device_sessions(device["id"])
     db.update_device(device["id"], **fields)
+    recheck_links(device["id"])   # its encoder link, if it may no longer be open
     if fields.get("encoder_auto"):
         discovery.scan_soon()   # not looked for yet, say (at most every 10 minutes)
     db.log(admin_name(request), f"Updated phone {fields.get('name', device['name'])}")
     return web.json_response({"ok": True})
+
+
+def end_device_sessions(device_id: int) -> None:
+    """Sign out everyone signed in on a phone or computer (its PIN sessions end)."""
+    for token, (dev_id, *_) in list(pin_sessions.items()):
+        if dev_id == device_id:
+            pin_sessions.pop(token, None)
 
 
 async def admin_device_action(request: web.Request):
@@ -3185,9 +3523,12 @@ async def admin_device_action(request: web.Request):
                WHERE id = ?""", (device["id"],))
         db.conn.commit()
         db.revoke_tokens(device["id"])   # and no backup can bring it back
+        recheck_links(device["id"])
         db.log(who, f"Revoked phone {device['name']}")
     elif action == "reenroll":
         db.new_enroll_code(device["id"])
+        end_device_sessions(device["id"])   # signed out, as the old token no longer works
+        recheck_links(device["id"])
         db.log(who, f"New setup code for {device['name']}")
     elif action == "unlock":
         db.update_device(device["id"], status="active", failed_pins=0, failed_day_count=0,
@@ -3205,6 +3546,7 @@ async def admin_delete_device(request: web.Request):
     if device["ha_refresh_token"]:
         await ha.unlink_user(device["ha_refresh_token"])
     db.delete_device(device["id"])
+    recheck_links(device["id"])
     db.log(admin_name(request), f"Deleted phone {device['name']}")
     return web.json_response({"ok": True})
 
@@ -3258,6 +3600,7 @@ def staff_sessions_end(staff_id: int) -> None:
     for token, (_, _, sid) in list(pin_sessions.items()):
         if sid == staff_id:
             pin_sessions.pop(token, None)
+    recheck_links()   # and their encoder links
 
 
 def require_pin(value) -> str:
@@ -3742,7 +4085,8 @@ async def admin_sync_doors(request: web.Request):
 
 
 async def admin_encoder_test(request: web.Request):
-    """Connect to a computer's card encoder, read its version, and let it go again."""
+    """Connect to a computer's card encoder, read its version, and let it go again. This
+    computer (USB) goes through the computer's browser link, so Wristbands must be open there."""
     device = db.device(int(request.match_info["id"]))
     if not device:
         raise web.HTTPNotFound()
@@ -3751,8 +4095,13 @@ async def admin_encoder_test(request: web.Request):
         return bad_request(
             f"No encoder has been found for this computer ({encoder_text(device)}). Click Find "
             "encoders, or enter its address." if encoder_mode(device) == "auto" else
-            "Choose this computer's card encoder (Automatic or its address) and save it first.")
+            "Choose this computer's card encoder (This computer, Automatic or its address) and "
+            "save it first.")
+    local = encoder_mode(device) == "local"
     device = {**device, "encoder_url": url}
+    if local and not encoders.relay(device["id"]).connected:
+        return bad_request(f"{encoders.relay(device['id']).missing_message()}, then test it "
+                           "again.", 409)
     now = time.time()
     if now - encoders_tested.get(device["id"], 0) < WRISTBAND_TEST_GAP:
         return bad_request("Wait a few seconds before testing again.", 429)
@@ -3764,9 +4113,12 @@ async def admin_encoder_test(request: web.Request):
     try:
         version = await test_encoder(device)
     except EncoderError as err:
-        db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=err.message,
+        # Through a browser link, say which computer to check (not "on the network").
+        message = (encoders.get(url).explain(err.code) if local and err.code in (
+            NO_LINK, UNREACHABLE, NO_REPLY) else err.message)
+        db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=message,
                ok=False)
-        return bad_request(err.message, 502)
+        return bad_request(message, 502)
     db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=str(version)[:200])
     return web.json_response({"version": version})
 
@@ -4470,6 +4822,7 @@ async def admin_restore(request: web.Request):
     else:
         branding.remove_logo()
     pin_sessions.clear()  # everyone with a PIN signs in again
+    recheck_links()       # so every encoder link closes too
     connecteam.forget()   # the restored settings may point somewhere else
     tthotel.forget()
     made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))

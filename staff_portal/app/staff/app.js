@@ -6,7 +6,7 @@
   const POLL_MS = 5000;
   const FAST_POLL_MS = 1500;   // while a change is waiting to be confirmed by the device
   const CONFIRM_MS = 90000;    // how long a change may take to show up before we say so
-  const PIN_PAUSE_MS = 1000;   // a PIN of unknown length signs in once typing stops this long
+  const PIN_PAUSE_MS = 500;    // a PIN of unknown length signs in once typing stops this long
   const PIN_LENGTHS = new Set([4, 5, 6, 7, 8]);
 
   const local = storage(() => window.localStorage);
@@ -636,6 +636,7 @@
     }
     const nothingElse = !data.entities.length || (data.layout && !data.layout.pages.length);
     if (!view.tool && nothingElse && tools.length) view.tool = tools[0];
+    wbLinkSync();   // this computer's encoder link is open only while Wristbands is
     const shape = JSON.stringify([isDesk(), view.tool, tools, data.layout
       ? [data.layout, view.pageId, view.detail]
       : data.entities.map((e) => [e.entity_id, e.area])]);
@@ -1696,8 +1697,10 @@
 
   // A front-desk computer with a TT Hotel card encoder makes wristbands (day passes and
   // overnight guests) and staff key cards. Staff Portal talks to the encoder itself, so the TT
-  // Hotel keys never reach this page; this screen asks for cards and follows along. What it
-  // offers is only a guide: the server checks every request against the person's permissions.
+  // Hotel sign-in details never reach this page; this screen asks for cards and follows along.
+  // (In This computer (USB) mode the encoder's requests pass through this page on their way to
+  // the encoder: see wbLink.) What it offers is only a guide: the server checks every request
+  // against the person's permissions.
   const WB_POLL_MS = 700;            // the encoding screen follows the encoder this closely
   const WB_HIDDEN_POLL_MS = 3000;    // ...and more slowly while the window is in the background
   const WB_OPTIONS_MS = 15000;       // how often the encoder status and what can be made are checked
@@ -1744,6 +1747,7 @@
       wb = {
         root: h("div", { class: "wb" }),
         pill: h("span", { class: "wb-pill" }),
+        linkNote: h("div", { class: "wb-link" }), noteKey: null,
         screen: "home", seq: 0, timer: null, rev: 0, acting: false, lost: 0,
         options: null, optionsAt: 0, loading: false, homeKey: null,
         form: null, job: null, jobView: null, lookup: null, lookView: null, log: null,
@@ -1756,9 +1760,11 @@
   }
 
   function wbReset() {
-    if (!wb) return;
-    wbQuiet();
-    wb = null;
+    if (wb) {
+      wbQuiet();
+      wb = null;
+    }
+    wbLinkSync();   // the encoder link goes with the screen
   }
 
   // Stop whatever the screen on show was waiting to do (a poll, a summary, a search).
@@ -1823,6 +1829,8 @@
     wb.screen = name;
     wb.root.dataset.screen = name;
     fill(wb.root, nodes);
+    wb.noteKey = null;   // the note under the header was taken off with the rest: draw it again
+    wbDrawPill();
     wbPlacePill();
     if (wb.root.isConnected) window.scrollTo(0, 0);
     return wb.seq;
@@ -1926,6 +1934,7 @@
   function wbTakeOptions(res, quiet = false) {
     if (res.status === 200) {
       wb.options = res.data;
+      wbLinkSync();
       wbDrawPill();
       return true;
     }
@@ -1948,13 +1957,19 @@
     const enc = wb.options?.encoder;
     // The job on screen is fresher than the last status check (every WB_OPTIONS_MS).
     const making = wb.screen === "job" && WB_ACTIVE.has(wb.job?.status);
-    const [cls, text] = enc?.error && !making ? ["error", "Encoder offline"]
+    // In This computer (USB) mode this page knows best whether the encoder can be reached; the
+    // add-on's own last problem (the encoder unplugged, say) counts once it can.
+    const local = wbLinkView();
+    const [cls, text] = local?.cls === "error" ? [local.cls, local.text]
+      : enc?.error && !making && (!local || local.cls === "ok") ? ["error", "Encoder offline"]
       : enc?.busy || making ? ["busy", "Encoder busy"]
+      : local ? [local.cls, local.text]
       : enc?.connected ? ["ok", "Encoder ready"]
       : ["", "Checking encoder…"];
     wb.pill.className = cls ? `wb-pill ${cls}` : "wb-pill";
-    wb.pill.title = enc?.error || "";
+    wb.pill.title = (local ? local.title || (local.cls === "ok" && enc?.error) : enc?.error) || "";
     fill(wb.pill, h("span", { class: "wb-pill-dot", "aria-hidden": "true" }), text);
+    wbDrawLinkNote(local);
   }
 
   // The encoder status sits in the page header on a computer, beside the title on a phone.
@@ -1962,6 +1977,556 @@
     if (!wb?.root.isConnected) return;
     const slot = isDesk() ? screen.querySelector(".desk-actions") : wb.root.querySelector(".wb-pill-slot");
     if (slot && wb.pill.parentNode !== slot) slot.append(wb.pill);
+  }
+
+  // In This computer (USB) mode, a note under the header on every Wristbands screen while
+  // something keeps this computer's encoder from connecting, and on the list the add-on's own
+  // last encoder problem once it does connect. (Otherwise the list shows that problem itself.)
+  function wbDrawLinkNote(local) {
+    const enc = wb.options?.encoder;
+    const [tone, title, text, action] = local?.title
+      ? [local.cls, local.title, local.note, local.action]
+      : local?.cls === "ok" && enc?.error && wb.screen === "home"
+        ? ["error", "The card encoder isn't answering", enc.error, null]
+        : [];
+    const note = wb.linkNote;
+    const key = title ? JSON.stringify([tone, title, text, action?.[0]]) : "";
+    if (key === wb.noteKey) return;   // unchanged: not announced again
+    wb.noteKey = key;
+    if (!title) {
+      note.remove();
+      return;
+    }
+    const box = wbNote(tone, text, title);
+    if (action) {
+      box.append(h("button",
+        { type: "button", class: "link-btn wb-note-action", onclick: action[1] }, action[0]));
+    }
+    fill(note, box);
+    const head = wb.root.querySelector(".wb-head");
+    if (head) head.after(note);
+    else wb.root.prepend(note);
+  }
+
+  // ---- this computer's encoder: This computer (USB) mode
+
+  // In This computer (USB) mode the add-on never connects to the desk computer: this page does
+  // it for the add-on. While Wristbands is open here, it holds a link to the add-on (a WebSocket
+  // on this app's own address, so it works through Cloudflare Tunnel) and a connection to TT
+  // Hotel's SN Web Socket on this computer, and passes each encoder request from the one to the
+  // other, one at a time. Only the requests the add-on's encoder runner makes (encoder.py) are
+  // passed on, each checked against WB_RELAYED; anything else is dropped. The encoder's key from
+  // TT Hotel (hotelInfo) passes through this page in those requests: it's never logged or kept,
+  // and SN Web Socket's copy of it in each answer is left out of what goes back.
+  //
+  // The messages (encoder.LocalRelay has the add-on's side). From the add-on: {"type": "call",
+  // "request": {"function", "requestId", ...}}. To it: {"type": "reply", "reply": <SN Web
+  // Socket's answer>}, and {"type": "status", "helper", "version"} on linking, on every change,
+  // every WB_STATUS_MS and whenever a request can't be passed on. helper is "ready",
+  // "unreachable", "blocked" (the browser won't let this page reach it) or null (connecting, or
+  // the browser is asking whether it may); either of the first two problems makes the add-on
+  // stop waiting for the request in hand.
+
+  // SN Web Socket on this computer: localhost as well, for one that only listens on IPv6 (::1).
+  const WB_HELPER_URLS = ["ws://127.0.0.1:8102", "ws://localhost:8102"];
+  const WB_TICKET_PATH = "/api/encoder/ticket";   // a one-time pass for the link (about 30 seconds)
+  const WB_LINK_PATH = "/api/encoder/link";       // the link: a WebSocket on this app's own address
+  const WB_LINK_RETRY_MS = [1000, 30000];     // waits before linking again: the first, the longest
+  const WB_HELPER_RETRY_MS = [2000, 30000];   // ...and before trying SN Web Socket again
+  const WB_LINK_STEADY_MS = 15000;    // lasted this long: the next retry waits the first wait again
+  const WB_HELPER_OPEN_MS = 8000;     // SN Web Socket gets this long to accept a connection...
+  const WB_ASKING_OPEN_MS = 60000;    // ...or this long where the browser may ask whether it may
+  const WB_ASKING_AFTER_MS = 1500;    // a connection still waiting this long: the browser is asking
+  const WB_CALL_MS = 15000;           // ...and this long to answer (as long as the add-on waits)
+  const WB_STATUS_MS = 30000;         // the add-on hears how SN Web Socket is at least this often
+  const WB_RELAY_MAX = 256 * 1024;    // largest message passed on either way (the add-on's limit)
+  // Longest text in a request: an encoder key is a few hundred characters, but TT Hotel doesn't
+  // say how long one may be, and one cut off here would stop every card.
+  const WB_RELAY_TEXT = 16384;
+  const WB_RELAY_QUEUE = 8;           // requests waiting their turn (the add-on sends one at once)
+  const WB_LINK_REPLACED = 4000;      // the add-on's close code: another window's link took over
+  // Chrome and Edge ask once whether a site may reach this computer's own apps or the local
+  // network. The permission's name, which differs between versions (none of them in others).
+  const WB_NETWORK_PERMISSIONS = ["loopback-network", "local-network-access", "local-network"];
+  // The SN Web Socket requests the add-on's encoder runner makes, with the type of each of their
+  // fields. Keep in step with encoder.py: a request or field not listed here is never passed on.
+  const WB_RELAYED = {
+    CE_DisconnectComm: {},
+    GetDeviceInfo: { transformCardNo: "boolean" },
+    CE_ConnectComm: { portname: "string" },
+    CE_GetCardID: {},
+    CE_InitCardEncoder: { hotelInfo: "string" },
+    CE_SetSectors: { sectors: "string" },
+    CE_InitCard: { hotelInfo: "string" },
+    CE_ClearCard: { hotelInfo: "string" },
+    CE_WriteCard: { hotelInfo: "string", buildNo: "number", floorNo: "number", mac: "string",
+      timestamp: "number", allowLockOut: "boolean" },
+    CE_ReadCard: { hotelInfo: "string" },
+    CE_CancelCard: { hotelInfo: "string", cardNo: "string", timestamp: "number" },
+    CE_ReadCancellationInfo: { hotelInfo: "string" },
+    CE_Beep: { voiceLen: "number", interval: "number", voiceCount: "number" },
+    CE_GetVersion: {},
+  };
+
+  // The link while this page holds it (wbLinkSync opens and closes it): to the add-on (ws; state
+  // "connecting", "open", "lost", "refused" or "replaced") and to SN Web Socket (helper).
+  let wbLink = null;
+  let wbPermission = null;   // the browser's local network permission, once asked (a promise)
+
+  // Whether this page should hold the link now: Wristbands open, on a computer whose card
+  // encoder is This computer (USB). The Wristbands screen only exists while someone is signed in.
+  function wbLinkWanted() {
+    return !PREVIEW && view.tool === "wristbands" && wbLocalEncoder(wb?.options);
+  }
+
+  // Whether the Wristbands status says this computer's encoder is This computer (USB): its own
+  // flag, or the encoder's status (which says so for an encoder reached through this page).
+  function wbLocalEncoder(options) {
+    return options?.encoder_local === true || options?.encoder?.local === true;
+  }
+
+  // Open or close the link to match. Called whenever that may have changed (each poll and status
+  // check, leaving Wristbands, signing out); does nothing when it already matches.
+  function wbLinkSync() {
+    if (wbLinkWanted() === !!wbLink) return;
+    if (wbLink) {
+      wbLinkStop();
+      return;
+    }
+    wbLink = {
+      ws: null, state: "connecting", reason: null, timer: null, delay: WB_LINK_RETRY_MS[0],
+      openedAt: 0, beat: null, queue: [], calling: false,
+      helper: { ws: null, url: null, state: "connecting", version: null, timer: null,
+        delay: WB_HELPER_RETRY_MS[0], trying: null, pending: null },
+    };
+    wbLinkConnect(wbLink);
+    wbHelperConnect(wbLink);
+    wbLinkDrawn();
+  }
+
+  function wbLinkStop() {
+    const link = wbLink;
+    wbLink = null;
+    clearTimeout(link.timer);
+    clearInterval(link.beat);
+    clearTimeout(link.helper.timer);
+    link.queue = [];
+    const ws = link.ws;
+    link.ws = null;
+    try { ws?.close(1000); } catch { /* already closing */ }
+    wbHelperDrop(link);
+    wbLinkDrawn();
+  }
+
+  // Something about the link changed: show it.
+  function wbLinkDrawn() {
+    if (wb) wbDrawPill();
+  }
+
+  // Link to the add-on: a one-time pass first (an ordinary request, so it's checked as this
+  // computer and this person's sign-in), then the WebSocket with it, since a browser can't send
+  // a WebSocket any other credentials.
+  async function wbLinkConnect(link) {
+    clearTimeout(link.timer);
+    const res = await api("POST", WB_TICKET_PATH);
+    if (wbLink !== link || link.ws) return;   // stopped, or linked by another try meanwhile
+    if (res.status !== 200 || typeof res.data.ticket !== "string" || !res.data.ticket) {
+      if (wbAuthError(res)) return;   // signed out: its own screen, which closes the link
+      if (res.status === 403 || res.status === 404 || res.status === 409) {
+        // Not this computer's encoder to link any more (its setting was changed, say). Try again
+        // later, and check the Wristbands status now: that closes the link if so.
+        link.state = "refused";
+        link.reason = typeof res.data.error === "string" ? res.data.error : null;
+        link.delay = WB_LINK_RETRY_MS[1];
+        if (wb && !wb.loading) wbRefreshOptions();
+      } else {
+        link.state = "lost";
+      }
+      wbLinkRetry(link);
+      return;
+    }
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const address = `${scheme}//${location.host}${WB_LINK_PATH}?ticket=` +
+      encodeURIComponent(res.data.ticket);
+    let ws;
+    try {
+      ws = new WebSocket(address);
+    } catch {
+      link.state = "lost";
+      wbLinkRetry(link);
+      return;
+    }
+    link.ws = ws;
+    ws.addEventListener("open", () => {
+      if (link.ws !== ws) return;
+      link.state = "open";
+      link.reason = null;
+      link.openedAt = Date.now();
+      wbLinkReport(link);
+      clearInterval(link.beat);
+      link.beat = setInterval(() => wbLinkReport(link), WB_STATUS_MS);
+      wbLinkDrawn();
+    });
+    ws.addEventListener("message", (ev) => {
+      if (link.ws === ws) wbLinkMessage(link, ev.data);
+    });
+    ws.addEventListener("close", (ev) => {
+      if (link.ws === ws) wbLinkClosed(link, ev.code);
+    });
+  }
+
+  function wbLinkClosed(link, code) {
+    link.ws = null;
+    clearInterval(link.beat);
+    link.queue = [];   // nobody to answer now: the add-on gives up on them by itself
+    if (code === WB_LINK_REPLACED) {
+      // Wristbands was opened in another window here, which has the encoder now. This one only
+      // takes it back when asked (Use it here: wbLinkResume), never by itself, since that would
+      // fail a card being made in the other window.
+      link.state = "replaced";
+      wbLinkDrawn();
+      return;
+    }
+    if (link.openedAt && Date.now() - link.openedAt >= WB_LINK_STEADY_MS) {
+      link.delay = WB_LINK_RETRY_MS[0];
+    }
+    link.openedAt = 0;
+    link.state = "lost";
+    wbLinkRetry(link);
+  }
+
+  // Link again after a wait that doubles each time, with a little jitter so several computers
+  // don't all come back at the same moment after the add-on restarts.
+  function wbLinkRetry(link) {
+    clearTimeout(link.timer);
+    const wait = link.delay * (0.75 + Math.random() / 2);
+    link.delay = Math.min(link.delay * 2, WB_LINK_RETRY_MS[1]);
+    link.timer = setTimeout(() => wbLinkConnect(link), wait);
+    wbLinkDrawn();
+  }
+
+  // Use it here: take the encoder back from the window that took it over.
+  function wbLinkResume() {
+    const link = wbLink;
+    if (link?.state !== "replaced") return;
+    link.state = "connecting";
+    link.delay = WB_LINK_RETRY_MS[0];
+    wbLinkConnect(link);
+    wbLinkDrawn();
+  }
+
+  function wbLinkSend(link, message) {
+    if (link.ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      link.ws.send(JSON.stringify(message));
+    } catch { /* closing: its close event follows */ }
+  }
+
+  // Tell the add-on how SN Web Socket is (and that this link is still here), in its words:
+  // connecting, or waiting for the browser's permission, is null (not known yet).
+  function wbLinkReport(link) {
+    const state = link.helper.state;
+    wbLinkSend(link, { type: "status", version: link.helper.version,
+      helper: ["ready", "unreachable", "blocked"].includes(state) ? state : null });
+  }
+
+  // A message from the add-on. A request that isn't allowed is dropped, never passed on.
+  function wbLinkMessage(link, text) {
+    const message = wbParseObject(text);
+    if (message?.type === "call") {
+      const request = wbRelayRequest(message.request);
+      if (!request || link.queue.length >= WB_RELAY_QUEUE) {
+        // Never the request itself: it may hold the encoder's key.
+        console.warn(request ? "Wristbands: too many encoder requests at once; one was dropped"
+          : "Wristbands: dropped an encoder request that isn't allowed");
+        return;
+      }
+      link.queue.push({ request, ws: link.ws });
+      wbRelayNext(link);
+    }
+  }
+
+  // A JSON object from a WebSocket message, or null for anything else (or anything too big).
+  function wbParseObject(text) {
+    if (typeof text !== "string" || text.length > WB_RELAY_MAX) return null;
+    try {
+      const value = JSON.parse(text);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function wbRequestId(id) {
+    return typeof id === "string" && id.length > 0 && id.length <= 100;
+  }
+
+  // The request to pass on to SN Web Socket, rebuilt from only what WB_RELAYED allows, or null
+  // if it asks for anything else (another function, another field, a value of the wrong type).
+  function wbRelayRequest(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const name = raw.function;
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(WB_RELAYED, name) ||
+        !wbRequestId(raw.requestId)) {
+      return null;
+    }
+    const fields = WB_RELAYED[name];
+    const request = { function: name, requestId: raw.requestId };
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === "function" || key === "requestId") continue;
+      const type = Object.prototype.hasOwnProperty.call(fields, key) ? fields[key] : null;
+      if (!type || typeof value !== type) return null;
+      if (type === "string" && value.length > WB_RELAY_TEXT) return null;
+      if (type === "number" && !Number.isFinite(value)) return null;
+      request[key] = value;
+    }
+    return request;
+  }
+
+  // Pass the waiting requests to SN Web Socket one at a time, each answer back to the add-on
+  // (over the link the request came on: a newer link never gets an older link's answers).
+  // Without an answer, the add-on hears how SN Web Socket is instead: out of reach, it stops
+  // waiting for this one; otherwise it waits out its own time limit.
+  async function wbRelayNext(link) {
+    if (link.calling) return;
+    link.calling = true;
+    while (wbLink === link && link.queue.length) {
+      const { request, ws } = link.queue.shift();
+      const reply = await wbHelperCall(link, request);
+      if (link.ws !== ws) continue;
+      if (reply) wbLinkSend(link, { type: "reply", reply });
+      else wbLinkReport(link);
+    }
+    link.calling = false;
+  }
+
+  // One request to SN Web Socket: its answer, or null when it couldn't be asked or didn't
+  // answer in time.
+  async function wbHelperCall(link, request) {
+    const helper = link.helper;
+    if (!(await wbHelperReady(link))) return null;
+    const ws = helper.ws;
+    if (!ws) return null;   // closed meanwhile
+    return new Promise((resolve) => {
+      const finish = (reply) => {
+        clearTimeout(timer);
+        if (helper.pending?.finish === finish) helper.pending = null;
+        resolve(reply);
+      };
+      const timer = setTimeout(() => {
+        finish(null);
+        // Start afresh, so a late answer can't be taken for the next request's.
+        if (helper.ws === ws) wbHelperDrop(link, true);
+      }, WB_CALL_MS);
+      helper.pending = { name: request.function, id: request.requestId, finish };
+      try {
+        ws.send(JSON.stringify(request));
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  // Something from SN Web Socket: the answer to the request waiting for one (by its requestId,
+  // or by function for SN Web Socket's own errors, which leave that out), else ignored (its
+  // greeting, say). Its version is noted from whatever says it.
+  function wbHelperMessage(link, text) {
+    const reply = wbParseObject(text);
+    if (!reply) return;
+    const helper = link.helper;
+    const version = reply.snWebSocketVersion;
+    if (typeof version === "string" && version !== helper.version &&
+        /^[\x20-\x7e]{1,40}$/.test(version)) {
+      helper.version = version;
+      wbLinkReport(link);
+    }
+    const pending = helper.pending;
+    if (!pending) return;
+    const ownError = !("requestId" in reply) && reply.function === pending.name &&
+      reply.errorCode != null && reply.errorCode !== 0;
+    if (reply.requestId !== pending.id && !ownError) return;
+    delete reply.hotelInfo;   // SN Web Socket repeats the request, encoder key and all
+    pending.finish(reply);
+  }
+
+  // Whether SN Web Socket is connected, connecting now (not at the next retry) if it isn't.
+  async function wbHelperReady(link) {
+    return !!link.helper.ws || wbHelperConnect(link);
+  }
+
+  // Connect to SN Web Socket: the address that worked last time first, then the other. Resolves
+  // to whether it worked; a failure is tried again later, waiting longer each time.
+  function wbHelperConnect(link) {
+    const helper = link.helper;
+    if (helper.trying) return helper.trying;
+    clearTimeout(helper.timer);
+    helper.trying = (async () => {
+      // "prompt" only means the browser would ask if it needs to (it says so where it never
+      // does, too). One that's asking holds the connection until it's answered, while an SN Web
+      // Socket that isn't running refuses at once: so a connection still waiting after a moment
+      // means it's asking.
+      const permission = await wbNetworkPermission();
+      const askable = permission?.state === "prompt";
+      const started = Date.now();
+      const asking = askable ? setTimeout(() => wbHelperSet(link, "asking"), WB_ASKING_AFTER_MS) : 0;
+      try {
+        for (const address of new Set([helper.url, ...WB_HELPER_URLS].filter(Boolean))) {
+          const ws = await wbHelperOpen(address, askable ? WB_ASKING_OPEN_MS : WB_HELPER_OPEN_MS);
+          if (wbLink !== link) {
+            ws?.close();
+            return false;
+          }
+          if (ws) {
+            wbHelperAttach(link, ws, address);
+            return true;
+          }
+        }
+      } finally {
+        clearTimeout(asking);
+      }
+      const state = permission?.state;
+      wbHelperSet(link, state === "denied" ? "blocked"
+        : state === "prompt" && Date.now() - started >= WB_ASKING_AFTER_MS ? "asking"
+          : "unreachable");
+      wbHelperRetry(link);
+      return false;
+    })().finally(() => { helper.trying = null; });
+    return helper.trying;
+  }
+
+  // A WebSocket to SN Web Socket once it's open, or null if it can't be opened in time.
+  function wbHelperOpen(address, wait) {
+    return new Promise((resolve) => {
+      let ws;
+      try {
+        ws = new WebSocket(address);
+      } catch {
+        resolve(null);   // refused by the browser outright
+        return;
+      }
+      const timer = setTimeout(() => ws.close(), wait);   // its close event says no
+      ws.addEventListener("open", () => { clearTimeout(timer); resolve(ws); }, { once: true });
+      ws.addEventListener("close", () => { clearTimeout(timer); resolve(null); }, { once: true });
+    });
+  }
+
+  function wbHelperAttach(link, ws, address) {
+    const helper = link.helper;
+    const openedAt = Date.now();
+    helper.ws = ws;
+    helper.url = address;
+    ws.addEventListener("message", (ev) => {
+      if (helper.ws === ws) wbHelperMessage(link, ev.data);
+    });
+    ws.addEventListener("close", () => {
+      if (helper.ws !== ws) return;   // closed on purpose
+      helper.ws = null;
+      helper.pending?.finish(null);
+      if (wbLink !== link) return;
+      // SN Web Socket closed or restarted: connect again straight away, unless it closed as soon
+      // as it opened (something else on its port, say), which waits longer each time instead.
+      wbHelperSet(link, "connecting");
+      if (Date.now() - openedAt >= WB_LINK_STEADY_MS) {
+        helper.delay = WB_HELPER_RETRY_MS[0];
+        wbHelperConnect(link);
+      } else {
+        wbHelperRetry(link);
+      }
+    });
+    wbHelperSet(link, "ready");
+  }
+
+  // Close the connection to SN Web Socket (the link closing, or a request it never answered),
+  // and with `again`, connect afresh. A request still waiting gets no answer.
+  function wbHelperDrop(link, again = false) {
+    const helper = link.helper;
+    const ws = helper.ws;
+    helper.ws = null;
+    try { ws?.close(); } catch { /* already closing */ }
+    helper.pending?.finish(null);
+    if (again && wbLink === link) {
+      wbHelperSet(link, "connecting");
+      wbHelperConnect(link);
+    }
+  }
+
+  function wbHelperRetry(link) {
+    const helper = link.helper;
+    clearTimeout(helper.timer);
+    const wait = helper.delay * (0.75 + Math.random() / 2);
+    helper.delay = Math.min(helper.delay * 2, WB_HELPER_RETRY_MS[1]);
+    helper.timer = setTimeout(() => {
+      if (wbLink === link) wbHelperConnect(link);
+    }, wait);
+  }
+
+  function wbHelperSet(link, state) {
+    if (link.helper.state === state) return;
+    link.helper.state = state;
+    wbLinkReport(link);
+    wbLinkDrawn();
+  }
+
+  // The browser's local network permission for this site (its state is "granted", "denied" or
+  // "prompt"), or null in browsers without one. Allowing it connects straight away.
+  function wbNetworkPermission() {
+    if (!wbPermission) {
+      wbPermission = (async () => {
+        for (const name of WB_NETWORK_PERMISSIONS) {
+          try {
+            const status = await navigator.permissions.query({ name });
+            status.addEventListener("change", () => {
+              if (wbLink && !wbLink.helper.ws) wbHelperConnect(wbLink);
+            });
+            return status;
+          } catch { /* not a permission this browser has */ }
+        }
+        return null;
+      })();
+    }
+    return wbPermission;
+  }
+
+  // This computer's encoder as this page sees it, in This computer (USB) mode (null otherwise):
+  // the pill's class and words, and a note's title, words and button when something's wrong.
+  function wbLinkView() {
+    const link = wbLink;
+    if (!link) return null;
+    const helper = link.helper.state;
+    if (link.state === "replaced") {
+      return { cls: "", text: "Encoder in another window",
+        title: "The encoder is connected in another window",
+        note: "Wristbands is open in another window or tab on this computer, and the encoder " +
+          "works there.",
+        action: ["Use it here", wbLinkResume] };
+    }
+    if (helper === "blocked") {
+      return { cls: "error", text: "Encoder blocked",
+        title: "Allow this site to access devices on your local network",
+        note: "This browser is keeping the page from the card encoder. Click the icon at the " +
+          "left of the address bar, allow local network access for this site, then reload the " +
+          "page." };
+    }
+    if (helper === "asking") {
+      return { cls: "", text: "Connecting encoder…",
+        title: "Allow this site to access devices on your local network",
+        note: "When this browser asks, choose Allow so the page can reach the card encoder." };
+    }
+    if (helper === "unreachable") {
+      return { cls: "error", text: "Encoder offline",
+        title: "Can't reach SN Web Socket on this computer: is it running?",
+        note: "Start TT Hotel's SN Web Socket on this computer. This page connects to it by " +
+          "itself once it's running." };
+    }
+    if (link.state === "refused") {
+      return { cls: "error", text: "Encoder offline", title: "The card encoder can't be connected",
+        note: link.reason || "Reload this page. If it keeps happening, ask your manager to check " +
+          `this ${word()}'s card encoder setting.` };
+    }
+    if (link.state !== "open" || helper !== "ready") {
+      return { cls: "", text: "Connecting encoder…" };
+    }
+    return { cls: "ok", text: "Encoder ready" };
   }
 
   // ---- the list: what to make, look up or check
@@ -2007,7 +2572,9 @@
         t.allowed ? () => wbOpenForm(type) : null);
     });
     wbShow("home", wbHomeHead(),
-      o.encoder?.error ? wbNote("error", o.encoder.error, "The card encoder isn't answering") : null,
+      // In This computer (USB) mode the note under the header says it (wbDrawLinkNote).
+      o.encoder?.error && !wbLocalEncoder(o)
+        ? wbNote("error", o.encoder.error, "The card encoder isn't answering") : null,
       !o.enabled && o.reason ? wbNote("", o.reason) : null,
       make.length ? h("section", { class: "group" }, h("h2", null, "Make"),
         h("div", { class: "wb-choices" }, make)) : null,
