@@ -603,14 +603,13 @@ def test_look_up_a_wristband():
         await h.until(lambda: h.runner.lookup_state()["state"] == "error", "the look-up")
         assert h.runner.lookup_state()["message"].startswith("No wristband detected")
         await h.released()
-        # A card just looked up isn't written over until it has been lifted off.
+        # A card just looked up can be written straight away, without lifting it off first.
         h.sim.place_card(number)
         h.runner.start_lookup(card_wait=1)
         await h.until(lambda: h.runner.lookup_state()["state"] == "done", "the look-up")
         job_id = h.submit()
-        await h.live(job_id, "waiting_for_card", 1, "Take the wristband you just looked up off "
-                                                    "the encoder")
-        h.runner.cancel(job_id)
+        await h.until(lambda: h.runner.live(job_id)["cards"][0]["status"] == "written",
+                      "the looked-up card written")
     run(scenario)
 
 

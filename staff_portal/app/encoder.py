@@ -1230,8 +1230,9 @@ class EncoderRunner:
                 except asyncio.TimeoutError:
                     pass
             lookup["card_number"] = number
-            # Looked at, not lifted off: don't overwrite it unseen either.
-            self._lingering, self._lingering_verb = number, "looked up"
+            # A card someone just looked up is fine to write next: they chose to put it there, and
+            # looking one up and then reusing it is common. (Only a card just made is held back.)
+            self._lingering = None
             message = None
             try:
                 hotel_info = await self._hotel_info(fresh=False)

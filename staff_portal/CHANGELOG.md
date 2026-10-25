@@ -48,6 +48,10 @@
   computer's card encoder setting, never the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
   older version of the add-on refuses a 0.8.0 backup.
 
+- **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after
+  looking one up waited for it to be lifted off the encoder first. A looked-up wristband can now be
+  reused straight away.
+
 ## 0.7.1
 
 - **Controls lock when the screen turns off.** As soon as the phone's screen goes off or the app
