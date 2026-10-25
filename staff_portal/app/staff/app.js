@@ -2037,6 +2037,7 @@
   const WB_HELPER_OPEN_MS = 8000;     // SN Web Socket gets this long to accept a connection...
   const WB_ASKING_OPEN_MS = 60000;    // ...or this long where the browser may ask whether it may
   const WB_ASKING_AFTER_MS = 1500;    // a connection still waiting this long: the browser is asking
+  const WB_ANSWERED_MS = 2000;        // answered in the site settings instead: start over after this
   const WB_CALL_MS = 15000;           // ...and this long to answer (as long as the add-on waits)
   const WB_STATUS_MS = 30000;         // the add-on hears how SN Web Socket is at least this often
   const WB_RELAY_MAX = 256 * 1024;    // largest message passed on either way (the add-on's limit)
@@ -2045,9 +2046,10 @@
   const WB_RELAY_TEXT = 16384;
   const WB_RELAY_QUEUE = 8;           // requests waiting their turn (the add-on sends one at once)
   const WB_LINK_REPLACED = 4000;      // the add-on's close code: another window's link took over
-  // Chrome and Edge ask once whether a site may reach this computer's own apps or the local
-  // network. The permission's name, which differs between versions (none of them in others).
-  const WB_NETWORK_PERMISSIONS = ["loopback-network", "local-network-access", "local-network"];
+  // Chrome and Edge ask once whether a site may "access other apps and services on this device"
+  // (Apps on device in the site settings). Its name since version 145, then the one before it:
+  // a site blocked under the old name stays blocked while the new one says "prompt".
+  const WB_NETWORK_PERMISSIONS = ["loopback-network", "local-network-access"];
   // The SN Web Socket requests the add-on's encoder runner makes, with the type of each of their
   // fields. Keep in step with encoder.py: a request or field not listed here is never passed on.
   const WB_RELAYED = {
@@ -2097,7 +2099,8 @@
       ws: null, state: "connecting", reason: null, timer: null, delay: WB_LINK_RETRY_MS[0],
       openedAt: 0, beat: null, queue: [], calling: false,
       helper: { ws: null, url: null, state: "connecting", version: null, timer: null,
-        delay: WB_HELPER_RETRY_MS[0], trying: null, pending: null },
+        delay: WB_HELPER_RETRY_MS[0], trying: null, pending: null, permission: null,
+        opening: null },
     };
     wbLinkConnect(wbLink);
     wbHelperConnect(wbLink);
@@ -2114,6 +2117,7 @@
     const ws = link.ws;
     link.ws = null;
     try { ws?.close(1000); } catch { /* already closing */ }
+    link.helper.opening?.close();   // a connection still waiting (on the browser's question, say)
     wbHelperDrop(link);
     wbLinkDrawn();
   }
@@ -2223,9 +2227,10 @@
   }
 
   // Tell the add-on how SN Web Socket is (and that this link is still here), in its words:
-  // connecting, or waiting for the browser's permission, is null (not known yet).
+  // connecting, or waiting for the browser's permission, is null (not known yet), and a question
+  // nobody answered is blocked (until someone does).
   function wbLinkReport(link) {
-    const state = link.helper.state;
+    const state = link.helper.state === "unanswered" ? "blocked" : link.helper.state;
     wbLinkSend(link, { type: "status", version: link.helper.version,
       helper: ["ready", "unreachable", "blocked"].includes(state) ? state : null });
   }
@@ -2355,7 +2360,8 @@
   }
 
   // Connect to SN Web Socket: the address that worked last time first, then the other. Resolves
-  // to whether it worked; a failure is tried again later, waiting longer each time.
+  // to whether it worked; a failure is tried again later, waiting longer each time, except a
+  // question from the browser that nobody answered.
   function wbHelperConnect(link) {
     const helper = link.helper;
     if (helper.trying) return helper.trying;
@@ -2363,15 +2369,16 @@
     helper.trying = (async () => {
       // "prompt" only means the browser would ask if it needs to (it says so where it never
       // does, too). One that's asking holds the connection until it's answered, while an SN Web
-      // Socket that isn't running refuses at once: so a connection still waiting after a moment
-      // means it's asking.
-      const permission = await wbNetworkPermission();
-      const askable = permission?.state === "prompt";
-      const started = Date.now();
+      // Socket that isn't running is refused at once (the browser only asks once something is
+      // there): so a connection still waiting after a moment means it's asking.
+      const askable = wbNetworkState(await wbNetworkPermission()) === "prompt";
       const asking = askable ? setTimeout(() => wbHelperSet(link, "asking"), WB_ASKING_AFTER_MS) : 0;
+      let asked = false;
       try {
         for (const address of new Set([helper.url, ...WB_HELPER_URLS].filter(Boolean))) {
-          const ws = await wbHelperOpen(address, askable ? WB_ASKING_OPEN_MS : WB_HELPER_OPEN_MS);
+          const tried = Date.now();
+          const ws = await wbHelperOpen(helper, address,
+            askable ? WB_ASKING_OPEN_MS : WB_HELPER_OPEN_MS);
           if (wbLink !== link) {
             ws?.close();
             return false;
@@ -2380,22 +2387,50 @@
             wbHelperAttach(link, ws, address);
             return true;
           }
+          // Held, then refused: the browser asked and nobody answered, or the question was
+          // closed. The other address would only ask again.
+          if (askable && Date.now() - tried >= WB_ASKING_AFTER_MS) {
+            asked = true;
+            break;
+          }
         }
       } finally {
         clearTimeout(asking);
       }
-      const state = permission?.state;
-      wbHelperSet(link, state === "denied" ? "blocked"
-        : state === "prompt" && Date.now() - started >= WB_ASKING_AFTER_MS ? "asking"
-          : "unreachable");
+      helper.permission = wbNetworkState(await wbNetworkPermission());   // Block answers it too
+      if (wbLink !== link) return false;
+      if (helper.permission === "denied") {
+        wbHelperSet(link, "blocked");
+      } else if (asked && helper.permission !== "granted") {
+        // Not asked again by itself: Chrome can stop asking a site for a while once its question
+        // has been closed a few times. Try again asks again, and allowing it in the site
+        // settings connects straight away.
+        wbHelperSet(link, "unanswered");
+        return false;
+      } else if (asked) {
+        helper.delay = WB_HELPER_RETRY_MS[0];   // allowed in the site settings meanwhile
+        wbHelperSet(link, "connecting");
+      } else {
+        wbHelperSet(link, "unreachable");
+      }
       wbHelperRetry(link);
       return false;
     })().finally(() => { helper.trying = null; });
     return helper.trying;
   }
 
-  // A WebSocket to SN Web Socket once it's open, or null if it can't be opened in time.
-  function wbHelperOpen(address, wait) {
+  // Try again (on a note): connect to SN Web Socket now, starting over from the first wait.
+  function wbHelperTryAgain() {
+    const link = wbLink;
+    if (!link || link.helper.ws || link.helper.trying) return;
+    link.helper.delay = WB_HELPER_RETRY_MS[0];
+    wbHelperSet(link, "connecting");
+    wbHelperConnect(link);
+  }
+
+  // A WebSocket to SN Web Socket once it's open, or null if it can't be opened in time (or
+  // helper.opening, the connection waiting meanwhile, is closed).
+  function wbHelperOpen(helper, address, wait) {
     return new Promise((resolve) => {
       let ws;
       try {
@@ -2404,9 +2439,15 @@
         resolve(null);   // refused by the browser outright
         return;
       }
+      helper.opening = ws;
       const timer = setTimeout(() => ws.close(), wait);   // its close event says no
-      ws.addEventListener("open", () => { clearTimeout(timer); resolve(ws); }, { once: true });
-      ws.addEventListener("close", () => { clearTimeout(timer); resolve(null); }, { once: true });
+      const done = (result) => {
+        clearTimeout(timer);
+        if (helper.opening === ws) helper.opening = null;
+        resolve(result);
+      };
+      ws.addEventListener("open", () => done(ws), { once: true });
+      ws.addEventListener("close", () => done(null), { once: true });
     });
   }
 
@@ -2467,24 +2508,49 @@
     wbLinkDrawn();
   }
 
-  // The browser's local network permission for this site (its state is "granted", "denied" or
-  // "prompt"), or null in browsers without one. Allowing it connects straight away.
+  // The browser's permission for this site to reach this computer's own apps, under each name it
+  // knows (each one's state is "granted", "denied" or "prompt"; none in browsers without it).
+  // Allowing it connects straight away.
   function wbNetworkPermission() {
     if (!wbPermission) {
       wbPermission = (async () => {
+        const found = [];
         for (const name of WB_NETWORK_PERMISSIONS) {
           try {
             const status = await navigator.permissions.query({ name });
-            status.addEventListener("change", () => {
-              if (wbLink && !wbLink.helper.ws) wbHelperConnect(wbLink);
-            });
-            return status;
+            status.addEventListener("change", wbNetworkChanged);
+            found.push(status);
           } catch { /* not a permission this browser has */ }
         }
-        return null;
+        return found;
       })();
     }
     return wbPermission;
+  }
+
+  // Allowed or blocked: connect now. Answering the browser's question opens the connection
+  // waiting for it; changing the site settings instead leaves it waiting for the question, so
+  // it's started over if it's still waiting a moment later.
+  function wbNetworkChanged() {
+    const link = wbLink;
+    if (!link || link.helper.ws) return;
+    const opening = link.helper.opening;
+    if (!opening) {
+      wbHelperConnect(link);
+      return;
+    }
+    setTimeout(() => {
+      if (link.helper.opening === opening) opening.close();
+    }, WB_ANSWERED_MS);
+  }
+
+  // Those as one state: blocked under any name is blocked, allowed only when allowed under
+  // every name, and null in browsers that have none of them.
+  function wbNetworkState(statuses) {
+    const states = statuses.map((status) => status.state);
+    if (!states.length) return null;
+    return states.includes("denied") ? "denied"
+      : states.every((state) => state === "granted") ? "granted" : "prompt";
   }
 
   // This computer's encoder as this page sees it, in This computer (USB) mode (null otherwise):
@@ -2502,21 +2568,39 @@
     }
     if (helper === "blocked") {
       return { cls: "error", text: "Encoder blocked",
-        title: "Allow this site to access devices on your local network",
-        note: "This browser is keeping the page from the card encoder. Click the icon at the " +
-          "left of the address bar, allow local network access for this site, then reload the " +
-          "page." };
+        title: "This browser is blocking the card encoder",
+        note: "Click the icon at the left of the address bar and allow Apps on device for this " +
+          "site (Local network access in older versions). The page connects by itself once " +
+          "it's allowed.",
+        action: ["Try again", wbHelperTryAgain] };
+    }
+    if (helper === "unanswered") {
+      return { cls: "error", text: "Encoder not allowed",
+        title: "Allow this site to reach the card encoder",
+        note: "The browser asked whether this site may access other apps and services on this " +
+          "device, which is how it reaches the card encoder. Click Try again, then choose Allow.",
+        action: ["Try again", wbHelperTryAgain] };
     }
     if (helper === "asking") {
       return { cls: "", text: "Connecting encoder…",
-        title: "Allow this site to access devices on your local network",
-        note: "When this browser asks, choose Allow so the page can reach the card encoder." };
+        title: "Choose Allow when the browser asks",
+        note: "The browser is asking whether this site may access other apps and services on " +
+          "this device, which is how it reaches the card encoder: choose Allow. If the question " +
+          "has gone, click the icon at the left of the address bar." };
     }
     if (helper === "unreachable") {
+      // The browser only asks once SN Web Socket is running, and one blocking the site without
+      // saying so refuses just as quickly: unless it's allowed, it may be either.
+      const maybeBlocked = link.helper.permission !== "granted";
       return { cls: "error", text: "Encoder offline",
         title: "Can't reach SN Web Socket on this computer: is it running?",
-        note: "Start TT Hotel's SN Web Socket on this computer. This page connects to it by " +
-          "itself once it's running." };
+        note: "Start TT Hotel's SN Web Socket on this computer (the one this browser is on), " +
+          "with the card encoder plugged in. This page connects to it by itself once it's " +
+          "running." + (maybeBlocked ? " The browser then asks whether this site may access " +
+            "other apps and services on this device: choose Allow. If SN Web Socket is " +
+            "running already, check that Apps on device isn't blocked for this site (the icon " +
+            "at the left of the address bar)." : ""),
+        action: ["Try again", wbHelperTryAgain] };
     }
     if (link.state === "refused") {
       return { cls: "error", text: "Encoder offline", title: "The card encoder can't be connected",

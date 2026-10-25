@@ -492,10 +492,16 @@ offered on shared or role-based computers where each person signs in with their 
        A card started for that encoder from elsewhere (such as **Make key card** on the Staff
        tab) waits until it's open (for **Wait for each card**), then needs attention. **Test
        encoder** goes through it too, so open Wristbands there first.
-     - **The first time**, Chrome or Edge asks whether the staff app may access devices on your
-       local network: choose **Allow**. If it was blocked, the header says **Allow this site to
-       access devices on your local network**: click the icon at the left of the address bar,
-       allow it for this site, and reload the page.
+     - **The first time**, Chrome or Edge asks whether the staff app may **access other apps and
+       services on this device** (that's SN Web Socket): choose **Allow**. It only asks once SN
+       Web Socket is running on that computer, so start it first; until then the header says
+       **Encoder offline**. If nobody answers, or the question is closed, the header says
+       **Encoder not allowed**: click **Try again** and choose **Allow**. It isn't asked again by
+       itself, because Chrome can stop asking a site for a while after its question is closed
+       a few times.
+     - If it was blocked, the header says **Encoder blocked**: click the icon at the left of the
+       address bar and allow **Apps on device** for the site (**Local network access** in Chrome
+       or Edge before version 145). The page connects by itself once it's allowed.
      - Keep Wristbands open in one window or tab at a time. A newer one takes the encoder over;
        the older one says **Encoder in another window**, with **Use it here** to take it back.
      - **The trade-off:** while a card is made or looked up, the encoder's key from TT Hotel
@@ -617,10 +623,15 @@ built to use a small share and never get the account blocked:
   on that computer and open **Wristbands**: a job waiting for it carries on by itself, and one
   that needs attention goes on with **Try again**.
 - **"Can't reach SN Web Socket on this computer: is it running?"** (This computer (USB), in the
-  Wristbands header) Start SN Web Socket on that computer; the page connects to it by itself.
-  **"Allow this site to access devices on your local network"** means the browser blocked it:
-  allow local network access for the site (the icon at the left of the address bar), then
-  reload.
+  Wristbands header) Start SN Web Socket on that computer, the one the browser is on; the page
+  connects to it by itself, and the browser then asks to **access other apps and services on
+  this device**: choose **Allow**. The browser never asks while SN Web Socket isn't running. If
+  it is running and the browser still doesn't ask, check that **Apps on device** isn't blocked
+  for the site (the icon at the left of the address bar).
+- **"This browser is blocking the card encoder"** (**Encoder blocked**): allow **Apps on device**
+  for the site (the icon at the left of the address bar; **Local network access** in older
+  versions). **"Allow this site to reach the card encoder"** (**Encoder not allowed**): nobody
+  answered the browser's question; click **Try again** and choose **Allow**.
 - **"Can't reach the card encoder's computer."** (Automatic or Address) Check that the computer
   is on, SN Web Socket is running, the address in **Phones & computers → Edit** is right, and
   nothing (such as Windows Firewall) blocks port 8102 from Home Assistant.

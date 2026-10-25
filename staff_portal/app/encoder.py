@@ -666,8 +666,8 @@ class LocalRelay:
         if not self.connected:
             return self.missing_message()
         if self.helper == "blocked":
-            return (f"The browser on {self.name()} is blocking the encoder. Allow this site to "
-                    "access devices on your local network")
+            return (f"The browser on {self.name()} is blocking the encoder. Allow Apps on device "
+                    "for this site there (the icon at the left of the address bar)")
         if self.helper == "unreachable":
             return f"Can't reach SN Web Socket on {self.name()}: is it running?"
         if self.helper == "ready":
@@ -1182,8 +1182,8 @@ class EncoderRunner:
         if code == NO_LINK:
             return f"{relay.missing_message()}, then try again."
         if code == UNREACHABLE and relay.helper == "blocked":
-            return (f"The browser on {relay.name()} blocked the card encoder. Allow this site to "
-                    "access devices on your local network, then try again.")
+            return (f"The browser on {relay.name()} is blocking the card encoder. Allow Apps on "
+                    "device for this site there (or choose Allow when it asks), then try again.")
         if code == UNREACHABLE:
             return (f"Can't reach SN Web Socket on {relay.name()}. Check that it's running, then "
                     "try again.")

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.5
+
+**Card encoders: This computer (USB)**
+
+- The Wristbands header now says exactly why the encoder can't connect, in the browser's own
+  words, with **Try again**:
+  - **Encoder offline**: SN Web Socket isn't running on this computer. Chrome and Edge only ask
+    for permission once it is, so the page says to start it first.
+  - **Connecting encoder…** while the browser asks whether the site may **access other apps and
+    services on this device**: choose **Allow**.
+  - **Encoder not allowed**: nobody answered, or the question was closed. It isn't asked again
+    by itself (Chrome can stop asking a site for a while after that happens a few times): **Try
+    again** asks again.
+  - **Encoder blocked**: names the setting to change, **Apps on device** (**Local network
+    access** before Chrome 145).
+- Fixed: a site blocked under the setting's old name showed **Encoder offline** ("is it
+  running?") instead of **Encoder blocked**.
+- Allowing it in the site settings connects straight away, even while the browser's question is
+  still showing.
+- The dashboard's and the add-on's messages for a blocked encoder name the same setting.
+
 ## 0.8.4
 
 **Card encoders**

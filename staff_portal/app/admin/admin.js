@@ -2506,9 +2506,9 @@
     }
     if (link.helper === "ready") return [`Connected${helperVersion(link)}.`, "ok"];
     if (link.helper === "blocked") {
-      return [`Wristbands is open on ${where}, but the browser there is blocking the encoder. Allow this ` +
-        "site to access devices on your local network (the browser asks, or use the site settings next " +
-        "to the address bar).", "warn"];
+      return [`Wristbands is open on ${where}, but the browser there is blocking the encoder. Choose ` +
+        "Allow when it asks, or allow Apps on device for the staff app (the icon at the left of the " +
+        "address bar).", "warn"];
     }
     if (link.helper === "unreachable") {
       return [`Wristbands is open on ${where}, but SN Web Socket isn't answering there: is it running?`, "warn"];

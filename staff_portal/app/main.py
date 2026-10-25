@@ -1912,13 +1912,14 @@ def wristbands_note(device: dict) -> str | None:
         return ("Card encoder not connected: it connects while someone signed in here has "
                 "Wristbands open, with SN Web Socket running on this computer.")
     if link and link["helper"] == "blocked":
-        return ("Card encoder: the browser on this computer is blocking it. Allow the staff app "
-                "to access devices on the local network when the browser asks.")
+        return ("Card encoder: the browser on this computer is blocking it. Choose Allow when the "
+                "browser asks, or allow Apps on device for the staff app (the icon at the left of "
+                "the address bar).")
     if link and link["helper"] == "unreachable":
         return ("Card encoder: Wristbands is open on this computer, but SN Web Socket isn't "
                 "answering there. Check that it's running.")
-    # Still connecting, or the browser there is asking about local network access: the card
-    # says "checking SN Web Socket", which is all that's known yet.
+    # Still connecting, or the browser there is asking whether the page may reach SN Web Socket:
+    # the card says "checking SN Web Socket", which is all that's known yet.
     return None
 
 
