@@ -483,6 +483,42 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .safety-row:last-child { border-bottom: 0; }
 .safety-row .entity-text { min-width: 200px; }
 
+/* Migrate to another install */
+.migrate-steps { padding-left: 20px; margin: 0; font-size: 14px; }
+.migrate-steps li { margin: 4px 0; }
+.migrate-made, .migrate-done { display: grid; gap: 10px; padding: 14px 16px; border-radius: 14px; }
+.migrate-made {
+  background: var(--warn-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.migrate-made .hint, .migrate-done .hint { margin: 0; }
+.migrate-done {
+  background: color-mix(in srgb, var(--ok) 9%, var(--card));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.migrate-done .btn:not(.primary) { background: var(--card); }
+.migrate-warn { color: var(--warn); font-weight: 600; font-size: 14px; margin: 0; }
+/* The code is shown once, big enough to copy down by hand without mistakes. */
+.migrate-code {
+  font: 700 clamp(20px, 4.6vw, 30px)/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  user-select: all;
+  -webkit-user-select: all;
+}
+.migrate-file { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.migrate-file .hint { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.migrate-not-new { margin: 0; font-size: 14px; }
+dialog input.code-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: clamp(15px, 4.4vw, 18px);  /* the whole code fits on one line, even on a phone */
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 /* Computers */
 .copy-row { display: flex; gap: 8px; margin: 10px 0 4px; }
 .copy-row input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

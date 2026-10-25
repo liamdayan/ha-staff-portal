@@ -358,16 +358,49 @@
       <fieldset>
         <legend>Full backup</legend>
         <p class="hint">Everything in Staff Access in one file: settings, logo, areas, roles, layout,
-          phones, staff and each phone's own arrangement. Restoring it puts all of that back, and
-          phones that were already set up keep working. The activity log isn't included.</p>
+          phones, staff and each phone's own arrangement, plus the activity log and the wristband and
+          key card history. Restoring it puts the setup back, and phones that were already set up keep
+          working. The log and card history are merged: entries from the file that aren't here yet are
+          added, and nothing here is removed.</p>
         <div class="backup-actions">
           <button class="btn primary" id="download-backup">Download backup</button>
           <button class="btn" id="restore-backup">Restore from a backup…</button>
         </div>
         <p class="hint">Keep backup files somewhere private: they include staff and phone PINs
-          (scrambled, never readable). Home Assistant sign-ins and pending setup QR codes are never
-          included. Staff Access is also part of Home Assistant's own backups.</p>
+          (scrambled, never readable) and the activity log. Home Assistant sign-ins, pending setup QR
+          codes and the TT Hotel and Connecteam secrets are never included. Staff Access is also part
+          of Home Assistant's own backups.</p>
         <div id="safety-backups"></div>
+      </fieldset>
+      <fieldset id="migrate">
+        <legend>Migrate to another install</legend>
+        <p class="hint">Moves everything to another install of this add-on, for example when you
+          switch Home Assistant from one add-on repository to another (Home Assistant treats that as a
+          different add-on). Phones and computers stay signed in and nothing needs typing again: the
+          file carries the whole setup, the activity log and card history, PINs, and the TT Hotel and
+          Connecteam connections with their secrets.</p>
+        <ol class="migrate-steps">
+          <li>Here, click <strong>Create migration file</strong>. Save the file and write down the
+            code shown with it.</li>
+          <li>Stop this add-on: in Home Assistant, <strong>Settings → Add-ons → Staff Portal →
+            Stop</strong>. Both use port 8787, so only one can run at a time.</li>
+          <li>Install the new add-on and start it.</li>
+          <li>Open the new one's <strong>Backup</strong> tab, click <strong>Restore from migration
+            file…</strong>, choose the file and type the code.</li>
+          <li>Check that phones, computers and this dashboard work.</li>
+          <li>Uninstall the old add-on and remove its repository. The Cloudflare Tunnel needs no
+            change.</li>
+        </ol>
+        <div class="backup-actions">
+          <button class="btn primary" id="create-migration">Create migration file</button>
+          <button class="btn" id="restore-migration">Restore from migration file…</button>
+        </div>
+        <div id="migration-code" class="migrate-made" role="region" aria-label="Migration code" hidden></div>
+        <div id="migration-done" class="migrate-done" role="status" hidden></div>
+        <p class="hint">Only the code can open the file, and the file holds everything, secrets
+          included: treat both like a password and keep them apart. A file can be restored within 24
+          hours of being made, and only onto a new install that has no staff, phones, computers,
+          roles, areas, departments, card jobs or layout pages yet.</p>
       </fieldset>
       <fieldset>
         <legend>Layout</legend>
@@ -408,7 +441,7 @@
         </div>
       </fieldset>
     </div>
-    <input type="file" id="import-file" accept=".json,application/json" hidden>
+    <input type="file" id="import-file" accept=".json,.gz,application/json,application/gzip" hidden>
   </section>
 
   <section id="tab-settings" class="tab" hidden>
@@ -866,6 +899,32 @@
     <div class="dialog-actions">
       <button class="btn" type="button" value="cancel">Cancel</button>
       <button class="btn primary" value="save">Link user</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="migrate-dialog">
+  <form id="migrate-form">
+    <h2>Restore from a migration file</h2>
+    <p class="hint">Use the file and the code from <strong>Create migration file</strong> on the
+      other install. Everything in the file is put here, and phones and computers stay signed in.
+      A copy of what's here now is saved first.</p>
+    <p class="notice migrate-not-new" data-not-new hidden><span data-not-new-why></span> To bring in
+      a backup, use <strong>Restore from a backup…</strong> instead.</p>
+    <div class="migrate-file">
+      <label class="btn file-btn">Choose file…<input type="file" data-file
+        accept=".json,.gz,application/json,application/gzip" hidden></label>
+      <span class="hint" data-file-name>No file chosen</span>
+    </div>
+    <p class="hint" data-file-info hidden></p>
+    <label>Code <small>The 20 letters and numbers shown when the file was made. Dashes and spaces
+        don't matter.</small>
+      <input data-code class="code-input" autocomplete="off" autocapitalize="characters"
+        spellcheck="false" maxlength="40" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" translate="no"></label>
+    <p class="form-error" data-error role="alert"></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" value="cancel">Cancel</button>
+      <button class="btn primary" value="restore">Restore</button>
     </div>
   </form>
 </dialog>

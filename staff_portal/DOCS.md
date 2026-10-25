@@ -673,7 +673,8 @@ computer (USB)**, through the signed-in staff app on that computer while a card 
 Socket over your network, and only to an address you entered or confirmed. SN Web Socket accepts
 commands from anything on your network, with no password, so keep the front-desk computer on the
 staff network (not guest Wi-Fi). The Client Secret and password are never shown again after saving
-(leave the boxes blank to keep them) and are never in backups.
+(leave the boxes blank to keep them) and are never in backups (only a migration file
+carries them, encrypted).
 
 ## Departments and staff key cards
 
@@ -902,7 +903,8 @@ has answered, how many your account has left. While paused or stopped it says wh
 after 15 minutes without an answer, people who must be clocked in can't sign in.
 
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
-included in backups. After restoring a backup on a new system, enter it again.
+included in backups. After restoring a backup on a new system, enter it again (a migration file
+brings it across, encrypted).
 
 ## Seeing staff actions in Home Assistant
 
@@ -946,7 +948,8 @@ How it works and what to know:
 PINs are never stored as typed. Each PIN is scrambled with scrypt and its own random salt, so
 they can't simply be read back. PINs are short, though, so someone with a copy of a backup or
 staff export could work them out by trying every combination on their own computer, where the
-wrong-PIN limits don't apply. Keep backups and exports private, like passwords.
+wrong-PIN limits don't apply. Keep backups and exports private, like passwords (backups also hold
+the activity log).
 
 Under **Settings → Phone security**:
 
@@ -1013,8 +1016,10 @@ backups. The **Backup** tab adds backups of just Staff Access, and a way to move
 between systems.
 
 **Full backup.** **Download backup** saves one file with your settings, logo, areas, roles,
-layout, phones, staff (with their roles and own settings) and each phone's own arrangement. **Restore from a backup…** puts all of
-that back:
+layout, phones, staff (with their roles and own settings), each phone's own arrangement, the
+activity log and the wristband and key card history (every card made, and lost-card lock-outs).
+The file is compressed (`.json.gz`); **Restore from a backup…** takes it, and plain `.json`
+backups from older versions too. Restoring puts the setup back:
 
 - Phones that were set up on this system keep working without re-pairing.
 - A phone or computer that wasn't signed in on this system needs setting up again after the
@@ -1025,15 +1030,70 @@ that back:
 - The Connecteam Client Secret and the TT Hotel Client Secret and password are never in a backup,
   and a restore never changes them. Wristband settings, door names, roles' wristband rules,
   departments, each person's department and Connecteam sync details, and how many digits each PIN
-  has (when that's known) are included; the card log
-  and key cards stay as they are. Whether remote lock-out was tested is never restored: test it
-  again on the new system.
+  has (when that's known) are included. Whether remote lock-out was tested is never restored: test
+  it again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
-- The activity log stays as it is.
-- Before replacing anything, Staff Access saves a copy of the current setup. It's listed under
-  **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a restore.
+- **The activity log and the card history are merged, not replaced.** Entries in the backup that
+  aren't here yet are added, and nothing here is removed, so restoring the same backup twice
+  never adds anything twice. The usual limits still apply: the activity log keeps 50,000 lines and 180
+  days, and the card history 2 years. A card job that was still running when the backup was made
+  comes back as stopped, and a remote lock-out that was still waiting comes back as failed, so
+  you can start them again. A backup from before 0.8.6 has no log or card history, and both stay
+  as they are.
+- Before replacing anything, Staff Access saves a copy of everything here, logs included. It's
+  listed under **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a
+  restore.
 - A damaged file or one from a newer version is refused, and nothing changes.
+
+**Migrate to another install.** This moves everything to another install of the add-on, for
+example when you switch Home Assistant from one add-on repository to another (such as from a test
+branch to main): Home Assistant treats that as a different add-on, with its own empty data.
+Unlike a backup, a migration file carries everything, so nothing needs pairing or typing again:
+
+- phones and computers stay signed in, and setup QR codes already handed out keep working;
+- staff PINs, phone PINs and links to Home Assistant users;
+- the TT Hotel Client Secret, password and sign-in, the Connecteam Client Secret, and both
+  request counts;
+- the whole door list, the activity log and the card history.
+
+The steps (they're also on the **Backup** tab):
+
+1. On the old install, click **Create migration file**. Save the file, and write down the code
+   shown with it: 20 letters and numbers in 5 groups of 4. **The code is shown only once.** Staff
+   Access never stores it, and nothing else opens the file: if it's lost, make a new file.
+2. Stop the old add-on: **Settings → Add-ons → Staff Portal → Stop**. Both installs use port
+   8787, so only one can run at a time. Changes made on the old one after step 1 aren't in the file.
+3. Install the new add-on and start it.
+4. On the new one's **Backup** tab, click **Restore from migration file…**, choose the file and
+   type the code (dashes, spaces and capitals don't matter).
+5. Check that a phone or two, the front desk computers and the dashboard work. Staff sign in again
+   with their PINs.
+6. Uninstall the old add-on and remove its repository. Don't start it again: it knows the same
+   phones and computers. The Cloudflare Tunnel needs no change, since it still points at port 8787.
+
+A few rules keep a migration file safe:
+
+- **It holds your secrets: treat the file and the code like passwords**, and keep them apart (not
+  in the same email or folder). The file is encrypted (AES-256-GCM, with a key made from the code
+  by scrypt), so without the code it's unreadable. Delete both once the migration is done.
+- **It works for 24 hours** after it's made. After that, make a new one: start the old install
+  again, click **Create migration file**, then stop it again.
+- **It only goes onto a fresh install**, one with no staff, phones, computers, roles, areas,
+  departments, card jobs or layout pages yet (changed settings or a logo don't count). If the new
+  install has been set up, uninstall and reinstall it first. This, with the 24 hours, is what
+  keeps a file to one use: the new install can't know whether the code was used somewhere else,
+  but once a file is restored, that install isn't fresh any more.
+- A wrong code and a changed or damaged file look the same: both are refused. So is a file made
+  by a newer version of Staff Portal (update the new install first). Nothing changes when a file
+  is refused.
+- The new install saves a copy of what it had first (**Saved before restoring**), and the
+  activity log says **Migrated from another install**. The old one logs **Created a migration
+  file**. The code is never logged.
+- A migration can't be undone by restoring that copy: it's of the fresh install, and a restore
+  never removes the secrets, activity log or card history the migration brought. To start over,
+  uninstall the new add-on and install it again (the old one still has everything until you
+  uninstall it).
 
 **Layout, roles, staff and departments** can each be exported and imported on their own:
 

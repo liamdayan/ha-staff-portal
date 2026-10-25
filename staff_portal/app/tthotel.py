@@ -734,16 +734,24 @@ class TTHotel:
                 "quota": MONTHLY_QUOTA, "token_expires": token["expires_at"] if token else None,
                 "needed": needed}
 
-    def forget(self) -> None:
+    def forget(self, *, saved_stops: bool = False) -> None:
         """Settings changed, or a backup was restored: start from scratch (pauses for TT Hotel's
         own limits stay, and so does the saved token, which is checked against the credentials
-        before it's used)."""
+        before it's used). saved_stops: a migration just saved another install's request count
+        with its pause or stop, for these same credentials, so those apply here instead (TT
+        Hotel refused these credentials, or asked to wait) and a stop isn't cleared."""
         self._token = None
         self._last_token_try = 0.0
         self._info = None
         self._info_error = None
         self.last_error = None
-        if self.halted:
+        if saved_stops:
+            until, reason = self.paused_until, self.pause_reason
+            self._load_stops()
+            if until > max(self.paused_until, time.time()):   # a pause of this install's own
+                self.paused_until, self.pause_reason = until, reason
+                self._save_stops()
+        elif self.halted:
             self.halted = None
             self._halt_everything = False
             self._save_stops()

@@ -164,7 +164,10 @@ class Portal:
 
     async def admin_call(self, method, path, body=None):
         resp = await self.admin.request(method, path, headers=ADMIN_HEADERS, json=body)
-        text = await resp.text()
+        raw = await resp.read()
+        if raw[:2] == transfer.GZIP_MAGIC:
+            raw = transfer.gunzip(raw)   # a backup download: read as a restore reads it
+        text = raw.decode()
         try:
             return resp.status, json.loads(text)
         except ValueError:
@@ -458,7 +461,7 @@ def test_secrets_never_reach_the_browser_or_backups(tmp_path):
             text = json.dumps(backup)
             for secret in (SECRET, PASSWORD, "tok-123", "ref-456"):
                 assert secret not in text
-            assert backup["schema"] == 3 and backup["settings"]["tthotel_client_id"] == "client-1"
+            assert backup["schema"] == 4 and backup["settings"]["tthotel_client_id"] == "client-1"
             # A backup can't plant or clear secrets either.
             planted = {**backup, "settings": {**backup["settings"], "tthotel_client_secret": "evil",
                                               "tthotel_password_md5": "f" * 32,
@@ -518,7 +521,7 @@ def test_backup_round_trip_and_old_backups(tmp_path):
         p.db.update_settings({"wb_checkout_time": "10:30"})
         async with p:
             status, backup = await p.admin_call("GET", "/api/backup")
-            assert status == 200 and backup["schema"] == 3
+            assert status == 200 and backup["schema"] == 4
             assert {"lock_id": 900, "name": "Pool", "hidden": 1} in backup["wristband_doors"]
             # Change everything, then restore.
             p.db.set_role_wristbands(p.front_desk, None)
@@ -535,7 +538,7 @@ def test_backup_round_trip_and_old_backups(tmp_path):
             door = p.db.wb_door(900)
             assert door["name"] == "Pool" and door["hidden"] == 1
             assert p.db.settings()["wb_checkout_time"] == "10:30"
-            # The door list and card records aren't part of a backup, and survive a restore.
+            # The door list isn't part of a backup, and survives a restore.
             assert len(p.db.wb_doors()) == len(DOORS)
 
             # Card jobs stay with their makers only while the same ID has the same name: a
@@ -588,7 +591,7 @@ def test_backup_round_trip_and_old_backups(tmp_path):
             assert p.db.role(p.front_desk)["wristbands"]["types"] == []
             # A newer backup is refused.
             status, reply = await p.admin_call("POST", "/api/restore/preview",
-                                               {"backup": {**backup, "schema": 4}})
+                                               {"backup": {**backup, "schema": 5}})
             assert status == 400 and "newer" in reply["error"]
     run(scenario())
 
@@ -1256,10 +1259,10 @@ def test_automatic_encoders_in_backups(tmp_path):
         desk, _ = p.computer("Desk 2", "role", None)
         p.db.update_device(desk, encoder_local=1)
         async with p:
-            # This computer (USB) travels in backups too (schema 3 still); older backups
+            # This computer (USB) travels in backups too (schema 3 and on); older backups
             # without it restore each computer's mode as before.
             status, backup = await p.admin_call("GET", "/api/backup")
-            assert backup["schema"] == 3
+            assert backup["schema"] == 4
             assert next(d for d in backup["devices"] if d["id"] == desk)["encoder_local"] == 1
             p.db.update_device(desk, encoder_local=0)
             status, reply = await p.admin_call("POST", "/api/restore", {"backup": backup})

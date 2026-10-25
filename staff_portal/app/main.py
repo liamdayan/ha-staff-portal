@@ -15,6 +15,7 @@ through the staff app open on the computer the encoder is plugged into.
 import asyncio
 import collections
 import dataclasses
+import functools
 import hashlib
 import io
 import ipaddress
@@ -39,6 +40,7 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
                     clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
                     visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
+import migrate
 import transfer
 from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
@@ -383,6 +385,35 @@ async def read_json(request: web.Request) -> dict:
     if not isinstance(data, dict):
         raise web.HTTPBadRequest(text="expected an object")
     return data
+
+
+async def read_upload(request: web.Request, limits: dict[str, int]) -> dict[str, bytes]:
+    """The fields of a multipart upload named in `limits`, each read up to its limit in bytes
+    (other fields are skipped). Raises ValueError for one that's too big or a body that isn't an
+    upload, and HTTPRequestTimeout like read_json."""
+    fields: dict[str, bytes] = {}
+    try:
+        async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
+            try:
+                reader = await request.multipart()
+            except (AssertionError, KeyError, ValueError):
+                raise ValueError("Choose a file to upload.") from None   # not an upload
+            while (part := await reader.next()) is not None:
+                name = getattr(part, "name", None)
+                if name not in limits or name in fields:
+                    await part.release()
+                    continue
+                data = bytearray()
+                while chunk := await part.read_chunk(64 * 1024):
+                    data.extend(chunk)
+                    if len(data) > limits[name]:
+                        raise ValueError(f"That file is too big (more than "
+                                         f"{limits[name] // 2**20} MB)." if limits[name] >= 2**20
+                                         else f"The {name} is too long.")
+                fields[name] = bytes(data)
+    except TimeoutError:
+        raise web.HTTPRequestTimeout(text="The upload took too long to arrive.") from None
+    return fields
 
 
 async def read_options(request: web.Request) -> dict:
@@ -2473,6 +2504,9 @@ async def admin_state(request: web.Request):
         "areas": db.areas(),
         "layout": db.layout(),
         "has_logo": branding.has_logo(),
+        # Why a migration file would be refused here (None on a fresh install), so the Migrate
+        # dialog says so early, by the add-on's own rule.
+        "not_fresh": not_fresh(),
     })
 
 
@@ -4775,46 +4809,126 @@ async def admin_import(request: web.Request):
     return web.json_response(result)
 
 
+# Room for a full backup with its logs, as the dashboard uploads it: the file as picked. As
+# downloaded (gzip-compressed) that's a few megabytes. An older or unpacked backup is plain JSON:
+# with a full activity log and the most card jobs the add-on keeps, about 70 MB with 2 doors on
+# each card, more with more doors (transfer.MAX_BACKUP_BYTES), so a bigger one goes up packed.
+MAX_ADMIN_BODY = 96 * 1024 * 1024
+BUSY = "Staff Access is busy with another backup or restore. Try again in a moment."
+transfer_running = [False]
+
+
+def one_at_a_time(handler):
+    """For backups, restores and migration files: each holds a whole backup (with its logs,
+    possibly tens of megabytes) in memory, so only one runs at a time; another is refused."""
+    @functools.wraps(handler)
+    async def run(request: web.Request):
+        if transfer_running[0]:
+            return bad_request(BUSY, 409)
+        transfer_running[0] = True
+        try:
+            return await handler(request)
+        finally:
+            transfer_running[0] = False
+    return run
+
+
+def attachment(body: bytes, name: str, content_type: str) -> web.Response:
+    return web.Response(body=body, content_type=content_type, headers={
+        "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
+@one_at_a_time
 async def admin_backup(request: web.Request):
     db.log(admin_name(request), "Downloaded a full backup")
-    return download(transfer.make_backup(db, branding, VERSION), "backup")
+    # Read here (the database is only used on the event loop), packed off it.
+    body = await asyncio.to_thread(transfer.pack_backup, transfer.make_backup(db, branding, VERSION))
+    return attachment(body, f"staff-portal-backup-{time.strftime('%Y-%m-%d')}.json.gz",
+                      "application/gzip")
+
+
+async def backup_from_request(request: web.Request):
+    """The backup a restore (or its preview) is about, read but not yet checked. Raises
+    ValueError with a message for the admin. It comes as:
+    - an upload (multipart, field "file"): a backup file as downloaded, gzip-compressed or plain;
+    - {"safety_backup": name}: a copy saved here before an earlier restore;
+    - {"backup": {...}}: the backup itself, already read as JSON (unpacked, if it was)."""
+    if request.content_type == "multipart/form-data":
+        raw = (await read_upload(request, {"file": MAX_ADMIN_BODY})).get("file")
+        if not raw:
+            raise ValueError("Choose a backup file.")
+        return await asyncio.to_thread(transfer.read_backup_file, raw)
+    body = await read_json(request)
+    if "safety_backup" in body:
+        path = transfer.safety_backup_path(DATA_DIR, str(body["safety_backup"] or ""))
+        try:
+            if not path:
+                raise OSError
+            return await asyncio.to_thread(transfer.read_backup_path, path)
+        except OSError:
+            raise ValueError("That saved copy couldn't be read.") from None
+    return body.get("backup")
 
 
 async def check_backup(data) -> dict:
-    # Decoding the logo is image work, so keep it off the event loop.
+    # Checking is pure Python work on what was sent (and decoding the logo is image work), so
+    # keep it off the event loop; what it needs from the database is read here first.
     return await asyncio.to_thread(transfer.clean_backup, data, clean_settings, db.settings(),
                                    branding.clean_logo, db.known_tokens())
 
 
+async def save_safety_backup() -> str:
+    """Save a copy of everything here (logs too) before a restore or migration replaces it, so
+    it can be undone. Read on the event loop, packed and written off it."""
+    return await asyncio.to_thread(transfer.save_safety_backup, DATA_DIR,
+                                   transfer.make_backup(db, branding, VERSION))
+
+
+async def unlink_dropped(tokens: list[str]) -> None:
+    for token in tokens:
+        # A link that didn't survive the restore would otherwise stay valid in Home Assistant.
+        try:
+            await ha.unlink_user(token)
+        except HomeAssistantError as err:
+            log.warning("Couldn't revoke a Home Assistant sign-in after restore: %s", err)
+
+
+def added_note(added: dict) -> str:
+    """For the activity log: " Added 120 activity log lines and 4 card jobs from it.", or ""
+    when a restore added none (db.replace_everything's counts)."""
+    parts = [f"{added[key]} {word if added[key] != 1 else word[:-1]}"
+             for key, word in (("activity", "activity log lines"), ("wb_jobs", "card jobs"))
+             if added.get(key)]
+    return f" Added {' and '.join(parts)} from it." if parts else ""
+
+
+@one_at_a_time
 async def admin_restore_preview(request: web.Request):
-    data = (await read_json(request)).get("backup")
     try:
+        data = await backup_from_request(request)
         snap = await check_backup(data)
     except ValueError as err:
         return bad_request(str(err))
     return web.json_response({**transfer.backup_summary(data), "needs_setup": snap["needs_setup"]})
 
 
+@one_at_a_time
 async def admin_restore(request: web.Request):
-    data = (await read_json(request)).get("backup")
     try:
+        data = await backup_from_request(request)
         snap = await check_backup(data)
     except ValueError as err:
         return bad_request(str(err))
+    del data   # it can be big; only the checked copy is needed from here
     # Keep what's being replaced, so a restore can be undone by restoring this copy.
-    safety = transfer.save_safety_backup(DATA_DIR, transfer.make_backup(db, branding, VERSION))
+    safety = await save_safety_backup()
     api = db.settings().get("wb_remote_lockout_api", "reversed")
-    dropped_links = db.replace_everything(snap)
+    dropped_links, added = db.replace_everything(snap)
     if db.settings().get("wb_remote_lockout_api", "reversed") != api:
         # Remote lock-out was tested with the other number format, not this one.
         db.update_settings({"wb_remote_lockout_tested": ""})
     remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
-    for token in dropped_links:
-        # A link that didn't survive the restore would otherwise stay valid in Home Assistant.
-        try:
-            await ha.unlink_user(token)
-        except HomeAssistantError as err:
-            log.warning("Couldn't revoke a Home Assistant sign-in after restore: %s", err)
+    await unlink_dropped(dropped_links)
     for device in snap["devices"]:
         if device["status"] == "pending":
             db.new_enroll_code(device["id"])  # setup codes never travel in backups
@@ -4828,9 +4942,9 @@ async def admin_restore(request: web.Request):
     tthotel.forget()
     made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))
     db.log(admin_name(request), "Restored a backup",
-           detail=f"Backup from {made}. What it replaced was saved as {safety}." +
+           detail=f"Backup from {made}.{added_note(added)} What it replaced was saved as {safety}." +
            (f" Revoked {len(dropped_links)} Home Assistant sign-in(s) no longer linked." if dropped_links else ""))
-    return web.json_response({"ok": True, "safety_backup": safety})
+    return web.json_response({"ok": True, "safety_backup": safety, "added": added})
 
 
 async def admin_safety_backups(request: web.Request):
@@ -4841,11 +4955,113 @@ async def admin_safety_backup(request: web.Request):
     path = transfer.safety_backup_path(DATA_DIR, request.match_info["name"])
     if not path:
         raise web.HTTPNotFound()
-    with open(path) as f:
-        text = f.read()
-    return web.Response(text=text, content_type="application/json", headers={
-        "Content-Disposition": f'attachment; filename="{os.path.basename(path)}"',
-        "Cache-Control": "no-store"})
+    with open(path, "rb") as f:
+        body = f.read()
+    return attachment(body, os.path.basename(path),
+                      "application/gzip" if path.endswith(".gz") else "application/json")
+
+
+# ---------------------------------------------------------------- migrate to another install
+
+SET_UP_NOUNS = {"staff": ("staff member", "staff members"),
+                "devices": ("phone or computer", "phones and computers"),
+                "roles": ("role", "roles"), "areas": ("area", "areas"),
+                "departments": ("department", "departments"),
+                "wb_jobs": ("card job", "card jobs"), "pages": ("layout page", "layout pages")}
+
+
+def not_fresh() -> str | None:
+    """Why this install can't take a migration (it's been set up), or None if it's fresh."""
+    found = db.setup_found()
+    if not found:
+        return None
+    listed = [f"{n} {SET_UP_NOUNS[key][n != 1]}" for key, n in found.items()]
+    what = listed[0] if len(listed) == 1 else f"{', '.join(listed[:-1])} and {listed[-1]}"
+    return (f"This install already has {what}. A migration replaces everything, so it only goes "
+            "onto a fresh install of the add-on: uninstall this one and install it again, then "
+            "restore the migration file.")
+
+
+@one_at_a_time
+async def admin_migrate_create(request: web.Request):
+    """Create migration file (Backup tab > Migrate): everything here, device tokens and secrets
+    included, encrypted under a one-time code (migrate.py). The file comes back in this answer
+    with the code, for the dashboard to save; the code is never stored, logged or put in an
+    address, and nothing of either is kept here."""
+    db.log(admin_name(request), "Created a migration file",
+           detail="It opens for 24 hours, only with the code shown when it was made.")
+    code = migrate.new_code()
+    # Read here (the database is only used on the event loop), encrypted off it.
+    file = await asyncio.to_thread(migrate.seal, migrate.make_snapshot(db, branding, VERSION),
+                                   code, VERSION)
+    return web.json_response(
+        {"code": code, "file": file, "expires_at": file["expires_at"],
+         "filename": f"staff-portal-migration-{time.strftime('%Y-%m-%d-%H%M')}.json"},
+        headers={"Cache-Control": "no-store"})
+
+
+async def migration_from_request(request: web.Request) -> tuple:
+    """(the migration file as sent, the code typed), from an upload (multipart: "file" and
+    "code") or JSON ({"file": the file read as JSON, or its text, "code": ...}). Raises
+    ValueError with a message for the admin."""
+    if request.content_type == "multipart/form-data":
+        fields = await read_upload(request, {"file": MAX_ADMIN_BODY, "code": 200})
+        file, code = fields.get("file"), fields.get("code", b"").decode("utf-8", "replace")
+    else:
+        body = await read_json(request)
+        file, code = body.get("file"), body.get("code")
+    if not file:
+        raise ValueError("Choose the migration file.")
+    return file, migrate.clean_code(code)
+
+
+@one_at_a_time
+async def admin_migrate_restore(request: web.Request):
+    """Restore from migration file: the file and its code (migration_from_request). Everything
+    here is replaced by what the file holds, device tokens and secrets included, so phones and
+    computers stay signed in. Only onto a fresh install (409 otherwise), within the file's 24
+    hours."""
+    try:
+        file, code = await migration_from_request(request)
+    except ValueError as err:
+        return bad_request(str(err))
+    if refusal := not_fresh():
+        return bad_request(refusal, 409)
+    try:
+        data, header = await asyncio.to_thread(migrate.open_file, file, code, VERSION)
+        del file
+        snap = await asyncio.to_thread(migrate.clean_snapshot, data, clean_settings, db.settings(),
+                                       branding.clean_logo)
+    except ValueError as err:
+        return bad_request(str(err))
+    summary = transfer.backup_summary(data)
+    del data   # it can be big; only the checked copy is needed from here
+    safety = await save_safety_backup()
+    if refusal := not_fresh():   # something was set up while the file was being opened
+        return bad_request(refusal, 409)
+    dropped_links, added = db.replace_everything(snap)
+    remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
+    await unlink_dropped(dropped_links)
+    for device in snap["devices"]:
+        if device["status"] == "pending" and device["id"] not in snap["migrate"]["setup_codes"]:
+            db.new_enroll_code(device["id"])
+    if snap["logo"]:
+        branding.write_logo(snap["logo"])
+    else:
+        branding.remove_logo()
+    pin_sessions.clear()  # devices stay signed in; people type their PIN again
+    connecteam.forget()   # new settings and secrets: nothing cached from before applies
+    tthotel.forget(saved_stops=True)   # but a pause or stop TT Hotel asked for still holds
+    signed_in = sum(1 for d in snap["devices"] if d["token_hash"])
+    made = time.strftime("%b %d, %Y %H:%M", time.localtime(header["created_at"]))
+    db.log(admin_name(request), "Migrated from another install",
+           detail=f"Migration file made {made} by Staff Portal {header['app_version'][:20]}. "
+                  f"{signed_in} phone(s) and computer(s) stay signed in.{added_note(added)} "
+                  f"What it replaced was saved as {safety}.")
+    return web.json_response({"ok": True, "summary": {
+        **summary, "made_at": header["created_at"], "app_version": header["app_version"][:20],
+        "signed_in": signed_in, "needs_setup": snap["needs_setup"], "added": added,
+        "safety_backup": safety}})
 
 
 async def admin_upload_logo(request: web.Request):
@@ -4910,9 +5126,8 @@ async def admin_guard(request: web.Request, handler):
 
 
 def admin_app() -> web.Application:
-    # Room for a full backup with its logo.
-    app = web.Application(middlewares=[admin_guard], client_max_size=16 * 1024 * 1024)
-    app[BODY_SECONDS] = 120.0   # a 16 MB backup over a slow connection
+    app = web.Application(middlewares=[admin_guard], client_max_size=MAX_ADMIN_BODY)
+    app[BODY_SECONDS] = 300.0   # a big backup over a slow connection
     app.router.add_get("/", admin_index)
     app.router.add_get("/preview", admin_preview)
     app.router.add_get("/api/preview/me", admin_preview_me)
@@ -4955,6 +5170,8 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/restore", admin_restore)
     app.router.add_get("/api/safety-backups", admin_safety_backups)
     app.router.add_get(r"/api/safety-backups/{name}", admin_safety_backup)
+    app.router.add_post("/api/migrate/create", admin_migrate_create)
+    app.router.add_post("/api/migrate/restore", admin_migrate_restore)
     app.router.add_get("/api/entities", admin_entities)
     app.router.add_post("/api/roles", admin_create_role)
     app.router.add_put(r"/api/roles/{id:\d+}", admin_update_role)

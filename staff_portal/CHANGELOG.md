@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.6
+
+**Migrate to another install**
+
+- **New: Migrate** on the **Backup** tab moves everything to another install of the add-on, such
+  as when you switch Home Assistant from one add-on repository to another (Home Assistant treats
+  that as a different add-on). **Create migration file** on the old install saves a file and shows
+  a one-time code; **Restore from migration file…** on the new install takes both. Phones and
+  computers stay signed in and nothing needs typing again: PINs, the TT Hotel and Connecteam
+  secrets, the door list, links to Home Assistant users, the activity log and the card history
+  all come across. The Cloudflare Tunnel needs no change.
+- The file is encrypted (AES-256-GCM, with a key made from the code by scrypt). The code is 20
+  letters and numbers, shown once and never stored or logged: nothing else opens the file. A file
+  works for 24 hours and only on a fresh install. A wrong code, a changed or expired file, or one
+  made by a newer version is refused, and nothing changes. The new install saves a copy of what
+  it had first.
+
+**Backups**
+
+- **Changed: backups include the activity log and the card history** (wristbands and key cards
+  made, and lost-card lock-outs). Restoring merges them: entries not already here are added, and
+  nothing here is removed, within the usual limits. Card jobs that were still running when the
+  backup was made come back as stopped. Backups from before 0.8.6 restore as before.
+- Backups download compressed (`.json.gz`, about a tenth of the size). **Restore from a backup…**
+  takes `.json.gz` and `.json` files, and uploads the file as it is. Copies saved before a restore
+  are compressed too and include the logs; **Restore this** restores one straight from where it's
+  saved. A backup file may now be up to 96 MB as uploaded, and 192 MB unpacked.
+- Only one backup, restore or migration runs at a time; another one is asked to wait.
+
 ## 0.8.5
 
 **Card encoders: This computer (USB)**

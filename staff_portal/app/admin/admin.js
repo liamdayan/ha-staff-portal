@@ -260,7 +260,13 @@
     let data = {};
     // Read the body once: some errors are plain text, and a failed .json() would use it up.
     const text = await res.text().catch(() => "");
-    try { data = JSON.parse(text); } catch { data = { error: text.trim().slice(0, 300) }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // The web server's own "request too large" answer is technical; say it plainly.
+      data = { error: res.status === 413 ? "That's too big to send to Staff Access."
+        : text.trim().slice(0, 300) };
+    }
     if (!res.ok) {
       // The whole answer goes with the error: some refusals say what to ask next (which encoder).
       const err = new Error(data.error || `Request failed (${res.status})`);
@@ -314,6 +320,7 @@
     state.wristbands = data.wristbands || {};
     state.departments = data.departments || [];
     state.staffSync = data.staff_sync || {};
+    state.notFresh = data.not_fresh || null;
     $("#add-from-connecteam").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
@@ -4685,6 +4692,16 @@
 
   const KIND_NAMES = { layout: "a layout", roles: "roles", staff: "staff members", departments: "departments",
     backup: "a full backup" };
+  // The add-on's upload limit (MAX_ADMIN_BODY): a bigger file can't be sent. Files read whole here
+  // (exports and migration files) are far smaller unpacked; one past this is something else, and
+  // reading it would only use up the browser's memory. A backup to restore is never read whole.
+  const MAX_FILE_BYTES = 96 * 1024 * 1024;
+  const PEEK_BYTES = 64 * 1024;   // enough of a file's start to see what it says it is
+  const TOO_BIG = "That file is too big to be a Staff Portal file.";
+  const NOT_OURS = "That isn't a Staff Portal export or backup file.";
+  const MIGRATE_FORMAT = "staff-portal-migrate";
+  const MIGRATE_CODE_CHARS = 20;  // the code's letters and numbers, shown in groups of 4
+  const NOT_MIGRATION = "That isn't a Staff Portal migration file.";
 
   // Pick between a few labelled options; resolves to the chosen key, or null on Cancel.
   function askChoice(message, choices) {
@@ -4702,12 +4719,8 @@
     });
   }
 
-  // Downloads go through fetch so a refusal shows as a message instead of a broken file.
-  async function downloadFile(path) {
-    const res = await fetch(path, { cache: "no-store" });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status}).`);
-    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "staff-portal.json";
-    const url = URL.createObjectURL(await res.blob());
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
     const a = h("a", { href: url, download: name });
     document.body.append(a);
     a.click();
@@ -4715,8 +4728,68 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  // Ask for a file and read it as a Staff Portal file of the expected kind.
-  function pickFile(kind) {
+  // Downloads go through fetch so a refusal shows as a message instead of a broken file.
+  async function downloadFile(path) {
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status}).`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || "staff-portal.json";
+    saveBlob(await res.blob(), name);
+  }
+
+  // A file's contents, unpacked if it's gzipped (as backups are saved, to keep them small) or as
+  // it is (older backups, or one a browser unpacked), up to `upTo` bytes: { parts, more }, more
+  // being whether there was more past that. Gzip is told apart by its first two bytes, not the
+  // file name. wrongFile is the message for a damaged one.
+  async function readFileStart(blob, upTo, wrongFile) {
+    if (blob.size > MAX_FILE_BYTES) throw new Error(TOO_BIG);
+    const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+    let stream = blob.stream();
+    if (head[0] === 0x1f && head[1] === 0x8b) {
+      if (typeof DecompressionStream !== "function") {
+        throw new Error("This browser can't open compressed files. Update it, or use a current Chrome, " +
+          "Edge, Firefox or Safari.");
+      }
+      stream = stream.pipeThrough(new DecompressionStream("gzip"));
+    }
+    // Read piece by piece, so a small file that unpacks to something huge is stopped early.
+    const reader = stream.getReader();
+    const parts = [];
+    let size = 0;
+    for (;;) {
+      let chunk;
+      try { chunk = await reader.read(); } catch { throw new Error(wrongFile); } // damaged gzip
+      if (chunk.done) return { parts, more: false };
+      size += chunk.value.length;
+      parts.push(chunk.value);
+      if (size > upTo) {
+        reader.cancel().catch(() => { /* already stopping */ });
+        return { parts, more: true };
+      }
+    }
+  }
+
+  // Reads a Staff Portal file as JSON. wrongFile is the message for anything that isn't JSON.
+  async function readJsonFile(blob, wrongFile) {
+    const { parts, more } = await readFileStart(blob, MAX_FILE_BYTES, wrongFile);
+    if (more) throw new Error(TOO_BIG);
+    try { return JSON.parse(await new Blob(parts).text()); } catch { throw new Error(wrongFile); }
+  }
+
+  // What a file says it is, from its start alone: { format, kind }, either missing if the start
+  // doesn't say (Staff Portal files begin with both; another tool may have reordered them).
+  async function peekFile(blob, wrongFile) {
+    const { parts } = await readFileStart(blob, PEEK_BYTES, wrongFile);
+    const text = new TextDecoder().decode(await new Blob(parts).arrayBuffer());
+    if (!/^\s*\{/.test(text)) throw new Error(wrongFile);   // not a JSON object
+    const said = /^\s*\{\s*"format"\s*:\s*"([^"\\]{0,40})"(?:\s*,\s*"kind"\s*:\s*"([^"\\]{0,40})")?/.exec(text);
+    return { format: said?.[1], kind: said?.[2] };
+  }
+
+  // Ask for a file and read it as a Staff Portal file of the expected kind: its data, or with
+  // asPicked, the file itself, to upload as it is. Then only its start is read: a backup with a
+  // full log and card history can be hundreds of megabytes unpacked, and the add-on checks all
+  // of it anyway (including whatever the start doesn't say).
+  function pickFile(kind, asPicked = false) {
     return new Promise((resolve, reject) => {
       const input = $("#import-file");
       input.value = "";
@@ -4724,12 +4797,16 @@
         const file = input.files[0];
         if (!file) return resolve(null);
         try {
-          if (file.size > 16 * 1024 * 1024) throw new Error("That file is too big to be a Staff Portal file.");
-          let data;
-          try { data = JSON.parse(await file.text()); } catch { throw new Error("That isn't a Staff Portal export or backup file."); }
-          if (data?.format !== "staff-portal") throw new Error("That isn't a Staff Portal export or backup file.");
-          if (data.kind !== kind) throw new Error(`That file holds ${KIND_NAMES[data.kind] || "something else"}, not ${KIND_NAMES[kind]}.`);
-          resolve(data);
+          const data = asPicked ? await peekFile(file, NOT_OURS) : await readJsonFile(file, NOT_OURS);
+          if (data?.format === MIGRATE_FORMAT) {
+            throw new Error("That's a migration file. Open it with Restore from migration file… under Migrate.");
+          }
+          const says = (value) => !asPicked || value !== undefined;
+          if (says(data?.format) && data?.format !== "staff-portal") throw new Error(NOT_OURS);
+          if (says(data?.kind) && data.kind !== kind) {
+            throw new Error(`That file holds ${KIND_NAMES[data.kind] || "something else"}, not ${KIND_NAMES[kind]}.`);
+          }
+          resolve(asPicked ? file : data);
         } catch (err) {
           reject(err);
         }
@@ -4836,14 +4913,24 @@
   }
 
   $("#restore-backup").addEventListener("click", () => run(async () => {
-    const file = await pickFile("backup");
-    return file ? restoreBackup(file) : false;
+    const file = await pickFile("backup", true);
+    if (!file) return false;
+    // The file goes up as it was picked: a backup as downloaded is gzip-compressed, a tenth the
+    // size of its JSON (the activity log and card history make that tens of megabytes or more).
+    const upload = new FormData();
+    upload.append("file", file, file.name);
+    return restoreBackup(upload);
   }));
 
-  async function restoreBackup(file) {
-    const info = await api("POST", "api/restore/preview", { backup: file });
+  // body: the backup file as an upload (FormData), or { safety_backup: name } for a copy saved
+  // here before an earlier restore. It's sent twice: to preview, then to restore.
+  async function restoreBackup(body) {
+    const info = await api("POST", "api/restore/preview", body);
     const counts = [`${info.roles} role${info.roles === 1 ? "" : "s"}`, `${info.devices} phone${info.devices === 1 ? "" : "s"}`,
       `${info.staff} staff member${info.staff === 1 ? "" : "s"}`, `${info.pages} layout page${info.pages === 1 ? "" : "s"}`];
+    // Backups from 0.8.6 on carry the activity log and card history; older ones don't say.
+    if (info.activity > 0) counts.push(`${info.activity} activity log entr${info.activity === 1 ? "y" : "ies"}`);
+    if (info.wb_cards > 0) counts.push(`${info.wb_cards} card${info.wb_cards === 1 ? "" : "s"} in the card history`);
     // Phones this system didn't sign in (another system's backup, a revoked phone, an edited
     // file) come back needing setup.
     const setup = info.needs_setup || [];
@@ -4855,20 +4942,27 @@
     const ok = await askConfirm(
       `Restore the backup of ${info.property_name || "Staff Access"} from ${fullDate(info.exported_at)}?\n\n` +
       `It has ${counts.join(", ")}. Everything in Staff Access now (settings, roles, layout, phones and staff) ` +
-      "is replaced; the activity log stays. A copy of the current setup is saved first, so you can undo this." +
+      "is replaced. The activity log and card history are kept, and any entries in the backup that aren't " +
+      "here yet are added. A copy of the current setup is saved first, so you can undo this." +
       setupNote,
       "Replace and restore");
     if (!ok) return false;
-    await api("POST", "api/restore", { backup: file });
+    await api("POST", "api/restore", body);
+    await reloadEverything();
+    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring.");
+    return false;
+  }
+
+  // After a restore or a migration replaced everything: unsaved edits belong to the old setup.
+  async function reloadEverything() {
     editing = null;
     layoutDraft = null;
     wbDirty = false;
-    wbDoors = null; // door names and hidden doors come back from the backup too
+    wbDoors = null; // door names and hidden doors come back from the file too
     await load();
     renderRoleEditor();
+    refreshIcon();  // the logo may have changed
     loadSafetyBackups();
-    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring.");
-    return false;
   }
 
   async function loadSafetyBackups() {
@@ -4878,18 +4972,233 @@
     if (!list.length) { box.replaceChildren(); return; }
     box.replaceChildren(
       h("div", { class: "pick-head" }, "Saved before restoring"),
-      h("p", { class: "hint" }, "Each restore first saves what it replaced. Restore one of these to undo. The last 5 are kept."),
+      h("p", { class: "hint" }, "Each restore or migration first saves what it replaced. Restore one of these " +
+        "to undo a restore. The last 5 are kept. A migration can't be undone this way (the secrets and " +
+        "history it brought stay): to start over, uninstall this add-on and install it again."),
       h("div", { class: "safety-list" }, list.map((b) => h("div", { class: "safety-row" },
         h("div", { class: "entity-text" },
           h("div", { class: "entity-name" }, `Before the restore on ${fullDate(b.saved_at)}`),
           h("div", { class: "entity-id" }, `${Math.max(1, Math.round(b.size / 1024))} KB`)),
         h("div", { class: "area-actions" },
           h("button", { class: "btn", onclick: () => run(() => downloadFile(`api/safety-backups/${b.name}`)) }, "Download"),
-          h("button", { class: "btn", onclick: () => run(async () => {
-            const res = await fetch(`api/safety-backups/${b.name}`, { cache: "no-store" });
-            if (!res.ok) throw new Error("That saved copy couldn't be read.");
-            return restoreBackup(await res.json());
-          }) }, "Restore this"))))));
+          // Restored straight from where it's saved: nothing needs to travel.
+          h("button", { class: "btn", onclick: () => run(() => restoreBackup({ safety_backup: b.name })) },
+            "Restore this"))))));
+  }
+
+  // ---------------------------------------------------------------- migrate to another install
+
+  // The migration file just made, kept only while its code is on screen so it can be saved
+  // again if the browser blocked the download. Neither is ever stored anywhere.
+  let migration = null;
+
+  const codeChars = (text) => String(text || "").toUpperCase().replace(/[^0-9A-Z]/g, "");
+  const groupCode = (chars) => chars.replace(/(.{4})(?=.)/g, "$1-");
+
+  $("#create-migration").addEventListener("click", (ev) => {
+    const button = ev.currentTarget;
+    run(async () => {
+      button.disabled = true;
+      try {
+        const made = await api("POST", "api/migrate/create", {});
+        if (!made.code || !made.file) throw new Error("The migration file didn't arrive. Try again.");
+        const text = typeof made.file === "string" ? made.file : JSON.stringify(made.file);
+        migration = { blob: new Blob([text], { type: "application/json" }),
+          name: made.filename || "staff-portal-migrate.json" };
+        showMigrationCode(groupCode(codeChars(made.code)), made.expires_at);
+        saveBlob(migration.blob, migration.name);
+      } finally {
+        button.disabled = false;
+      }
+      return false;
+    });
+  });
+
+  // The code is shown this once: the add-on keeps no copy it could show again.
+  function showMigrationCode(code, expires) {
+    const box = $("#migration-code");
+    // Each group can wrap on its own on a narrow screen; the dashes stay with the code.
+    const groups = code.split("-").flatMap((g, i) => (i ? ["-", h("wbr"), g] : [g]));
+    const codeEl = h("div", { class: "migrate-code", translate: "no" }, groups);
+    box.replaceChildren(
+      h("div", { class: "pick-head" }, "Write down this code now"),
+      h("p", { class: "migrate-warn" }, "It's shown only this once and isn't saved anywhere. Without it, " +
+        "the file can't be opened: you'd have to make a new one."),
+      codeEl,
+      h("div", { class: "backup-actions" },
+        h("button", { type: "button", class: "btn primary", onclick: () => copyCode(codeEl, code) }, "Copy code"),
+        h("button", { type: "button", class: "btn", onclick: () => saveBlob(migration.blob, migration.name) },
+          "Download the file again"),
+        h("button", { type: "button", class: "btn subtle", onclick: hideMigrationCode }, "I've written it down")),
+      h("p", { class: "hint" }, `The file and code work ${expires ? `until ${fullDate(expires)}` : "for 24 hours"}, ` +
+        "on a new install only. " +
+        "Keep them apart and private: together they open everything, secrets included. Changes made here " +
+        "from now on aren't in the file, so stop this add-on next (step 2)."));
+    $("#migration-done").hidden = true;
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  // The clipboard API can be blocked inside Home Assistant's frame; fall back to the old way.
+  async function copyCode(el, code) {
+    try {
+      await navigator.clipboard.writeText(code);
+    } catch {
+      getSelection().selectAllChildren(el);
+      if (!document.execCommand("copy")) {
+        toast("Couldn't copy it here. Select the code and copy it, or write it down.", true);
+        return;
+      }
+    }
+    toast("Code copied. Keep it somewhere private, away from the file.");
+  }
+
+  async function hideMigrationCode() {
+    if (!await askConfirm("Hide the code? It can't be shown again. If you haven't written it down, " +
+      "you'll need to make a new migration file.", "Hide code")) return;
+    migration = null;
+    $("#migration-code").replaceChildren();
+    $("#migration-code").hidden = true;
+  }
+
+  $("#restore-migration").addEventListener("click", openMigrateDialog);
+
+  function openMigrateDialog() {
+    const dialog = $("#migrate-dialog");
+    const form = $("#migrate-form");
+    const fileInput = $("[data-file]", form);
+    const fileName = $("[data-file-name]", form);
+    const fileInfo = $("[data-file-info]", form);
+    const codeInput = $("[data-code]", form);
+    const error = $("[data-error]", form);
+    const submit = $("button[value=restore]", form);
+    let chosen = null;     // the migration file, read and checked
+    let typed = "";        // the code's letters and numbers as last formatted
+    let busy = false;      // restoring: the dialog stays open to show how it went
+
+    form.reset();
+    fileName.textContent = "No file chosen";
+    fileInfo.hidden = true;
+    error.textContent = "";
+    // Only a new install takes a migration file. The add-on decides (and says why, the same way,
+    // in the state); this just says so early.
+    $("[data-not-new-why]", form).textContent = state.notFresh || "";
+    $("[data-not-new]", form).hidden = !state.notFresh;
+
+    const close = () => {
+      form.reset(); // the code doesn't stay in the page once the dialog is closed
+      chosen = null;
+      dialog.close();
+    };
+
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      chosen = null;
+      error.textContent = "";
+      fileInfo.hidden = true;
+      fileName.textContent = file ? file.name : "No file chosen";
+      if (!file) return;
+      try {
+        const data = await readJsonFile(file, NOT_MIGRATION);
+        if (data?.format === "staff-portal") {
+          throw new Error("That's a backup or export file, not a migration file. Make a migration file on the " +
+            "other install with Create migration file.");
+        }
+        if (data?.format !== MIGRATE_FORMAT) throw new Error(NOT_MIGRATION);
+        chosen = data;
+        // The header is readable without the code; the add-on checks it again (it's sealed in).
+        const made = Number(data.created_at) || 0;
+        const expires = Number(data.expires_at) || 0;
+        const expired = expires > 0 && expires * 1000 < Date.now();
+        const by = data.app_version ? ` by Staff Portal ${String(data.app_version).slice(0, 20)}` : "";
+        fileInfo.textContent = [made && `Made ${fullDate(made)}${by}.`, expired
+          ? `It stopped working ${fullDate(expires)}: make a new one on the other install.`
+          : expires && `It works until ${fullDate(expires)}.`].filter(Boolean).join(" ");
+        fileInfo.classList.toggle("migrate-warn", expired);
+        fileInfo.hidden = !fileInfo.textContent;
+        codeInput.focus();
+      } catch (err) {
+        fileInput.value = "";
+        fileName.textContent = "No file chosen";
+        error.textContent = err.message;
+      }
+    };
+
+    // Shows the code in groups of 4 as it's typed or pasted, whatever spacing was used.
+    codeInput.oninput = (ev) => {
+      let chars = codeChars(codeInput.value);
+      let caret = codeChars(codeInput.value.slice(0, codeInput.selectionStart ?? codeInput.value.length)).length;
+      // Backspace just after a dash takes the character before it, as if the dash weren't there.
+      if (ev.inputType === "deleteContentBackward" && chars === typed && caret > 0) {
+        chars = chars.slice(0, caret - 1) + chars.slice(caret);
+        caret -= 1;
+      }
+      chars = chars.slice(0, 32); // a little room past 20, so a longer code is still sent whole
+      caret = Math.min(caret, chars.length);
+      typed = chars;
+      codeInput.value = groupCode(chars);
+      const at = caret + Math.floor(Math.max(0, caret - 1) / 4);
+      codeInput.setSelectionRange(at, at);
+      if (error.textContent) error.textContent = "";
+    };
+
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      error.textContent = "";
+      const code = codeChars(codeInput.value);
+      if (!chosen) {
+        error.textContent = "Choose the migration file first.";
+        return;
+      }
+      if (code.length < MIGRATE_CODE_CHARS) {
+        error.textContent = `Type the whole code: ${MIGRATE_CODE_CHARS} letters and numbers, in 5 groups of 4.`;
+        codeInput.focus();
+        return;
+      }
+      const cancel = $("button[value=cancel]", form);
+      busy = true;
+      submit.disabled = cancel.disabled = true;
+      submit.textContent = "Restoring…";
+      try {
+        await api("POST", "api/migrate/restore", { file: chosen, code: groupCode(code) });
+        busy = false;
+        close();
+        await reloadEverything();
+        showMigrated();
+      } catch (err) {
+        error.textContent = err.message;
+      } finally {
+        busy = false;
+        submit.disabled = cancel.disabled = false;
+        submit.textContent = "Restore";
+      }
+    };
+    $("button[value=cancel]", form).onclick = close;
+    dialog.oncancel = (ev) => { // Esc: clear the code too, but not while restoring
+      ev.preventDefault();
+      if (!busy) close();
+    };
+    dialog.showModal();
+  }
+
+  // What's left to do once everything has arrived here.
+  function showMigrated() {
+    const box = $("#migration-done");
+    box.replaceChildren(
+      h("div", { class: "pick-head" }, "Migration finished"),
+      h("p", { class: "hint" }, "Everything from the other install is here, and phones and computers stay " +
+        "signed in. Staff sign in again with their PINs."),
+      h("ol", { class: "migrate-steps" },
+        h("li", null, "Check that a phone or two and the front desk computers still work, and look over " +
+          "Staff, Roles and Settings here."),
+        h("li", null, "Uninstall the old add-on and remove its repository. Don't start it again: it still " +
+          "knows the same phones and computers, and it uses the same port."),
+        h("li", null, "Delete the migration file and the note of its code.")),
+      h("div", { class: "backup-actions" },
+        h("button", { type: "button", class: "btn", onclick: () => { box.hidden = true; } }, "Done")));
+    $("#migration-code").hidden = true;
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   // ---------------------------------------------------------------- start

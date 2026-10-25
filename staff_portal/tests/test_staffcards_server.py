@@ -682,7 +682,7 @@ def test_departments_and_new_staff_fields_in_backups(tmp_path):
                               "connecteam_auto_staff": "1"})
         async with p:
             status, backup = await p.admin_call("GET", "/api/backup")
-            assert status == 200 and backup["schema"] == 3
+            assert status == 200 and backup["schema"] == 4
             assert [d["name"] for d in backup["departments"]] == ["Housekeeping"]
             p.db.delete_department(house)
             p.db.update_staff(p.cy, connecteam_auto=0, clock_in_set=0, role_set=0)

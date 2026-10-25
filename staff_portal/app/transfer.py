@@ -3,39 +3,51 @@ Access.
 
 Files are JSON with a small envelope ({"format": "staff-portal", "kind": ...}) so the wrong file
 is refused with a clear message. Everything read from a file is validated as strictly as the
-same data typed into the dashboard.
+same data typed into the dashboard. Full backups are downloaded gzip-compressed (the logs in them
+shrink about tenfold); a restore takes them either way, and plain JSON files too.
 
 What files never contain:
 - Home Assistant sign-in tokens for linked users. After restoring onto the same system, links
   are kept for phones and staff that still match; otherwise they need relinking.
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
 - The Connecteam and TT Hotel secrets (and TT Hotel's sign-in). A restore keeps the ones saved.
-- The door list (it comes from TT Hotel) and the record of wristbands and key cards made. Only
-  the door names and hiding chosen here travel, and land on doors the system already has.
+- The door list (it comes from TT Hotel). Only the door names and hiding chosen here travel, and
+  land on doors the system already has.
+(A migration file, migrate.py, carries all of these, encrypted.)
 Departments (with their key card templates) are in backups; a backup from before departments
-leaves the ones here as they are.
+leaves the ones here as they are. The activity log and the record of wristbands and key cards
+made are in backups from 0.8.6 (schema 4), and a restore adds them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
 """
 
 import base64
 import binascii
+import gzip
+import io
 import ipaddress
 import json
 import os
 import re
 import time
+import zlib
 
-from db import PRIVATE_SETTINGS, card_access_choice, page_choice, pin_length
+from db import (ACTIVITY_MAX_ROWS, CARD_STATES, LOCKOUT_METHODS, LOCKOUT_STATUSES, PRIVATE_SETTINGS,
+                WB_ACTIVE, WB_CARD_STATUSES, WB_JOB_KINDS, WB_JOB_STATUSES, WB_JOBS_MAX_ROWS,
+                ActivityRow, CardJobRow, CardRow, LockoutRow, card_access_choice, page_choice,
+                pin_length)
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
-from wristbands import NO_ACCESS, clean_permissions, permission_choice
+from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean_permissions,
+                        permission_choice)
 
 FORMAT = "staff-portal"
-BACKUP_SCHEMA = 3          # 3: wristbands and card encoders (0.8.0)
+MIGRATE_FORMAT = "staff-portal-migrate"   # a migration file's header (migrate.py)
+BACKUP_SCHEMA = 4          # 4: the activity log and card records (0.8.6)
+                           # 3: wristbands and card encoders (0.8.0)
                            # 2: role pages, people's roles, pages and own changes (0.7.0)
-READABLE_SCHEMAS = (1, 2, 3)
+READABLE_SCHEMAS = (1, 2, 3, 4)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members",
          "departments": "departments", "backup": "a full backup"}
 PIN_HASH_RE = re.compile(r"^[0-9a-f]{32}\$[0-9a-f]{128}$")
@@ -52,7 +64,29 @@ MAX_ROWS = 5000          # per table in a backup, or entries in an export
 MAX_LINK_ROWS = 200_000
 MAX_LOGO_BYTES = 6 * 1024 * 1024
 KEEP_SAFETY_BACKUPS = 5
-SAFETY_NAME_RE = re.compile(r"^before-restore-\d{8}-\d{6}\.json$")
+# Saved copies are gzip-compressed since 0.8.6 (.json.gz); older ones are plain .json.
+SAFETY_NAME_RE = re.compile(r"^before-restore-\d{8}-\d{6}\.json(\.gz)?$")
+NOT_OURS = "That isn't a Staff Portal export or backup file."
+# Logs make backups big, so they're downloaded gzip-compressed, which shrinks them about tenfold
+# or more. A restore holds the whole backup in memory, several times its unpacked size, hence a
+# limit on that too. The most the add-on keeps, 50,000 activity lines and 100,000 card jobs of
+# 2 cards, is about 70 MB unpacked with 2 doors on each card and 160 MB with 10 (each door adds
+# about 120 bytes to a job); only cards with many more doors, made all day for two years, go past.
+GZIP_MAGIC = b"\x1f\x8b"
+MAX_BACKUP_BYTES = 192 * 1024 * 1024
+# The log sections of a backup, each {"columns": [...], "rows": [[...], ...]} (columns rather
+# than a dict per row: a third smaller, and far less memory to read). The most rows each may have
+# is what the add-on keeps itself; cards and lock-outs have no limit of their own, so theirs are
+# simply far above anything real.
+LOG_ROWS = {"activity": ActivityRow, "wb_jobs": CardJobRow, "wb_cards": CardRow,
+            "wb_lockouts": LockoutRow}
+LOG_NAMES = {"activity": "activity log lines", "wb_jobs": "card jobs", "wb_cards": "cards",
+             "wb_lockouts": "lost card lock-outs"}
+MAX_LOG_ROWS = {"activity": ACTIVITY_MAX_ROWS, "wb_jobs": WB_JOBS_MAX_ROWS, "wb_cards": 500_000,
+                "wb_lockouts": 200_000}
+FUTURE_SLACK = 86400     # a log time later than this from now is damaged, not a clock a bit off
+MAX_JOB_RECORDS = 256    # records written on one job's cards (an encoder fits at most 64)
+STOPPED_IN_BACKUP = "Stopped: it was still running when the backup was made."
 SMART_GROUP_RE = re.compile(r"^\d{1,20}$")   # a Connecteam smart group ID
 MAX_CARD_DAYS = 3650     # how long a key card made from the Staff tab may last
 MAX_CARD_ACCESS = 256    # entries in a department's key card template (as in a card request)
@@ -72,8 +106,11 @@ def _envelope(kind: str, version: str, **data) -> dict:
 
 
 def check_file(data, kind: str) -> None:
+    if isinstance(data, dict) and data.get("format") == MIGRATE_FORMAT:
+        raise ValueError("That's a migration file. Open it with Restore from migration file, under "
+                         "Migrate, and the code shown when it was made.")
     if not isinstance(data, dict) or data.get("format") != FORMAT:
-        raise ValueError("That isn't a Staff Portal export or backup file.")
+        raise ValueError(NOT_OURS)
     if data.get("kind") != kind:
         found = KINDS.get(data.get("kind"), "something else")
         raise ValueError(f"That file holds {found}, not {KINDS[kind]}.")
@@ -672,7 +709,37 @@ def make_backup(db, branding, version: str) -> dict:
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
         wristband_doors=rows("SELECT lock_id, name, hidden FROM wb_doors"),
+        **log_sections(db),
     )
+
+
+def log_sections(db) -> dict:
+    """The activity log and the card records, as a backup carries them (see LOG_ROWS), oldest
+    first: at most what the add-on keeps, newest first if there's ever more."""
+    newest_jobs = "SELECT id FROM wb_jobs ORDER BY ts DESC, id DESC LIMIT ?"
+    newest_cards = (f"SELECT id FROM wb_cards WHERE job_id IN ({newest_jobs}) "
+                    "ORDER BY id DESC LIMIT ?")
+    queries = {
+        "activity": ("SELECT {} FROM (SELECT * FROM activity ORDER BY ts DESC, id DESC LIMIT ?) "
+                     "ORDER BY ts, id", (ACTIVITY_MAX_ROWS,)),
+        "wb_jobs": (f"SELECT {{}} FROM wb_jobs WHERE id IN ({newest_jobs}) ORDER BY ts, id",
+                    (WB_JOBS_MAX_ROWS,)),
+        "wb_cards": (f"SELECT {{}} FROM wb_cards WHERE id IN ({newest_cards}) ORDER BY id",
+                     (WB_JOBS_MAX_ROWS, MAX_LOG_ROWS["wb_cards"])),
+        "wb_lockouts": (f"SELECT {{}} FROM wb_lockouts WHERE card_id IN ({newest_cards}) "
+                        "ORDER BY id LIMIT ?",
+                        (WB_JOBS_MAX_ROWS, MAX_LOG_ROWS["wb_cards"], MAX_LOG_ROWS["wb_lockouts"])),
+    }
+    return {key: {"columns": list(LOG_ROWS[key]._fields),
+                  "rows": [list(r) for r in db.conn.execute(
+                      sql.format(", ".join(LOG_ROWS[key]._fields)), params)]}
+            for key, (sql, params) in queries.items()}
+
+
+def _log_count(data: dict, key: str) -> int:
+    section = data.get(key)
+    rows = section.get("rows") if isinstance(section, dict) else None
+    return len(rows) if isinstance(rows, list) else 0
 
 
 def backup_summary(data: dict) -> dict:
@@ -680,7 +747,10 @@ def backup_summary(data: dict) -> dict:
             "property_name": (data.get("settings") or {}).get("property_name"),
             **{k: len(data.get(k) or []) if isinstance(data.get(k) or [], list) else 0
                for k in ("roles", "areas", "devices", "staff", "departments")},
-            "pages": len((data.get("layout") or {}).get("pages") or [])}
+            "pages": len((data.get("layout") or {}).get("pages") or []),
+            # Logs (backups from 0.8.6 on); a restore adds them to the ones here.
+            "has_logs": any(key in data for key in LOG_ROWS),
+            **{key: _log_count(data, key) for key in ("activity", "wb_jobs", "wb_cards")}}
 
 
 def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
@@ -887,18 +957,237 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             "staff_entities": staff_entities, "staff_areas": staff_areas,
             "phone_orders": phone_orders, "wristband_doors": wristband_doors,
             "departments": departments, "needs_setup": needs_setup,
+            "logs": clean_logs(data),
             "exported_at": _time(data.get("exported_at"), time.time())}
+
+
+# ---------------------------------------------------------------- logs in backups
+
+def _text(value, limit: int) -> str | None:
+    """A text field of a log row, cut to the length the add-on stores (None if it isn't text)."""
+    return value[:limit] if isinstance(value, str) else None
+
+
+def _whole(value, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _log_id(value) -> int | None:
+    return value if _whole(value, 1, 2**53) else None
+
+
+def _log_time(value, now: float) -> float | None:
+    """When something in a log happened. A time more than a day ahead is damaged: it would sit
+    at the top of the log for good."""
+    found = _time(value)
+    return found if found is not None and found <= now + FUTURE_SLACK else None
+
+
+def _log_rows(data: dict, key: str):
+    """The rows of one log section, each as {column: value} (one at a time, so a big section
+    never exists twice). Raises ValueError for a damaged or oversized section."""
+    section = data.get(key)
+    if section is None:
+        return
+    columns, rows = ((section.get("columns"), section.get("rows")) if isinstance(section, dict)
+                     else (None, None))
+    if (not isinstance(columns, list) or not all(isinstance(c, str) for c in columns)
+            or not isinstance(rows, list)):
+        raise ValueError(f"The backup's {LOG_NAMES[key]} are damaged.")
+    if len(rows) > MAX_LOG_ROWS[key]:
+        raise ValueError(f"The backup has too many {LOG_NAMES[key]} (more than "
+                         f"{MAX_LOG_ROWS[key]:,}).")
+    for row in rows:
+        if isinstance(row, list) and len(row) == len(columns):
+            yield dict(zip(columns, row))
+
+
+def _stored_records(raw) -> str:
+    """What a card job wrote on its cards, from a backup (JSON text or a list), as it's stored
+    here. Records that are damaged are left out: they only describe cards already made, and a
+    replacement card is checked again from scratch."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, RecursionError):
+        return "[]"
+    cleaned = []
+    for r in value[:MAX_JOB_RECORDS] if isinstance(value, list) else []:
+        if not isinstance(r, dict) or r.get("level") not in ("door", "floor", "building", "all"):
+            continue
+        door, mac = r.get("door"), r.get("mac")
+        if (not _whole(r.get("building"), 0, MAX_BUILDING)
+                or not _whole(r.get("floor"), 0, MAX_FLOOR)
+                or not isinstance(mac, str) or not MAC_RE.match(mac)
+                or (door is not None and not _whole(door, 1, 2**53))):
+            continue
+        cleaned.append({"level": r["level"], "building": r["building"], "floor": r["floor"],
+                        "mac": r["mac"], "door": door, "label": _name(r.get("label"), 100)})
+    return json.dumps(cleaned)
+
+
+def clean_logs(data: dict, now: float | None = None) -> dict | None:
+    """The activity log and card records in a backup, row by row, ready for
+    db.replace_everything to add to the ones here: {"activity": [ActivityRow], "wb_jobs":
+    [CardJobRow], "wb_cards": [CardRow], "wb_lockouts": [LockoutRow]}. None for a backup from
+    before logs were in backups (nothing is added). A damaged row is left out, since it only
+    records something that already happened; a damaged section is refused like any other.
+
+    Card jobs that were still running when the backup was made are stopped (nothing is working
+    on them here), and so are remote lock-outs; they can be started again."""
+    if not any(key in data for key in LOG_ROWS):
+        return None
+    now = time.time() if now is None else now
+    activity = []
+    for row in _log_rows(data, "activity"):
+        ts, actor, action = (_log_time(row.get("ts"), now), _text(row.get("actor"), 120),
+                             _text(row.get("action"), 120))
+        if ts is None or not actor or not action:
+            continue
+        activity.append(ActivityRow(
+            ts=ts, actor=actor, role=_text(row.get("role"), 80),
+            entity_id=_text(row.get("entity_id"), 255), action=action,
+            detail=_text(row.get("detail"), 300), ok=0 if row.get("ok") in (0, False) else 1,
+            ip=_text(row.get("ip"), 64)))
+
+    jobs, job_ids, stopped = [], set(), set()
+    for row in _log_rows(data, "wb_jobs"):
+        job_id, ts, expires = (_log_id(row.get("id")), _log_time(row.get("ts"), now),
+                               _time(row.get("expires_at")))
+        status, message = row.get("status"), _text(row.get("message"), 300)
+        actor = _text(row.get("actor"), 120)
+        if (job_id is None or job_id in job_ids or ts is None or expires is None or not actor
+                or row.get("kind") not in WB_JOB_KINDS or row.get("card_type") not in TYPES
+                or not _whole(row.get("count"), 1, 1000) or status not in WB_JOB_STATUSES):
+            continue
+        finished = _time(row.get("finished_at"))
+        if status in WB_ACTIVE:
+            stopped.add(job_id)
+            status, message, finished = "cancelled", STOPPED_IN_BACKUP, finished or ts
+        job_ids.add(job_id)
+        jobs.append(CardJobRow(
+            id=job_id, ts=ts, card_type=row["card_type"], name=_text(row.get("name"), 80) or "",
+            count=row["count"], records=_stored_records(row.get("records")),
+            summary=_text(row.get("summary"), 300) or "", expires_at=expires,
+            allow_lockout=1 if row.get("allow_lockout") in (1, True) else 0,
+            staff_id=_log_id(row.get("staff_id")), device_id=_log_id(row.get("device_id")),
+            actor=actor, role=_text(row.get("role"), 80), ip=_text(row.get("ip"), 64),
+            encoder_url=_text(row.get("encoder_url"), 200) or "", status=status, message=message,
+            finished_at=finished, holder_staff_id=_log_id(row.get("holder_staff_id")),
+            department_id=_log_id(row.get("department_id")), source=_text(row.get("source"), 20),
+            kind=row["kind"], target_card_id=_log_id(row.get("target_card_id")),
+            target_card=_text(row.get("target_card"), 40),
+            cancel_until=_time(row.get("cancel_until"))))
+
+    cards, card_ids, places = [], set(), set()
+    for row in _log_rows(data, "wb_cards"):
+        card_id, job_id, seq, status = (_log_id(row.get("id")), _log_id(row.get("job_id")),
+                                        row.get("seq"), row.get("status"))
+        if (card_id is None or card_id in card_ids or job_id not in job_ids
+                or not _whole(seq, 1, 1000) or (job_id, seq) in places
+                or status not in WB_CARD_STATUSES):
+            continue
+        if job_id in stopped and status in ("pending", "failed"):
+            status = "cancelled"
+        card_ids.add(card_id)
+        places.add((job_id, seq))
+        cards.append(CardRow(
+            id=card_id, job_id=job_id, seq=seq, status=status,
+            card_number=_text(row.get("card_number"), 40), error=_text(row.get("error"), 300),
+            written_at=_time(row.get("written_at")),
+            state=row.get("state") if row.get("state") in CARD_STATES else "active",
+            state_at=_time(row.get("state_at")), state_by=_text(row.get("state_by"), 120),
+            cancelled_card=_text(row.get("cancelled_card"), 40)))
+
+    lockouts, seen = [], set()
+    for row in _log_rows(data, "wb_lockouts"):
+        card_id, lock_id = _log_id(row.get("card_id")), row.get("lock_id")
+        method = row.get("method")
+        status, detail, at = row.get("status"), _text(row.get("detail"), 300), _time(row.get("at"))
+        if (card_id not in card_ids or not _whole(lock_id, 1, 2**53) or at is None
+                or method not in LOCKOUT_METHODS or status not in LOCKOUT_STATUSES
+                or (card_id, lock_id, method) in seen):
+            continue
+        if method == "remote" and status == "pending":
+            status, detail = "failed", STOPPED_IN_BACKUP + " Lock it out again."
+        seen.add((card_id, lock_id, method))
+        lockouts.append(LockoutRow(card_id=card_id, lock_id=lock_id, method=method, status=status,
+                                   detail=detail, at=at,
+                                   tries=row["tries"] if _whole(row.get("tries"), 0, 1000) else 0))
+    return {"activity": activity, "wb_jobs": jobs, "wb_cards": cards, "wb_lockouts": lockouts}
+
+
+# ---------------------------------------------------------------- backup files
+
+def pack_backup(data: dict) -> bytes:
+    """A backup as it's downloaded and saved: compact JSON, gzip-compressed. The log sections
+    are written a few thousand rows at a time, so the whole JSON text (tens of megabytes) never
+    exists at once. Works only on data already read, so it can run off the event loop."""
+    dump = lambda value: json.dumps(value, separators=(",", ":")).encode()
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", compresslevel=6, mtime=0) as packed:
+        packed.write(b"{")
+        for n, (key, value) in enumerate(data.items()):
+            packed.write(b"," * bool(n) + dump(key) + b":")
+            rows = value.get("rows") if key in LOG_ROWS and isinstance(value, dict) else None
+            if not isinstance(rows, list):
+                packed.write(dump(value))
+                continue
+            packed.write(b'{"columns":' + dump(value["columns"]) + b',"rows":[')
+            for start in range(0, len(rows), 5000):
+                packed.write(b"," * bool(start) + dump(rows[start:start + 5000])[1:-1])
+            packed.write(b"]}")
+        packed.write(b"}")
+    return out.getvalue()
+
+
+def gunzip(raw: bytes, limit: int | None = None) -> bytes:
+    """Unpack gzip-compressed bytes, refusing more than `limit` bytes unpacked (MAX_BACKUP_BYTES
+    unless given: a small file could otherwise unpack into gigabytes). Raises ValueError."""
+    limit = MAX_BACKUP_BYTES if limit is None else limit
+    unpacker = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+    try:
+        data = unpacker.decompress(raw, limit + 1)
+    except zlib.error:
+        raise ValueError("That file is damaged: it couldn't be unpacked.") from None
+    if len(data) > limit:
+        raise ValueError(f"That file is too big to restore (more than {limit // 2**20} MB "
+                         "unpacked).")
+    if not unpacker.eof:
+        raise ValueError("That file is damaged: it ends too soon (was the download cut off?).")
+    return data
+
+
+def read_backup_file(raw: bytes) -> dict:
+    """A file uploaded for a restore: a backup gzip-compressed (as downloaded since 0.8.6) or
+    plain JSON (older backups, or one someone unpacked), told apart by its first bytes. Raises
+    ValueError. Works only on bytes, so it can run off the event loop."""
+    if raw[:2] == GZIP_MAGIC:
+        raw = gunzip(raw)
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):   # not JSON, or not UTF-8
+        raise ValueError(NOT_OURS) from None
+
+
+def read_backup_path(path: str) -> dict:
+    """A backup file saved here (a copy from before a restore), gzip-compressed or not."""
+    with open(path, "rb") as f:
+        return read_backup_file(f.read())
 
 
 # ---------------------------------------------------------------- automatic safety copies
 
 def save_safety_backup(data_dir: str, backup: dict) -> str:
-    """Keep a copy of what a restore is about to replace, so it can be undone."""
+    """Keep a copy of what a restore is about to replace, so it can be undone: a backup like a
+    downloaded one (from make_backup, gzip-compressed). Works only on data already read, and the
+    files, so it can run off the event loop."""
     folder = os.path.join(data_dir, "backups")
     os.makedirs(folder, exist_ok=True)
-    name = time.strftime("before-restore-%Y%m%d-%H%M%S.json")
-    with open(os.path.join(folder, name), "w") as f:
-        json.dump(backup, f)
+    name = time.strftime("before-restore-%Y%m%d-%H%M%S.json.gz")
+    path = os.path.join(folder, name)
+    with open(path + ".part", "wb") as f:
+        f.write(pack_backup(backup))
+    os.replace(path + ".part", path)   # never half a copy under the real name
     for old in safety_backups(data_dir)[KEEP_SAFETY_BACKUPS:]:
         os.remove(os.path.join(folder, old["name"]))
     return name

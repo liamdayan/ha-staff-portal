@@ -1,5 +1,6 @@
 """SQLite storage for roles, phones, settings, the activity log and wristband records."""
 
+import collections
 import hashlib
 import json
 import os
@@ -383,7 +384,8 @@ DEFAULT_SETTINGS = {
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
-# not put in backups, and not taken from one.
+# not put in backups, and not taken from one. Only a migration file carries them, encrypted
+# (migrate.py), to another install of the add-on.
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage")
 
@@ -393,6 +395,8 @@ ACTIVITY_MAX_ROWS = 50_000
 WB_JOBS_KEEP_DAYS = 2 * 365    # card records outlive the activity log: wristbands can be asked
 WB_JOBS_MAX_ROWS = 100_000     # about long after they were made
 WB_ACTIVE = ("queued", "running", "needs_attention")   # card jobs that haven't finished
+WB_JOB_STATUSES = (*WB_ACTIVE, "done", "cancelled")
+WB_CARD_STATUSES = ("pending", "written", "failed", "skipped", "cancelled")
 WB_JOB_FIELDS = {"status", "message", "finished_at"}
 WB_CARD_FIELDS = {"status", "card_number", "error", "written_at", "state", "state_at", "state_by",
                   "cancelled_card"}
@@ -408,6 +412,27 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
                 "connecteam_note", "pin_length"}
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
                      "card_lockout"}
+
+# One row of each log table as backups carry it: a section's "columns" are these fields, in this
+# order. Tuples rather than dicts because a full log is tens of thousands of rows, and a backup
+# being restored is held in memory whole.
+ActivityRow = collections.namedtuple(
+    "ActivityRow", "ts actor role entity_id action detail ok ip")
+CardJobRow = collections.namedtuple(
+    "CardJobRow", "id ts card_type name count records summary expires_at allow_lockout staff_id "
+                  "device_id actor role ip encoder_url status message finished_at holder_staff_id "
+                  "department_id source kind target_card_id target_card cancel_until")
+CardRow = collections.namedtuple(
+    "CardRow", "id job_id seq status card_number error written_at state state_at state_by "
+               "cancelled_card")
+LockoutRow = collections.namedtuple("LockoutRow", "card_id lock_id method status detail tries at")
+# What a migration brings besides a backup's contents (see migrate.py): every column of a door.
+DOOR_COLUMNS = ("lock_id", "tt_name", "alias", "mac", "lock_type", "building_number",
+                "building_name", "floor_number", "floor_name", "battery", "has_gateway", "name",
+                "hidden", "active", "synced_at")
+# What makes an install "set up", for Migrate (which only restores onto a fresh install): a
+# fresh one has none of these, only default settings and perhaps a few activity log lines.
+SET_UP_TABLES = ("staff", "devices", "roles", "areas", "departments", "wb_jobs")
 
 
 def hash_token(token: str) -> str:
@@ -927,13 +952,30 @@ class Database:
 
     # Restoring a backup
 
-    def replace_everything(self, snap: dict) -> list[str]:
+    def setup_found(self) -> dict[str, int]:
+        """What has been set up here, as {table: how many} (layout pages as "pages"), leaving out
+        what there's none of. Empty means a fresh install."""
+        found = {table: self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                 for table in SET_UP_TABLES}
+        found["pages"] = len(self.layout().get("pages") or [])
+        return {k: v for k, v in found.items() if v}
+
+    def replace_everything(self, snap: dict) -> tuple[list[str], dict[str, int]]:
         """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
-        of it lands or none of it does. The activity log, the door list and the card records are
-        kept (departments come from the backup when it has them). Home Assistant links are kept for phones and staff that still exist with the same
-        ID and name. Returns the Home Assistant refresh tokens of links that didn't carry over, so
-        the caller can revoke them."""
+        of it lands or none of it does. The door list is kept, and so are the activity log and
+        the card records, with the backup's own added to them (departments come from the backup
+        when it has them). Home Assistant links are kept for phones and staff that still exist
+        with the same ID and name.
+
+        A migration (migrate.clean_snapshot, which adds "migrate") also brings the device tokens,
+        secrets, door list, Home Assistant links and unexpired setup codes of the install it came
+        from.
+
+        Returns the Home Assistant refresh tokens of links that didn't carry over, so the caller
+        can revoke them, and how many log rows came from the backup ({"activity", "wb_jobs",
+        "wb_cards"}; empty for a backup from before logs were in backups)."""
         c = self.conn
+        migrate = snap.get("migrate")
         links = {
             table: {r["id"]: r for r in c.execute(
                 f"SELECT id, name, ha_user, ha_refresh_token, ha_link_error"
@@ -1017,6 +1059,8 @@ class Database:
                         c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,
                                       ha_link_error = ? WHERE id = ?""",
                                   (old["ha_user"], old["ha_refresh_token"], old["ha_link_error"], row["id"]))
+            if migrate:
+                self._apply_migration(migrate, kept)
             # Card jobs stay with the people who made them, by the same rule: a job whose maker
             # isn't here any more under the same ID and name belongs to no one (people who may
             # see every card still see it), so it can't turn up in someone else's card log.
@@ -1039,12 +1083,145 @@ class Database:
                     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
             c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('layout', ?)",
                       (json.dumps(snap["layout"]),))
+            merged = self._merge_logs(snap["logs"]) if snap.get("logs") else {}
             c.commit()
         except Exception:
             c.rollback()
             raise
         return [r["ha_refresh_token"] for table in links.values() for r in table.values()
-                if r["ha_refresh_token"] and r["ha_refresh_token"] not in kept]
+                if r["ha_refresh_token"] and r["ha_refresh_token"] not in kept], merged
+
+    def _apply_migration(self, extra: dict, kept: set[str]) -> None:
+        """The parts of a migration a backup never carries (from migrate.clean_snapshot), without
+        committing. Only ever used on a fresh install, so there is nothing here to keep."""
+        c = self.conn
+        c.executemany("INSERT OR REPLACE INTO device_tokens (token_hash, device_id, issued_at) "
+                      "VALUES (?, ?, ?)", extra["device_tokens"])
+        for key, value in extra["secrets"].items():
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        if extra["doors"] is not None:
+            c.execute("DELETE FROM wb_doors")
+            c.executemany(f"INSERT INTO wb_doors ({', '.join(DOOR_COLUMNS)}) "
+                          f"VALUES ({', '.join('?' * len(DOOR_COLUMNS))})",
+                          [tuple(d[k] for k in DOOR_COLUMNS) for d in extra["doors"]])
+        for table in ("devices", "staff"):
+            for row_id, (user, token, error) in extra["links"][table].items():
+                kept.add(token)
+                c.execute(f"UPDATE {table} SET ha_user = ?, ha_refresh_token = ?, ha_link_error = ? "
+                          "WHERE id = ?", (user, token, error, row_id))
+        c.executemany("UPDATE devices SET enroll_code = ?, enroll_expires = ? "
+                      "WHERE id = ? AND status = 'pending'",
+                      [(code, expires, device_id)
+                       for device_id, (code, expires) in extra["setup_codes"].items()])
+
+    # Logs from a backup: added to the ones here, never replacing them
+
+    def _merge_logs(self, logs: dict) -> dict[str, int]:
+        """Add a backup's activity log and card records (transfer.clean_logs) to the ones here,
+        without committing. Rows already here are skipped and nothing here is removed; then the
+        usual limits apply. Card jobs from the backup get new IDs here, and their cards (and
+        those cards' lock-outs) follow them. Returns how many rows were added and kept (when a
+        log is full, older rows from the backup are trimmed straight away, so they don't count,
+        and restoring the same backup again never counts them again)."""
+        c = self.conn
+        now = time.time()
+        # Activity: the same moment, person, action, detail and device is the same entry. Rows
+        # the log would drop straight away (too old) aren't added at all.
+        cutoff = now - ACTIVITY_KEEP_DAYS * 86400
+        seen = {tuple(r) for r in c.execute(
+            "SELECT ts, actor, action, detail, entity_id FROM activity")}
+        added = []
+        for row in logs["activity"]:
+            key = (row.ts, row.actor, row.action, row.detail, row.entity_id)
+            if row.ts >= cutoff and key not in seen:
+                seen.add(key)
+                added.append(row)
+        activity_added = 0
+        if added:
+            c.executemany(f"INSERT INTO activity ({', '.join(ActivityRow._fields)}) "
+                          f"VALUES ({', '.join('?' * len(ActivityRow._fields))})", added)
+            self._renumber_activity(now)
+            seen.clear()
+            kept = {tuple(r) for r in c.execute(
+                "SELECT ts, actor, action, detail, entity_id FROM activity")}
+            activity_added = sum((row.ts, row.actor, row.action, row.detail, row.entity_id) in kept
+                                 for row in added)
+
+        # Card jobs: the same moment, kind, card type, name, count and maker is the same job.
+        # One that's here already keeps its own cards and progress (it may have moved on since
+        # the backup was made); the backup's lock-outs for its cards are still added.
+        staff = {r[0] for r in c.execute("SELECT id FROM staff")}
+        devices = {r[0] for r in c.execute("SELECT id FROM devices")}
+        departments = {r[0] for r in c.execute("SELECT id FROM departments")}
+        jobs_here = {tuple(r)[1:]: r[0] for r in c.execute(
+            "SELECT id, ts, kind, card_type, name, count, actor FROM wb_jobs")}
+        cards_here = {(r[0], r[1]): r[2] for r in c.execute("SELECT job_id, seq, id FROM wb_cards")}
+        job_cutoff = now - WB_JOBS_KEEP_DAYS * 86400
+        job_ids, new_jobs, targets = {}, set(), []
+        columns = CardJobRow._fields[1:]   # everything but the ID, which is new here
+        for job in sorted(logs["wb_jobs"], key=lambda j: (j.ts, j.id)):
+            key = (job.ts, job.kind, job.card_type, job.name, job.count, job.actor)
+            if key in jobs_here:
+                job_ids[job.id] = jobs_here[key]
+                continue
+            if job.ts < job_cutoff:
+                continue
+            target = job.target_card_id
+            # People, devices and departments are the backup's own, now restored here; any it
+            # no longer had belong to no one (so a job never lands in someone else's card log).
+            job = job._replace(
+                staff_id=job.staff_id if job.staff_id in staff else None,
+                holder_staff_id=job.holder_staff_id if job.holder_staff_id in staff else None,
+                device_id=job.device_id if job.device_id in devices else None,
+                department_id=job.department_id if job.department_id in departments else None,
+                target_card_id=None)
+            new_id = c.execute(f"INSERT INTO wb_jobs ({', '.join(columns)}) "
+                               f"VALUES ({', '.join('?' * len(columns))})", job[1:]).lastrowid
+            jobs_here[key] = job_ids[job.id] = new_id
+            new_jobs.add(new_id)
+            if target is not None:
+                targets.append((new_id, target))
+        card_ids, cards_added = {}, collections.Counter()   # cards added, by their new job
+        columns = CardRow._fields[1:]
+        for card in sorted(logs["wb_cards"], key=lambda r: r.id):
+            job_id = job_ids.get(card.job_id)
+            if job_id is None:
+                continue   # its job was left out
+            here = cards_here.get((job_id, card.seq))
+            if here is not None:
+                card_ids[card.id] = here
+                continue
+            if job_id not in new_jobs:
+                continue   # a job that was here already keeps its own cards
+            cards_here[(job_id, card.seq)] = card_ids[card.id] = c.execute(
+                f"INSERT INTO wb_cards ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' * len(columns))})", (job_id, *card[2:])).lastrowid
+            cards_added[job_id] += 1
+        # A revoke, notice or replacement points at the card it was for, by that card's new ID.
+        c.executemany("UPDATE wb_jobs SET target_card_id = ? WHERE id = ?",
+                      [(card_ids.get(old), job_id) for job_id, old in targets])
+        c.executemany(
+            f"INSERT OR IGNORE INTO wb_lockouts ({', '.join(LockoutRow._fields)}) "
+            f"VALUES ({', '.join('?' * len(LockoutRow._fields))})",
+            [(card_ids[lo.card_id], *lo[1:]) for lo in logs["wb_lockouts"]
+             if lo.card_id in card_ids])
+        self._prune_wb_jobs(now)
+        new_jobs &= {r[0] for r in c.execute("SELECT id FROM wb_jobs")}   # those the limit kept
+        return {"activity": activity_added, "wb_jobs": len(new_jobs),
+                "wb_cards": sum(cards_added[job_id] for job_id in new_jobs)}
+
+    def _renumber_activity(self, now: float) -> None:
+        """Rewrite the activity log oldest first, within its limits, without committing. Rows
+        added from a backup get the newest IDs whatever their time, and log() trims by ID (it
+        runs on every action, so it has to be quick); after this, ID order is time order."""
+        c = self.conn
+        columns = ", ".join(ActivityRow._fields)
+        keep = c.execute(f"SELECT {columns} FROM activity WHERE ts >= ? ORDER BY ts DESC, id DESC "
+                         "LIMIT ?", (now - ACTIVITY_KEEP_DAYS * 86400, ACTIVITY_MAX_ROWS)).fetchall()
+        c.execute("DELETE FROM activity")
+        c.executemany(f"INSERT INTO activity ({columns}) "
+                      f"VALUES ({', '.join('?' * len(ActivityRow._fields))})",
+                      [tuple(r) for r in reversed(keep)])
 
     # Personal arrangements set on the phone
 
@@ -1199,20 +1376,28 @@ class Database:
                  cancel_until)).lastrowid
             c.executemany("INSERT INTO wb_cards (job_id, seq, status) VALUES (?, ?, 'pending')",
                           [(job_id, seq) for seq in range(1, count + 1)])
-            # Keep WB_JOBS_KEEP_DAYS or WB_JOBS_MAX_ROWS, whichever is less, like the activity log.
-            old = [r[0] for r in c.execute(
-                f"""SELECT id FROM wb_jobs WHERE (ts < ? OR id <= ?)
-                    AND status NOT IN ({", ".join("?" * len(WB_ACTIVE))})""",
-                (now - WB_JOBS_KEEP_DAYS * 86400, job_id - WB_JOBS_MAX_ROWS, *WB_ACTIVE))]
-            c.executemany("DELETE FROM wb_lockouts WHERE card_id IN "
-                          "(SELECT id FROM wb_cards WHERE job_id = ?)", [(i,) for i in old])
-            c.executemany("DELETE FROM wb_cards WHERE job_id = ?", [(i,) for i in old])
-            c.executemany("DELETE FROM wb_jobs WHERE id = ?", [(i,) for i in old])
+            self._prune_wb_jobs(now)
             c.commit()
         except Exception:
             c.rollback()
             raise
         return job_id
+
+    def _prune_wb_jobs(self, now: float) -> None:
+        """Keep WB_JOBS_KEEP_DAYS or WB_JOBS_MAX_ROWS of card jobs, whichever is less, like the
+        activity log, with their cards and lock-outs; unfinished jobs always stay. Counted by
+        when jobs were made, not by ID: jobs added from a backup get new IDs whatever their age.
+        Doesn't commit."""
+        c = self.conn
+        old = [r[0] for r in c.execute(
+            f"""SELECT id FROM wb_jobs WHERE status NOT IN ({", ".join("?" * len(WB_ACTIVE))})
+                AND (ts < ? OR id IN (SELECT id FROM wb_jobs ORDER BY ts DESC
+                                      LIMIT -1 OFFSET ?))""",
+            (*WB_ACTIVE, now - WB_JOBS_KEEP_DAYS * 86400, WB_JOBS_MAX_ROWS))]
+        c.executemany("DELETE FROM wb_lockouts WHERE card_id IN "
+                      "(SELECT id FROM wb_cards WHERE job_id = ?)", [(i,) for i in old])
+        c.executemany("DELETE FROM wb_cards WHERE job_id = ?", [(i,) for i in old])
+        c.executemany("DELETE FROM wb_jobs WHERE id = ?", [(i,) for i in old])
 
     def _wb_job_rows(self, rows) -> list[dict]:
         jobs = [dict(r) for r in rows]
@@ -1330,7 +1515,7 @@ class Database:
                 LEFT JOIN departments dp ON dp.id = j.department_id
                 WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
                 AND c.card_number IS NOT NULL AND {' AND '.join(where or ['1'])}
-                ORDER BY c.id DESC LIMIT ?""", (*params, limit))]
+                ORDER BY j.ts DESC, c.id DESC LIMIT ?""", (*params, limit))]
         for row in rows:
             try:
                 row["records"] = json.loads(row["records"])
@@ -1341,9 +1526,11 @@ class Database:
 
     def key_cards(self, state: str = "all", q: str = "", limit: int = 100,
                   before: int | None = None, holder_staff_id: int | None = None) -> list[dict]:
-        """Staff cards made (one row per card written, whoever made it), newest first. state:
-        active (not expired), expired, revoked, lost or all. q matches part of the name the card
-        was made for, its holder's name, or its number. before: a card ID, for the next page."""
+        """Staff cards made (one row per card written, whoever made it), newest first: by when
+        their job was made, since cards added from a backup get new IDs whatever their age.
+        state: active (not expired), expired, revoked, lost or all. q matches part of the name
+        the card was made for, its holder's name, or its number. before: a card ID, for the next
+        page (the cards listed after it)."""
         assert state in KEY_CARD_FILTERS
         now = time.time()
         where, params = [], []
@@ -1357,8 +1544,14 @@ class Database:
             where.append("c.state = ?")
             params.append(state)
         if before is not None:
-            where.append("c.id < ?")
-            params.append(before)
+            made = self.conn.execute("SELECT j.ts FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id "
+                                     "WHERE c.id = ?", (before,)).fetchone()
+            if made:
+                where.append("(j.ts < ? OR (j.ts = ? AND c.id < ?))")
+                params += [made[0], made[0], before]
+            else:   # gone since (trimmed with its job): go on by ID
+                where.append("c.id < ?")
+                params.append(before)
         if holder_staff_id is not None:
             where.append("j.holder_staff_id = ?")
             params.append(holder_staff_id)

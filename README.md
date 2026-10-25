@@ -125,7 +125,11 @@ encoder, without opening TT Hotel's own software.
 - **Branding:** property name (shown in the staff app instead of "Staff Portal"), home-screen
   name, brand color and logo.
 - **Backup tab:**
-  - a full backup and restore, with automatic undo copies;
+  - a full backup and restore, with automatic undo copies. Backups include the activity log and
+    the card history, which a restore merges (adding what's missing, removing nothing);
+  - **Migrate:** move everything to another install of the add-on (such as another repository)
+    with an encrypted file and a one-time code, so phones and computers stay signed in and no
+    secrets need typing again;
   - export and import of the layout, roles and staff on their own.
 
 ### Security
@@ -146,10 +150,13 @@ encoder, without opening TT Hotel's own software.
   encoder key never reaches a browser except the front-desk computer the encoder is plugged
   into, and only while it's making or looking up a card. The add-on never sends it to an encoder
   you haven't set up or confirmed.
-- **Backup files** never include Home Assistant sign-ins, pending setup codes, the Connecteam
-  secret or the TT Hotel secret and password. A restore only keeps phones signed in that this
-  system set up and hasn't revoked, so an old or edited backup can't bring back or add a working
-  phone.
+- **Backup files** include the activity log and card history, but never Home Assistant
+  sign-ins, pending setup codes, the Connecteam secret or the TT Hotel secret and password. A
+  restore only keeps phones signed in that this system set up and hasn't revoked, so an old or
+  edited backup can't bring back or add a working phone.
+- **Migration files** do carry device sign-ins and the secrets, encrypted with AES-256-GCM under a
+  key made (scrypt) from a one-time code of 20 letters and numbers. The code is shown once and
+  never stored or logged, a file works for 24 hours, and it only restores onto a fresh install.
 
 ## Screenshots
 
@@ -217,6 +224,7 @@ staff_portal/
     permissions.py           What each device type allows, and validation of every action
     layout.py                Pages, group cards, per-item access, per-device arrangement
     transfer.py              Export, import, backup and restore
+    migrate.py               Encrypted migration files for moving to another install
     connecteam.py            Connecteam users and time clock (OAuth 2.0)
     db.py                    SQLite storage
     ha.py                    Home Assistant REST and WebSocket client

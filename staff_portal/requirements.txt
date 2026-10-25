@@ -1,3 +1,9 @@
 aiohttp==3.14.5
 segno==1.6.6
 Pillow==13.0.0
+# Migration files (AES-256-GCM, scrypt). cffi and pycparser are cryptography's own needs, pinned
+# to versions with musllinux wheels for Python 3.13 on amd64 and aarch64: the add-on image has
+# no build tools.
+cryptography==50.0.2
+cffi==2.1.1
+pycparser==3.12
