@@ -129,50 +129,19 @@
   <section id="tab-wristbands" class="tab" hidden>
     <div class="section-head"><h2>Wristbands</h2></div>
     <p class="hint wb-intro">Staff signed in on a front-desk computer make TT Hotel wristbands and key
-      cards on the card encoder plugged into it. Set up your TT Hotel account and the defaults here,
-      set each front-desk computer's card encoder (This computer (USB) is easiest) in <button class="linkish"
+      cards on the card encoder plugged into it. Set the defaults here, set each front-desk computer's
+      card encoder (This computer (USB) is easiest) in <button class="linkish"
       data-goto="phones">Phones &amp; computers</button> → Edit, and choose who may make which cards on the
       <button class="linkish" data-goto="roles">Roles</button> tab. Every card is recorded with who made it.</p>
     <form id="wb-form" class="settings">
       <fieldset>
-        <legend>TT Hotel account</legend>
         <label class="check-row"><input type="checkbox" name="wristbands_enabled">
           <span>Make wristbands and key cards
           <small>People whose role allows it can make day passes, overnight wristbands and staff cards
           on a front-desk computer with a card encoder.</small></span></label>
-        <p class="hint">In the TT Hotel program on the front-desk computer, sign in as the hotel's admin
-          and open <b>Settings → Integration</b>. Copy the Client ID, Client Secret, username and
-          password from there. The password there is already scrambled (32 letters and numbers):
-          paste it exactly as TT Hotel shows it, never your real password.</p>
-        <div class="row">
-          <label>Client ID<input name="tthotel_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
-          <label>Client Secret<input name="tthotel_client_secret" type="password" maxlength="500"
-            autocomplete="new-password" spellcheck="false"></label>
-        </div>
-        <div class="row">
-          <label>Username <small>The hotel admin's TT Hotel username.</small>
-            <input name="tthotel_username" maxlength="200" autocomplete="off" spellcheck="false"></label>
-          <label>Password <small>Exactly as exported from TT Hotel → Settings → Integration.</small>
-            <input name="tthotel_password_md5" type="password" maxlength="64" autocomplete="new-password"
-              spellcheck="false"></label>
-        </div>
-        <div class="row">
-          <label>Account hosted in<select name="tthotel_region">
-            <option value="global">Outside China (euapi.ttlock.com)</option>
-            <option value="china">China (cnapi.ttlock.com)</option></select></label>
-          <label>Check for new doors every (hours)<input name="tthotel_sync_hours" type="number" min="1" max="48"></label>
-        </div>
-        <p class="hint">TT Hotel's free limit is 30,000 requests a month, counting every request.
-          Staff Access never uses more than a quarter of that (7,500), and its automatic door checks stop
-          at half of its share so making cards always has room. Making cards needs a fresh key for the
-          encoder from TT Hotel: one request covers about 8 minutes of card-making. Door checks cost a
-          request or two each, and only run while Wristbands is on and a computer has a card encoder.</p>
-        <label class="check-row" id="wb-clear-row" hidden><input type="checkbox" name="tthotel_clear_secret">
-          <span>Remove the saved Client Secret and password</span></label>
-        <div class="ct-status">
-          <span id="wb-status" class="hint"></span>
-          <button class="btn" type="button" id="wb-test">Test connection</button>
-        </div>
+        <p class="hint wb-account">TT Hotel account: <span class="badge" id="wb-tt-state"></span>
+          <button class="linkish" type="button" data-goto="settings"
+            data-open-conn="conn-tthotel">Settings → Connections</button></p>
       </fieldset>
       <fieldset>
         <legend>Day passes</legend>
@@ -472,6 +441,118 @@
         <div><button type="button" class="btn" id="add-area">Add area</button></div>
       </fieldset>
     </div>
+    <div class="settings">
+      <fieldset class="connections">
+        <legend>Connections</legend>
+        <p class="hint">The services Staff Access signs in to. Open one to change its details; each
+          has its own Save button.</p>
+        <div class="conn-list">
+          <details class="conn" id="conn-tthotel">
+            <summary>
+              <span class="conn-head"><span class="conn-name">TT Hotel</span>
+                <span class="badge" data-conn-state></span></span>
+              <span class="conn-use" data-conn-use></span>
+            </summary>
+            <form id="tt-form" class="conn-body">
+              <p class="hint">In the TT Hotel program on the front-desk computer, sign in as the hotel's admin
+                and open <b>Settings → Integration</b>. Copy the Client ID, Client Secret, username and
+                password from there. The password there is already scrambled (32 letters and numbers):
+                paste it exactly as TT Hotel shows it, never your real password.</p>
+              <div class="row">
+                <label>Client ID<input name="tthotel_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+                <label>Client Secret<input name="tthotel_client_secret" type="password" maxlength="500"
+                  autocomplete="new-password" spellcheck="false"></label>
+              </div>
+              <div class="row">
+                <label>Username <small>The hotel admin's TT Hotel username.</small>
+                  <input name="tthotel_username" maxlength="200" autocomplete="off" spellcheck="false"></label>
+                <label>Password <small>Exactly as exported from TT Hotel → Settings → Integration.</small>
+                  <input name="tthotel_password_md5" type="password" maxlength="64" autocomplete="new-password"
+                    spellcheck="false"></label>
+              </div>
+              <div class="row">
+                <label>Account hosted in<select name="tthotel_region">
+                  <option value="global">Outside China (euapi.ttlock.com)</option>
+                  <option value="china">China (cnapi.ttlock.com)</option></select></label>
+                <label>Check for new doors every (hours)<input name="tthotel_sync_hours" type="number" min="1" max="48"></label>
+              </div>
+              <p class="hint">TT Hotel's free limit is 30,000 requests a month, counting every request.
+                Staff Access never uses more than a quarter of that (7,500), and its automatic door checks stop
+                at half of its share so making cards always has room. Making cards needs a fresh key for the
+                encoder from TT Hotel: one request covers about 8 minutes of card-making. Door checks cost a
+                request or two each, and only run while Wristbands is on and a computer has a card encoder.</p>
+              <p class="wb-warn" id="wb-off-note" hidden>Wristbands is off, so Staff Access doesn't use TT Hotel.
+                Turn it on with <b>Make wristbands and key cards</b> on the <button class="linkish" type="button"
+                data-goto="wristbands">Wristbands</button> tab.</p>
+              <label class="check-row" id="wb-clear-row" hidden><input type="checkbox" name="tthotel_clear_secret">
+                <span>Remove the saved Client Secret and password</span></label>
+              <div class="ct-status">
+                <span id="wb-status" class="hint"></span>
+                <button class="btn" type="button" id="wb-test">Test connection</button>
+              </div>
+              <div class="form-actions"><button class="btn primary" type="submit">Save TT Hotel settings</button></div>
+            </form>
+          </details>
+          <details class="conn" id="conn-connecteam">
+            <summary>
+              <span class="conn-head"><span class="conn-name">Connecteam</span>
+                <span class="badge" data-conn-state></span></span>
+              <span class="conn-use" data-conn-use></span>
+            </summary>
+            <form id="ct-form" class="conn-body">
+              <label class="check-row"><input type="checkbox" name="connecteam_enabled">
+                <span>Link staff to Connecteam
+                <small>Add staff from your Connecteam user list, and only let them sign in and use controls
+                while they're clocked in on a Connecteam time clock (you can turn that off per person).
+                Staff you add by hand aren't affected.</small></span></label>
+              <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
+                <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
+                changed later). Copy the Client Secret straight away: Connecteam only shows it once, then paste its keys
+                here. API access needs Connecteam's Expert plan or higher.</p>
+              <div class="row">
+                <label>Client ID<input name="connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+                <label>Client Secret<input name="connecteam_client_secret" type="password" maxlength="200"
+                  autocomplete="new-password" spellcheck="false"></label>
+              </div>
+              <div class="row">
+                <label>Account hosted in<select name="connecteam_region">
+                  <option value="global">Global (api.connecteam.com)</option>
+                  <option value="au">Australia (api-au.connecteam.com)</option></select></label>
+                <label>Check the time clock every (minutes)<input name="connecteam_poll_minutes" type="number" min="30" max="240"></label>
+              </div>
+              <p class="hint">Connecteam limits API requests per account, shared with your other integrations
+                and reports (Expert plan: 10,000 a day). One check covers everyone and costs one request per
+                time clock. Staff Access checks on that schedule only while someone must be clocked in, plus
+                once when someone the last check didn't find clocked in signs in or uses a control (that check
+                replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With one
+                time clock that's about 24 requests a day plus a few at the start of shifts. It never uses more
+                than a fifth of your daily limit and pauses on its own if your account runs low.</p>
+              <label class="check-row" id="ct-clear-row" hidden><input type="checkbox" name="connecteam_clear_secret">
+                <span>Remove the saved Client Secret</span></label>
+              <div class="ct-status">
+                <span id="ct-status" class="hint"></span>
+                <button class="btn" type="button" id="ct-test">Test connection</button>
+              </div>
+              <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
+                <span>Add everyone from Connecteam
+                <small>Every active Connecteam user becomes a staff member here, in the department whose
+                smart group they're in (Staff tab, Departments), with their kiosk code as their PIN. Checked
+                about once an hour, inside the same request limits. People archived in Connecteam are turned
+                off, never deleted. People you add by hand are never changed.</small></span></label>
+              <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
+                <span>People added this way must be clocked in to sign in
+                <small>You can change this for anyone on their card on the Staff tab; the sync never changes
+                it back.</small></span></label>
+              <div class="ct-status">
+                <span id="ct-sync-status" class="hint"></span>
+                <button class="btn" type="button" id="ct-sync">Sync staff now</button>
+              </div>
+              <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam settings</button></div>
+            </form>
+          </details>
+        </div>
+      </fieldset>
+    </div>
     <form id="settings-form" class="settings">
       <fieldset>
         <legend>Branding</legend>
@@ -527,56 +608,6 @@
           work. Controls lock again after the time below with no control used.</small></span></label>
         <label class="inline-number">Lock controls again after (minutes)
           <input name="control_lock_minutes" type="number" min="1" max="120"></label>
-      </fieldset>
-      <fieldset>
-        <legend>Connecteam</legend>
-        <label class="check-row"><input type="checkbox" name="connecteam_enabled">
-          <span>Link staff to Connecteam
-          <small>Add staff from your Connecteam user list, and only let them sign in and use controls
-          while they're clocked in on a Connecteam time clock (you can turn that off per person).
-          Staff you add by hand aren't affected.</small></span></label>
-        <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
-          <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
-          changed later). Copy the Client Secret straight away: Connecteam only shows it once, then paste its keys
-          here. API access needs Connecteam's Expert plan or higher.</p>
-        <div class="row">
-          <label>Client ID<input name="connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
-          <label>Client Secret<input name="connecteam_client_secret" type="password" maxlength="200"
-            autocomplete="new-password" spellcheck="false"></label>
-        </div>
-        <div class="row">
-          <label>Account hosted in<select name="connecteam_region">
-            <option value="global">Global (api.connecteam.com)</option>
-            <option value="au">Australia (api-au.connecteam.com)</option></select></label>
-          <label>Check the time clock every (minutes)<input name="connecteam_poll_minutes" type="number" min="30" max="240"></label>
-        </div>
-        <p class="hint">Connecteam limits API requests per account, shared with your other integrations
-          and reports (Expert plan: 10,000 a day). One check covers everyone and costs one request per
-          time clock. Staff Access checks on that schedule only while someone must be clocked in, plus
-          once when someone the last check didn't find clocked in signs in or uses a control (that check
-          replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With one
-          time clock that's about 24 requests a day plus a few at the start of shifts. It never uses more
-          than a fifth of your daily limit and pauses on its own if your account runs low.</p>
-        <label class="check-row" id="ct-clear-row" hidden><input type="checkbox" name="connecteam_clear_secret">
-          <span>Remove the saved Client Secret</span></label>
-        <div class="ct-status">
-          <span id="ct-status" class="hint"></span>
-          <button class="btn" type="button" id="ct-test">Test connection</button>
-        </div>
-        <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
-          <span>Add everyone from Connecteam
-          <small>Every active Connecteam user becomes a staff member here, in the department whose
-          smart group they're in (Staff tab, Departments), with their kiosk code as their PIN. Checked
-          about once an hour, inside the same request limits. People archived in Connecteam are turned
-          off, never deleted. People you add by hand are never changed.</small></span></label>
-        <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
-          <span>People added this way must be clocked in to sign in
-          <small>You can change this for anyone on their card on the Staff tab; the sync never changes
-          it back.</small></span></label>
-        <div class="ct-status">
-          <span id="ct-sync-status" class="hint"></span>
-          <button class="btn" type="button" id="ct-sync">Sync staff now</button>
-        </div>
       </fieldset>
       <fieldset>
         <legend>Home Assistant logbook</legend>

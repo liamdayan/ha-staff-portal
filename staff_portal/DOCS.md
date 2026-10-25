@@ -442,6 +442,25 @@ Good to know:
   in, wrong-PIN locks, signing out after the idle time, and Connecteam's clocked-in check.
 - **Preview** on the Layout tab can show a role or a person: pick them under **As**.
 
+## Connections: TT Hotel and Connecteam
+
+**Settings → Connections** holds the two outside services Staff Access can sign in to: **TT
+Hotel** (for wristbands and key cards) and **Connecteam** (for staff and the time clock). Each is
+folded to one line until you click it, showing:
+
+- **Connected**, **Not set up**, **Turned off** (Connecteam), **Wristbands off** (TT Hotel's
+  details are saved, but Wristbands is off, so TT Hotel isn't used), **Not checked yet**, or a
+  problem in a few words: **Stopped: access refused** (it stopped asking until you fix the
+  details), **Paused until** a time or date (a request limit), or **Last try failed**.
+- The requests Staff Access made against its own limit: for TT Hotel this month, such as
+  "1,240 requests this month (limit 7,500)", and for Connecteam today, such as "35 requests today
+  (limit 2,000)". Showing them costs no requests.
+
+Open one for its details, **Test connection**, the full status (why it's stopped or paused) and
+how its requests are kept low. Each has its own **Save** button, which saves only that
+connection's settings, so saving one never changes the other or the rest of Settings. Secrets
+stay hidden: leave the box blank to keep the saved one.
+
 ## Wristbands (TT Hotel key cards)
 
 If your doors use **TT Hotel** (TTLock) locks, staff signed in on a front-desk computer can make
@@ -481,10 +500,12 @@ offered on shared or role-based computers where each person signs in with their 
 
 ### Turning it on in Staff Access
 
-1. Open the **Wristbands** tab, tick **Make wristbands and key cards**, paste the four TT Hotel
-   details and click **Save wristband settings**, then **Test connection**. It reports how many
-   doors and buildings TT Hotel has. **Sync from TT Hotel** fetches the door list again (it's also
-   checked every 6 hours on its own).
+1. Open the **Wristbands** tab, tick **Make wristbands and key cards** and click **Save wristband
+   settings**. Then open **Settings → Connections → TT Hotel** (the **Settings → Connections**
+   link on the Wristbands tab goes straight there), paste the four TT Hotel details, click **Save
+   TT Hotel settings**, then **Test connection**. It reports how many doors and buildings TT Hotel
+   has. **Sync from TT Hotel** (Wristbands tab, under **Doors**) fetches the door list again
+   (it's also checked every 6 hours on its own).
 2. Under **Day passes**, tick the doors every day pass opens and set **Day passes stop working
    at**. Under **Overnight guests**, tick the shared doors and set the **Checkout time**. Both
    times can be changed at any time; cards already made keep the time they were made with.
@@ -646,11 +667,13 @@ built to use a small share and never get the account blocked:
   for making cards.
 - If TT Hotel says the account has reached its limit, Staff Access stops asking until the limit
   resets and never retries straight away. If it rejects the Client ID, secret, username or
-  password, it stops all automatic requests until you save the Wristbands settings again or
+  password, it stops all automatic requests until you save the TT Hotel settings again or
   click **Test connection**. Both last through add-on restarts, and a restart doesn't sync the
   doors again before they're due.
-- The **Wristbands** tab shows how many requests Staff Access made this month, when the doors
-  were last synced and, while stopped or paused, why.
+- **Settings → Connections** shows how many requests Staff Access made this month on TT Hotel's
+  line. Open **TT Hotel** for when the doors were last synced and, while stopped or paused, why.
+  The Wristbands tab says whether the account is connected, next to its **Make wristbands and key
+  cards** switch.
 - Wristbands makes **no Connecteam requests**: it uses the same sign-in and clock-in checks as
   the rest of the app.
 
@@ -872,9 +895,10 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
 1. In Connecteam, open **your name → Integration Center → OAuth 2.0** and click **Create app**.
    Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later.
 2. Copy the **Client ID** and **Client Secret**. Connecteam only shows the secret once.
-3. In Staff Access, open **Settings → Connecteam**, tick **Link staff to Connecteam**, paste both
-   keys, choose **Australia** under **Account hosted in** if your Connecteam account is hosted
-   there, and click **Save settings**, then **Test connection**. It reports how many users and time
+3. In Staff Access, open **Settings → Connections → Connecteam**, tick **Link staff to
+   Connecteam**, paste both keys, choose **Australia** under **Account hosted in** if your
+   Connecteam account is hosted there, and click **Save Connecteam settings**, then **Test
+   connection**. It reports how many users and time
    clocks it found and how many people are clocked in now.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
    greyed out.
@@ -913,7 +937,7 @@ How clocked-in sign-in works:
 ### Add everyone from Connecteam
 
 Instead of adding people one by one, tick **Add everyone from Connecteam** under **Settings →
-Connecteam** and save. Every active Connecteam user then becomes a staff member here:
+Connections → Connecteam** and click **Save Connecteam settings**. Every active Connecteam user then becomes a staff member here:
 
 - Named as in Connecteam ("First Last"; if someone here already has that name, "(2)" is added).
 - Their PIN is their Connecteam kiosk code when it's 4 to 8 digits and nobody else here uses it.
@@ -991,8 +1015,9 @@ a small, steady share:
   until you save the Connecteam settings again or click **Test connection**.
 - Requests identify themselves as Staff Portal (in the User-Agent).
 
-**Settings → Connecteam** shows how many requests Staff Access made today and, once Connecteam
-has answered, how many your account has left. While paused or stopped it says why. Remember that
+**Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
+Open **Connecteam** for how many your account has left (once Connecteam has answered) and, while
+paused or stopped, why. Remember that
 after 15 minutes without an answer, people who must be clocked in can't sign in.
 
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't

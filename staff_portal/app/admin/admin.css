@@ -555,6 +555,29 @@ dialog input.code-input {
 #ct-dialog input[type="search"][hidden] { display: none; }
 .choice.danger strong { color: var(--danger); }
 
+/* Settings > Connections: each one folded to its status and requests until opened */
+.conn-list { display: grid; }
+.conn { border-top: 1px solid var(--line); }
+.conn > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 3px 12px; padding: 12px 0; cursor: pointer; list-style: none; }
+.conn > summary::-webkit-details-marker { display: none; }
+.conn > summary::after { content: ""; grid-column: 2; grid-row: 1 / span 2; width: 8px; height: 8px;
+  margin: 0 6px 4px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(45deg);
+  transition: transform 0.15s; }
+.conn[open] > summary::after { transform: rotate(-135deg); margin-bottom: -4px; }
+.conn > summary:hover::after { border-color: var(--text); }
+.conn:last-child:not([open]) > summary { padding-bottom: 0; }
+.conn-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.conn-name { font-weight: 700; }
+.conn-use { color: var(--muted); font-size: 13px; }
+.conn-body { display: grid; gap: 14px; padding: 4px 0 16px; min-width: 0; }
+.conn:last-child .conn-body { padding-bottom: 0; }
+/* Hints of different lengths: the boxes in a row still line up along the bottom. */
+#tt-form .row > label { grid-template-rows: auto 1fr auto; }
+#tt-form .row > label > :is(input, select) { align-self: end; }
+.wb-account { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
+.wb-account .linkish { padding: 0; }
+
 /* Page groups in the layout's page list */
 .page-group { align-items: flex-start; }
 .page-group-box { flex: 1; min-width: 0; display: grid; gap: 6px; }
