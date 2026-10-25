@@ -5,7 +5,12 @@ It speaks SN Web Socket 2.5.1's protocol for the requests Staff Portal sends: a 
 connect, answers that repeat the request's fields plus "errorCode" (and "data"), errors of its
 own without the requestId, and the encoder driver's codes. Cards behave like real ones: a blank
 card must be set up (CE_InitCard) before it can be cleared or written (106 until then), records
-add up until the card is cleared, and CE_ReadCard returns them.
+add up until the card is cleared, and CE_ReadCard returns them. A card can also carry
+cancellations of lost cards (CE_CancelCard, read back with CE_ReadCancellationInfo): they need a
+card set up for this hotel, live in one sector of their own next to the records (so a card with
+cancellations has room for one sector's worth of records less), hold CANCEL_SLOTS card numbers,
+and are wiped by CE_ClearCard and CE_InitCard like the records. How many fit, and that clearing
+wipes them, are guesses: the vendor doesn't say.
 
     python encoder_sim.py --port 8102 [--auto] [--host 0.0.0.0]
 
@@ -36,6 +41,8 @@ AUTO_IDLE_RESET = 5.0        # --auto: a gap in polling means nobody was waiting
 OUR_HOTEL = "this hotel"     # every hotelInfo counts as this hotel (real ones change often)
 OTHER_HOTEL = "another hotel"
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{12}$")
+CANCEL_SLOTS = 4             # lost card numbers one card holds (a guess: one 48-byte sector)
+RECORDS_PER_SECTOR = 4
 
 
 class EncoderSim:
@@ -47,7 +54,8 @@ class EncoderSim:
         self.auto = auto
         self.place_after = place_after
         self.remove_after = remove_after
-        self.cards: dict[str, dict] = {}     # number -> {"hotel": None or whose, "records"}
+        self.cards: dict[str, dict] = {}     # number -> {"hotel": None or whose, "records",
+                                             #            "cancels": [{"cardNo", "timestamp"}]}
         self.present: str | None = None      # the card on the encoder
         self.connected = False               # the driver has the USB port open
         self.plugged = True
@@ -77,7 +85,7 @@ class EncoderSim:
         number = str(number).strip()
         if number not in self.cards:
             hotel = OTHER_HOTEL if foreign else OUR_HOTEL if initialized else None
-            self.cards[number] = {"hotel": hotel, "records": []}
+            self.cards[number] = {"hotel": hotel, "records": [], "cancels": []}
         self.present = number
         self._remove_at = None
         self._wait_started = None
@@ -279,7 +287,7 @@ class EncoderSim:
             return code, None
         if card["hotel"] == OTHER_HOTEL:
             return 106, None
-        card.update(hotel=OUR_HOTEL, records=[])
+        card.update(hotel=OUR_HOTEL, records=[], cancels=[])
         return 0, None
 
     def _fn_CE_ClearCard(self, request):
@@ -287,6 +295,7 @@ class EncoderSim:
         if code:
             return code, None
         card["records"] = []
+        card["cancels"] = []
         return 0, None
 
     def _fn_CE_WriteCard(self, request):
@@ -299,7 +308,7 @@ class EncoderSim:
                 and 0 <= floor <= 255 and isinstance(mac, str) and MAC_RE.match(mac)
                 and isinstance(expires, int) and 0 < expires <= 0xFFFFFFFF):
             return 2, None
-        if len(card["records"]) >= 4 * (self.sectors.count("1") or 16):
+        if len(card["records"]) >= self._record_room(card):
             return 104, None
         card["records"].append({"buildNo": building, "floorNo": floor, "mac": mac.upper(),
                                 "startDate": int(time.time()), "endDate": expires,
@@ -314,6 +323,33 @@ class EncoderSim:
             return code, None
         return 0, [dict(r) for r in card["records"]]
 
+    def _fn_CE_CancelCard(self, request):
+        code, card = self._card(request.get("hotelInfo"))
+        if code:
+            return code, None
+        number, expires = request.get("cardNo"), request.get("timestamp")
+        # The DLL takes the number as a decimal string and the expiry as an unsigned long.
+        if (not isinstance(number, str) or not re.fullmatch(r"[0-9]{1,20}", number)
+                or not isinstance(expires, int) or isinstance(expires, bool)
+                or not 0 < expires <= 0xFFFFFFFF):
+            return 2, None
+        others = [c for c in card["cancels"] if c["cardNo"] != number]
+        if len(others) >= CANCEL_SLOTS:
+            return 104, None
+        if not card["cancels"] and len(card["records"]) > self._record_room(card, cancels=1):
+            return 104, None   # the cancellation sector is taken by records
+        card["cancels"] = others + [{"cardNo": number, "timestamp": expires}]
+        if self.auto:
+            self._remove_at = time.monotonic() + self.remove_after
+        return 0, None
+
+    def _fn_CE_ReadCancellationInfo(self, request):
+        code, card = self._card(request.get("hotelInfo"))
+        if code:
+            return code, None
+        # SN Web Socket JSON.parses the DLL's string, so data arrives as a list.
+        return 0, [dict(c) for c in card["cancels"]]
+
     def _fn_CE_Beep(self, request):
         if self._ready():
             return 3, None
@@ -321,6 +357,12 @@ class EncoderSim:
         return 0, None
 
     # ------------------------------------------------------------ internals
+
+    def _record_room(self, card: dict, cancels: int | None = None) -> int:
+        """Records that fit: four a sector, less one sector once cancellations are on it."""
+        sectors = self.sectors.count("1") or 16
+        has_cancels = card["cancels"] if cancels is None else cancels
+        return RECORDS_PER_SECTOR * max(0, sectors - (1 if has_cancels else 0))
 
     def _new_number(self) -> str:
         while True:

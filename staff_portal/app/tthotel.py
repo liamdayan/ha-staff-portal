@@ -1,7 +1,7 @@
 """TT Hotel: the property's door list and the card encoder's hotel key, from TT Hotel's cloud
 API (the TTLock Open Platform).
 
-Wristbands need two things from TT Hotel:
+Wristbands need two things from TT Hotel (and a third, only when an admin asks for it):
 
 - The door list (GET /v3/lock/listByHotel, with an access token from the integration's username
   and password). Synced in the background every few hours while wristbands are in use and kept
@@ -25,6 +25,11 @@ refused (and the account emailed), so this client asks as little as it can:
 - hotelInfo is cached, and a failed fetch is remembered for INFO_RETRY_GAP seconds, so a burst
   of wristbands can't become a burst of requests. Cards that only open single doors may use an
   older hotelInfo when TT Hotel can't be reached.
+- Remote lock-out of a lost card (experimental, doors on a gateway only, on an admin's say-so):
+  the lost card's number is enrolled on the lock through TT Hotel with dates a year ahead (so it
+  can't open anything meanwhile), then deleted again, which makes the lock refuse that number for
+  good. Two calls a door, both through the caps; a busy or offline gateway is reported as worth
+  trying again later, never retried here.
 - TT Hotel's quota errors are never retried: 30007 (monthly limit) pauses everything until next
   month (UTC), 30006 for an hour. Pauses and stops are saved with the request count, so a
   restart doesn't ask again.
@@ -80,6 +85,13 @@ TOKEN_CODES = {10003, 10004}    # token invalid/expired: drop token, re-auth onc
 CLIENT_HALT_CODES = {10000, 10001, 30008}           # bad client ID or secret, wrong region
 LOGIN_HALT_CODES = {10007, 30002, 30005, -2018}     # username or password refused, not the admin
 AUTH_HALT_CODES = CLIENT_HALT_CODES | LOGIN_HALT_CODES  # Halt until settings change or Test
+GATEWAY_RETRY_CODES = {-3002, -3003, -3036, -3037}  # gateway or lock offline or busy: try later
+LOCKOUT_APIS = {"reversed": "/v3/identityCard/addForReversedCardNumber",   # TT Hotel's advice
+                "plain": "/v3/identityCard/add"}   # ...when reversed numbers don't match the lock
+LOCKOUT_NAME = "Lost card"   # the name a lost card is briefly enrolled under (and found by)
+LOCKOUT_AHEAD = 365 * 86400  # it's enrolled to start a year from now: it never opens anything...
+LOCKOUT_SPAN = 86400         # ...and to last a day, should the delete never happen
+MAX_LOCKOUT_CARD = 20        # digits in a card number
 
 STOPPED_NOTE = (" (Staff Access stopped asking TT Hotel until the TT Hotel settings are saved "
                 "again or the connection is tested.)")
@@ -101,6 +113,14 @@ MESSAGES = {
     90000: "TT Hotel's server had a problem. Try again in a few minutes.",
     -2018: "That TT Hotel account isn't the hotel's admin. Use the details from TT Hotel > "
            "Settings > Integration.",
+    -2012: "That door isn't connected to a gateway, so TT Hotel can't reach it.",
+    -3002: "The door's gateway is offline. Check it has power and internet, then try again.",
+    -3003: "The door's gateway is busy. Try again in a few minutes.",
+    -3036: "The door is offline (out of the gateway's reach, or its battery is flat).",
+    -3037: "The door is busy. Try again in a few minutes.",
+    -4043: "This door doesn't support adding cards through TT Hotel.",
+    -4056: "The door's card memory is full.",
+    -1021: "TT Hotel doesn't know that card on this door.",
 }
 MESSAGES[10004] = MESSAGES[10003]
 
@@ -115,6 +135,14 @@ class TTHotelError(Exception):
         super().__init__(message)
         self.code = code
         self.needs_admin = needs_admin
+
+
+class MinuteFull(TTHotelError):
+    """Refused by Staff Access's own per-minute cap: nothing was sent, and a minute later
+    there's room again."""
+
+    def __init__(self):
+        super().__init__("Staff Access has made enough TT Hotel requests for this minute.")
 
 
 class Halt(TTHotelError):
@@ -146,6 +174,7 @@ class TTHotel:
         self._info: tuple[str, float] | None = None              # hotelInfo, fetched at
         self._info_error: tuple[TTHotelError, float] | None = None
         self._recent = collections.deque()     # times of requests in the last minute
+        self._api_sent = 0                     # "api" requests that got past the caps
         self.synced_at: float | None = None    # last successful door sync
         self.door_count: int | None = None
         self.building_count: int | None = None
@@ -217,7 +246,7 @@ class TTHotel:
         while self._recent and now - self._recent[0] > 60:
             self._recent.popleft()
         if len(self._recent) >= MINUTE_CAP:
-            raise TTHotelError("Staff Access has made enough TT Hotel requests for this minute.")
+            raise MinuteFull()
         u = self.usage()
         cap = self.monthly_cap()
         if u["count"] >= cap:
@@ -312,6 +341,8 @@ class TTHotel:
                        background: bool = False) -> dict:
         """One HTTP request through the caps. Returns the reply or raises TTHotelError."""
         self._spend(kind, background)
+        if kind == "api":
+            self._api_sent += 1
         url = f"{self._api()}{path}"
         try:
             if method == "POST":   # TT Hotel wants form-encoded bodies
@@ -440,13 +471,17 @@ class TTHotel:
                 "expires_at": time.time() + lifetime}
 
     async def _authed_get(self, path: str, params: dict, background: bool = False) -> dict:
+        return await self._authed("GET", path, params, background)
+
+    async def _authed(self, method: str, path: str, params: dict,
+                      background: bool = False) -> dict:
         for attempt in (1, 2):
             token = await self._access_token(background)
             client_id = self._credentials(login=True)[1]
             try:
                 return await self._request(
-                    "GET", path, {**params, "clientId": client_id, "accessToken": token,
-                                  "date": _date_ms()}, kind="api", background=background)
+                    method, path, {**params, "clientId": client_id, "accessToken": token,
+                                   "date": _date_ms()}, kind="api", background=background)
             except TTHotelError as err:
                 if err.code not in TOKEN_CODES or attempt == 2:
                     raise
@@ -556,6 +591,119 @@ class TTHotel:
             result.setdefault("total", len(doors))
             result.setdefault("buildings", self.building_count)
             return result
+
+    # ------------------------------------------------------------ lost cards
+
+    def _room(self, calls: int) -> None:
+        """Refuse up front unless the caps leave room for this many calls, so a lock-out isn't
+        cut off between enrolling the lost card and deleting it."""
+        self._spend("api", count=False)
+        now = time.time()
+        while self._recent and now - self._recent[0] > 60:
+            self._recent.popleft()
+        if len(self._recent) + calls > MINUTE_CAP:
+            raise MinuteFull()
+        if self.usage()["count"] + calls > self.monthly_cap():
+            raise TTHotelError("Staff Access has nearly used its monthly share of TT Hotel "
+                               "requests, so it can't lock out a card this month.",
+                               needs_admin=True)
+
+    async def lock_out_card(self, lock_id: int, card_number: str, *, api: str = "reversed",
+                            card_id: int | None = None, find_first: bool = False) -> dict:
+        """Make a door on a gateway refuse a lost card for good: enroll the card number on the
+        lock (starting a year from now, so it can't open anything), then delete it, which TT
+        Hotel says blacklists that number in the lock (encoder-made cards included).
+
+        api: "reversed" (addForReversedCardNumber, TT Hotel's advice for encoder card numbers)
+        or "plain" (add). card_id: the card enrolled by an earlier try whose delete didn't go
+        through; only the delete is sent. find_first: an earlier try's enrolment may or may not
+        have happened (no answer from TT Hotel), so look for it on the lock first (one more
+        call) instead of enrolling the number twice.
+
+        Never raises. Returns {"status": "done"|"retry"|"failed", "card_id": the enrolled card
+        (when known), "code": TT Hotel's errcode or None, "message": a plain sentence for admins
+        (None when done), "unsure": True when an enrolment may have happened unseen, "wait":
+        True when Staff Access's own per-minute cap held this try back, so TT Hotel wasn't
+        asked}. "retry" means trying again later may work (gateway or door busy or offline, no
+        answer, the minute's requests used up); retries are the caller's to space out and cap."""
+        result = {"status": "failed", "card_id": card_id, "code": None, "message": None,
+                  "unsure": False, "wait": False}
+        lock = _as_int(lock_id)
+        number = str(card_number or "").strip()
+        if (lock is None or not 1 <= lock <= 2 ** 53 or api not in LOCKOUT_APIS
+                or not re.fullmatch(rf"[0-9]{{1,{MAX_LOCKOUT_CARD}}}", number)
+                or (card_id is not None and (_as_int(card_id) is None or _as_int(card_id) < 1))):
+            result["message"] = "That door or card number can't be locked out."
+            return result
+        step = "delete" if card_id is not None else "add"
+        try:
+            calls = 1 if card_id is not None else 2
+            self._room(calls + (1 if find_first and card_id is None else 0))
+            if card_id is None and find_first:
+                card_id = await self._find_lockout(lock, number)
+                result["card_id"] = card_id
+            if card_id is None:
+                start = _date_ms() + LOCKOUT_AHEAD * 1000
+                sent = self._api_sent
+                try:
+                    body = await self._authed("POST", LOCKOUT_APIS[api], {
+                        "lockId": lock, "cardNumber": number, "cardName": LOCKOUT_NAME,
+                        "startDate": start, "endDate": start + LOCKOUT_SPAN * 1000,
+                        "addType": 2})
+                except TTHotelError as err:
+                    if err.code is None and self._api_sent > sent:
+                        result["unsure"] = True   # sent, but no readable answer
+                    raise
+                card_id = _as_int(body.get("cardId"))
+                if card_id is None or card_id < 1:
+                    result.update(unsure=True, message="TT Hotel added the card to the door but "
+                                  "didn't say which card it is, so it couldn't be deleted. Try "
+                                  "again (Staff Access looks for it first).")
+                    return result
+                result["card_id"] = card_id
+            step = "delete"
+            await self._authed("POST", "/v3/identityCard/delete",
+                               {"lockId": lock, "cardId": card_id, "deleteType": 2})
+        except TTHotelError as err:
+            retry = (err.code in GATEWAY_RETRY_CODES
+                     or (err.code is None and not err.needs_admin))
+            message = str(err)
+            if step == "delete" and result["card_id"] is not None:
+                message += (" The card is on the door, with dates starting a year from now, "
+                            "until it's deleted: it can't open the door meanwhile, but try again "
+                            "well before then.")
+            result.update(status="retry" if retry else "failed", code=err.code, message=message,
+                          wait=isinstance(err, MinuteFull))
+            return result
+        except Exception as err:  # noqa: BLE001 - a malformed reply must not reach a request
+            log.warning("TT Hotel lock-out of a card on lock %s failed: %r", lock, err)
+            result.update(status="retry", unsure=card_id is None,
+                          message="Something went wrong talking to TT Hotel. Try again.")
+            return result
+        log.info("TT Hotel: card locked out on lock %s", lock)
+        result.update(status="done", card_id=card_id)
+        return result
+
+    async def _find_lockout(self, lock: int, number: str) -> int | None:
+        """This lost card, enrolled by an earlier try (by its name, its start a year ahead and
+        its number), or None. Another lost card's enrolment left on the same door is never
+        taken for it: deleting that one wouldn't lock this number out."""
+        body = await self._authed("GET", "/v3/identityCard/list",
+                                  {"lockId": lock, "pageNo": 1, "pageSize": 20, "orderBy": 1,
+                                   "searchStr": LOCKOUT_NAME})
+        items = body.get("list")
+        now_ms = _date_ms()
+        numbers = _lockout_numbers(number)
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or item.get("cardName") != LOCKOUT_NAME:
+                continue
+            listed = str(item.get("cardNumber") or "").strip()
+            if len(listed) > MAX_LOCKOUT_CARD + 5 or _as_int(listed) not in numbers:
+                continue
+            start, found = _as_int(item.get("startDate")), _as_int(item.get("cardId"))
+            if start is not None and start > now_ms + 30 * 86400 * 1000 and found and found > 0:
+                return found
+        return None
 
     # ------------------------------------------------------------ status
 
@@ -676,6 +824,14 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _lockout_numbers(number: str) -> set[int]:
+    """The numbers TT Hotel may list a lost card under: as sent, or with its bytes reversed
+    (what addForReversedCardNumber stores: 3661413478 is listed as 1723612378)."""
+    value = int(number)
+    size = max(4, (value.bit_length() + 7) // 8)
+    return {value, int.from_bytes(value.to_bytes(size, "big"), "little")}
 
 
 def _text(value, limit: int = 100) -> str:

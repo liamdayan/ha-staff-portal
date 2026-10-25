@@ -34,6 +34,9 @@ class FakeTTHotel:
         self.page_size = 1000
         self.overrides: dict[str, tuple[int, object]] = {}   # kind -> (HTTP status, body)
         self.hotel_info = "HOTEL-KEY-1"
+        self.cards: dict[int, dict] = {}       # cardId -> enrolled card (identityCard/*)
+        self.blacklist: set[tuple[int, str]] = set()   # (lockId, cardNumber) deleted remotely
+        self.queued: dict[str, list] = {}      # kind -> errcodes (or "drop") for the next calls
         self.runner = None
         self.url = None
 
@@ -58,6 +61,14 @@ class FakeTTHotel:
         if kind == "/oauth2/token":
             kind = "refresh" if params.get("grant_type") == "refresh_token" else "login"
         self.requests.append((request.method, kind, params))
+        queued = self.queued.get(kind)
+        if queued:
+            code = queued.pop(0)
+            if code == "drop":   # the request went through but the answer got lost
+                if kind.startswith("/v3/identityCard/add"):
+                    self.enroll(params)
+                return web.Response(text="<html>bad gateway</html>", status=502)
+            return web.json_response({"errcode": code, "errmsg": "queued error"})
         if kind in self.overrides:
             status, body = self.overrides[kind]
             return (web.json_response(body, status=status) if not isinstance(body, str)
@@ -83,7 +94,36 @@ class FakeTTHotel:
             return web.json_response({"list": self.locks[(page - 1) * size:page * size],
                                       "pageNo": page, "pageSize": size, "pages": pages,
                                       "total": len(self.locks)})
+        if kind.startswith("/v3/identityCard/"):
+            if params.get("accessToken") not in self.tokens:
+                return web.json_response({"errcode": 10004, "errmsg": "invalid token"})
+            if kind in ("/v3/identityCard/add", "/v3/identityCard/addForReversedCardNumber"):
+                return web.json_response({"cardId": self.enroll(params)})
+            if kind == "/v3/identityCard/delete":
+                card = self.cards.pop(int(params["cardId"]), None)
+                if card is None or card["lockId"] != int(params["lockId"]):
+                    return web.json_response({"errcode": -1021, "errmsg": "no such card"})
+                assert params["deleteType"] == "2"
+                self.blacklist.add((card["lockId"], card["cardNumber"]))
+                return web.json_response({"errcode": 0, "errmsg": "none error message"})
+            if kind == "/v3/identityCard/list":
+                found = [c for c in self.cards.values() if c["lockId"] == int(params["lockId"])
+                         and params.get("searchStr", "") in c["cardName"]]
+                return web.json_response({"list": found, "pageNo": 1, "pageSize": 20,
+                                          "pages": 1, "total": len(found)})
         return web.json_response({"errcode": -3, "errmsg": "not here"}, status=404)
+
+    def enroll(self, params: dict) -> int:
+        assert params["addType"] == "2"
+        self.seq += 1
+        number = params["cardNumber"]
+        if "Reversed" in self.requests[-1][1]:   # TT Hotel stores these numbers reversed
+            number = str(int.from_bytes(int(number).to_bytes(4, "big"), "little"))
+        self.cards[self.seq] = {"cardId": self.seq, "lockId": int(params["lockId"]),
+                                "cardNumber": number, "cardName": params.get("cardName", ""),
+                                "startDate": int(params["startDate"]),
+                                "endDate": int(params["endDate"])}
+        return self.seq
 
     async def start(self) -> str:
         app = web.Application()
@@ -648,4 +688,134 @@ def test_failed_background_syncs_back_off(monkeypatch):
         before = len(env.fake.requests)
         await env.tt._background_sync()
         assert len(env.fake.requests) == before and "stopped asking" in env.tt.last_error
+    run(monkeypatch, scenario)
+
+
+# ---------------------------------------------------------------- remote lock-out of lost cards
+
+LOST = "3661413478"
+
+
+def test_lock_out_enrolls_in_the_future_then_deletes(monkeypatch):
+    async def scenario(env):
+        before = env.tt.usage()["count"]
+        result = await env.tt.lock_out_card(163377, LOST)
+        assert result == {"status": "done", "card_id": result["card_id"], "code": None,
+                          "message": None, "unsure": False, "wait": False}
+        kinds = [k for _, k, _ in env.fake.requests]
+        assert kinds == ["login", "/v3/identityCard/addForReversedCardNumber",
+                         "/v3/identityCard/delete"]
+        _, _, add = env.fake.requests[1]
+        now_ms = time.time() * 1000
+        start, end = int(add["startDate"]), int(add["endDate"])
+        assert 364 * 86400_000 < start - now_ms < 366 * 86400_000
+        assert end - start == 86400_000
+        assert add["cardName"] == "Lost card" and add["lockId"] == "163377"
+        assert add["cardNumber"] == LOST and SECRET not in json.dumps(add)
+        assert env.fake.cards == {}   # deleted again
+        assert (163377, "1723612378") in env.fake.blacklist   # reversed, as TT Hotel stores it
+        assert env.tt.usage()["count"] == before + 3   # login + 2
+        # The plain number format.
+        assert (await env.tt.lock_out_card(5, LOST, api="plain"))["status"] == "done"
+        assert env.fake.requests[-2][1] == "/v3/identityCard/add"
+        assert (5, LOST) in env.fake.blacklist
+    run(monkeypatch, scenario)
+
+
+def test_lock_out_busy_gateway_is_worth_trying_again(monkeypatch):
+    async def scenario(env):
+        env.fake.queued["/v3/identityCard/addForReversedCardNumber"] = [-3037]
+        result = await env.tt.lock_out_card(1, LOST)
+        assert (result["status"], result["code"], result["card_id"], result["unsure"]) == (
+            "retry", -3037, None, False)
+        assert "busy" in result["message"]
+        assert env.fake.count("/v3/identityCard/delete") == 0   # never a storm of retries
+        # Busy again when deleting: only the delete is sent next time.
+        env.fake.queued["/v3/identityCard/delete"] = [-3003]
+        result = await env.tt.lock_out_card(1, LOST)
+        assert result["status"] == "retry" and result["card_id"] and "a year from now" in (
+            result["message"])
+        adds = env.fake.count("/v3/identityCard/addForReversedCardNumber")
+        again = await env.tt.lock_out_card(1, LOST, card_id=result["card_id"])
+        assert again["status"] == "done" and env.fake.cards == {}
+        assert env.fake.count("/v3/identityCard/addForReversedCardNumber") == adds
+        # A door that isn't on a gateway won't get better by trying again.
+        env.fake.queued["/v3/identityCard/addForReversedCardNumber"] = [-2012]
+        result = await env.tt.lock_out_card(1, LOST)
+        assert result["status"] == "failed" and "gateway" in result["message"]
+    run(monkeypatch, scenario)
+
+
+def test_lock_out_with_a_lost_answer_looks_before_enrolling_again(monkeypatch):
+    async def scenario(env):
+        env.fake.queued["/v3/identityCard/addForReversedCardNumber"] = ["drop"]
+        result = await env.tt.lock_out_card(9, LOST)
+        assert result["status"] == "retry" and result["unsure"] is True
+        assert len(env.fake.cards) == 1   # enrolled, unseen
+        result = await env.tt.lock_out_card(9, LOST, find_first=True)
+        assert result["status"] == "done" and env.fake.cards == {}
+        assert env.fake.count("/v3/identityCard/addForReversedCardNumber") == 1
+        assert env.fake.count("/v3/identityCard/list") == 1
+        # Nothing found: enrolled once, as usual.
+        result = await env.tt.lock_out_card(9, LOST, find_first=True)
+        assert result["status"] == "done"
+        assert env.fake.count("/v3/identityCard/addForReversedCardNumber") == 2
+    run(monkeypatch, scenario)
+
+
+def test_lock_out_goes_through_the_caps(monkeypatch):
+    async def scenario(env):
+        for bad in ((0, LOST), (1, "12AB"), (1, ""), ("x", LOST), (1, "1" * 21)):
+            result = await env.tt.lock_out_card(*bad)
+            assert result["status"] == "failed"
+        assert (await env.tt.lock_out_card(1, LOST, api="hex"))["status"] == "failed"
+        assert env.fake.requests == []
+        # Room for one more call this month isn't enough for two: nothing is sent.
+        env.usage.value = {"month": time.strftime("%Y-%m", time.gmtime()),
+                           "count": env.tt.monthly_cap() - 1}
+        result = await env.tt.lock_out_card(1, LOST)
+        assert result["status"] == "failed" and "monthly share" in result["message"]
+        assert env.fake.requests == []
+        env.usage.value = {}
+        # The minute cap: refused up front, and worth trying again later.
+        env.tt._recent.extend([time.time()] * (tthotel.MINUTE_CAP - 1))
+        result = await env.tt.lock_out_card(1, LOST)
+        assert result["status"] == "retry" and "this minute" in result["message"]
+        assert result["wait"] is True   # our own cap, not TT Hotel: worth waiting a minute
+        assert env.fake.requests == []
+        env.tt._recent.clear()
+        # Turned off, or stopped by rejected credentials: not worth retrying.
+        env.settings[0] = False
+        assert (await env.tt.lock_out_card(1, LOST))["status"] == "failed"
+        env.settings[0] = True
+        env.tt.halted = "TT Hotel didn't accept the username or password."
+        result = await env.tt.lock_out_card(1, LOST)
+        assert result["status"] == "failed" and "stopped asking" in result["message"]
+        assert env.fake.requests == []
+    run(monkeypatch, scenario)
+
+
+def test_lock_out_only_finds_this_cards_enrolment(monkeypatch):
+    async def scenario(env):
+        # Another lost card's enrolment was left on the door (its delete never went through).
+        env.fake.queued["/v3/identityCard/delete"] = [-3037]
+        other = await env.tt.lock_out_card(9, "1234567890")
+        assert other["status"] == "retry" and other["card_id"]
+        # This card's earlier try may have enrolled it unseen: the other card isn't taken for
+        # it (deleting that one wouldn't lock this number out), so this one is enrolled.
+        result = await env.tt.lock_out_card(9, LOST, find_first=True)
+        assert result["status"] == "done" and result["card_id"] != other["card_id"]
+        assert (9, "1723612378") in env.fake.blacklist      # this card, reversed
+        assert list(env.fake.cards) == [other["card_id"]]   # the other one is still there
+        # Its own enrolment is found, whichever way the number was sent and listed.
+        for api, number in (("reversed", LOST), ("plain", "42")):
+            env.fake.queued["/v3/identityCard/addForReversedCardNumber"] = ["drop"]
+            env.fake.queued["/v3/identityCard/add"] = ["drop"]
+            assert (await env.tt.lock_out_card(9, number, api=api))["unsure"] is True
+            adds = len(env.fake.requests)
+            result = await env.tt.lock_out_card(9, number, api=api, find_first=True)
+            assert result["status"] == "done"
+            assert [k for _, k, _ in env.fake.requests[adds:]] == [
+                "/v3/identityCard/list", "/v3/identityCard/delete"]
+        assert list(env.fake.cards) == [other["card_id"]]
     run(monkeypatch, scenario)

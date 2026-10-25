@@ -56,11 +56,46 @@
   hours, and a hard cap of 7,500 a month. When TT Hotel says stop, Staff Access stays stopped
   across restarts. Wristbands makes no Connecteam requests.
 
+**Staff key cards, departments and lost cards**
+
+- **New: Key cards list** on the Staff tab: every staff key card (made in the dashboard or the
+  staff app), filtered by Active, Expired, Revoked or Lost and searchable by name or card number,
+  with who made it, what it opens and when it stops working.
+- **New: Make key card** on each person's card on the Staff tab, from their department's key card
+  template, with the same live progress as the front desk. If they already have one, choose
+  **Replace their current card** (the new card cancels the old one at each door it's tapped on)
+  or **Add another card**.
+- **New: Revoke** a card you have in hand: the encoder waits for that exact card and clears it.
+  Any other card is left alone ("That's card 123…, not 456…"). People who may see everyone's
+  cards can revoke from the staff app's card log too, which now shows each staff card's state.
+- **New: Report lost**, then lock the card out door by door with a **lost card notice** (a spare
+  card carrying a cancellation of the lost number, ticked off per door) or a **replacement card**.
+  **Look up** shows what a notice card cancels.
+- **New, experimental: remote lock-out** of a lost card on doors with a gateway, through TT Hotel
+  (2 requests a door, a busy gateway tried again at most 3 times, minutes apart). Off by default,
+  and usable only after the **Test remote lock-out** walkthrough confirms it works with your
+  locks. A number locked out this way is retired on that door for good.
+- **New: Departments** (Staff tab): a Connecteam smart group, a role and a key card template
+  (doors, days, deadbolt) each. In backups and exports.
+
+**Connecteam**
+
+- **New: Add everyone from Connecteam.** Every active Connecteam user becomes a staff member, with
+  their kiosk code as their PIN (or turned off, with a note, when it can't be used), in the
+  department of their smart group and with its role. Checked about once an hour within the
+  existing request limits, plus **Sync staff now**. People archived in Connecteam are turned off,
+  never deleted; people added by hand are never changed.
+- **New: clock-in per person.** People the sync adds must be clocked in by default (a setting).
+  A **Must be clocked in to sign in** switch on each linked person's Staff card (and in **Edit**)
+  turns it off or on for just them, and the sync never changes it back.
+
 **Backups**
 
-- Backups include wristband settings, door names, roles' and people's wristband rules and each
-  computer's card encoder setting, never the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
-  older version of the add-on refuses a 0.8.0 backup.
+- Backups include wristband settings, door names, roles' and people's wristband rules, each
+  computer's card encoder setting, departments and each person's department and Connecteam sync
+  details, never the TT Hotel Client Secret or password, and never whether remote lock-out was
+  tested. Older backups still restore (with no wristbands or departments). An older version of the
+  add-on refuses a 0.8.0 backup.
 
 ## 0.7.1
 

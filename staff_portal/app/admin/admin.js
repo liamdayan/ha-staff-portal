@@ -260,7 +260,13 @@
     // Read the body once: some errors are plain text, and a failed .json() would use it up.
     const text = await res.text().catch(() => "");
     try { data = JSON.parse(text); } catch { data = { error: text.trim().slice(0, 300) }; }
-    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    if (!res.ok) {
+      // The whole answer goes with the error: some refusals say what to ask next (which encoder).
+      const err = new Error(data.error || `Request failed (${res.status})`);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
@@ -305,15 +311,20 @@
     state.tunnelSources = data.tunnel_sources;
     state.connecteam = data.connecteam;
     state.wristbands = data.wristbands || {};
+    state.departments = data.departments || [];
+    state.staffSync = data.staff_sync || {};
     $("#add-from-connecteam").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
     renderStaff();
+    renderStaffSync();
+    renderDepartments();
     renderAreaSettings();
     renderRoleList();
     refreshEditing();
     renderWristbandStatus();
     renderEncoderList();
+    $("#keycards-section").hidden = !wristbandsOn();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -324,6 +335,7 @@
     document.querySelectorAll(".tab").forEach((s) => { s.hidden = s.id !== `tab-${name}`; });
     try {
       if (name === "activity") loadActivity(true);
+      if (name === "staff") openStaffTab();
       if (name === "settings") fillSettings();
       if ((name === "roles" || name === "layout") && !entities) loadEntities();
       if (name === "roles" && wristbandsOn() && !wbDoors) loadDoors();
@@ -847,8 +859,12 @@
         await load();
       }, `${m.name}'s role changed. It applies on role-based devices within a few seconds.`));
       const own = ownChangesText(m);
+      const dept = state.departments.find((d) => d.id === m.department_id);
       const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit"),
         h("button", { class: "btn", onclick: () => openPersonAccess(m.id) }, "Access")];
+      if (wristbandsOn()) {
+        actions.splice(1, 0, h("button", { class: "btn", onclick: () => run(() => makeKeyCard(m)) }, "Make key card"));
+      }
       if (m.locked) {
         actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
           await api("POST", `api/staff/${m.id}/unlock`);
@@ -881,13 +897,23 @@
                 class: m.ha_link_error ? "badge locked" : "badge linked",
                 title: m.ha_link_error || "Actions show in Home Assistant as this user",
               }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
+              m.connecteam_auto ? h("span", { class: "badge linked",
+                title: "Added by Add everyone from Connecteam, which keeps their department up to date" },
+              "From Connecteam") : null,
               clockBadge(m),
               h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
+            m.connecteam_note && m.status === "disabled" ? h("div", { class: "meta wb-note" },
+              `Turned off: ${m.connecteam_note}.`, m.connecteam_note.startsWith("No usable kiosk code")
+                ? " Give them a PIN with Edit, and tick Can sign in." : "") : null,
             h("div", { class: "meta" }, phones.length
               ? `Can sign in on: ${phones.join(", ")}`
               : "Not on any shared phone yet"),
-            own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null),
-          h("label", { class: "inline-select" }, "Role", roleSelect)),
+            own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null,
+            wristbandsOn() ? keyCardLine(m, dept) : null,
+            clockRule(m)),
+          h("div", { class: "staff-selects" },
+            h("label", { class: "inline-select" }, "Role", roleSelect),
+            departmentSelect(m))),
         h("div", { class: "card-actions" }, actions));
     }));
   }
@@ -921,6 +947,64 @@
     }, "Back to your layout. The phone updates within a few seconds.");
   }
 
+  // Whether this person must be clocked in on Connecteam to sign in, as a switch on their card.
+  // Changing it here (or in Edit) is the admin's choice: the Connecteam sync never changes it back.
+  function clockRule(m) {
+    if (!m.connecteam_user_id) return null;
+    const required = !!m.require_clock_in;
+    const box = h("input", { type: "checkbox", role: "switch", checked: required,
+      "aria-label": `${m.name} must be clocked in to sign in` });
+    box.addEventListener("change", () => run(async () => {
+      try {
+        await api("PATCH", `api/staff/${m.id}`, { require_clock_in: box.checked });
+      } catch (err) {
+        box.checked = required;
+        throw err;
+      }
+      await load();
+    }, box.checked ? `${m.name} must be clocked in on Connecteam to sign in.`
+      : `${m.name} can sign in without clocking in.`));
+    const off = !state.connecteam?.enabled;
+    return h("div", { class: "meta clock-rule" },
+      h("span", { class: `badge ${required ? "pending" : "active"}`,
+        title: off ? "Connecteam is turned off in Settings, so the clock isn't checked for anyone" : null },
+      required ? "Must be clocked in" : "Clock-in not required"),
+      h("label", { class: "switch" }, box, h("span", { class: "switch-track", "aria-hidden": "true" }),
+        h("span", null, "Must be clocked in to sign in")),
+      m.clock_in_set && m.connecteam_auto
+        ? h("span", { class: "hint-inline", title: "Set by hand, so the Connecteam sync leaves it as it is" },
+          "set by hand") : null);
+  }
+
+  // Their department, saved as soon as it's picked (shown once there are departments).
+  function departmentSelect(m) {
+    if (!state.departments.length && !m.department_id) return null;
+    const select = h("select", { "aria-label": `Department for ${m.name}` });
+    fillDepartmentOptions(select, m.department_id);
+    select.addEventListener("change", () => run(async () => {
+      await api("PATCH", `api/staff/${m.id}`, { department_id: select.value ? Number(select.value) : null });
+      await load();
+    }, m.connecteam_auto ? `${m.name}'s department changed. The Connecteam sync moves them back if their ` +
+      "smart group says otherwise." : `${m.name}'s department changed.`));
+    return h("label", { class: "inline-select" }, "Department", select);
+  }
+
+  function fillDepartmentOptions(select, selected) {
+    select.replaceChildren(h("option", { value: "" }, "No department"),
+      ...state.departments.map((d) => h("option", { value: d.id, selected: d.id === selected }, d.name)));
+  }
+
+  // Their key cards and the one Make key card would make, in a line.
+  function keyCardLine(m, dept) {
+    const n = m.key_cards || 0;
+    const cards = n ? h("button", { type: "button", class: "linkish", onclick: () => showKeyCardsFor(m) },
+      `${plural(n, "active key card")}`) : "No active key card";
+    const template = !dept ? "no department, so no key card to make"
+      : dept.card_access == null ? `${dept.name} has no key card set`
+      : `Make key card: ${accessSummary(dept.card_access)}, ${plural(dept.card_days, "day")}`;
+    return h("div", { class: "meta" }, cards, ` \u00b7 ${template}`);
+  }
+
   // ctUser: a Connecteam user picked in "Add from Connecteam" ({id, name}).
   function editStaff(m, ctUser) {
     const dialog = $("#staff-dialog");
@@ -930,6 +1014,8 @@
       : ctUser ? "Add from Connecteam" : "Add staff member";
     form.elements["name"].value = m ? m.name : ctUser ? ctUser.name.slice(0, 40) : "";
     fillRoleOptions(form.elements["role_id"], m ? m.role_id : null, "No role");
+    fillDepartmentOptions(form.elements["department_id"], m ? m.department_id : null);
+    $("[data-dept-row]", dialog).hidden = !state.departments.length && !m?.department_id;
     form.elements["pin"].required = !m;
     $("[data-pin-hint]", dialog).textContent = m
       ? "Leave blank to keep their current PIN."
@@ -942,7 +1028,14 @@
     const ctBox = $("[data-ct]", dialog);
     ctBox.hidden = !ctId;
     $("[data-ct-label]", dialog).textContent = ctUser ? `Connecteam: ${ctUser.name}` : "Linked to Connecteam";
-    form.elements["require_clock_in"].checked = m ? !!m.require_clock_in : true;
+    form.elements["require_clock_in"].checked = m ? !!m.require_clock_in
+      : state.settings.connecteam_auto_clock_in !== "0";
+    const ctNote = $("[data-ct-note]", dialog);
+    ctNote.textContent = m?.connecteam_auto
+      ? `Added by the Connecteam sync, which keeps their department up to date${m.clock_in_set
+        ? ". The clock-in rule was set by hand, so the sync leaves it as it is." : ". Changing the clock-in " +
+          "rule here makes it yours: the sync never changes it back."}` : "";
+    ctNote.hidden = !ctNote.textContent;
     // Their Connecteam kiosk code as the PIN: fetched by the add-on, never shown here.
     const kiosk = form.elements["use_kiosk_code"];
     kiosk.closest("label").hidden = ctUser ? !ctUser.has_kiosk_code : !m?.connecteam_user_id;
@@ -956,7 +1049,8 @@
     };
     kiosk.onchange();
     const unlink = $("[data-ct-unlink]", dialog);
-    unlink.hidden = !m;
+    // Someone the sync added stays linked while it runs (it would only add them again).
+    unlink.hidden = !m || !!(m.connecteam_auto && state.staffSync?.enabled);
     unlink.onclick = () => {
       ctId = null;
       kiosk.checked = false;
@@ -968,6 +1062,8 @@
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
+      const dept = form.elements["department_id"].value;
+      if (!$("[data-dept-row]", dialog).hidden) body.department_id = dept ? Number(dept) : null;
       const pin = form.elements["pin"].value.trim();
       if (pin) body.pin = pin;
       if (m) body.active = form.elements["active"].checked;
@@ -1711,6 +1807,7 @@
       lines.push(use + ".");
     }
     $("#ct-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
+    renderStaffSync();
   }
 
   // Tests the saved keys, so Save settings first.
@@ -1752,7 +1849,7 @@
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
     for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock",
-      "connecteam_enabled", "connecteam_clear_secret"]) {
+      "connecteam_enabled", "connecteam_clear_secret", "connecteam_auto_staff", "connecteam_auto_clock_in"]) {
       body[name] = e.target.elements[name].checked ? "1" : "0";
     }
     run(async () => {
@@ -1805,7 +1902,7 @@
   const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
   // FormData leaves unticked boxes out, so every checkbox in the form is listed here.
   const WB_CHECKBOXES = ["wristbands_enabled", "tthotel_clear_secret", "wb_lockout_daypass",
-    "wb_lockout_overnight", "wb_lockout_staff"];
+    "wb_lockout_overnight", "wb_lockout_staff", "wb_remote_lockout"];
   const WB_STATUS = { queued: "Waiting for the encoder", running: "Being made", needs_attention: "Needs attention",
     done: "Done", cancelled: "Stopped" };
   // The day-pass and overnight door lists, ticked but maybe not saved yet. Kept apart from the
@@ -1893,6 +1990,8 @@
       doorsLoading = null;
       renderDoors();
       renderDefaultDoors();
+      renderDepartments();
+      renderStaff();   // each person's "Make key card" line names the doors
       if (editing && !$("#tab-roles").hidden) renderRoleEditor();
     })();
     return doorsLoading;
@@ -2140,6 +2239,7 @@
     wbDirty = false;
     renderWristbandSecrets();
     renderWristbandStatus();
+    renderRemoteStatus();
     renderZoneNote();
     renderDefaultDoors();
   }
@@ -2511,6 +2611,1010 @@
 
   $("#wb-refresh-jobs").addEventListener("click", () => loadWristbandJobs(true));
   $("#wb-more-jobs").addEventListener("click", () => loadWristbandJobs(false));
+
+  // ---------------------------------------------------------------- staff tab: departments
+
+  // A department gives its people a role and the key card Make key card makes for them; with
+  // Add everyone from Connecteam on, people join the one whose smart group they're in (the first
+  // in this order, if they're in several).
+
+  let smartGroups = null;   // Connecteam's smart groups ({id, name, users}), once the dialog loaded them
+
+  // replaceChildren, leaving out the parts that aren't shown (null or false).
+  const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+
+  const people = (n) => `${n} ${n === 1 ? "person" : "people"}`;
+  const groupName = (id) => smartGroups?.find((g) => g.id === id)?.name
+    || state.departments.find((d) => d.smart_group_id === id)?.smart_group_name || "a Connecteam smart group";
+
+  // A key card template ("access" entries) in a few words: "every door", "Building 1, Floor 2"...
+  function accessSummary(entries) {
+    if (!entries?.length) return "nothing chosen";
+    if (entries.some((e) => e.level === "all")) return "every door";
+    const sample = (pick) => wbDoors?.find(pick);
+    const name = (e) => {
+      if (e.level === "door") {
+        const d = sample((x) => x.id === e.door);
+        return d ? doorName(d) : `Door ${e.door}`;
+      }
+      const d = sample((x) => x.building === e.building && (e.level === "building" || x.floor === e.floor));
+      const b = d ? buildingName(d) : `Building ${e.building}`;
+      return e.level === "building" ? b : `${b}, ${d ? floorName(d) : `Floor ${e.floor}`}`;
+    };
+    if (entries.length <= 3) return entries.map(name).join("; ");
+    const n = (level) => entries.filter((e) => e.level === level).length;
+    return [n("building") && plural(n("building"), "building"), n("floor") && plural(n("floor"), "floor"),
+      n("door") && plural(n("door"), "door")].filter(Boolean).join(", ");
+  }
+
+  function departmentSummary(d) {
+    const role = state.roles.find((r) => r.id === d.role_id);
+    return [people(d.staff_count || 0),
+      d.smart_group_id ? `Connecteam: ${groupName(d.smart_group_id)}` : "Added by hand",
+      role ? `Role: ${role.name}` : "Role left alone",
+      d.card_access == null ? "No key card"
+        : `Key card: ${accessSummary(d.card_access)}, ${plural(d.card_days, "day")}` +
+          (d.card_lockout ? ", opens deadbolted doors" : "")].join(" · ");
+  }
+
+  function renderDepartments() {
+    const list = $("#department-list");
+    if (!list) return;
+    if (!state.departments.length) {
+      list.replaceChildren(h("div", { class: "empty small" }, "No departments yet. Add one like " +
+        "“Housekeeping” with the doors its key cards open."));
+      return;
+    }
+    list.replaceChildren(...state.departments.map((d) => h("div", { class: "area-row sort-row" },
+      dragHandle(`Reorder department ${d.name}`),
+      h("div", { class: "entity-text" },
+        h("div", { class: "entity-name" }, d.name),
+        h("div", { class: "entity-id dept-sub" }, departmentSummary(d)),
+        d.card_access && !d.card_access.length
+          ? h("div", { class: "via access-note" }, "Its key card is damaged: choose its doors again.") : null),
+      h("div", { class: "area-actions" },
+        h("button", { type: "button", class: "btn", onclick: () => run(() => editDepartment(d)) }, "Edit"),
+        h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
+          const who = d.staff_count ? ` Its ${people(d.staff_count)} stay, with no department.` : "";
+          if (!await askConfirm(`Delete the ${d.name} department?${who}`, "Delete department")) return false;
+          await api("DELETE", `api/departments/${d.id}`);
+          await load();
+        }, "Department deleted.") }, "Delete")))));
+  }
+
+  // Saved straight away, one move at a time, like the areas list.
+  let departmentSaves = Promise.resolve();
+  sortable($("#department-list"), "departments", (from, to) => {
+    moveItem(state.departments, from, to);
+    renderDepartments();
+    const order = state.departments.map((d) => d.id);
+    departmentSaves = departmentSaves.then(() => run(async () => {
+      try {
+        await api("PUT", "api/departments/order", { order });
+      } finally {
+        await load();
+      }
+    }));
+  });
+
+  $("#add-department").addEventListener("click", () => run(() => editDepartment(null)));
+
+  async function editDepartment(d) {
+    const dialog = $("#dept-dialog");
+    const form = $("#dept-form");
+    const error = $("[data-error]", dialog);
+    form.reset();
+    error.textContent = "";
+    $("[data-title]", dialog).textContent = d ? `Edit ${d.name}` : "Add department";
+    form.elements["name"].value = d ? d.name : "";
+    fillRoleOptions(form.elements["role_id"], d ? d.role_id : null, "Leave their role as it is");
+
+    // Smart groups come from Connecteam (cached by the add-on for hours), only when asked for.
+    const groupSelect = form.elements["smart_group_id"];
+    const groupHint = $("[data-group-hint]", dialog);
+    const fillGroups = () => {
+      const taken = new Map(state.departments.filter((x) => x.smart_group_id && x.id !== d?.id)
+        .map((x) => [x.smart_group_id, x.name]));
+      const known = smartGroups || [];
+      const options = [h("option", { value: "" }, "None: add people by hand")];
+      if (d?.smart_group_id && !known.some((g) => g.id === d.smart_group_id)) {
+        options.push(h("option", { value: d.smart_group_id, selected: true }, groupName(d.smart_group_id)));
+      }
+      for (const g of known) {
+        const users = g.users == null ? "" : ` (${people(g.users)})`;
+        const used = taken.get(g.id);
+        options.push(h("option", { value: g.id, selected: g.id === d?.smart_group_id, disabled: !!used },
+          used ? `${g.name}: ${used} follows it` : `${g.name}${users}`));
+      }
+      groupSelect.replaceChildren(...options);
+    };
+    fillGroups();
+    if (!state.connecteam?.enabled) {
+      groupHint.textContent = "Turn on Connecteam in Settings to choose one.";
+      groupSelect.disabled = !d?.smart_group_id;
+    } else {
+      groupSelect.disabled = false;
+      groupHint.textContent = smartGroups ? "People in it join this department." : "Loading smart groups…";
+      if (!smartGroups) {
+        api("GET", "api/connecteam/smart-groups").then((r) => {
+          smartGroups = r.groups || [];
+          const picked = groupSelect.value;
+          fillGroups();
+          groupSelect.value = picked;
+          groupHint.textContent = smartGroups.length ? "People in it join this department."
+            : "Connecteam has no smart groups yet.";
+          renderDepartments();
+        }, (err) => { groupHint.textContent = `Couldn't load them: ${err.message}`; });
+      }
+    }
+
+    // The key card template: what Make key card puts on their card.
+    const hasCard = form.elements["has_card"];
+    const cardBox = $("[data-card-box]", dialog);
+    const accessBox = $("[data-access]", dialog);
+    let access = clone(d?.card_access || []);
+    hasCard.checked = d ? d.card_access != null : false;
+    form.elements["card_days"].value = String(d ? d.card_days : 30);
+    form.elements["card_lockout"].checked = d ? !!d.card_lockout : true;
+    const syncCard = () => { cardBox.hidden = !hasCard.checked; };
+    hasCard.onchange = syncCard;
+    syncCard();
+    const drawAccess = () => {
+      if (!wristbandsOn()) {
+        accessBox.replaceChildren(h("p", { class: "hint" }, "Turn on wristbands on the ",
+          h("button", { type: "button", class: "linkish", onclick: () => { dialog.close(); selectTab("wristbands"); } },
+            "Wristbands"), " tab to choose doors." + (access.length ? ` Saved now: ${accessSummary(access)}.` : "")));
+        return;
+      }
+      if (!wbDoors) {
+        accessBox.replaceChildren(doorsPending());
+        loadDoors().then(() => { if (dialog.open && wbDoors) drawAccess(); });
+        return;
+      }
+      accessBox.replaceChildren(cardAccessPicker(access, (value) => { access = value; }));
+    };
+    drawAccess();
+
+    form.onsubmit = (ev) => {
+      if (ev.submitter?.value !== "save") return;
+      ev.preventDefault();
+      const name = form.elements["name"].value.trim();
+      const days = Math.floor(Number(form.elements["card_days"].value));
+      const problem = !name ? "Give the department a name."
+        : hasCard.checked && !access.length ? "Choose what the key card opens, or untick Make key cards."
+        : hasCard.checked && !(days >= 1 && days <= WB_MAX_LIMIT) ? `A key card lasts 1 to ${WB_MAX_LIMIT} days.`
+        : "";
+      error.textContent = problem;
+      if (problem) return;
+      const body = { name, smart_group_id: groupSelect.value || null,
+        role_id: form.elements["role_id"].value ? Number(form.elements["role_id"].value) : null,
+        card_access: hasCard.checked ? access : null };
+      if (hasCard.checked) {
+        body.card_days = days;
+        body.card_lockout = form.elements["card_lockout"].checked;
+      }
+      const save = $("button[value=save]", dialog);
+      save.disabled = true;
+      (async () => {
+        try {
+          if (d) await api("PUT", `api/departments/${d.id}`, body);
+          else await api("POST", "api/departments", body);
+          dialog.close("saved");
+          await load();
+          toast(d ? "Department saved." : `${name} added.`);
+        } catch (err) {
+          error.textContent = err.message;
+        } finally {
+          save.disabled = false;
+        }
+      })();
+    };
+    dialog.showModal();
+    return false;
+  }
+
+  // What a key card opens: every door, or whole buildings, whole floors and single doors (as a
+  // staff card request's "access"). Ticking a building or floor covers what's in it, including
+  // doors added there later. Calls onChange with fresh entries after every change.
+  function cardAccessPicker(entries, onChange) {
+    const scope = { all: false, buildings: new Set(), floors: new Set(), doors: new Set() };
+    for (const e of entries || []) {
+      if (e.level === "all") scope.all = true;
+      else if (e.level === "building") scope.buildings.add(e.building);
+      else if (e.level === "floor") scope.floors.add(`${e.building}:${e.floor}`);
+      else if (e.level === "door") scope.doors.add(e.door);
+    }
+    const toggle = (set, key, on) => (on ? set.add(key) : set.delete(key));
+    const value = () => {
+      if (scope.all) return [{ level: "all" }];
+      const out = [...scope.buildings].sort((a, b) => a - b).map((b) => ({ level: "building", building: b }));
+      for (const key of scope.floors) {
+        const [b, f] = key.split(":").map(Number);
+        if (!scope.buildings.has(b)) out.push({ level: "floor", building: b, floor: f });
+      }
+      const known = new Map((wbDoors || []).map((d) => [d.id, d]));
+      for (const id of scope.doors) {
+        const d = known.get(id);
+        if (d && d.building != null && (scope.buildings.has(d.building) ||
+          (d.floor != null && scope.floors.has(`${d.building}:${d.floor}`)))) continue;
+        out.push({ level: "door", door: id });
+      }
+      return out;
+    };
+    const count = h("small", { class: "wb-count" });
+    const emit = () => {
+      const v = value();
+      count.textContent = v.length ? accessSummary(v) : "nothing chosen yet";
+      onChange(v);
+    };
+    const tree = h("div", { class: "wb-tree-box" });
+    const all = h("input", { type: "checkbox", checked: scope.all, onchange: () => {
+      scope.all = all.checked;
+      tree.hidden = scope.all;
+      emit();
+    } });
+    tree.hidden = scope.all;
+    const check = (checked, label, onchange, note) => h("label", { class: "check" },
+      h("input", { type: "checkbox", checked, onchange }),
+      note ? h("span", null, label, h("small", { class: "wb-count" }, note)) : label);
+    const treeRow = (picked, label, n, onPick) => {
+      const box = h("input", { type: "checkbox", checked: picked });
+      const small = h("small", { class: "wb-count" });
+      const describe = () => {
+        small.textContent = box.checked ? ` · all ${plural(n, "door")}, and ones added later` : ` · ${plural(n, "door")}`;
+      };
+      box.addEventListener("change", () => { describe(); onPick(box.checked); emit(); });
+      describe();
+      return h("label", { class: "check" }, box, h("span", null, label, small));
+    };
+    const active = (wbDoors || []).filter((d) => d.active);
+    if (!active.length) {
+      tree.replaceChildren(h("p", { class: "hint" }, "No doors yet. Sync them from TT Hotel on the Wristbands tab."));
+    } else {
+      const doorItem = (d) => h("li", null, check(scope.doors.has(d.id), doorName(d), (ev) => {
+        toggle(scope.doors, d.id, ev.target.checked);
+        emit();
+      }, d.has_gateway ? " · gateway" : null));
+      tree.replaceChildren(h("ul", { class: "wb-tree" }, doorGroups(active).map((b) => {
+        const floors = h("ul", { class: "wb-tree" }, b.floors.map((f) => {
+          const inside = h("ul", { class: "wb-tree" }, f.doors.map(doorItem));
+          if (b.number == null || f.number == null) return h("li", null, h("div", { class: "wb-tree-head" }, f.name), inside);
+          const key = `${b.number}:${f.number}`;
+          inside.hidden = scope.floors.has(key);
+          return h("li", null, treeRow(scope.floors.has(key), f.name, f.doors.length, (on) => {
+            toggle(scope.floors, key, on);
+            inside.hidden = on;
+          }), inside);
+        }));
+        if (b.number == null) return h("li", null, h("div", { class: "wb-tree-head" }, b.name), floors);
+        floors.hidden = scope.buildings.has(b.number);
+        return h("li", null, treeRow(scope.buildings.has(b.number), b.name, b.count, (on) => {
+          toggle(scope.buildings, b.number, on);
+          floors.hidden = on;
+        }), floors);
+      })));
+    }
+    emit();
+    return h("div", { class: "wb-pick dept-access" },
+      h("label", { class: "check" }, all, h("span", null, "Every door, including ones added later (a master card)")),
+      tree, h("p", { class: "hint dept-pick-sum" }, "Opens: ", count));
+  }
+
+  // ---------------------------------------------------------------- staff tab: Connecteam sync
+
+  function syncResultText(r) {
+    if (!r) return "";
+    const parts = [r.added && `${r.added} added`, r.updated && `${r.updated} updated`,
+      r.turned_off && `${r.turned_off} turned off`, r.turned_on && `${r.turned_on} turned on`,
+      r.no_code && `${r.no_code} without a kiosk code`].filter(Boolean);
+    return parts.length ? parts.join(", ") : "no changes";
+  }
+
+  function staffSyncText() {
+    const s = state.staffSync || {};
+    if (!s.enabled) return "";
+    if (s.error) return `Connecteam staff sync: ${s.error}`;
+    if (!s.synced_at) return "Adding everyone from Connecteam: not synced yet. It runs within a minute or two.";
+    return `Synced from Connecteam ${ago(s.synced_at).toLowerCase()}: ${syncResultText(s.result)}. ` +
+      "Checked about once an hour.";
+  }
+
+  function renderStaffSync() {
+    const s = state.staffSync || {};
+    const line = $("#staff-sync-status");
+    line.textContent = staffSyncText();
+    line.hidden = !s.enabled;
+    line.classList.toggle("wb-note", !!s.error);
+    $("#sync-staff").hidden = !s.enabled;
+    const settingsLine = $("#ct-sync-status");
+    settingsLine.textContent = !state.connecteam?.enabled ? "Turn on Connecteam to add everyone from it."
+      : !s.enabled ? "Adding everyone from Connecteam is turned off." : staffSyncText();
+    $("#ct-sync").disabled = !s.enabled;
+  }
+
+  function syncStaffNow(button) {
+    return run(async () => {
+      button.disabled = true;
+      try {
+        const r = await api("POST", "api/connecteam/sync-staff", {});
+        toast(`Synced staff from Connecteam: ${r.detail || syncResultText(r)}.`);
+      } finally {
+        button.disabled = false;
+        await load();
+      }
+    });
+  }
+
+  $("#sync-staff").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
+  $("#ct-sync").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
+
+  // ---------------------------------------------------------------- key cards: encoders and progress
+
+  const JOB_POLL_MS = 1000;
+  const JOB_HIDDEN_POLL_MS = 4000;
+  const JOB_LOST_AFTER = 4;   // failed checks in a row before saying the add-on can't be reached
+  const JOB_ACTIVE = new Set(["queued", "running", "needs_attention"]);
+  const CARD_WORDS = { written: "Made", cleared: "Cleared", failed: "Didn't work", skipped: "Skipped",
+    cancelled: "Stopped", pending: "Waiting" };
+  // How each step looks: [symbol, class]. Waiting for the encoder and writing show a spinner.
+  const JOB_LOOK = { waiting_for_card: ["", "pulse"], remove_card: ["", "lift"], needs_attention: ["!", "alert"],
+    done: ["✓", "ok"], cancelled: ["■", "quiet"] };
+
+  // The card encoders computers use now, one per address (two computers can share one).
+  function cardEncoders() {
+    const found = new Map();
+    for (const d of state.devices) {
+      if (d.status === "revoked" || !d.encoder_address) continue;
+      const e = found.get(d.encoder_address);
+      if (e) e.name = `${e.name}, ${d.name}`;
+      else found.set(d.encoder_address, { device_id: d.id, name: d.name, address: d.encoder_address });
+    }
+    return [...found.values()];
+  }
+
+  function encoderWords(e) {
+    const s = state.wristbands?.encoders?.[e.address] || e.status || {};
+    return s.busy ? "Making cards right now" : s.error ? `Problem: ${s.error}` : s.connected ? "Working" : "";
+  }
+
+  // Which encoder to use: the only one, or the one the admin picks (null if they cancel).
+  async function pickEncoder(list = cardEncoders()) {
+    if (!list.length) {
+      throw new Error("No computer has a card encoder yet. In Phones & computers, edit the front-desk " +
+        "computer and set its Card encoder to Automatic.");
+    }
+    if (list.length === 1) return list[0].device_id;
+    const picked = await askChoice("Which card encoder? Have the card ready next to it.",
+      list.map((e) => [String(e.device_id), e.name, encoderWords(e)]));
+    return picked == null ? null : Number(picked);
+  }
+
+  // Starts a card job on an encoder the admin picks. Returns the job, or null if they cancelled.
+  async function postCardJob(path, body) {
+    let deviceId = await pickEncoder();
+    if (deviceId == null) return null;
+    try {
+      return (await api("POST", path, { ...body, device_id: deviceId })).job;
+    } catch (err) {
+      if (!err.data?.encoders?.length) throw err;
+      // The computers changed meanwhile: ask again from the add-on's own list.
+      deviceId = await pickEncoder(err.data.encoders);
+      if (deviceId == null) return null;
+      return (await api("POST", path, { ...body, device_id: deviceId })).job;
+    }
+  }
+
+  // The live encoding dialog: place the card, writing, done, or try again / skip / stop, like the
+  // front-desk app. Resolves with the job as it last was once the dialog is closed.
+  function showJob(job, title, { expiry = true } = {}) {
+    return new Promise((resolve) => {
+      const dialog = $("#job-dialog");
+      const part = (key) => $(`[data-${key}]`, dialog);
+      const v = { job, phase: undefined, mode: null, timer: null, acting: false, lost: 0, rev: 0 };
+      const active = () => JOB_ACTIVE.has(v.job.status);
+      const button = (label, cls, onclick) => h("button", { type: "button", class: cls, onclick }, label);
+
+      const draw = () => {
+        const j = v.job;
+        const total = j.cards?.length || j.count || 1;
+        part("eyebrow").textContent = title;
+        part("step").textContent = active() && j.current && total > 1 ? `Card ${j.current} of ${total}` : "";
+        part("prompt").textContent = j.message || "";
+        if (j.phase !== v.phase) {
+          v.phase = j.phase;
+          const [symbol, cls] = JOB_LOOK[j.phase] || [null, ""];
+          const visual = part("visual");
+          visual.className = cls ? `job-visual ${cls}` : "job-visual";
+          fill(visual, symbol == null ? h("div", { class: "spinner" })
+            : symbol ? h("span", { class: "job-symbol" }, symbol) : h("div", { class: "job-card" }));
+        }
+        dialog.classList.toggle("attention", j.status === "needs_attention");
+        const dots = part("dots");
+        dots.hidden = total < 2;
+        dots.replaceChildren(...(j.cards || []).map((c) => {
+          const now = active() && c.seq === j.current && c.status === "pending";
+          return h("li", { class: `job-dot ${now ? "current" : c.status}`, title: `Card ${c.seq}: ` +
+            (now ? "in progress" : (CARD_WORDS[c.status] || c.status).toLowerCase()) },
+          c.status === "written" || c.status === "cleared" ? "✓" : String(c.seq));
+        }));
+        part("meta").textContent = [expiry && j.expires_label && `Works until ${j.expires_label}`, j.summary]
+          .filter(Boolean).join(" · ");
+        part("conn").hidden = v.lost < JOB_LOST_AFTER;
+        const mode = j.status === "needs_attention" ? "attention" : active() ? "active" : "finished";
+        if (mode === v.mode) return;
+        v.mode = mode;
+        const actions = part("actions");
+        if (mode === "attention") {
+          const retry = button("Try again", "btn primary", () => decide("retry"));
+          fill(actions, button("Stop", "btn danger", stop),
+            total > 1 ? button("Skip this one", "btn", () => decide("skip")) : null, retry);
+          retry.focus();
+        } else if (mode === "active") {
+          actions.replaceChildren(button("Stop", "btn danger", stop));
+        } else {
+          const made = (j.cards || []).filter((c) => c.status === "written" && c.card_number);
+          const done = button("Done", "btn primary", () => dialog.close());
+          fill(actions, made.length
+            ? h("span", { class: "job-made" }, `Card number${made.length === 1 ? "" : "s"}: ` +
+              made.map((c) => c.card_number).join(", ")) : null, done);
+          done.focus();
+        }
+      };
+
+      const schedule = () => {
+        clearTimeout(v.timer);
+        if (dialog.open && active() && !v.acting) {
+          v.timer = setTimeout(poll, document.visibilityState === "visible" ? JOB_POLL_MS : JOB_HIDDEN_POLL_MS);
+        }
+      };
+      async function poll() {
+        const rev = v.rev;
+        try {
+          const r = await api("GET", `api/keycards/jobs/${v.job.id}`);
+          if (rev !== v.rev || !dialog.open) return;
+          v.job = r.job;
+          v.lost = 0;
+        } catch (err) {
+          if (rev !== v.rev || !dialog.open) return;
+          if (err.status === 404) {
+            v.job = { ...v.job, status: "cancelled", phase: "cancelled", message: err.message };
+          } else {
+            v.lost += 1;
+          }
+        }
+        draw();
+        schedule();
+      }
+      async function decide(action) {
+        if (v.acting) return;
+        v.acting = true;
+        v.rev += 1;   // a check on its way would show the job from before this
+        clearTimeout(v.timer);
+        part("actions").classList.add("working");
+        try {
+          v.job = (await api("POST", `api/keycards/jobs/${v.job.id}/${action}`, {})).job;
+        } catch (err) {
+          toast(err.message, true);
+        } finally {
+          v.acting = false;
+          part("actions").classList.remove("working");
+        }
+        if (!dialog.open) return;
+        v.mode = null;
+        draw();
+        schedule();
+      }
+      async function stop() {
+        const words = v.job.status === "needs_attention" ? "Stop here?" :
+          "Stop now? A card being written right now may be left half made: clear it or make it again.";
+        if (await askConfirm(words, "Stop")) await decide("cancel");
+      }
+
+      // Escape doesn't close it while the encoder is working: Stop says what happens to the card.
+      dialog.oncancel = (ev) => { if (active()) ev.preventDefault(); };
+      dialog.onclose = () => {
+        clearTimeout(v.timer);
+        v.rev += 1;
+        resolve(v.job);
+      };
+      draw();
+      dialog.showModal();
+      part("prompt").focus();
+      schedule();
+    });
+  }
+
+  // After a card job: the people (key card counts) and the Key cards list are drawn again.
+  async function afterCardJob() {
+    await load();
+    loadKeyCards(true);
+  }
+
+  // Make key card (Staff tab): their department's key card, on an encoder the admin picks.
+  async function makeKeyCard(m) {
+    const dept = state.departments.find((d) => d.id === m.department_id);
+    if (!dept) throw new Error(`Choose ${m.name}'s department first: their key card comes from it.`);
+    if (dept.card_access == null) {
+      throw new Error(`${dept.name} has no key card set. Edit the department under Departments to choose its doors.`);
+    }
+    const ask = async (current) => {
+      const numbers = (current || []).map((c) => c.card_number).filter(Boolean);
+      const n = current?.length || m.key_cards || 1;
+      return askChoice(`${m.name} already has ${n === 1 ? "an active key card" : `${n} active key cards`}` +
+        `${numbers.length ? ` (No. ${numbers.join(", ")})` : ""}. Replace it, or add another card?`, [
+        ["replace", "Replace their current card", "The new card also cancels the old one at each door it's " +
+          "tapped on, and the old one is marked revoked. Best when it's lost or broken" +
+          (n > 1 ? " (the newest one is replaced)." : ".")],
+        ["add", "Add another card", "Their current card keeps working too."]]);
+    };
+    let mode = null;
+    if (m.key_cards) {
+      mode = await ask(null);
+      if (!mode) return false;
+    }
+    let job;
+    try {
+      job = await postCardJob(`api/staff/${m.id}/keycard`, mode ? { mode } : {});
+    } catch (err) {
+      if (!err.data?.needs_choice) throw err;
+      mode = await ask(err.data.current);   // they got a card meanwhile
+      if (!mode) return false;
+      job = await postCardJob(`api/staff/${m.id}/keycard`, { mode });
+    }
+    if (!job) return false;
+    const final = await showJob(job, `Key card for ${m.name} · ${dept.name}`);
+    await afterCardJob();
+    if (final.status === "done" && mode === "replace") {
+      toast("Done. Have them tap the new card on each door once: that cancels the old card there.");
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------- key cards list (Staff tab)
+
+  const KC_STATE = { active: ["Active", "active"], expired: ["Expired", ""], revoked: ["Revoked", "revoked"],
+    lost: ["Lost", "locked"] };
+  const KC_SOURCE = { dashboard: "Staff tab", staff_app: "staff app" };
+  const LOCKOUT_WORDS = { notice: "lost card notice", replacement: "replacement card", remote: "remote lock-out" };
+  const kc = { state: "active", q: "", oldest: null, seq: 0, remote: null, timer: null };
+
+  function openStaffTab() {
+    if (!wristbandsOn()) return;
+    loadKeyCards(true);
+    if (!wbDoors && state.departments.some((d) => d.card_access?.length)) loadDoors();
+  }
+
+  // Remote lock-out's state, from the last Key cards list (or the settings until then).
+  function remoteInfo() {
+    if (kc.remote) return kc.remote;
+    const on = state.settings.wb_remote_lockout === "1";
+    const tested = Number(state.settings.wb_remote_lockout_tested) || null;
+    return { enabled: on, tested_at: tested, ready: on && !!tested, api: state.settings.wb_remote_lockout_api,
+      why: !on ? "Remote lock-out is turned off (Wristbands settings). It's experimental."
+        : !tested ? "Test remote lock-out on one door first." : null };
+  }
+
+  async function loadKeyCards(reset) {
+    const rows = $("#kc-rows");
+    const seq = ++kc.seq;
+    if (reset) kc.oldest = null;
+    const params = new URLSearchParams({ state: kc.state });
+    if (kc.q) params.set("q", kc.q);
+    if (!reset && kc.oldest) params.set("before", String(kc.oldest));
+    let data;
+    try {
+      data = await api("GET", `api/keycards?${params}`);
+    } catch (err) {
+      if (seq !== kc.seq) return;
+      if (reset) rows.replaceChildren(h("tr", null, h("td", { colspan: "7", class: "empty" }, err.message)));
+      else toast(err.message, true);
+      return;
+    }
+    if (seq !== kc.seq) return;   // a newer filter or search was chosen meanwhile
+    kc.remote = data.remote || null;
+    const cards = data.cards || [];
+    if (reset) {
+      rows.replaceChildren();
+      if (!cards.length) {
+        const what = { active: "No active key cards", expired: "No expired key cards", revoked: "No revoked key cards",
+          lost: "No lost key cards", all: "No key cards made yet" }[kc.state];
+        rows.append(h("tr", null, h("td", { colspan: "7", class: "empty" }, kc.q ? `${what} match.` : `${what}.`)));
+      }
+    }
+    rows.append(...cards.map(keyCardRow));
+    if (cards.length) kc.oldest = cards[cards.length - 1].id;
+    $("#kc-more").hidden = !data.more;
+  }
+
+  // How locking a card out is going: "Locked out of 2 of 5 doors" (or "" if not started).
+  function lockoutText(card) {
+    const lockouts = card.lockouts || [];
+    const done = new Set(lockouts.filter((l) => l.status === "done").map((l) => l.lock_id));
+    const failed = lockouts.filter((l) => l.status === "failed" && !done.has(l.lock_id)).length;
+    const running = card.remote_running || lockouts.some((l) => l.method === "remote" && l.status === "pending");
+    const total = card.doors ? card.doors.length : new Set(lockouts.map((l) => l.lock_id)).size;
+    const parts = [];
+    if (card.state === "lost") {
+      if (card.expires_at <= Date.now() / 1000) parts.push("Expired, so it opens nothing now");
+      else if (!total) parts.push("No doors to lock it out of");
+      else parts.push(`Locked out of ${done.size} of ${plural(total, "door")}`);
+    } else if (lockouts.length) {
+      parts.push(`Cancelled at ${done.size} of ${plural(total, "door")}`);
+    }
+    if (running) parts.push("remote lock-out running");
+    if (failed) parts.push(`${failed} remote failed`);
+    return parts.join(", ");
+  }
+
+  function keyCardRow(card) {
+    const [label, cls] = KC_STATE[card.state] || [card.state, ""];
+    const progress = lockoutText(card);
+    const actions = [];
+    if (card.state === "active") {
+      actions.push(h("button", { type: "button", class: "btn", onclick: () => run(() => revokeCard(card)) }, "Revoke"),
+        h("button", { type: "button", class: "btn danger", onclick: () => run(() => reportLost(card)) }, "Report lost"));
+    } else if (card.state === "lost" || card.lockouts?.length) {
+      actions.push(h("button", { type: "button", class: card.state === "lost" ? "btn primary" : "btn",
+        onclick: () => run(() => openCardDialog(card.id)) }, card.state === "lost" ? "Lock out…" : "Doors"));
+    }
+    const stateBy = card.state_by && (card.state === "revoked" || card.state === "lost")
+      ? `${card.state === "lost" ? "Reported" : "Revoked"} ${card.state_at ? ago(card.state_at).toLowerCase() : ""} by ${card.state_by}`
+      : "";
+    return h("tr", { class: card.state === "lost" ? "kc-lost" : null },
+      h("td", null, card.holder, h("div", { class: "sub" },
+        [card.department, card.name && card.name !== card.holder ? `Card says ${card.name}` : ""].filter(Boolean).join(" · "))),
+      h("td", { class: "nowrap kc-number" }, card.card_number,
+        card.cancelled_card ? h("div", { class: "sub" }, `Cancels ${card.cancelled_card}`) : null),
+      h("td", null, card.summary, card.allow_lockout ? h("div", { class: "sub" }, "Opens deadbolted doors") : null),
+      h("td", { class: "nowrap" }, card.made_at ? when(card.made_at) : "",
+        h("div", { class: "sub" }, `${card.made_by}${KC_SOURCE[card.source] ? ` · ${KC_SOURCE[card.source]}` : ""}`)),
+      h("td", { class: "nowrap" }, card.expires_label || when(card.expires_at)),
+      h("td", null, h("span", { class: `badge ${cls}`.trim() }, label),
+        stateBy ? h("div", { class: "sub" }, stateBy) : null,
+        progress ? h("div", { class: `sub ${card.state === "lost" ? "kc-progress" : ""}` }, progress) : null),
+      h("td", { class: "kc-actions" }, actions));
+  }
+
+  // Show one person's active key cards: their name in the search box.
+  function showKeyCardsFor(m) {
+    setKeyCardFilter("active");
+    $("#kc-search").value = m.name;
+    kc.q = m.name;
+    loadKeyCards(true);
+    $("#keycards-section").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function setKeyCardFilter(value) {
+    kc.state = value;
+    document.querySelectorAll("#kc-filter button").forEach((b) =>
+      b.setAttribute("aria-checked", String(b.dataset.state === value)));
+  }
+
+  document.querySelectorAll("#kc-filter button").forEach((b) => b.addEventListener("click", () => {
+    setKeyCardFilter(b.dataset.state);
+    loadKeyCards(true);
+  }));
+  $("#kc-search").addEventListener("input", (e) => {
+    clearTimeout(kc.timer);
+    kc.timer = setTimeout(() => {
+      kc.q = e.target.value.trim().slice(0, 60);
+      loadKeyCards(true);
+    }, 250);
+  });
+  $("#kc-search").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  $("#kc-refresh").addEventListener("click", () => loadKeyCards(true));
+  $("#kc-more").addEventListener("click", () => loadKeyCards(false));
+
+  // Revoke (card in hand): the encoder waits for that exact card and clears it.
+  async function revokeCard(card) {
+    if (!await askConfirm(`Revoke card ${card.card_number} (${card.holder})? You need the card itself: put it ` +
+      "on the encoder and it's cleared, so it opens nothing (it can be used again for a new card). If you " +
+      "don't have it, use Report lost instead.", "Revoke")) return false;
+    const job = await postCardJob(`api/keycards/${card.id}/revoke`, {});
+    if (!job) return false;
+    const final = await showJob(job, `Revoke card ${card.card_number} · ${card.holder}`, { expiry: false });
+    await afterCardJob();
+    if (final.status === "done") toast(`Card ${card.card_number} is cleared and revoked.`);
+    return false;
+  }
+
+  async function reportLost(card) {
+    if (!await askConfirm(`Report card ${card.card_number} (${card.holder}) lost? A lost card keeps opening its ` +
+      `doors until it expires (${card.expires_label || when(card.expires_at)}) unless it's locked out of each ` +
+      "one. Next, choose how.", "Report lost")) return false;
+    const { card: lost } = await api("POST", `api/keycards/${card.id}/lost`, {});
+    loadKeyCards(true);
+    load();
+    return openCardDialog(lost.id, lost);
+  }
+
+  // ---------------------------------------------------------------- a lost card: lock it out
+
+  const LOST_POLL_MS = 5000;   // while a remote lock-out runs in the background
+  let cardView = null;         // { id, card, timer } while the card dialog is open
+
+  async function openCardDialog(id, card = null) {
+    const dialog = $("#card-dialog");
+    cardView = { id, card: card?.doors ? card : null, timer: null };
+    if (!cardView.card) cardView.card = (await api("GET", `api/keycards/${id}`)).card;
+    drawCardDialog();
+    if (!dialog.open) dialog.showModal();
+    scheduleCardPoll();
+    return false;
+  }
+
+  $("[data-close]", $("#card-dialog")).addEventListener("click", () => $("#card-dialog").close());
+  $("#card-dialog").addEventListener("close", () => {
+    clearTimeout(cardView?.timer);
+    cardView = null;
+    loadKeyCards(true);
+  });
+
+  function scheduleCardPoll() {
+    clearTimeout(cardView?.timer);
+    const c = cardView?.card;
+    if (!c || !(c.remote_running || c.lockouts?.some((l) => l.method === "remote" && l.status === "pending"))) return;
+    const view = cardView;
+    view.timer = setTimeout(async () => {
+      try {
+        const { card } = await api("GET", `api/keycards/${view.id}`);
+        if (cardView !== view) return;
+        view.card = card;
+        drawCardDialog();
+      } catch { /* tried again next time */ }
+      if (cardView === view) scheduleCardPoll();
+    }, LOST_POLL_MS);
+  }
+
+  async function refreshCardDialog(card) {
+    if (!cardView) return;
+    cardView.card = card || (await api("GET", `api/keycards/${cardView.id}`)).card;
+    drawCardDialog();
+    scheduleCardPoll();
+  }
+
+  // A card job started from the card dialog (notice or replacement), then the dialog drawn again.
+  async function cardDialogJob(path, title) {
+    const job = await postCardJob(path, {});
+    if (!job) return false;
+    await showJob(job, title);
+    await refreshCardDialog();
+    load();
+    return false;
+  }
+
+  function drawCardDialog() {
+    const dialog = $("#card-dialog");
+    const card = cardView.card;
+    const lost = card.state === "lost";
+    const expired = card.expires_at <= Date.now() / 1000;
+    $("[data-title]", dialog).textContent = `${lost ? "Lost card" : "Card"} ${card.card_number} · ${card.holder}`;
+    const lockouts = card.lockouts || [];
+    const doors = card.doors || [];
+    const byDoor = new Map(doors.map((d) => [d.id, { door: d, rows: [] }]));
+    for (const l of lockouts) {
+      if (!byDoor.has(l.lock_id)) byDoor.set(l.lock_id, { door: { id: l.lock_id, name: l.door, has_gateway: false }, rows: [] });
+      byDoor.get(l.lock_id).rows.push(l);
+    }
+    const has = (method) => lockouts.some((l) => l.method === method);
+    const tick = (l) => {
+      const box = h("input", { type: "checkbox", checked: l.status === "done" });
+      box.addEventListener("change", () => run(async () => {
+        try {
+          const { card: next } = await api("PATCH", `api/keycards/${card.id}/lockouts/${l.lock_id}`,
+            { method: l.method, done: box.checked });
+          await refreshCardDialog(next);
+        } catch (err) {
+          box.checked = !box.checked;
+          throw err;
+        }
+      }));
+      return h("label", { class: "check" }, box, l.method === "notice" ? "Notice tapped" : "Replacement tapped");
+    };
+    const doorRows = [...byDoor.values()].map(({ door, rows }) => {
+      const safe = rows.some((l) => l.status === "done");
+      const remote = rows.find((l) => l.method === "remote");
+      return h("div", { class: `lo-row ${safe ? "safe" : ""}`.trim() },
+        h("div", { class: "entity-text" },
+          h("div", { class: "entity-name" }, door.name, door.has_gateway ? h("small", { class: "wb-count" }, " · gateway") : null),
+          h("div", { class: "entity-id lo-state" }, safe
+            ? `Locked out (${rows.filter((l) => l.status === "done").map((l) => LOCKOUT_WORDS[l.method]).join(", ")})`
+            : lost && !expired ? "Still opens it" : ""),
+          remote && remote.status !== "done"
+            ? h("div", { class: `via ${remote.status === "failed" ? "access-note" : "pending-note"}` },
+              `Remote lock-out: ${remote.detail || remote.status}`) : null),
+        h("div", { class: "lo-ticks" }, rows.filter((l) => l.method !== "remote").map(tick)));
+    });
+    const gateways = doors.filter((d) => d.has_gateway &&
+      !lockouts.some((l) => l.lock_id === d.id && l.method === "remote" && l.status === "done"));
+    const remote = remoteInfo();
+    const running = card.remote_running || lockouts.some((l) => l.method === "remote" && l.status === "pending");
+
+    const intro = !lost ? (card.state === "revoked" && has("replacement")
+      ? "This card was replaced. Each door stops accepting it once the replacement card is tapped there: tick " +
+        "the doors off as that happens."
+      : `This card is ${card.state}.`)
+      : expired ? "This card has expired, so it opens nothing now. There's nothing more to do."
+      : `Reported lost${card.state_by ? ` by ${card.state_by}` : ""}${card.state_at ? ` ${ago(card.state_at).toLowerCase()}` : ""}. ` +
+        `Until it expires (${card.expires_label || when(card.expires_at)}) it still opens the doors below. Lock it ` +
+        "out of each one in any of these ways; a door is safe once one of them is done there.";
+
+    const section = (head, ...body) => h("section", { class: "lo-method" }, h("h3", null, head), ...body);
+    const methods = lost && !expired ? [
+      section("1. Lost card notice",
+        h("p", { class: "hint" }, "Write a notice onto a spare card (a blank card, or a hotel card nobody " +
+          "uses). Tap it on each door below once, then tick the door off. From then on that door refuses the " +
+          "lost card."),
+        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn", onclick: () =>
+          run(() => cardDialogJob(`api/keycards/${card.id}/notice`, `Lost card notice for ${card.card_number}`)) },
+        has("notice") ? "Write another notice card" : "Write a notice card"))),
+      section("2. Replacement card",
+        h("p", { class: "hint" }, `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
+          "time it's tapped on a door, that door refuses the lost card. Tick each door off once it's been tapped. " +
+          "It uses their department's key card (or what the lost card opened)."),
+        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn", onclick: () =>
+          run(() => cardDialogJob(`api/keycards/${card.id}/replace`, `Replacement card for ${card.holder}`)) },
+        "Make a replacement card"))),
+      section("3. Remote lock-out (experimental)",
+        h("p", { class: "hint" }, "For doors with a gateway: TT Hotel tells the door to refuse this card number, " +
+          "without anyone walking there. It costs 2 TT Hotel requests per door."),
+        h("p", { class: "wb-warn" }, "Permanent: the card number is retired on those doors for good. That " +
+          "card can never open them again, even if it's found, cleared and made again."),
+        !remote.ready ? h("p", { class: "hint" }, remote.why || "Remote lock-out isn't ready.", " ",
+          remote.enabled ? h("button", { type: "button", class: "linkish", onclick: () => openRemoteTest() }, "Test remote lock-out")
+            : h("button", { type: "button", class: "linkish", onclick: () => { $("#card-dialog").close(); selectTab("wristbands"); } },
+              "Wristbands settings")) : null,
+        h("div", { class: "lo-actions" }, h("button", {
+          type: "button", class: "btn danger", disabled: !remote.ready || running || !gateways.length,
+          title: !remote.ready ? remote.why : !gateways.length ? "None of its doors has a gateway still to do" : null,
+          onclick: () => run(() => remoteLockOut(card, gateways)),
+        }, running ? "Remote lock-out running…"
+          : gateways.length ? `Lock out of ${plural(gateways.length, "gateway door")} remotely` : "No gateway doors left"))),
+    ] : [];
+
+    fill($("[data-body]", dialog),
+      h("p", { class: "hint lo-intro" }, intro),
+      h("div", { class: "lo-summary" }, card.summary, card.cancelled_card ? ` · cancels card ${card.cancelled_card}` : ""),
+      byDoor.size ? h("div", { class: "lo-doors" }, doorRows)
+        : h("p", { class: "hint" }, "None of the doors this card was made for are in TT Hotel's door list now."),
+      ...methods);
+  }
+
+  async function remoteLockOut(card, gateways) {
+    if (!await askConfirm(`Lock card ${card.card_number} out of ${plural(gateways.length, "door")} through TT Hotel? ` +
+      "This is experimental and permanent: the number is retired on those doors for good.", "Lock out remotely")) {
+      return false;
+    }
+    const { card: next } = await api("POST", `api/keycards/${card.id}/lockout`, {});
+    await refreshCardDialog(next);
+    toast("Remote lock-out started. Each door shows how it went.");
+    return false;
+  }
+
+  // ---------------------------------------------------------------- remote lock-out: the test
+
+  function renderRemoteStatus() {
+    const s = state.settings;
+    const tested = Number(s.wb_remote_lockout_tested) || 0;
+    const format = s.wb_remote_lockout_api === "plain" ? "as printed" : "reversed";
+    $("#wb-remote-status").textContent = s.wb_remote_lockout !== "1" ? "Turned off."
+      : tested ? `Tested ${fullDate(tested)} (number format: ${format}): it can be used on lost cards.`
+      : "On, not tested yet: it can't be used on lost cards until a test card is refused at a door.";
+  }
+
+  $("#wb-remote-test").addEventListener("click", () => run(async () => {
+    if (wbDirty) throw new Error("Click Save wristband settings first: the test uses what's saved.");
+    if (state.settings.wb_remote_lockout !== "1") {
+      throw new Error("Tick Offer remote lock-out for lost cards and save first.");
+    }
+    return openRemoteTest();
+  }));
+
+  const remoteRun = { step: "choose", doorId: null, message: "" };
+
+  async function openRemoteTest() {
+    const dialog = $("#remote-dialog");
+    if (!wbDoors) await loadDoors();
+    if (!dialog.open) {
+      remoteRun.step = "choose";
+      remoteRun.message = "";
+      dialog.showModal();
+    }
+    drawRemoteTest();
+    return false;
+  }
+
+  $("[data-close]", $("#remote-dialog")).addEventListener("click", () => $("#remote-dialog").close());
+  $("#remote-dialog").addEventListener("close", () => {
+    kc.remote = null;   // the settings say how it stands until the Key cards list is read again
+    load().then(() => { renderRemoteStatus(); if (cardView) drawCardDialog(); });
+  });
+
+  function drawRemoteTest() {
+    const dialog = $("#remote-dialog");
+    const body = $("[data-body]", dialog);
+    const doors = (wbDoors || []).filter((d) => d.active && d.has_gateway);
+    const door = doors.find((d) => d.id === remoteRun.doorId);
+    const name = door ? doorName(door) : "the door";
+    const format = state.settings.wb_remote_lockout_api === "plain" ? "as printed" : "reversed";
+    const step = (n, text) => h("div", { class: "rt-step" }, h("span", { class: "rt-n" }, String(n)), h("div", null, text));
+    const note = remoteRun.message ? h("p", { class: "wb-warn" }, remoteRun.message) : null;
+    const buttons = (...b) => h("div", { class: "lo-actions" }, ...b);
+    const go = (stepName, message = "") => { remoteRun.step = stepName; remoteRun.message = message; drawRemoteTest(); };
+    const intro = h("p", { class: "hint" }, "Checks at one door that remote lock-out works with your locks, before " +
+      "it's used on a lost card. You need a blank card and a few minutes at a door with a gateway. The test card's " +
+      `number is retired on that door for good, which is fine for a test card. Number format now: ${format}.`);
+
+    if (remoteRun.step === "choose") {
+      if (!doors.length) {
+        body.replaceChildren(intro, h("p", { class: "wb-warn" }, "None of your doors has a gateway, so remote " +
+          "lock-out can't be used. Use a lost card notice or a replacement card instead."));
+        return;
+      }
+      const select = h("select", { "aria-label": "Door to test" },
+        doors.map((d) => h("option", { value: d.id, selected: d.id === remoteRun.doorId }, doorName(d))));
+      fill(body, intro, note,
+        step(1, "Choose a door with a gateway, and make a test card for it (it works for a day)."),
+        h("label", { class: "rt-door" }, "Door", select),
+        buttons(h("button", { type: "button", class: "btn primary", onclick: () => run(async () => {
+          remoteRun.doorId = Number(select.value);
+          const job = await postCardJob("api/keycards/remote-test/start", { door_id: remoteRun.doorId });
+          if (!job) return false;
+          const final = await showJob(job, "Remote lock-out test card");
+          if (final.status === "done" && final.cards?.some((c) => c.status === "written")) go("made");
+          else go("choose", "The test card wasn't made. Try again.");
+          return false;
+        }) }, "Make test card")));
+    } else if (remoteRun.step === "made") {
+      fill(body, intro, note,
+        step(2, `Tap the test card on ${name}. It should open.`),
+        buttons(h("button", { type: "button", class: "btn", onclick: () => go("choose",
+          "If the test card doesn't open the door, check the door's time and that it's the right door, then make " +
+          "another test card.") }, "It didn't open"),
+        h("button", { type: "button", class: "btn primary", onclick: () => go("ready") }, "It opened")));
+    } else if (remoteRun.step === "ready") {
+      const lockBtn = h("button", { type: "button", class: "btn primary danger-fill" }, "Lock the test card out");
+      lockBtn.addEventListener("click", () => run(async () => {
+        lockBtn.disabled = true;
+        lockBtn.textContent = "Asking TT Hotel…";
+        try {
+          await api("POST", "api/keycards/remote-test/lockout", {});
+        } catch (err) {
+          go("ready", `That didn't work: ${err.message}`);
+          return false;
+        }
+        go("check");
+        return false;
+      }));
+      fill(body, intro, note,
+        step(3, `Now lock the test card out of ${name} through TT Hotel (2 TT Hotel requests). If the door's ` +
+          "gateway is busy, wait a few minutes and click it again."),
+        buttons(lockBtn));
+    } else if (remoteRun.step === "check") {
+      fill(body, intro, note,
+        step(4, `Wait a minute, then tap the test card on ${name} again. Did the door refuse it?`),
+        buttons(h("button", { type: "button", class: "btn", onclick: () => run(async () => {
+          await api("POST", "api/keycards/remote-test/failed", {});
+          await load();
+          const next = state.settings.wb_remote_lockout_api === "plain" ? "as printed" : "reversed";
+          go("choose", `Switched the number format to ${next}. Make a new test card and try again. If neither ` +
+            "format works, remote lock-out doesn't work with these locks: use notice or replacement cards.");
+          return false;
+        }) }, "It still opened"),
+        h("button", { type: "button", class: "btn primary", onclick: () => run(async () => {
+          await api("POST", "api/keycards/remote-test/passed", {});
+          kc.remote = null;
+          await load();
+          go("done");
+          return false;
+        }) }, "It was refused")));
+    } else {
+      body.replaceChildren(h("p", { class: "rt-done" }, "✓ Remote lock-out works with your locks."),
+        h("p", { class: "hint" }, "It can now be used on lost cards (Staff tab, Key cards, Lock out). Remember: " +
+          "a number locked out remotely is retired on that door for good. Throw the test card away or clear it."),
+        buttons(h("button", { type: "button", class: "btn primary", onclick: () => dialog.close() }, "Done")));
+    }
+  }
 
   // ---------------------------------------------------------------- layout
 
@@ -3325,7 +4429,8 @@
 
   // ---------------------------------------------------------------- backup and transfer
 
-  const KIND_NAMES = { layout: "a layout", roles: "roles", staff: "staff members", backup: "a full backup" };
+  const KIND_NAMES = { layout: "a layout", roles: "roles", staff: "staff members", departments: "departments",
+    backup: "a full backup" };
 
   // Pick between a few labelled options; resolves to the chosen key, or null on Cancel.
   function askChoice(message, choices) {
@@ -3428,12 +4533,13 @@
     return false;
   }
 
-  // Roles and staff are added to what's here; same names get the admin's choice.
+  // Roles, departments and staff are added to what's here; same names get the admin's choice.
   async function importNamed(kind, file) {
-    const list = (kind === "roles" ? file.roles : file.staff) || [];
-    const have = new Set((kind === "roles" ? state.roles : state.staff).map((x) => x.name.toLowerCase()));
-    const clashes = list.filter((x) => have.has(String(x.name || "").trim().toLowerCase())).map((x) => x.name);
-    const word = kind === "roles" ? ["role", "roles"] : ["staff member", "staff members"];
+    const list = Array.isArray(file[kind]) ? file[kind] : [];
+    const have = new Set((state[kind] || []).map((x) => x.name.toLowerCase()));
+    const clashes = list.filter((x) => have.has(String(x?.name || "").trim().toLowerCase())).map((x) => x.name);
+    const word = { roles: ["role", "roles"], departments: ["department", "departments"] }[kind]
+      || ["staff member", "staff members"];
     let mode = "copy";
     if (clashes.length) {
       const shown = clashes.slice(0, 5).join(", ") + (clashes.length > 5 ? `, and ${clashes.length - 5} more` : "");
@@ -3443,6 +4549,7 @@
         ["copy", "Keep both", "Add the file's version with “(imported)” after the name."],
         ["replace", "Replace them", kind === "roles"
           ? "Use the file's access settings. Phones keep their role."
+          : kind === "departments" ? "Use the file's smart group, role and key card. People stay in them."
           : "Use the file's PIN and settings. Anyone whose PIN changes is signed out, people you've " +
             "turned off stay off, and Home Assistant links are kept.", "danger"],
       ]);
@@ -3453,7 +4560,7 @@
     // A role open in the editor that the import just replaced must show the imported access,
     // or saving it would quietly put the old access back.
     let reloaded = false;
-    if (editing && editing.kind === (kind === "roles" ? "role" : "person") && mode === "replace" &&
+    if (kind !== "departments" && editing && editing.kind === (kind === "roles" ? "role" : "person") && mode === "replace" &&
         clashes.some((n) => String(n).trim().toLowerCase() === editing.name.trim().toLowerCase())) {
       editing.dirty = false;
       refreshEditing();

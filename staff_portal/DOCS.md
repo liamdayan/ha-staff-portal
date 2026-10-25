@@ -586,6 +586,113 @@ encoder's key never reach a browser or phone: the add-on talks to TT Hotel and t
 itself. The Client Secret and password are never shown again after saving (leave the boxes blank
 to keep them) and are never in backups.
 
+## Departments and staff key cards
+
+### Departments
+
+On the **Staff** tab, under **Departments**, click **Add department** (Housekeeping, Front Desk,
+Maintenance…). Each one has:
+
+- **Connecteam smart group** (optional): with **Add everyone from Connecteam** on (see the
+  Connecteam section), people in that smart group join this department. Someone in several of
+  these smart groups gets the first department in the list: drag departments to change the order.
+- **Role**: given to people who join it (or **Leave their role as it is**).
+- **Key card**: what a key card made with **Make key card** opens (every door, whole buildings,
+  whole floors or single doors, like a staff card), how many days it lasts, and whether it opens
+  doors that are deadbolted from inside.
+
+Pick each person's department on their card on the Staff tab (or in **Edit**). Deleting a
+department leaves its people with no department. Departments are in backups, and can be exported
+and imported on the Backup tab (roles are matched by name).
+
+### Make key card
+
+Every person's card on the Staff tab says what **Make key card** would make for them, from their
+department. Click it, have a blank card (or a card to reuse) ready at the front-desk encoder, and
+the dashboard walks you through it like the staff app: place the card, wait, take it off, with
+**Try again** and **Stop** if it doesn't work. With more than one card encoder, it asks which one.
+The card is recorded as made by you, for that person.
+
+If the person already has an active key card, you choose:
+
+- **Replace their current card:** the new card also carries a cancellation of the old one. The
+  first time it's tapped on a door, that door refuses the old card. The old card is marked
+  revoked. Best for a lost or broken card.
+- **Add another card:** their current card keeps working too.
+
+### The Key cards list
+
+**Key cards** on the Staff tab lists every staff key card, made here or at a front-desk computer
+(cards made in the staff app are matched to the person by name), newest first. Filter by
+**Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or card number. Each
+row shows who it's for, the card number, what it opens, who made it and when, when it stops
+working, its state and, for a lost card, how many of its doors it's been locked out of.
+
+- **Revoke** (you have the card): choose the encoder, put that card on it, and it's cleared, so
+  it opens nothing; it can be used again for a new card. Only that exact card is cleared: any
+  other card gets "That's card 123…, not 456…" and is left as it is.
+- **Report lost** (you don't have it): the card is marked lost and the next screen shows each
+  door it opens, which it keeps opening until it expires unless it's locked out there.
+
+People whose role may **see everyone's cards** can also revoke a staff card (with it in hand)
+from the card log in the staff app, which shows each staff card as Active, Expired, Revoked or
+Lost. Reporting a card lost and locking it out are done in the dashboard.
+
+### Lost cards
+
+TT Hotel locks check cards on their own, offline, so a lost card can't simply be switched off: each
+door has to be told to refuse it. A door is safe once any one of these has been done there. The
+lost card's screen (**Lock out…** in the Key cards list) lists its doors with what's been done.
+
+1. **Lost card notice.** **Write a notice card** writes a cancellation of the lost card onto a spare
+   card (a blank card, or a hotel card nobody uses; it's cleared first, so the notice opens no
+   doors). Walk it to each door on the list and tap it once, then tick **Notice tapped** for that
+   door. From then on that door refuses the lost card. **Look up** in the staff app shows what a
+   notice card cancels.
+2. **Replacement card.** **Make a replacement card** makes the person a new key card (their
+   department's, or what the lost card opened) that also carries the cancellation. Each door
+   refuses the lost card once the new card has been tapped there: tick **Replacement tapped** as
+   that happens.
+3. **Remote lock-out (experimental, off by default).** For doors with a gateway, TT Hotel can tell
+   the door to refuse the card number without anyone walking there. See below.
+
+Once the card's end date has passed it opens nothing, so there's nothing more to do.
+
+### Remote lock-out (experimental)
+
+TT Hotel's documentation says that deleting a card from a lock through its API makes the lock
+refuse that card number from then on, encoder-made cards included. Staff Access uses that: for
+each of the lost card's doors with a gateway, it adds the card number to the lock (starting a
+year from now and lasting a day, so the card can't open anything while it's briefly there), then
+deletes it.
+
+**It's permanent.** A card number locked out remotely is retired on that door for good: that
+card can never open it again, even if it's found, cleared and made again. Throw such cards away.
+
+To turn it on:
+
+1. On the **Wristbands** tab, under **Lost key cards: remote lock-out**, tick **Offer remote
+   lock-out for lost cards** and save.
+2. Click **Test remote lock-out** and follow the steps with a blank card at a door with a gateway:
+   make a test card for that door, tap it (it should open), click **Lock the test card out**, wait
+   a minute and tap it again. If the door refused it, click **It was refused**: remote lock-out
+   can now be used. If it still opened, click **It still opened**: Staff Access switches the
+   **Card number format** (reversed, which TT Hotel recommends for encoder cards, or as printed)
+   and you test again. If neither works, these locks don't support it: use notice or replacement
+   cards.
+
+Until it's been tested (and again after the number format changes, including by restoring a
+backup with the other format), the button on a lost card
+is shown but greyed out, saying why. Once tested, **Lock out of N gateway doors remotely** works
+door by door in the background, and each door shows how it went.
+
+TT Hotel requests: 2 per gateway door, only when you click it, within the same monthly limits as
+the rest of Wristbands. Doors go one at a time, at most about 10 a minute, leaving room for
+wristbands and key cards. A door whose gateway is busy or offline is tried again after the others,
+at most 3 times, 5 minutes apart. A door tried before is checked for a leftover enrolment first
+(one more request), so a card is never added to a lock twice. A restart of the add-on stops a
+lock-out that's running; start it again from the lost card's screen.
+
 ## Connecteam: add staff and require clocking in (optional)
 
 If you use [Connecteam](https://connecteam.com) for time tracking, Staff Access can add staff from
@@ -635,6 +742,39 @@ How clocked-in sign-in works:
 - Turning off **Link staff to Connecteam** lets everyone sign in with their PIN again, without
   removing the links.
 
+### Add everyone from Connecteam
+
+Instead of adding people one by one, tick **Add everyone from Connecteam** under **Settings →
+Connecteam** and save. Every active Connecteam user then becomes a staff member here:
+
+- Named as in Connecteam ("First Last"; if someone here already has that name, "(2)" is added).
+- Their PIN is their Connecteam kiosk code when it's 4 to 8 digits and nobody else here uses it.
+  Otherwise they're added **turned off**, and their card says **No usable kiosk code in
+  Connecteam**: give them a PIN with **Edit** and tick **Can sign in**. If their kiosk code changes
+  in Connecteam, their PIN follows it (and they're signed out), unless you've given them a
+  different PIN.
+- Their department comes from their Connecteam smart groups (Staff tab, **Departments**), and
+  their role from the department, if it sets one. Someone who leaves the smart group leaves its
+  department (and the role it gave them); a department without a smart group, chosen by hand,
+  stays. Once you change someone's role by hand, the sync leaves their role alone.
+- People archived or removed in Connecteam are turned off (and signed out), never deleted. If they
+  come back, they're turned on again. Someone you turn off yourself stays off.
+- People you added by hand are never changed. If you delete someone the sync added, the next sync
+  adds them again: turn them off instead. For the same reason they can't be unlinked from
+  Connecteam while this is ticked.
+
+The sync runs about once an hour while this is ticked, soon after you save the settings, and when
+you click **Sync staff now** (on the Staff tab or in Settings; at most once a minute). It uses the
+same request limits as the time clock checks (below) and never runs while Connecteam is paused or
+stopped. The Staff tab says when it last ran and what changed, and each sync that changes
+something is in **Activity**.
+
+**Clocking in, person by person.** **People added this way must be clocked in to sign in** (ticked
+by default) sets this for people the sync adds. You can change it for anyone linked to Connecteam,
+however they were added, with the **Must be clocked in to sign in** switch on their card on the
+Staff tab (or in **Edit**). Their card shows **Must be clocked in** or **Clock-in not required**.
+Once you've changed it for someone, the sync never changes it back.
+
 ### Staying within Connecteam's API limits
 
 Connecteam limits API requests **per account**, shared by every integration you use (Expert plan:
@@ -645,6 +785,10 @@ a small, steady share:
   active person must be clocked in. Otherwise it sends nothing.
 - Each check is one request per active time clock. The list of time clocks is reused for 6 hours
   and the user list for 5 minutes. The access token lasts 24 hours (one more request a day).
+- **Add everyone from Connecteam** reads the user list (one request for up to 500 people) about
+  once an hour, after the add-on starts, after saving the settings and on **Sync staff now** (at
+  most once a minute). The list of smart groups is only read when you edit a department, and
+  reused for 6 hours. Nothing is asked on page loads.
 - With one time clock, hourly checks are 24 requests a day. Add one for each sign-in or control
   by someone the last check didn't find clocked in, typically the start of each shift. With many
   time clocks it checks less often if needed, so regular checks stay under 15% of your daily limit.
@@ -787,8 +931,10 @@ that back:
   can't bring back a lost phone you revoked, and an edited file can't add a working phone.
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
 - The Connecteam Client Secret and the TT Hotel Client Secret and password are never in a backup,
-  and a restore never changes them. Wristband settings, door names and roles' wristband rules are
-  included; the card log stays as it is.
+  and a restore never changes them. Wristband settings, door names, roles' wristband rules,
+  departments and each person's department and Connecteam sync details are included; the card log
+  and key cards stay as they are. Whether remote lock-out was tested is never restored: test it
+  again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - The activity log stays as it is.
@@ -796,15 +942,16 @@ that back:
   **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a restore.
 - A damaged file or one from a newer version is refused, and nothing changes.
 
-**Layout, roles and staff** can each be exported and imported on their own:
+**Layout, roles, staff and departments** can each be exported and imported on their own:
 
 - **Import layout** loads the file into the Layout tab so you can check it, then click
   **Save layout**. Whole-area items are matched to your areas by name.
-- **Import roles** and **Import staff** add to what's there. If a name already exists, you
-  choose to **skip** it (the choice that's selected), **keep both** (the imported one gets
-  "(imported)" after its name), or **replace** it. Areas, roles, pages and page groups are matched
-  by name, and so are phones (for staff). Anything with no match here is listed after the import.
-  Pages with no match are left out, never replaced by every page.
+- **Import roles**, **Import staff** and **Import departments** add to what's there. If a name
+  already exists, you choose to **skip** it (the choice that's selected), **keep both** (the
+  imported one gets "(imported)" after its name), or **replace** it. Areas, roles, pages and page
+  groups are matched by name, and so are phones and departments (for staff). Anything with no
+  match here is listed after the import. Pages with no match are left out, never replaced by every
+  page.
 - Replacing staff uses the file's PINs, roles, pages and own settings, and anyone whose PIN
   changes is signed out. Someone you've turned off stays off, even if the file has them on. A file
   from before 0.7.0 has no roles or own settings for people, so replacing from one leaves theirs as

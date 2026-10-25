@@ -744,8 +744,13 @@ body.with-tabs .toast { bottom: calc(env(safe-area-inset-bottom) + 76px); }
 }
 .wb-badge.alert { background: var(--alert-bg); color: var(--alert); }
 .wb-badge.live { background: var(--on-bg); color: var(--text); }
+.wb-badge.ok { background: var(--on-bg); color: var(--text); }   /* an active staff card */
 .wb-log-detail { display: grid; gap: 10px; padding: 0 10px 14px; }
 .wb-log-detail .btn.primary { justify-self: start; margin-top: 0; }
+/* Revoke buttons under a staff card's details (people who may see every card) */
+.wb-log-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wb-log-actions .btn { margin-top: 0; }
+.wb .btn.working { opacity: 0.6; pointer-events: none; }   /* a Revoke on its way */
 .wb-rows .reading-row { min-height: 40px; padding: 8px 0; }
 .wb-more { display: block; margin: 4px auto 0; }
 @media (max-width: 420px) {

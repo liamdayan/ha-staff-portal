@@ -12,7 +12,7 @@ from aiohttp import WSMsgType, web
 
 import encoder
 from encoder import (BUSY, NO_REPLY, UNREACHABLE, EncoderError, Encoders, SNWebSocket,
-                     card_records)
+                     card_cancellations, card_records)
 from encoder_sim import EncoderSim
 
 MAC = "C540E09C8CC1"
@@ -82,6 +82,18 @@ class Harness:
                              "cards": [{"seq": s, "status": "pending", "card_number": None,
                                         "error": None} for s in range(1, count + 1)]}
         self.runner.submit(row, port=port, sectors="0000000000011111", card_wait=card_wait)
+        return job_id
+
+    def submit_kind(self, kind, card_wait=5.0, **fields):
+        """A revoke or notice job (or a write job with extra fields), for one staff card."""
+        job_id = self.next_id
+        self.next_id += 1
+        row = {"id": job_id, "card_type": "staff", "name": "Smith", "count": 1, "kind": kind,
+               "status": "queued", **fields}
+        self.jobs[job_id] = {"status": "queued", "message": None, "finished_at": None,
+                             "cards": [{"seq": 1, "status": "pending", "card_number": None,
+                                        "error": None}]}
+        self.runner.submit(row, sectors="0000000000011111", card_wait=card_wait)
         return job_id
 
     def statuses(self, job_id):
@@ -764,3 +776,228 @@ def test_records_read_from_cards_in_one_shape():
         {"level": None, "building": None, "floor": None, "mac": None, "starts_at": None,
          "expires_at": None, "allow_lockout": None},
     ]
+
+
+# ---------------------------------------------------------------- revoke, notice, replacement
+
+LOST = "3661413478"
+LOST_UNTIL = int(time.time()) + 30 * 86400
+
+
+def test_revoke_clears_only_the_card_asked_for():
+    async def scenario(h):
+        made = h.submit(card_type="staff")
+        target = h.sim.place_card(initialized=True)
+        await h.status(made, "done")
+        await h.released()
+        h.sim.remove_card()
+        job_id = h.submit_kind("revoke", card_number=target)
+        await h.live(job_id, "waiting_for_card", 1, f"Place card {target} on the encoder")
+        other = h.sim.place_card(initialized=True)
+        await h.live(job_id, "waiting_for_card", 1, f"That's card {other}, not {target}. Place "
+                                                    f"card {target} on the encoder")
+        await asyncio.sleep(0.05)
+        assert "CE_ClearCard" not in list(h.sim.calls)[-5:]
+        h.sim.place_card(target)
+        job = await h.status(job_id, "done")
+        assert job["cards"][0]["status"] == "cleared"
+        assert job["cards"][0]["card_number"] == target and job["cards"][0]["written_at"]
+        assert job["message"] == f"Card {target} was cleared. It no longer opens any doors."
+        assert h.sim.cards[target]["records"] == [] and h.sim.cards[other]["records"] == []
+        assert h.runner.live(job_id)["kind"] == "revoke"
+        await h.released()
+        # The card just cleared isn't written over unseen, but can be made again once lifted
+        # off and put back.
+        again = h.submit(card_type="staff")
+        await h.live(again, "waiting_for_card", 1, "Take the card you just cleared off the "
+                                                   "encoder")
+        h.sim.remove_card()
+        await h.live(again, "waiting_for_card", 1, "Place the card on the encoder")
+        h.sim.place_card(target)
+        await h.status(again, "done")
+    run(scenario)
+
+
+def test_revoke_wrong_card_left_on_needs_attention_and_blank_cards_are_not_cleared():
+    async def scenario(h):
+        job_id = h.submit_kind("revoke", card_number="0012345", card_wait=0.1)
+        h.sim.place_card("999", initialized=True)
+        job = await h.status(job_id, "needs_attention")
+        assert job["message"] == ("That's card 999, not 0012345. Place card 0012345 on the "
+                                  "encoder, then try again.")
+        h.sim.place_card("12345")   # the same number without the leading zeros, but blank
+        h.runner.retry(job_id)
+        await h.until(lambda: h.jobs[job_id]["message"].startswith(
+            "Card 0012345 couldn't be cleared"), "the blank card to be refused")
+        h.runner.skip(job_id)
+        job = await h.status(job_id, "done")
+        assert job["message"] == "The card wasn't cleared"
+        assert h.sim.cards["12345"]["hotel"] is None   # never set up as ours
+        stopped = h.submit_kind("revoke", card_number="777")
+        await h.live(stopped, "waiting_for_card")
+        h.runner.cancel(stopped)
+        assert (await h.status(stopped, "cancelled"))["message"] == ("Stopped before the card "
+                                                                     "was cleared")
+    run(scenario)
+
+
+def test_lost_card_notice_on_a_blank_spare_card():
+    async def scenario(h):
+        job_id = h.submit_kind("notice", cancel_card=LOST, cancel_until=LOST_UNTIL)
+        await h.live(job_id, "waiting_for_card", 1, "Place a spare card on the encoder for the "
+                                                    "lost card notice")
+        h.sim.place_card(LOST, initialized=True)   # the lost card turned up on the encoder
+        await h.live(job_id, "waiting_for_card", 1, f"That's card {LOST}, the lost card itself. "
+                                                    "Take it off and use a different card")
+        spare = h.sim.place_card()   # blank
+        job = await h.status(job_id, "done")
+        assert job["message"] == ("The lost card notice is ready. Tap it on each door the lost "
+                                  "card opens.")
+        card = h.sim.cards[spare]
+        assert card["hotel"] == "this hotel" and card["records"] == []
+        assert card["cancels"] == [{"cardNo": LOST, "timestamp": LOST_UNTIL}]
+        assert job["cards"][0] == {"seq": 1, "status": "written", "card_number": spare,
+                                   "error": None, "written_at": job["cards"][0]["written_at"]}
+        assert "CE_ReadCancellationInfo" in h.sim.calls
+        # Look up reads it back.
+        await h.released()
+        h.runner.start_lookup(card_wait=1)
+        await h.until(lambda: h.runner.lookup_state()["state"] == "done", "the look-up")
+        found = h.runner.lookup_state()
+        assert found["card_number"] == spare and found["card"] == []
+        assert found["cancellations"] == [{"card_number": LOST, "expires_at": LOST_UNTIL}]
+    run(scenario)
+
+
+def test_a_notice_that_does_not_stay_on_the_card_needs_attention(monkeypatch):
+    async def scenario(h):
+        monkeypatch.setattr(EncoderSim, "_fn_CE_ReadCancellationInfo", lambda self, r: (0, []))
+        job_id = h.submit_kind("notice", cancel_card=LOST, cancel_until=LOST_UNTIL)
+        h.sim.place_card(initialized=True)
+        job = await h.status(job_id, "needs_attention")
+        assert job["message"].startswith(f"The cancellation of card {LOST} didn't stay")
+        # An unreadable but non-empty answer is trusted (the driver's format isn't documented).
+        monkeypatch.setattr(EncoderSim, "_fn_CE_ReadCancellationInfo",
+                            lambda self, r: (0, [{"weird": 1}]))
+        h.runner.retry(job_id)
+        await h.status(job_id, "done")
+        # An older SN Web Socket that doesn't know CE_CancelCard.
+        h.sim.fail_next("CE_CancelCard", -3)
+        second = h.submit_kind("notice", cancel_card=LOST, expires_at=LOST_UNTIL)
+        h.sim.place_card(initialized=True)
+        job = await h.status(second, "needs_attention")
+        assert "SN Web Socket" in job["message"]
+        h.runner.cancel(second)
+        assert (await h.status(second, "cancelled"))["message"] == ("Stopped before the lost "
+                                                                     "card notice was made")
+    run(scenario)
+
+
+def test_replacement_card_carries_the_doors_and_the_cancellation():
+    async def scenario(h):
+        job_id = h.submit_kind("write", records=json.dumps([POOL, FLOOR]), expires_at=EXPIRES,
+                               cancel_card=LOST, cancel_until=LOST_UNTIL)
+        await h.live(job_id, "waiting_for_card", 1, "Place the card on the encoder")
+        number = h.sim.place_card(initialized=True)
+        job = await h.status(job_id, "done")
+        assert job["message"] == "The card is ready"
+        card = h.sim.cards[number]
+        assert len(card["records"]) == 2
+        assert card["cancels"] == [{"cardNo": LOST, "timestamp": LOST_UNTIL}]
+        calls = list(h.sim.calls)
+        assert calls.index("CE_CancelCard") > max(i for i, c in enumerate(calls)
+                                                  if c == "CE_WriteCard")
+        # The cancellation's expiry defaults to the job's.
+        second = h.submit_kind("write", records=json.dumps([POOL]), expires_at=EXPIRES,
+                               cancel_card=LOST)
+        h.sim.remove_card()
+        other = h.sim.place_card(initialized=True)
+        await h.status(second, "done")
+        assert h.sim.cards[other]["cancels"] == [{"cardNo": LOST, "timestamp": EXPIRES}]
+    run(scenario)
+
+
+def test_replacement_that_loses_its_doors_is_not_written(monkeypatch):
+    async def scenario(h):
+        original = EncoderSim._fn_CE_CancelCard
+
+        def wipes(self, request):   # an encoder that can't keep both on one card
+            code, data = original(self, request)
+            self.cards[self.present]["records"] = []
+            return code, data
+        monkeypatch.setattr(EncoderSim, "_fn_CE_CancelCard", wipes)
+        job_id = h.submit_kind("write", records=json.dumps([POOL]), expires_at=EXPIRES,
+                               cancel_card=LOST, cancel_until=LOST_UNTIL)
+        h.sim.place_card(initialized=True)
+        job = await h.status(job_id, "needs_attention")
+        assert "Make a lost card notice instead" in job["message"]
+        h.runner.cancel(job_id)
+    run(scenario)
+
+
+def test_revoke_and_notice_jobs_that_cannot_be_done():
+    async def scenario(h):
+        base = {"id": 99, "card_type": "staff", "count": 1}
+        for bad in ({"kind": "erase"}, {"kind": "revoke"}, {"kind": "revoke", "card_number": ""},
+                    {"kind": "revoke", "card_number": "1" * 65},
+                    {"kind": "revoke", "card_number": "5", "count": 2},
+                    {"kind": "notice", "expires_at": LOST_UNTIL},
+                    {"kind": "notice", "cancel_card": "12AB", "expires_at": LOST_UNTIL},
+                    {"kind": "notice", "cancel_card": "1" * 21, "expires_at": LOST_UNTIL},
+                    {"kind": "notice", "cancel_card": LOST},
+                    {"kind": "write", "records": json.dumps([POOL]), "expires_at": EXPIRES,
+                     "cancel_card": "x"}):
+            with pytest.raises(ValueError):
+                h.runner.submit({**base, **bad})
+        h.runner.submit({**base, "kind": "revoke", "card_number": 1234})   # a number is fine
+        assert h.runner.live(99)["kind"] == "revoke"
+        h.runner.cancel(99)
+    run(scenario)
+
+
+def test_simulated_cancellations_behave_like_cards():
+    sim = EncoderSim()
+    sim.connected = True
+    ask = lambda function, **p: sim.answer(json.dumps({"function": function, "requestId": "r",
+                                                       "hotelInfo": "k", **p}))
+    blank = sim.place_card()
+    assert ask("CE_CancelCard", cardNo=LOST, timestamp=LOST_UNTIL)["errorCode"] == 106
+    assert ask("CE_ReadCancellationInfo")["errorCode"] == 106
+    assert ask("CE_InitCard")["errorCode"] == 0
+    assert ask("CE_CancelCard", cardNo=int(LOST), timestamp=LOST_UNTIL)["errorCode"] == 2
+    assert ask("CE_CancelCard", cardNo=LOST, timestamp="soon")["errorCode"] == 2
+    for n in range(4):
+        assert ask("CE_CancelCard", cardNo=str(n), timestamp=LOST_UNTIL)["errorCode"] == 0
+    assert ask("CE_CancelCard", cardNo="9", timestamp=LOST_UNTIL)["errorCode"] == 104   # full
+    assert ask("CE_CancelCard", cardNo="2", timestamp=1)["errorCode"] == 0  # same number: once
+    reply = ask("CE_ReadCancellationInfo")
+    assert reply["errorCode"] == 0 and len(reply["data"]) == 4
+    assert {"cardNo": "2", "timestamp": 1} in reply["data"]
+    assert ask("CE_ClearCard")["errorCode"] == 0
+    assert ask("CE_ReadCancellationInfo")["data"] == []
+    # Cancellations take a sector of their own: with 5 sectors, 16 records still fit.
+    for n in range(20):
+        assert ask("CE_WriteCard", buildNo=1, floorNo=1, mac=MAC,
+                   timestamp=EXPIRES)["errorCode"] == 0
+    assert ask("CE_CancelCard", cardNo=LOST, timestamp=LOST_UNTIL)["errorCode"] == 104
+    assert ask("CE_ClearCard")["errorCode"] == 0
+    assert ask("CE_CancelCard", cardNo=LOST, timestamp=LOST_UNTIL)["errorCode"] == 0
+    results = [ask("CE_WriteCard", buildNo=1, floorNo=1, mac=MAC, timestamp=EXPIRES)["errorCode"]
+               for _ in range(17)]
+    assert results == [0] * 16 + [104]
+    assert sim.cards[blank]["hotel"] == "this hotel"
+
+
+def test_cancellations_read_from_cards_in_one_shape():
+    assert card_cancellations(encoder._raw_cancellations(
+        json.dumps({"infoArray": [{"cardNo": LOST, "timestamp": LOST_UNTIL * 1000}]}))) == [
+        {"card_number": LOST, "expires_at": LOST_UNTIL}]
+    assert card_cancellations(encoder._raw_cancellations([123, {"cardNumber": "45"}, None])) == [
+        {"card_number": "123", "expires_at": None}, {"card_number": "45", "expires_at": None}]
+    assert encoder._raw_cancellations("") == [] and encoder._raw_cancellations(None) == []
+    assert card_cancellations([{"cardNo": True}, {"cardNo": "x" * 65}]) == [
+        {"card_number": None, "expires_at": None}, {"card_number": None, "expires_at": None}]
+    with pytest.raises(EncoderError):
+        encoder._raw_cancellations("not json")
+    with pytest.raises(EncoderError):
+        encoder._raw_cancellations(42)

@@ -1676,7 +1676,11 @@
     staff: { title: "Staff card", noun: "card", icon: "card" },
   };
   const WB_CARD_WORDS = { written: "Made", failed: "Didn't work", skipped: "Skipped",
-    cancelled: "Not made", pending: "Not made" };
+    cancelled: "Not made", pending: "Not made", cleared: "Cleared" };
+  // A staff card's state, as the card log and look-up show it. "expired" isn't stored: it's an
+  // active card past its last day. A state not listed here (damaged data) shows as unknown and
+  // offers no Revoke.
+  const WB_STATE_WORDS = { active: "Active", expired: "Expired", revoked: "Revoked", lost: "Lost" };
   // Line icons (24px grid, drawn with currentColor).
   const WB_ICONS = {
     band: '<rect x="2.5" y="8.5" width="19" height="7" rx="3.5"/><rect x="8.5" y="6" width="7" height="12" rx="2"/>',
@@ -1807,6 +1811,8 @@
   }
 
   function wbStopQuestion(job) {
+    if (job.kind === "revoke") return `Stop revoking card ${job.target_card}? It keeps working until it's revoked.`;
+    if (job.kind === "notice") return "Stop making the lost card notice?";
     const noun = (WB_TYPES[job.type] || WB_TYPES.day_pass).noun;
     const made = job.cards.filter((c) => c.status === "written").length;
     return `Stop making ${noun}s?` + (made ? ` The ${wbPlural(made, noun)} already made will still work.` : "");
@@ -2567,13 +2573,15 @@
     const Noun = cap(kind.noun);
     const active = WB_ACTIVE.has(job.status);
     const total = job.cards.length || job.count;
-    setText(v.eyebrow, `${kind.title} · ${job.name}`);
+    const write = (job.kind || "write") === "write";
+    setText(v.eyebrow, `${wbJobTitle(job)} · ${job.name}`);
     setText(v.step, active && job.current && total > 1 ? `${Noun} ${job.current} of ${total}` : "");
     setText(v.prompt, job.message || "");
     if (job.phase !== v.phase) {
       v.phase = job.phase;
       const [icon, cls] = {
-        waiting_for_card: ["band", "pulse"], remove_card: ["up", "lift"], needs_attention: ["alert", "alert"],
+        waiting_for_card: [kind.icon === "card" ? "card" : "band", "pulse"], remove_card: ["up", "lift"],
+        needs_attention: ["alert", "alert"],
         done: ["check", "ok"], cancelled: ["stop", "quiet"],
       }[job.phase] || [null, ""];   // queued, writing: a spinner
       v.visual.className = cls ? `wb-visual ${cls}` : "wb-visual";
@@ -2590,8 +2598,9 @@
         h("span", { "aria-hidden": "true" }, c.status === "written" ? "✓" : String(c.seq)),
         h("span", { class: "wb-sr" }, `${Noun} ${c.seq}: ${words}`));
     }));
-    setText(v.meta, [job.expires_label && `Works until ${job.expires_label}`, job.summary]
-      .filter(Boolean).join(" · "));
+    setText(v.meta, job.kind === "revoke" ? `Only card ${job.target_card} is cleared. Any other card is left as it is.`
+      : !write ? `For card ${job.target_card}`
+      : [job.expires_label && `Works until ${job.expires_label}`, job.summary].filter(Boolean).join(" · "));
     v.conn.hidden = wb.lost < WB_LOST_AFTER;
     wbDrawPill();
 
@@ -2611,10 +2620,11 @@
       if (!wb.loading) wbRefreshOptions();   // the encoder is free again: say so now
       const done = button("Done", "btn primary", () => wbBack());
       fill(v.actions, done);
-      fill(v.results, h("section", { class: "group" }, h("h2", null, `${Noun}s`),
+      fill(v.results, write ? h("section", { class: "group" }, h("h2", null, `${Noun}s`),
         wbRows(job.cards.map((c) => [`${Noun} ${c.seq}`,
           c.status === "written" ? c.card_number || "Made" : WB_CARD_WORDS[c.status] || cap(c.status),
-          c.status === "failed"]))));
+          c.status === "failed"])))
+        : h("section", { class: "group" }, h("h2", null, "Result"), wbRows([wbOtherResult(job)])));
       done.focus({ preventScroll: true });
     }
   }
@@ -2740,11 +2750,22 @@
     const until = job?.expires_label || (look.card || []).find((r) => r.expires_label)?.expires_label;
     const hero = (value, label) => h("div", { class: "hero-value" },
       h("div", { class: "hero-number" }, value), h("div", { class: "hero-label" }, label));
+    // Our record of this very card, when it's a staff card: its state, and the lost card it also
+    // cancels if it was made as a replacement.
+    const mine = job && wbKeyCard(job)
+      ? job.cards.find((c) => c.status === "written" && wbSameCard(c.card_number, look.card_number)) : null;
+    const state = mine ? wbCardState(job, mine) : null;
+    const done = look.state === "done";
+    const revoke = done && mine && wbCanRevoke(job, mine)
+      ? h("button", { type: "button", class: "btn wb-stop",
+        onclick: (ev) => wbRevoke(mine, job.name, ev.currentTarget) }, "Revoke this card") : null;
     fill(v.body,
       look.state === "error" ? wbNote("error", look.message || "That didn't work. Try again.") : null,
-      look.state === "done" ? h("div", { class: "hero-values wb-hero" },
-        hero(look.card_number || "—", "Card number"), until ? hero(until, "Works until") : null) : null,
-      look.state === "done" && look.message ? wbNote("", look.message) : null,
+      done ? h("div", { class: "hero-values wb-hero" },
+        hero(look.card_number || "—", "Card number"), until ? hero(until, "Works until") : null,
+        mine ? hero(WB_STATE_WORDS[state] || "Unknown", "State") : null) : null,
+      done && mine ? wbStateNote(state, look.card?.length > 0) : null,
+      done && look.message ? wbNote("", look.message) : null,
       job ? h("section", { class: "group" }, h("h2", null, "Our record"), wbRows([
         ["Made for", job.name],
         ["Kind", `${kind.title} · ${wbPlural(job.count, kind.noun)}`],
@@ -2752,11 +2773,44 @@
         ["Made", wbWhen(job.created_at)],
         ["Opens", job.summary || null],
         ["Works until", job.expires_label || null],
+        ["State", mine ? WB_STATE_WORDS[state] || "Unknown" : null, state !== "active"],
+        ["Replaces lost card", mine?.cancelled_card || null],
       ])) : null,
-      look.card?.length ? h("section", { class: "group" }, h("h2", null, "On the wristband"),
+      look.card?.length ? h("section", { class: "group" },
+        h("h2", null, job?.type === "staff" ? "On the card" : "On the wristband"),
         wbRows(look.card.map((r) => [r.label, r.expires_label ? `Until ${r.expires_label}` : "—"]))) : null,
+      done && (!job || job.type === "staff") ? wbNoticeSection(look.cancellations) : null,
       h("div", { class: "wb-actions wb-actions-start" }, h("button", { type: "button", class: "btn primary",
-        onclick: () => wbOpenLookup(true) }, look.state === "error" ? "Try again" : "Look up another")));
+        onclick: () => wbOpenLookup(true) }, look.state === "error" ? "Try again" : "Look up another"), revoke));
+  }
+
+  // What a revoked, lost or expired card on the encoder means for the person holding it.
+  function wbStateNote(state, hasDoors) {
+    if (state === "revoked") {
+      return wbNote("error", hasDoors ? "Doors are still written on it, so keep it out of use."
+        : "It's been cleared and can be used again.", "This card was revoked");
+    }
+    if (state === "lost") {
+      return wbNote("error", "Keep it out of use and tell a manager it's been found.", "This card was reported lost");
+    }
+    if (state === "expired") return wbNote("", "Its last day has passed, so it no longer opens doors.", "Expired");
+    if (!state) return wbNote("error", "Its record couldn't be read. Treat it as not working.", "Unknown state");
+    return null;
+  }
+
+  // The lost card notice on a card read off the encoder (CE_ReadCancellationInfo): the card numbers
+  // that locks refuse once it's tapped on them. null: the encoder didn't read it.
+  function wbNoticeSection(cancellations) {
+    if (!Array.isArray(cancellations)) return null;
+    if (!cancellations.length) {
+      return h("section", { class: "group" }, h("h2", null, "Lost card notice"),
+        wbRows([["Lost card notice", "None on this card"]]));
+    }
+    return h("section", { class: "group" }, h("h2", null, "Lost card notice"),
+      h("p", { class: "muted wb-sub" }, "Each lock this card is tapped on stops opening for these cards."),
+      wbRows(cancellations.slice(0, 20).map((c) => [
+        c?.card_number ? `Cancels card ${c.card_number}` : "Cancels a card the encoder couldn't read",
+        Number(c?.expires_at) > 0 ? `Until ${wbWhen(c.expires_at)}` : "—", true])));
   }
 
   // ---- the card log
@@ -2786,7 +2840,8 @@
     });
     wbShow("log", wbSubHead("Card log"),
       h("p", { class: "muted wb-sub" }, wb.options?.see_all_cards
-        ? "Every wristband and card made here, newest first." : "The wristbands and cards you've made, newest first."),
+        ? "Every wristband and card made here, newest first. Open a staff card to revoke it (have the card in hand)."
+        : "The wristbands and cards you've made, newest first."),
       search, log.list, log.moreBtn);
     if (isDesk()) search.focus({ preventScroll: true });
     wbLoadLog(false);
@@ -2850,12 +2905,19 @@
     const log = wb.log;
     const kind = WB_TYPES[job.type] || WB_TYPES.day_pass;
     const open = log.open.has(job.id);
-    const made = job.cards.filter((c) => c.status === "written").length;
+    const write = (job.kind || "write") === "write";
+    const made = job.cards.filter((c) => c.status === "written" || c.status === "cleared").length;
+    // A staff card's state goes on the row when all its cards share one (usually there's one card).
+    const states = wbKeyCard(job)
+      ? [...new Set(job.cards.filter((c) => c.status === "written").map((c) => wbCardState(job, c)))] : [];
+    const state = states.length === 1 ? states[0] : null;
     const [badge, tone] = job.status === "needs_attention" ? ["Needs attention", "alert"]
-      : WB_ACTIVE.has(job.status) ? ["Making…", "live"]
+      : WB_ACTIVE.has(job.status) ? [!write ? (job.kind === "revoke" ? "Revoking…" : "Working…") : "Making…", "live"]
+      : !write && !made ? [job.kind === "revoke" ? "Not revoked" : "Not made", "alert"]
       : made < job.count ? [made ? `${made} of ${job.count} made` : "Not made", "alert"]
+      : states.length ? [state ? WB_STATE_WORDS[state] || "Unknown" : "Mixed", wbStateTone(state)]
       : [null, null];
-    const sub = [`${kind.title} · ${wbPlural(job.count, kind.noun)}`,
+    const sub = [write ? `${kind.title} · ${wbPlural(job.count, kind.noun)}` : wbJobTitle(job),
       wb.options?.see_all_cards ? job.made_by : null].filter(Boolean).join(" · ");
     const row = h("button", { type: "button", class: "wb-log-row", "aria-expanded": String(open),
       "data-job": String(job.id), onclick: () => {
@@ -2868,19 +2930,117 @@
       h("span", null, wbTime(job.created_at))));
     if (!open) return h("div", { class: "wb-log-item" }, row);
     const Noun = cap(kind.noun);
+    if (!write) {
+      return h("div", { class: "wb-log-item open" }, row, h("div", { class: "wb-log-detail" },
+        wbRows([
+          ["Card", job.target_card || null],
+          ["Done by", job.made_by],
+          ["When", wbWhen(job.created_at)],
+          WB_ACTIVE.has(job.status) ? ["Result", "Not finished yet"] : wbOtherResult(job),
+        ], "wb-rows"),
+        WB_ACTIVE.has(job.status)
+          ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
+          : null));
+    }
+    const key = wbKeyCard(job);
+    const cardValue = (c) => {
+      if (c.status !== "written") return WB_CARD_WORDS[c.status] || cap(c.status);
+      const number = c.card_number || "Made";
+      return key ? `${number} · ${WB_STATE_WORDS[wbCardState(job, c)] || "Unknown"}` : number;
+    };
+    const cardAlert = (c) => c.status === "failed" || (key && c.status === "written"
+      && !["active", "expired"].includes(wbCardState(job, c)));
+    // People who may see every card can revoke an active staff card here, with it in hand.
+    const revocable = WB_ACTIVE.has(job.status) ? [] : job.cards.filter((c) => wbCanRevoke(job, c));
     return h("div", { class: "wb-log-item open" }, row, h("div", { class: "wb-log-detail" },
       wbRows([
         ["Opens", job.summary || null],
         ["Works until", job.expires_label || null],
         ["Made by", job.made_by],
         ["Made", wbWhen(job.created_at)],
-        ...job.cards.map((c) => [`${Noun} ${c.seq}`,
-          c.status === "written" ? c.card_number || "Made" : WB_CARD_WORDS[c.status] || cap(c.status),
-          c.status === "failed"]),
+        ...job.cards.flatMap((c) => [[`${Noun} ${c.seq}`, cardValue(c), cardAlert(c)],
+          [`${Noun} ${c.seq} replaces lost card`, c.status === "written" && c.cancelled_card || null]]),
       ], "wb-rows"),
       WB_ACTIVE.has(job.status)
         ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
+        : null,
+      revocable.length ? h("div", { class: "wb-log-actions" }, revocable.map((c) =>
+        h("button", { type: "button", class: "btn wb-stop", onclick: (ev) => wbRevoke(c, job.name, ev.currentTarget) },
+          revocable.length > 1 || job.cards.length > 1 ? `Revoke card ${c.card_number}` : "Revoke this card")))
         : null));
+  }
+
+  // ---- staff cards: their state, and revoking one (card in hand)
+
+  // "Staff card", or what a job that didn't make cards did: revoked a card, or made a lost
+  // card notice for one.
+  function wbJobTitle(job) {
+    if (job.kind === "revoke") return `Revoke card ${job.target_card}`;
+    if (job.kind === "notice") return `Lost card notice for card ${job.target_card}`;
+    return (WB_TYPES[job.type] || WB_TYPES.day_pass).title;
+  }
+
+  // How a finished revoke or lost card notice job went, as a [label, value, alert?] row.
+  function wbOtherResult(job) {
+    const done = job.cards.some((c) => c.status === "written" || c.status === "cleared");
+    if (job.kind === "revoke") return ["Result", done ? "Revoked and cleared" : "Not revoked", !done];
+    return ["Result", done ? "Lost card notice made" : "Not made", !done];
+  }
+
+  // Staff cards made (not a revoke or a lost card notice job, which made no key card).
+  function wbKeyCard(job) {
+    return job.type === "staff" && (job.kind || "write") === "write";
+  }
+
+  // Card numbers as the encoder and the record may spell them (leading zeros aside).
+  function wbSameCard(a, b) {
+    const norm = (n) => String(n ?? "").trim().replace(/^0+(?=\d)/, "");
+    return a != null && b != null && norm(a) !== "" && norm(a) === norm(b);
+  }
+
+  // active, expired (active, past its last day), revoked or lost; null when the record is damaged.
+  function wbCardState(job, card) {
+    const state = card.state ?? "active";
+    if (state === "active") {
+      const ends = Number(job.expires_at);
+      return Number.isFinite(ends) && ends > 0 && ends * 1000 <= Date.now() ? "expired" : "active";
+    }
+    return state === "revoked" || state === "lost" ? state : null;
+  }
+
+  function wbStateTone(state) {
+    return state === "active" ? "ok" : state === "expired" ? "" : "alert";
+  }
+
+  // Only people who may see every card, only an active card (an expired one too: it's still
+  // cleared for reuse), and only one this app can name. The server checks all of it again.
+  function wbCanRevoke(job, card) {
+    if (!wb.options?.see_all_cards || !wbKeyCard(job) || card.status !== "written") return false;
+    const state = wbCardState(job, card);
+    return (state === "active" || state === "expired") && Number.isInteger(card.id) && !!card.card_number;
+  }
+
+  // Revoke a staff card with it in hand: the encoder waits for that exact card, clears it, and
+  // it's marked revoked. The encoding screen shows how it goes.
+  async function wbRevoke(card, name, button) {
+    const state = wb;
+    if (!state || state.acting) return;
+    const who = name ? ` (${name})` : "";
+    if (!window.confirm(`Revoke card ${card.card_number}${who}?\n\nYou'll put the card on the encoder next. ` +
+      "It's cleared so it opens nothing, and it can be given out again afterwards.")) return;
+    state.acting = true;
+    button?.classList.add("working");
+    button?.setAttribute("aria-busy", "true");
+    const res = await api("POST", `/api/wristbands/cards/${card.id}/revoke`);
+    if (wb !== state) return;
+    state.acting = false;
+    button?.classList.remove("working");
+    button?.removeAttribute("aria-busy");
+    if (res.status === 200 && res.data.job) return wbShowJob(res.data.job);
+    if (wbAuthError(res)) return;
+    toast(res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection, then try again.`
+      : res.data.error || "That card couldn't be revoked. Try again.", true);
+    if (res.status === 409 && state.screen === "log") wbLoadLog(false);   // its state may have changed
   }
 
   // ---- small pieces

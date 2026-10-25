@@ -11,11 +11,24 @@ on connect, answers to other requests) is ignored. Its own errors (an unknown fu
 request it couldn't run) come back without the requestId, so those are matched by function.
 None of this is documented by the vendor; it's what version 2.5.1 does.
 
-One job at a time per encoder address, oldest first, in a runner task of its own. For each
-wristband: wait for a card, clear it (setting up a blank card first), write each record, beep,
-then wait for it to be taken off. A card already written in this job never counts as the next
-one, a card that failed and was skipped isn't used again, and the last card made (or looked
-up) isn't overwritten until it has been lifted off. Problems put the job in "needs attention"
+One job at a time per encoder address, oldest first, in a runner task of its own. A job is one
+of three kinds:
+
+- "write" (wristbands and key cards): for each card, wait for one, clear it (setting up a blank
+  card first), write each record, beep, then wait for it to be taken off. A key card that
+  replaces a lost one also carries a cancellation of the lost card's number (CE_CancelCard,
+  written after the records and read back with CE_ReadCancellationInfo to make sure the doors
+  and the cancellation are both on it).
+- "revoke": wait for one particular card (a card in hand being taken back), clear it and read it
+  back to make sure no doors are left on it. Any other card is refused by number.
+- "notice": a lost card notice. A spare card is cleared (set up first when blank) and given a
+  cancellation of the lost card's number; tapped on a door, it tells the lock to refuse that card
+  from then on.
+
+In every kind, a card already written in this job never counts as the next one, a card that
+failed and was skipped isn't used again, the last card made (or looked up) isn't overwritten
+until it has been lifted off, and a lost card is never used for its own notice or replacement.
+Problems put the job in "needs attention"
 (letting go of the encoder meanwhile) until staff choose Try again, Skip or Stop; a job nobody
 answers is stopped after ATTENTION_TIMEOUT so it can't hold up the next one. After every job
 the encoder is disconnected (CE_DisconnectComm), so TT Hotel's own Windows program can use it
@@ -51,6 +64,9 @@ LIVE_HISTORY = 200           # finished jobs whose progress is kept in memory, p
 MAX_ENCODERS = 100           # encoder addresses kept at once
 MAX_MESSAGE = 1024 * 1024    # largest reply accepted from SN Web Socket
 MAX_CARD_NUMBER = 64         # characters; anything longer isn't a card number
+MAX_CANCEL_NUMBER = 20       # digits: CE_CancelCard takes the lost card's number in decimal
+JOB_KINDS = ("write", "revoke", "notice")   # make cards / clear one card / lost card notice
+NO_RECORD = 107              # the driver's "no such record": a card with no cancellations on it
 DEFAULT_SECTORS = "0000000000011111"   # TT Hotel's default: sectors 12 to 16
 NEEDS_INIT = {105, 106, 109}     # clearing failed because the card isn't set up for this hotel
 COMM_CODES = {3, 4, 16}          # the USB link failed: reconnect before the next try
@@ -409,6 +425,26 @@ class SNWebSocket:
         reply = await self.call("CE_ReadCard", hotelInfo=hotel_info)
         return _raw_records(reply.get("data"))
 
+    async def cancel_card(self, hotel_info: str, card_number: str, expires_at: int) -> None:
+        """Write a cancellation of another card onto this one (CE_CancelCard): a lock the card
+        is tapped on refuses that card number from then on. expires_at is the cancelled card's
+        own expiry (unix seconds), after which the lock can forget it."""
+        if (not re.fullmatch(rf"[0-9]{{1,{MAX_CANCEL_NUMBER}}}", card_number or "")
+                or not 0 < expires_at <= 0xFFFFFFFF):
+            raise EncoderError(2, "CE_CancelCard", "card number or expiry out of range")
+        await self.call("CE_CancelCard", hotelInfo=hotel_info, cardNo=card_number,
+                        timestamp=int(expires_at))
+
+    async def read_cancellations(self, hotel_info: str) -> list[dict]:
+        """The cancellations on the card (CE_ReadCancellationInfo), as the driver reports them;
+        [] for a card of this hotel without any."""
+        code, reply = await self.exchange("CE_ReadCancellationInfo", hotelInfo=hotel_info)
+        if code == NO_RECORD:
+            return []
+        if code != 0:
+            raise EncoderError(code, "CE_ReadCancellationInfo")
+        return _raw_cancellations(reply.get("data"))
+
     async def beep(self) -> None:
         await self.call("CE_Beep", voiceLen=120, interval=80, voiceCount=1)
 
@@ -516,6 +552,61 @@ def card_records(raw: list[dict]) -> list[dict]:
     return found
 
 
+def _raw_cancellations(data) -> list[dict]:
+    """CE_ReadCancellationInfo's data as a list of dicts. Its shape isn't documented, so a list,
+    a dict holding one, a single entry or bare card numbers are all accepted."""
+    if isinstance(data, str):
+        if not data.strip():
+            return []
+        try:
+            data = json.loads(data.replace("\n", ""))
+        except ValueError:
+            raise EncoderError(301, "CE_ReadCancellationInfo", "data isn't JSON") from None
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        for key in ("infoArray", "cancelArray", "cancellationInfo", "list", "data", "cards"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+        else:
+            data = [data] if data else []
+    if not isinstance(data, list):
+        raise EncoderError(301, "CE_ReadCancellationInfo", "unexpected data")
+    found = []
+    for item in data[:256]:
+        if isinstance(item, (str, int)) and not isinstance(item, bool):
+            item = {"cardNo": item}
+        if isinstance(item, dict):
+            found.append(item)
+    return found
+
+
+def _decimal(value) -> str | None:
+    """A card number as plain decimal digits without leading zeros, else None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value).strip()
+    if not text.isdigit() or len(text) > MAX_CARD_NUMBER:
+        return None
+    return text.lstrip("0") or "0"
+
+
+def card_cancellations(raw: list[dict]) -> list[dict]:
+    """Cancellations read off a card, in one shape: {"card_number", "expires_at"} (None when
+    unreadable): the cards a lock refuses once this card is tapped on it."""
+    found = []
+    for item in raw:
+        number = _pick(item, "cardNo", "cardNumber", "card", "number", "cardId")
+        number = str(number).strip() if isinstance(number, (str, int)) and not isinstance(
+            number, bool) else ""
+        found.append({"card_number": number if number and len(number) <= MAX_CARD_NUMBER
+                      and number.isprintable() else None,
+                      "expires_at": _seconds(_pick(item, "timestamp", "endDate", "endTime",
+                                                   "expireTime", "time"))})
+    return found
+
+
 # ---------------------------------------------------------------- job runner
 
 class _Cancelled(Exception):
@@ -542,6 +633,10 @@ class _Job:
     sectors: str
     card_wait: float
     cards: list[dict]
+    kind: str = "write"                 # one of JOB_KINDS
+    target: str | None = None           # revoke: the one card that may be cleared
+    cancel_card: str | None = None      # notice, or a replacement: the lost card's number
+    cancel_until: int | None = None     # ...and when it runs out (unix seconds)
     status: str = "queued"
     phase: str = "queued"
     current: int | None = None
@@ -554,30 +649,52 @@ class _Job:
 
     @classmethod
     def from_row(cls, row: dict, port, sectors, card_wait) -> "_Job":
-        """A wb_jobs row (or the same keys). Raises ValueError when it can't be written."""
+        """A wb_jobs row (or the same keys). Raises ValueError when it can't be done.
+
+        "kind" (default "write") picks the job: "write" needs "count", "records" and
+        "expires_at", and may carry "cancel_card" (plus "cancel_until", else "expires_at") for
+        a replacement card; "revoke" needs "card_number", the card to clear; "notice" needs
+        "cancel_card" and "cancel_until" (or "expires_at"). Revoke and notice jobs are one card."""
         job_id = row.get("id")
         card_type = row.get("type", row.get("card_type"))
-        count = row.get("count")
-        records = row.get("records")
-        if isinstance(records, str):
-            records = json.loads(records)
+        kind = row.get("kind") or "write"
+        count = row.get("count", 1 if kind != "write" else None)
         if (not isinstance(job_id, int) or card_type not in ("day_pass", "overnight", "staff")
-                or not isinstance(count, int) or not 1 <= count <= 100
-                or not isinstance(records, list) or not 1 <= len(records) <= 64):
+                or kind not in JOB_KINDS or not isinstance(count, int)
+                or not 1 <= count <= (100 if kind == "write" else 1)):
             raise ValueError("not a card job")
         parsed = []
-        for r in records:
-            get = r.get if isinstance(r, dict) else (lambda k, r=r: getattr(r, k, None))
-            level, building, floor = get("level"), get("building"), get("floor")
-            mac = str(get("mac") or "").upper()
-            if (level not in ("door", "floor", "building", "all") or not isinstance(building, int)
-                    or not isinstance(floor, int) or not 0 <= building <= 254
-                    or not 0 <= floor <= 255 or not re.fullmatch(r"[0-9A-F]{12}", mac)):
-                raise ValueError("a record can't be written")
-            parsed.append((level, building, floor, mac))
-        expires_at = int(row.get("expires_at") or 0)
-        if not 0 < expires_at <= 0xFFFFFFFF:
-            raise ValueError("bad expiry")
+        expires_at = _seconds(row.get("expires_at"))
+        if kind == "write":
+            records = row.get("records")
+            if isinstance(records, str):
+                records = json.loads(records)
+            if not isinstance(records, list) or not 1 <= len(records) <= 64:
+                raise ValueError("not a card job")
+            for r in records:
+                get = r.get if isinstance(r, dict) else (lambda k, r=r: getattr(r, k, None))
+                level, building, floor = get("level"), get("building"), get("floor")
+                mac = str(get("mac") or "").upper()
+                if (level not in ("door", "floor", "building", "all")
+                        or not isinstance(building, int) or not isinstance(floor, int)
+                        or not 0 <= building <= 254 or not 0 <= floor <= 255
+                        or not re.fullmatch(r"[0-9A-F]{12}", mac)):
+                    raise ValueError("a record can't be written")
+                parsed.append((level, building, floor, mac))
+            if expires_at is None:
+                raise ValueError("bad expiry")
+        target = None
+        if kind == "revoke":
+            target = _card_number(row.get("card_number"))
+            if target is None:
+                raise ValueError("no card to clear")
+        cancel_card = cancel_until = None
+        if kind == "notice" or row.get("cancel_card") not in (None, ""):
+            cancel_card = _decimal(row.get("cancel_card"))
+            cancel_until = _seconds(row.get("cancel_until")) or expires_at
+            if (cancel_card is None or len(cancel_card) > MAX_CANCEL_NUMBER
+                    or cancel_until is None):
+                raise ValueError("the lost card's number or expiry can't be written")
         if not re.fullmatch(r"[01]{16}", sectors or ""):
             sectors = DEFAULT_SECTORS
         cards = [{"seq": seq, "status": "pending", "card_number": None, "error": None}
@@ -585,18 +702,72 @@ class _Job:
         for given in row.get("cards") or []:   # a job picked up again keeps what's done
             if (isinstance(given, dict) and isinstance(given.get("seq"), int)
                     and 1 <= given["seq"] <= count
-                    and given.get("status") in ("written", "skipped", "pending")):
+                    and given.get("status") in ("written", "cleared", "skipped", "pending")):
                 cards[given["seq"] - 1].update(status=given["status"],
                                                card_number=given.get("card_number"))
-        return cls(id=job_id, type=card_type, records=parsed, expires_at=expires_at,
+        return cls(id=job_id, type=card_type, records=parsed, expires_at=expires_at or 0,
                    allow_lockout=bool(row.get("allow_lockout")), port=str(port or "auto"),
                    sectors=sectors, card_wait=_seconds_between(card_wait, 0.1, 600),
-                   cards=cards)
+                   cards=cards, kind=kind, target=target, cancel_card=cancel_card,
+                   cancel_until=cancel_until)
 
     @property
     def networked(self) -> bool:
         """Floor, building and all-door records need a fresh hotelInfo (and the internet)."""
         return any(level != "door" for level, *_ in self.records)
+
+    @property
+    def noun(self) -> str:
+        return "lost card notice" if self.kind == "notice" else card_noun(self.type)
+
+    def place_message(self, seq: int) -> str:
+        if self.kind == "revoke":
+            return f"Place card {self.target} on the encoder"
+        if self.kind == "notice":
+            return "Place a spare card on the encoder for the lost card notice"
+        return place_message(self.type, seq, len(self.cards))
+
+    def writing_message(self, seq: int) -> str:
+        if self.kind == "revoke":
+            return f"Clearing card {self.target}…"
+        if self.kind == "notice":
+            return "Writing the lost card notice…"
+        return writing_message(self.type, seq, len(self.cards))
+
+    def summary(self, status: str) -> str:
+        """The final message of a done or cancelled job."""
+        done = any(c["status"] in ("written", "cleared") for c in self.cards)
+        if self.kind == "revoke":
+            if done:
+                return f"Card {self.target} was cleared. It no longer opens any doors."
+            return ("Stopped before the card was cleared" if status == "cancelled"
+                    else "The card wasn't cleared")
+        if self.kind == "notice":
+            if done:
+                return ("The lost card notice is ready. Tap it on each door the lost card "
+                        "opens.")
+            return ("Stopped before the lost card notice was made" if status == "cancelled"
+                    else "No lost card notice was made")
+        return summary_message(self.type, status, self.cards)
+
+
+def _card_number(value) -> str | None:
+    """A card number as the encoder reports it, else None."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    number = str(value).strip()
+    if not number or len(number) > MAX_CARD_NUMBER or not number.isprintable():
+        return None
+    return number
+
+
+def _same_card(a: str | None, b: str | None) -> bool:
+    """Whether two card numbers are the same card (decimal numbers compare without leading
+    zeros, anything else exactly)."""
+    if a is None or b is None:
+        return False
+    da, db = _decimal(a), _decimal(b)
+    return da == db if da is not None and db is not None else a.strip() == b.strip()
 
 
 _LOOKUP = "lookup"   # the queue's marker for a look-up
@@ -698,12 +869,14 @@ class EncoderRunner:
         return self._decide(job_id, "skip")
 
     def live(self, job_id: int) -> dict | None:
-        """{"status", "phase", "current", "message", "cards": [{"seq", "status",
-        "card_number", "error"}]} while this encoder knows the job, else None."""
+        """{"kind", "status", "phase", "current", "message", "cards": [{"seq", "status",
+        "card_number", "error"}]} while this encoder knows the job, else None. A card's status
+        is "cleared" once a revoke job has cleared it."""
         job = self._jobs.get(job_id)
         if job is None:
             return None
-        return {"status": job.status, "phase": job.phase, "current": job.current,
+        return {"kind": job.kind, "status": job.status, "phase": job.phase,
+                "current": job.current,
                 "message": job.message, "cards": [dict(c) for c in job.cards]}
 
     def status(self) -> dict:
@@ -723,6 +896,7 @@ class EncoderRunner:
             self._lookup_wake.set()
         self._lookup_args = (str(port or "auto"), _seconds_between(card_wait, 0.1, 600))
         self._lookup = {"state": "waiting", "card_number": None, "card": [], "raw": [],
+                        "cancellations": [],
                         "message": WAITING_MESSAGE if self._busy() else QUEUED_MESSAGE,
                         "started_at": time.time(), "_stop": False}
         if _LOOKUP not in self._queue:
@@ -731,7 +905,8 @@ class EncoderRunner:
 
     def lookup_state(self) -> dict | None:
         """{"state": "waiting"|"done"|"error", "card_number", "card" (card_records()),
-        "message"}, or None before any look-up."""
+        "cancellations" (card_cancellations(): the cards a lost card notice or replacement card
+        cancels; None when they couldn't be read), "message"}, or None before any look-up."""
         if self._lookup is None:
             return None
         return {k: (list(v) if isinstance(v, list) else v) for k, v in self._lookup.items()
@@ -936,7 +1111,7 @@ class EncoderRunner:
         self._save(job, {"status": "running", "message": None})
         excluded: set[str] = set()   # cards that failed and were skipped, for the rest of the job
         first = True
-        noun = card_noun(job.type)
+        noun = job.noun
         while True:
             pending = [c["seq"] for c in job.cards if c["status"] == "pending"]
             # Checked before the cancel flag: a Stop that lands while the last card is being
@@ -948,8 +1123,7 @@ class EncoderRunner:
                 self._finish(job, "cancelled")
                 return
             seq = pending[0]
-            self._set_live(job, "waiting_for_card", seq,
-                           place_message(job.type, seq, len(job.cards)))
+            self._set_live(job, "waiting_for_card", seq, job.place_message(seq))
             job.attempt_card = None
             try:
                 await self._prepare(job, first)
@@ -967,7 +1141,8 @@ class EncoderRunner:
                 failure = _Failure(failure_message(exc.code, job.type), exc.code)
             except Exception:  # noqa: BLE001 - shown as a failed card, never a crash
                 log.exception("Card job %s, %s %s failed unexpectedly", job.id, noun, seq)
-                failure = _Failure(f"Something went wrong while making this {noun}. Try again.")
+                doing = "clearing this" if job.kind == "revoke" else "making this"
+                failure = _Failure(f"Something went wrong while {doing} {noun}. Try again.")
             decision = await self._needs_attention(job, seq, failure)
             if decision in ("cancel", "unattended"):
                 if decision == "unattended":
@@ -1032,11 +1207,19 @@ class EncoderRunner:
                    if c["status"] == "written" and c["card_number"]}
         number = await self._wait_for_card(job, seq, written, excluded)
         job.attempt_card = number
-        self._set_live(job, "writing", seq, writing_message(job.type, seq, len(job.cards)))
-        await self._write_card(job)
-        self._set_card(job, seq, status="written", card_number=number, error=None,
+        self._set_live(job, "writing", seq, job.writing_message(seq))
+        if job.kind == "revoke":
+            await self._clear_target(job)
+            status, verb = "cleared", "cleared"
+        elif job.kind == "notice":
+            await self._write_notice(job)
+            status, verb = "written", "made"
+        else:
+            await self._write_card(job)
+            status, verb = "written", "made"
+        self._set_card(job, seq, status=status, card_number=number, error=None,
                        written_at=time.time())
-        self._lingering, self._lingering_verb = number, "made"
+        self._lingering, self._lingering_verb = number, verb
         if not last:
             await self._wait_for_removal(job, seq, number)
 
@@ -1052,10 +1235,11 @@ class EncoderRunner:
 
     async def _wait_for_card(self, job: _Job, seq: int, written: dict[str, int],
                              excluded: set[str]) -> str:
-        """Poll until a card that may be written is on the encoder."""
+        """Poll until a card that may be written (or, to revoke, the card asked for) is on the
+        encoder."""
         noun = card_noun(job.type)
         total = len(job.cards)
-        prompt = place_message(job.type, seq, total)
+        prompt = job.place_message(seq)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + job.card_wait
         seen_card = False
@@ -1068,6 +1252,14 @@ class EncoderRunner:
                 self._lingering = None
             if number is None:
                 blocked = None
+            elif job.kind == "revoke":
+                if _same_card(number, job.target):
+                    return number   # the card asked for, even if it was just made or looked up
+                blocked = (f"That's card {number}, not {job.target}. Place card {job.target} on "
+                           "the encoder")
+            elif _same_card(number, job.cancel_card):
+                blocked = (f"That's card {number}, the lost card itself. Take it off and use a "
+                           f"different {noun}")
             elif number in written:
                 blocked = remove_message(job.type, written[number], total)
             elif number in excluded:
@@ -1090,22 +1282,80 @@ class EncoderRunner:
         socket = self._ws()
         networked = job.networked
         hotel_info = await self._get_hotel_info(job, networked, "access" if networked else "write")
+        hotel_info = await self._blank(job, hotel_info, networked)
+        for _, building, floor, mac in job.records:
+            await socket.write_record(hotel_info, building, floor, mac, job.expires_at,
+                                      job.allow_lockout)
+        if job.cancel_card:
+            # After the records (the DLL manual doesn't say the two can share a card, so the
+            # records are read back too: a card that lost its doors must not pass as written).
+            await self._add_cancellation(job, hotel_info)
+            if not await socket.read_card(hotel_info):
+                raise _Failure("This encoder couldn't keep the doors and the lost card's "
+                               "cancellation on one card. Make a lost card notice instead.")
+        await self._beep()
+
+    async def _blank(self, job: _Job, hotel_info: str, fresh: bool) -> str:
+        """Clear the card on the encoder, setting up a blank one first (which needs a fresh
+        hotelInfo). Returns the hotelInfo to go on with."""
+        socket = self._ws()
         try:
             await socket.clear_card(hotel_info)
         except EncoderError as err:
             if err.code not in NEEDS_INIT:
                 raise
             log.info("Card isn't set up for this hotel yet (code %s); setting it up", err.code)
-            if not networked:
+            if not fresh:
                 hotel_info = await self._get_hotel_info(job, True, "init")
             await socket.init_card(hotel_info)
             await socket.clear_card(hotel_info)
-        for _, building, floor, mac in job.records:
-            await socket.write_record(hotel_info, building, floor, mac, job.expires_at,
-                                      job.allow_lockout)
+        return hotel_info
+
+    async def _add_cancellation(self, job: _Job, hotel_info: str) -> None:
+        """Write the lost card's cancellation and read it back."""
+        socket = self._ws()
+        await socket.cancel_card(hotel_info, job.cancel_card, job.cancel_until)
+        found = card_cancellations(await socket.read_cancellations(hotel_info))
+        if any(_same_card(c["card_number"], job.cancel_card) for c in found):
+            return
+        if found and all(c["card_number"] is None for c in found):
+            # The driver's format isn't documented: something is on the card, just unreadable.
+            log.warning("Card job %s: couldn't read the cancellation back; trusting the write",
+                        job.id)
+            return
+        raise _Failure(f"The cancellation of card {job.cancel_card} didn't stay on this "
+                       f"{job.noun if job.kind == 'notice' else 'card'}. Try again, or use a "
+                       "different card.")
+
+    async def _write_notice(self, job: _Job) -> None:
+        """A lost card notice: a spare card with no doors on it, only the cancellation."""
+        hotel_info = await self._get_hotel_info(job, False, "write")
+        hotel_info = await self._blank(job, hotel_info, False)
+        await self._add_cancellation(job, hotel_info)
+        await self._beep()
+
+    async def _clear_target(self, job: _Job) -> None:
+        """Revoke: clear the card asked for and check that nothing is left on it."""
+        socket = self._ws()
+        hotel_info = await self._get_hotel_info(job, False, "write")
         try:
-            await socket.beep()
-        except EncoderError as err:   # the card is already written
+            await socket.clear_card(hotel_info)
+        except EncoderError as err:
+            if err.code not in NEEDS_INIT:
+                raise
+            # Blank, another hotel's, or a sector setting that doesn't match: it can't be
+            # cleared here, so it mustn't be marked as cleared either.
+            raise _Failure(f"Card {job.target} couldn't be cleared: the encoder can't read it as "
+                           "this hotel's card. Ask a manager to check the encoder's sector "
+                           "setting.", err.code) from None
+        if await socket.read_card(hotel_info):
+            raise _Failure(f"Card {job.target} still has doors on it. Try again.")
+        await self._beep()
+
+    async def _beep(self) -> None:
+        try:
+            await self._ws().beep()
+        except EncoderError as err:   # the card is already done
             log.info("Card encoder at %s: beep failed: %s", self.url, err)
 
     async def _get_hotel_info(self, job: _Job, fresh: bool, purpose: str) -> str:
@@ -1191,7 +1441,7 @@ class EncoderRunner:
                     self._set_card(job, card["seq"], status="cancelled")
         job.status = status
         job.awaiting = False
-        message = message or summary_message(job.type, status, job.cards)
+        message = message or job.summary(status)
         self._set_live(job, status, None, message)
         self._save(job, {"status": status, "message": message, "finished_at": time.time()})
 
@@ -1243,6 +1493,12 @@ class EncoderRunner:
                 hotel_info = await self._hotel_info(fresh=False)
                 raw = await socket.read_card(hotel_info)
                 lookup.update(raw=raw, card=card_records(raw))
+                try:
+                    lookup["cancellations"] = card_cancellations(
+                        await socket.read_cancellations(hotel_info))
+                except EncoderError as err:   # an older SN Web Socket: the doors still count
+                    log.info("Card encoder at %s: cancellations not read: %s", self.url, err)
+                    lookup["cancellations"] = None
             except EncoderError as err:
                 if err.code in NEEDS_INIT:
                     message = ("This wristband is blank or belongs to another hotel, so there "
