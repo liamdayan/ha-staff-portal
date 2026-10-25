@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.1
+
+- **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after
+  looking one up waited for it to be lifted off the encoder first. A looked-up wristband can now be
+  reused straight away.
+- **Fixed: the encoder sometimes wouldn't reconnect after TT Hotel's own program used it** until
+  its cable was replugged. Staff Portal now releases any old connection in SN Web Socket before
+  connecting.
+
 ## 0.8.0
 
 **Wristbands (TT Hotel key cards)**
@@ -47,13 +56,6 @@
 - Backups include wristband settings, door names, roles' and people's wristband rules and each
   computer's card encoder setting, never the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
   older version of the add-on refuses a 0.8.0 backup.
-
-- **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after
-  looking one up waited for it to be lifted off the encoder first. A looked-up wristband can now be
-  reused straight away.
-- **Fixed: the encoder sometimes wouldn't reconnect after TT Hotel's own program used it** until
-  its cable was replugged. Staff Portal now releases any old connection in SN Web Socket before
-  connecting.
 
 ## 0.7.1
 
