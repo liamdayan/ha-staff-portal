@@ -68,8 +68,9 @@ system.
   - add everyone from your Connecteam user list automatically, with their kiosk code as their
     PIN, and turn people off when they're archived there;
   - **departments** follow your Connecteam Smart Groups and give people their role;
-  - only let people sign in while they're clocked in, with a per-person switch for anyone who
-    shouldn't need to be.
+  - only let people sign in while they're clocked in, set per department (Must be clocked in,
+    Doesn't need to, or each person's own setting), with a per-person switch that still wins and
+    says where each person's rule comes from.
 - **Activity log** of every action and every blocked attempt. Actions can also show in Home
   Assistant's logbook, or be credited to a linked Home Assistant user.
 
@@ -79,9 +80,13 @@ Staff at a front-desk computer make RFID wristbands and key cards on the desk's 
 encoder, without opening TT Hotel's own software.
 
 - **Day passes:** enter the guest's name and party size; the wristbands open the doors you
-  choose until the end time you set (8 PM by default).
+  choose until the end time you set (8 PM by default). People you allow can pick a later time,
+  up to 11:59 PM, even after the usual end time.
 - **Overnight wristbands:** pick the room and checkout date; they work until your checkout
   time (11 AM by default).
+- **Public doors and guest rooms:** mark each door, one at a time or a whole floor or building
+  at once. Rooms are picked from the guest rooms and shared doors from the public doors, and
+  the add-on refuses a room picked as a shared door (or the other way round).
 - **Staff cards:** a single door, whole floors, whole buildings, or every door, until a date.
 - **Look up a wristband:** set it on the encoder to see what's on the card, who it was made
   for, by whom and until when, and wipe it with **Revoke**.
@@ -91,15 +96,21 @@ encoder, without opening TT Hotel's own software.
   (all, a building, a floor or single doors), down to the longest stay and how long a staff
   card may last.
 - **Make key card** from the Staff tab, using the person's department template (doors, how many
-  days, deadbolt override), to replace their card or add another.
+  days, deadbolt override), to replace their card or add another. Choose **This computer** to
+  make it on the encoder plugged into the computer you're using, with nothing to set up.
 - **Key cards list** with **Revoke** (wipe a card that's handed back) and **Report lost**: a lost
   card notice written on a spare card with a door-by-door checklist, a replacement card that
   cancels the old one at each door it's used, or (experimental, gateway doors only, after a
   one-time test) remote lock-out.
+- **Door activity** (doors with a TT Hotel gateway): every unlock and refused card as it happens,
+  through TT Hotel's Callback URL: when, which door, who and how. Each card shows where it was
+  **last used**, and a lost or revoked card tried at a door is flagged in the Activity tab and as
+  a Home Assistant notification.
 - **Connecting the encoder:** **This computer (USB)**, the default, connects through the
   Wristbands page on the computer the encoder is plugged into, so nothing has to be set up on
   the network. A fixed address, or **Automatic** search with an encoder you confirm, are there
-  for other setups.
+  for other setups. Key cards made from the dashboard can use the encoder on the administrator's
+  own computer.
 - **TT Hotel requests stay well inside its free plan:** at most one request per batch of cards,
   doors synced every few hours, a monthly cap far below TT Hotel's limit, and requests stop at
   once if TT Hotel says to.
@@ -109,8 +120,10 @@ encoder, without opening TT Hotel's own software.
 - **Phones & computers:** add, revoke, re-pair, unlock, link to a Home Assistant user, and choose
   which pages or page groups each one shows.
 - **Staff:** people with personal PINs for shared devices, each with a role and department, a
-  clock-in switch, and **Make key card**; plus the **Key cards** list.
-- **Departments:** linked to Connecteam Smart Groups, each with a role and a key card template.
+  clock-in switch, and **Make key card**; plus the **Key cards** list, with where each card was
+  last used.
+- **Departments:** linked to Connecteam Smart Groups, each with a role, a clock-in rule and a key
+  card template.
 - **Roles:** each role's access and pages, with its people listed under it; click a person to
   give them their own settings.
 - **Layout editor:** pages, headings, single devices, whole areas and group cards. Drag to
@@ -120,9 +133,11 @@ encoder, without opening TT Hotel's own software.
 - **Preview:** see the layout as a phone or a computer would, unsaved changes included: everything
   on it, or exactly what one device, role or person would see. Tapping a control there sends
   nothing.
-- **Wristbands:** TT Hotel connection and its monthly request count, the door list (rename or
-  hide doors), day-pass and overnight doors, the end and checkout times, staff card defaults,
-  and every card made.
+- **Wristbands:** the door list (rename or hide doors, and mark them as public doors or guest
+  rooms), day-pass and overnight doors, the end and checkout times, staff card defaults, Door
+  activity, and every card made.
+- **Settings → Connections:** TT Hotel and Connecteam, each folded to one line saying whether it
+  works and how many requests Staff Access has used against its limit, with its own Save button.
 - **Branding:** property name (shown in the staff app instead of "Staff Portal"), home-screen
   name, brand color and logo.
 - **Backup tab:**
@@ -149,10 +164,14 @@ encoder, without opening TT Hotel's own software.
 - **Key cards:** each role and person may only make the cards and doors they're allowed, checked
   by the add-on on every request, and every card is recorded with who made it. TT Hotel's
   encoder key never reaches a browser except the front-desk computer the encoder is plugged
-  into, and only while it's making or looking up a card. The add-on never sends it to an encoder
-  you haven't set up or confirmed.
+  into (or an administrator's own dashboard making a key card on its computer's encoder), and
+  only while it's making or looking up a card. The add-on never sends it to an encoder you
+  haven't set up or confirmed.
+- **Door activity** arrives at an address with a long random secret that only TT Hotel is given
+  (and that you can replace at any time); it's never in backups, and passcodes are never stored.
 - **Backup files** include the activity log and card history, but never Home Assistant
-  sign-ins, pending setup codes, the Connecteam secret or the TT Hotel secret and password. A
+  sign-ins, pending setup codes, the Connecteam secret, the TT Hotel secret and password, or the
+  Door activity address. A
   restore only keeps phones signed in that this system set up and hasn't revoked, so an old or
   edited backup can't bring back or add a working phone.
 - **Migration files** do carry device sign-ins and the secrets, encrypted with AES-256-GCM under a
@@ -189,8 +208,9 @@ recommended.
    **Staff Access → Settings**.
 4. Create a role, add a phone or computer, and scan the QR code or open the setup link.
 5. For wristbands and key cards (optional): install TT Hotel's free **SN Web Socket** on the
-   front-desk computer the card encoder is plugged into, enter your TT Hotel integration details
-   on the **Wristbands** tab, and give your front-desk role wristband permissions.
+   front-desk computer the card encoder is plugged into, turn on **Wristbands**, enter your TT
+   Hotel integration details under **Settings → Connections**, and give your front-desk role
+   wristband permissions.
 
 The full guide is in [staff_portal/DOCS.md](staff_portal/DOCS.md), which is also shown on the
 add-on's **Documentation** tab. It covers tunnels, roles, areas, layouts, shared devices, locked
@@ -229,6 +249,7 @@ staff_portal/
     migrate.py               Encrypted migration files for moving to another install
     connecteam.py            Connecteam users and time clock (OAuth 2.0)
     db.py                    SQLite storage
+    doorlog.py               Door activity: TT Hotel's lock records from its Callback URL
     checkpoint.py            Run just before Home Assistant backs the add-on up (backup_pre)
     ha.py                    Home Assistant REST and WebSocket client
     branding.py              Logo handling and home-screen icons

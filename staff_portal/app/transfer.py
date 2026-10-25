@@ -12,14 +12,15 @@ What files never contain:
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
 - The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), and the secret in the Door
   activity address. A restore keeps the ones saved.
+- The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door or
+  guest room) chosen here travel, and land on doors the system already has. A backup from before
+  0.9.0 has no kind, and leaves each door's as it is.
 - Door activity (TT Hotel's lock records): TT Hotel keeps its own six months of them.
-- The door list (it comes from TT Hotel). Only the door names and hiding chosen here travel, and
-  land on doors the system already has.
-(A migration file, migrate.py, carries all of these, encrypted.)
-Departments (with their key card templates and clock-in rules) are in backups; a backup from
-before departments leaves the ones here as they are. The activity log and the record of
-wristbands and key cards made are in backups from 0.8.6 (schema 4), and a restore adds them to
-the ones here.
+(A migration file, migrate.py, carries all of these but door activity, encrypted.)
+Departments (with their key card templates, and their clock-in rules from 0.9.0) are in backups;
+a backup from before departments leaves the ones here as they are. The activity log and the
+record of wristbands and key cards made are in backups from 0.8.6 (schema 4), and a restore adds
+them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
 """

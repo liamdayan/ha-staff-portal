@@ -461,6 +461,10 @@ how its requests are kept low. Each has its own **Save** button, which saves onl
 connection's settings, so saving one never changes the other or the rest of Settings. Secrets
 stay hidden: leave the box blank to keep the saved one.
 
+TT Hotel's **Callback URL**, which sends Staff Access each unlock at doors with a gateway, isn't
+one of these details: its address is under **Door activity** on the Wristbands tab (see [Door
+activity](#door-activity)).
+
 ## Wristbands (TT Hotel key cards)
 
 If your doors use **TT Hotel** (TTLock) locks, staff signed in on a front-desk computer can make
@@ -1006,8 +1010,8 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
 3. In Staff Access, open **Settings → Connections → Connecteam**, tick **Link staff to
    Connecteam**, paste both keys, choose **Australia** under **Account hosted in** if your
    Connecteam account is hosted there, and click **Save Connecteam settings**, then **Test
-   connection**. It reports how many users and time
-   clocks it found and how many people are clocked in now.
+   connection**. It reports how many users and time clocks it found and how many people are
+   clocked in now.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
    greyed out.
    - **Use their Connecteam kiosk code as their PIN** is ticked when Connecteam has a kiosk code
@@ -1035,7 +1039,7 @@ How clocked-in sign-in works:
   they use after the next check signs them out.
 - If Connecteam can't be reached, the last answer is kept until 15 minutes after the next check
   was due. After that, clocked-in-only people can't sign in or use controls until Connecteam
-  answers again. The Settings page and the add-on log show what went wrong.
+  answers again. **Settings → Connections** and the add-on log show what went wrong.
 - The Staff tab shows each linked person's clock status. **Edit** lets you turn clocked-in-only
   on or off, change their PIN to their current kiosk code (if it changed in Connecteam), or
   **Unlink** them.
@@ -1045,7 +1049,8 @@ How clocked-in sign-in works:
 ### Add everyone from Connecteam
 
 Instead of adding people one by one, tick **Add everyone from Connecteam** under **Settings →
-Connections → Connecteam** and click **Save Connecteam settings**. Every active Connecteam user then becomes a staff member here:
+Connections → Connecteam** and click **Save Connecteam settings**. Every active Connecteam user
+then becomes a staff member here:
 
 - Named as in Connecteam ("First Last"; if someone here already has that name, "(2)" is added).
 - Their PIN is their Connecteam kiosk code when it's 4 to 8 digits and nobody else here uses it.
@@ -1125,8 +1130,8 @@ a small, steady share:
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
 Open **Connecteam** for how many your account has left (once Connecteam has answered) and, while
-paused or stopped, why. Remember that
-after 15 minutes without an answer, people who must be clocked in can't sign in.
+paused or stopped, why. Remember that after 15 minutes without an answer, people who must be
+clocked in can't sign in.
 
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
 included in backups. After restoring a backup on a new system, enter it again (a migration file
@@ -1292,7 +1297,10 @@ Unlike a backup, a migration file carries everything, so nothing needs pairing o
 - staff PINs, phone PINs and links to Home Assistant users;
 - the TT Hotel Client Secret, password and sign-in, the Connecteam Client Secret, both request
   counts, and the Door activity address (TT Hotel's Callback URL keeps working);
-- the whole door list, the activity log and the card history.
+- the whole door list (with what each door is marked as), the activity log and the card history.
+
+Door activity itself isn't carried: the new install's list starts empty (TT Hotel keeps its own
+six months).
 
 The steps (they're also on the **Backup** tab):
 
@@ -1342,6 +1350,9 @@ A few rules keep a migration file safe:
   groups are matched by name, and so are phones and departments (for staff). Anything with no
   match here is listed after the import. Pages with no match are left out, never replaced by every
   page.
+- Department files carry each department's clock-in rule; replacing a department from a file
+  made before 0.9.0 leaves its rule as it is. Staff files carry whether someone's clock-in setting
+  was changed by hand, and people linked to Connecteam who are added from one keep that.
 - Replacing staff uses the file's PINs, roles, pages and own settings, and anyone whose PIN
   changes is signed out. Someone you've turned off stays off, even if the file has them on. A file
   from before 0.7.0 has no roles or own settings for people, so replacing from one leaves theirs as

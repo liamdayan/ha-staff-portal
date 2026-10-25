@@ -3121,8 +3121,8 @@
       return;
     }
     if (!wbDoors.length) {
-      box.replaceChildren(h("p", { class: "hint" }, "Turn on wristbands and save your TT Hotel details " +
-        "above, then click Sync from TT Hotel."));
+      box.replaceChildren(h("p", { class: "hint" }, "Turn on wristbands above and save your TT Hotel " +
+        "details in Settings → Connections, then click Sync from TT Hotel."));
       return;
     }
     const rows = [];

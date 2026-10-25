@@ -527,6 +527,9 @@
                 at half of its share so making cards always has room. Making cards needs a fresh key for the
                 encoder from TT Hotel: one request covers about 8 minutes of card-making. Door checks cost a
                 request or two each, and only run while Wristbands is on and a computer has a card encoder.</p>
+              <p class="hint">TT Hotel's <b>Callback URL</b> (in the same place) is for door activity: its
+                address is under <b>Door activity</b> on the <button class="linkish" type="button"
+                data-goto="wristbands">Wristbands</button> tab.</p>
               <p class="wb-warn" id="wb-off-note" hidden>Wristbands is off, so Staff Access doesn't use TT Hotel.
                 Turn it on with <b>Make wristbands and key cards</b> on the <button class="linkish" type="button"
                 data-goto="wristbands">Wristbands</button> tab.</p>
@@ -549,7 +552,8 @@
               <label class="check-row"><input type="checkbox" name="connecteam_enabled">
                 <span>Link staff to Connecteam
                 <small>Add staff from your Connecteam user list, and only let them sign in and use controls
-                while they're clocked in on a Connecteam time clock (you can turn that off per person).
+                while they're clocked in on a Connecteam time clock (you can turn that off per department or
+                per person).
                 Staff you add by hand aren't affected.</small></span></label>
               <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
                 <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
@@ -587,8 +591,8 @@
                 off, never deleted. People you add by hand are never changed.</small></span></label>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
                 <span>People added this way must be clocked in to sign in
-                <small>You can change this for anyone on their card on the Staff tab; the sync never changes
-                it back.</small></span></label>
+                <small>Unless their department sets its own (Staff tab, Departments). You can change it for
+                anyone on their row on the Staff tab; the sync never changes it back.</small></span></label>
               <div class="ct-status">
                 <span id="ct-sync-status" class="hint"></span>
                 <button class="btn" type="button" id="ct-sync">Sync staff now</button>

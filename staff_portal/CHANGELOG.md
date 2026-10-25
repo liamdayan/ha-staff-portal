@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.9.0
+
+**Make staff key cards from the dashboard**
+
+- **New: This computer (the one you're using).** Make staff key cards straight from the dashboard
+  on the card encoder plugged into the computer you're using. It's offered first in **Make key
+  card**, **Revoke**, lost card notices and replacement cards. Nothing to set up in **Phones &
+  computers**: SN Web Socket just has to be running on that computer.
+- The dialog says how this computer's encoder is doing in plain words: connecting, choose
+  **Allow** when the browser asks, blocked by the browser, SN Web Socket isn't running, or ready.
+  It also says so when Home Assistant isn't open at its https address, which this needs.
+- Each Home Assistant administrator has their own: cards are made only on their own computer,
+  recorded under their name as made from the dashboard, and listed in **Key cards** and the card
+  log.
+- If the page is closed mid-card, the next card you start on that computer brings the unfinished
+  one back, to **Try again** or **Stop**.
+
+**Door activity**
+
+- **New: Door activity** on the Wristbands tab. Copy its address into TT Hotel's **Callback URL**
+  (Settings → Integration in TT Hotel), and every unlock at a door with a gateway shows up as it
+  happens: when, which door, who (the card made here, or TT Hotel's name for it), how (card, app,
+  passcode…) and whether the door opened or refused. Filter by door, or show problems only.
+- **Last used:** each card says where and when it was last used ("Pool Gate, today 3:12 PM"), in
+  the staff app's card log and Look up, and in a new **Last used** column in the Key cards list.
+- **Lost card alerts:** a lost or revoked card tried at a door (or a card TT Hotel has deleted) is
+  highlighted in Door activity, noted in the Activity tab, and sent to Home Assistant as a
+  notification, at most once per card every 10 minutes. Untick **Tell Home Assistant when a lost
+  or revoked card is tried** to keep it to the Activity tab.
+- Door battery levels now update with each lock record.
+- The Door activity address is never in backups (migration files carry it), and **Make a new
+  address** replaces it if it ever gets out. Staff Access makes no TT Hotel requests for any of
+  this, and passcodes are never stored.
+
+**Doors: public doors and guest rooms**
+
+- **New: mark each door as a Public door or a Guest room** (Wristbands tab, **Doors**), one at a
+  time or a whole floor or building at once. A line above the list says how many doors aren't
+  marked yet.
+- Overnight guests' rooms are now picked from the guest rooms, and the shared doors (day-pass
+  doors, overnight shared doors, and the doors staff may add) from the public doors. Doors not
+  marked yet show in both lists, so nothing disappears after the update.
+- Picking a guest room as a shared door, or a public door as a room, is refused with a plain
+  message. A door already chosen for day passes or overnight wristbands keeps working if you mark
+  it the other way later, and the Wristbands tab warns about it.
+- Syncing doors from TT Hotel never changes what a door is marked as. Backups and migration files
+  carry it, and restoring an older backup leaves it as it is.
+
+**Day passes: a later end time**
+
+- **New wristband rule for roles and people: "May change when day passes stop working".** People
+  with it get a **Works until** time on the day pass form (any time later than now, up to 11:59
+  PM), and can still make day passes after the usual end time by picking a later one. The
+  wristbands, the card log and the activity log use the time picked.
+
+**Clocking in, by department**
+
+- **Departments can now set the Connecteam clock-in rule** for everyone in them: **Must be clocked
+  in**, **Doesn't need to clock in**, or **Each person's own setting** (Staff tab, Departments,
+  Edit).
+- A person's own clock-in setting, changed by hand, still beats their department's. Their row on
+  the Staff tab says where their rule comes from (**From Housekeeping**, **Set by hand** or
+  **Default**) and offers **Use the department's setting**.
+- A change to a department's rule counts from the next sign-in. The staff app's list of names
+  shows **Not clocked in** by the same rule, and the time clock is only checked while someone
+  actually needs it.
+- Moving someone to another department, or saving **Edit** without touching the switch, no longer
+  turns their clock-in rule into a by-hand one.
+- Backups, migration files and department exports carry each department's clock-in rule. Staff
+  exports keep a person's by-hand setting.
+
+**Settings → Connections**
+
+- **TT Hotel and Connecteam are now together under Settings → Connections.** Each is folded to
+  one line showing whether it works (**Connected**, **Not set up**, **Paused until…**, **Stopped:
+  access refused** and so on) and how many requests Staff Access has used, such as "1,240 requests
+  this month (limit 7,500)". Click one to see its details.
+- Each connection has its own Save button that saves only that connection, so saving one never
+  changes the other or the rest of Settings. **Test connection** asks you to save unsaved changes
+  first, and says so when Wristbands is off.
+- The Wristbands tab keeps its on/off switch, times, doors and card options. A line under the
+  switch shows whether the TT Hotel account is connected, with a link that opens it in Settings.
+  **Sync from TT Hotel** is still next to the door list.
+- The Activity tab now says "Updated TT Hotel settings" or "Updated Connecteam settings" when only
+  that connection was saved.
+- **Fixed:** after you removed the saved Connecteam Client Secret, a new secret typed in without
+  reloading the page could be removed again on the next save.
+
 ## 0.8.10
 
 **Staff tab**

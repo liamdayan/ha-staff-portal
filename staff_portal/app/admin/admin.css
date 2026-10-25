@@ -838,6 +838,10 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
   .da-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas:
     "when result" "door how" "who who"; column-gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .da-table tr:last-child { border-bottom: 0; }
+  /* An alert row is shaded as one block, not cell by cell (the gaps between them stayed plain). */
+  .da-table tr.da-alert { background: color-mix(in srgb, var(--danger) 7%, transparent);
+    box-shadow: inset 3px 0 0 var(--danger); }
+  .da-table tr.da-alert td { background: none; box-shadow: none; }
   .da-table td { border: 0; padding: 1px 14px; min-width: 0; overflow-wrap: anywhere; }
   .da-table td:nth-child(1) { grid-area: when; font-weight: 600; }
   .da-table td:nth-child(2) { grid-area: door; }

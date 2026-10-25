@@ -4678,8 +4678,8 @@ async def admin_new_door_address(request: web.Request):
 
 KEY_CARD_PAGE = 100
 DASHBOARD_CARD_PERMS = {"types": ["staff"], "staff_levels": list(wristbands.LEVELS),
-                        "doors": {"all": True}, "edit_doors": True, "max_nights": 0,
-                        "max_staff_days": 0, "see_all_cards": True}
+                        "doors": {"all": True}, "edit_doors": True, "edit_end_time": False,
+                        "max_nights": 0, "max_staff_days": 0, "see_all_cards": True}
 REMOTE_TRIES = 3              # a door whose gateway is busy is tried this often at most...
 REMOTE_RETRY_SECONDS = 300    # ...this far apart, so a busy gateway never gets a storm of calls
 REMOTE_PACE_SECONDS = 6       # doors one at a time, at most ~10 a minute: 20 of TT Hotel's 30
