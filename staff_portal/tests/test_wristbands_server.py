@@ -895,7 +895,9 @@ def test_card_that_fails_needs_a_decision(tmp_path):
                 card = sim.place_card(initialized=True)
                 job = await job_until(p, ana, job_id, lambda j: j["phase"] == "needs_attention")
                 assert job["status"] == "needs_attention" and job["current"] == 1
-                assert job["cards"][0]["status"] == "failed" and "104" not in job["message"]
+                # The encoder's own code is on show, for whoever looks into it.
+                assert job["cards"][0]["status"] == "failed"
+                assert job["message"].endswith(" Encoder error 104.")
                 # Try again: the same card is written this time.
                 status, reply = await p.call("POST", f"/api/wristbands/jobs/{job_id}/retry", ana)
                 assert status == 200, reply
@@ -1328,3 +1330,43 @@ def test_why_wristbands_wont_show_on_a_computer(tmp_path):
     p.db.update_settings({"wristbands_enabled": "1"})
     p.db.update_device(p.device, kind="phone")
     assert note() is None                                  # only computers
+
+
+def test_reconnect_checks_the_encoder_now_and_shows_its_code(tmp_path):
+    """Reconnect on the Wristbands screen: the add-on connects to the encoder now, so its status
+    says how it is now, not how it was when it was last used. A code the add-on doesn't know is
+    shown as it is, and it's refused while cards are being made or straight after a check."""
+    async def scenario():
+        async with Simulator() as sim, FakeTTHotel([tt_lock(d) for d in DOORS]):
+            p = Portal(tmp_path, encoder_url=f"ws://127.0.0.1:{sim._runner.addresses[0][1]}")
+            tthotel_account(p)
+            async with p:
+                ana = await p.sign_in(p.ana)
+                encoder = lambda reply: reply["encoder"]   # noqa: E731
+
+                sim.fail_next("GetDeviceInfo", 2)   # a code the add-on has no words for
+                status, reply = await p.call("POST", "/api/wristbands/encoder/reconnect", ana)
+                assert status == 502, reply
+                assert reply["error"] == ("The card encoder reported a problem. Try again, or use "
+                                          "a different wristband. Encoder error 2.")
+                status, options = await p.call("GET", "/api/wristbands", ana)
+                assert encoder(options)["error"] == reply["error"]   # on show until it's fixed
+
+                status, reply = await p.call("POST", "/api/wristbands/encoder/reconnect", ana)
+                assert status == 429, reply   # checked a moment ago
+                main.encoders_tested.clear()
+
+                status, reply = await p.call("POST", "/api/wristbands/encoder/reconnect", ana)
+                assert status == 200 and reply["ok"] is True, reply
+                status, options = await p.call("GET", "/api/wristbands", ana)
+                assert encoder(options)["error"] is None and encoder(options)["connected"] is True
+                logged = [r for r in p.db.activity(50) if r["action"] == "Reconnected the card encoder"]
+                assert [r["ok"] for r in logged] == [1, 0]   # newest first
+
+                main.encoders_tested.clear()
+                status, reply = await p.call("POST", "/api/wristbands/jobs", ana, overnight([101]))
+                assert status == 200, reply
+                status, again = await p.call("POST", "/api/wristbands/encoder/reconnect", ana)
+                assert status == 409, again   # cards are being made
+                await p.call("POST", f"/api/wristbands/jobs/{reply['job']['id']}/cancel", ana)
+    run(scenario())

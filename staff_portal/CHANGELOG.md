@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.9
+
+**Card encoders**
+
+- **New: Reconnect.** When the Wristbands screen says **The card encoder isn't answering**,
+  **Reconnect** has the add-on connect to the encoder straight away and say how it is now.
+  Before, the last problem stayed on show until the encoder was next used, such as for a
+  look-up. It's the same check as **Test encoder** on the dashboard.
+- **The encoder's error code is on screen.** A problem the encoder or SN Web Socket reports ends
+  with its own code ("Encoder error 1004."), and the dashboard's messages say it too. A code
+  the add-on has no words for says "The card encoder reported a problem" with the code, rather
+  than claiming a card couldn't be written.
+- A look-up that can't connect to the encoder now shows that on the Wristbands screen until the
+  encoder is reached again, as a card that can't connect does.
+
 ## 0.8.8
 
 - **Clearer: "The card encoder wasn't found."** When SN Web Socket can't find the encoder, staff

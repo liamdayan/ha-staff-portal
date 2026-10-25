@@ -1674,6 +1674,35 @@ async def api_wristband_log(request: web.Request):
     return web.json_response({"jobs": [job_view(job, zone) for job in jobs]})
 
 
+async def api_reconnect_encoder(request: web.Request):
+    """Reconnect (Wristbands screen): connect to this computer's card encoder now, read it and
+    let it go, so its status says how it is now rather than how it was when it was last used.
+    Refused while it's making cards, and at most every WRISTBAND_TEST_GAP seconds (shared with
+    the dashboard's Test encoder)."""
+    device, member, _perms = await wristband_caller(request)
+    url = device["encoder_url"]
+    if encoder_busy(url):
+        return bad_request(ENCODER_BUSY, 409)
+    now = time.time()
+    if now - encoders_tested.get(device["id"], 0) < WRISTBAND_TEST_GAP:
+        return bad_request("The card encoder was checked a moment ago. Wait a few seconds, then "
+                           "try again.", 429)
+    if len(encoders_tested) > 1000:
+        encoders_tested.clear()
+    encoders_tested[device["id"]] = now
+    actor, role = actor_name(device, member), role_label(device, member)
+    try:
+        version = await test_encoder(device)
+    except EncoderError as err:
+        message = encoders.get(url).explain(err.code)
+        db.log(actor, "Reconnected the card encoder", detail=message, role=role, ok=False,
+               ip=client_ip(request))
+        return bad_request(message, 502)
+    db.log(actor, "Reconnected the card encoder", detail=str(version)[:200], role=role,
+           ip=client_ip(request))
+    return web.json_response({"ok": True, "version": version})
+
+
 async def api_start_lookup(request: web.Request):
     """Read the wristband on this computer's encoder: its number and what's written on it."""
     device, member, perms = await wristband_caller(request, change=True)
@@ -2403,6 +2432,7 @@ def staff_app() -> web.Application:
                         api_wristband_job_action)
     app.router.add_get("/api/wristbands/log", api_wristband_log)
     app.router.add_post("/api/wristbands/lookup", api_start_lookup)
+    app.router.add_post("/api/wristbands/encoder/reconnect", api_reconnect_encoder)
     app.router.add_get("/api/wristbands/lookup", api_lookup)
     app.router.add_post(r"/api/wristbands/cards/{id:\d{1,12}}/revoke", api_revoke_card)
     app.router.add_post("/api/wristbands/lookup/revoke", api_lookup_revoke)

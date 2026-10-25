@@ -1987,6 +1987,33 @@
     if (wb && !wb.loading && Date.now() - wb.optionsAt >= WB_OPTIONS_MS) wbRefreshOptions();
   }
 
+  // The add-on's last problem with the encoder, with Reconnect (Automatic and Address modes; in
+  // This computer (USB) mode wbDrawLinkNote shows it).
+  function wbEncoderNote(error) {
+    const box = wbNote("error", error, "The card encoder isn't answering");
+    box.append(h("button", { type: "button", class: "link-btn wb-note-action", onclick: wbReconnect },
+      "Reconnect"));
+    return box;
+  }
+
+  // Reconnect: the add-on connects to the encoder now and reads it, so the status says how it
+  // is now. (Otherwise a problem stays on show until the encoder is next used.)
+  async function wbReconnect(ev) {
+    const button = ev.currentTarget;
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Reconnecting…";
+    const res = await api("POST", "/api/wristbands/encoder/reconnect");
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+    if (wbAuthError(res)) return;
+    if (res.status === 200) toast("The card encoder is ready.");
+    else toast(res.data.error || "Couldn't reach the card encoder. Try again.", true);
+    if (wb && !wb.loading) wbRefreshOptions();
+  }
+
   async function wbRefreshOptions() {
     const state = wb;
     state.loading = true;
@@ -2055,7 +2082,7 @@
     const [tone, title, text, action] = local?.title
       ? [local.cls, local.title, local.note, local.action]
       : local?.cls === "ok" && enc?.error && wb.screen === "home"
-        ? ["error", "The card encoder isn't answering", enc.error, null]
+        ? ["error", "The card encoder isn't answering", enc.error, ["Reconnect", wbReconnect]]
         : [];
     const note = wb.linkNote;
     const key = title ? JSON.stringify([tone, title, text, action?.[0]]) : "";
@@ -2725,8 +2752,7 @@
     });
     wbShow("home", wbHomeHead(),
       // In This computer (USB) mode the note under the header says it (wbDrawLinkNote).
-      o.encoder?.error && !wbLocalEncoder(o)
-        ? wbNote("error", o.encoder.error, "The card encoder isn't answering") : null,
+      o.encoder?.error && !wbLocalEncoder(o) ? wbEncoderNote(o.encoder.error) : null,
       !o.enabled && o.reason ? wbNote("", o.reason) : null,
       make.length ? h("section", { class: "group" }, h("h2", null, "Make"),
         h("div", { class: "wb-choices" }, make)) : null,

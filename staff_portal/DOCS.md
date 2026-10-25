@@ -621,6 +621,10 @@ built to use a small share and never get the account blocked:
 
 ### Troubleshooting
 
+- **"The card encoder isn't answering"** (Wristbands screen): click **Reconnect** to have Staff
+  Access connect to the encoder now; the screen otherwise shows the last problem until the
+  encoder is next used. Messages from the encoder end with its own code (**Encoder error 1004**,
+  say): mention it when asking for help.
 - **"The card encoder wasn't found"**, or **the encoder types card numbers like a keyboard**
   (into the PIN pad, a name or the address bar) and no card gets made: SN Web Socket can't reach
   the encoder on that computer, which then acts as a plain card reader. SN Web Socket looks for it

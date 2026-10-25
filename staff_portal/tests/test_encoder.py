@@ -407,7 +407,7 @@ def test_unplugged_encoder_needs_attention_then_recovers():
         live = await h.live(job_id, "needs_attention", 1)
         assert live["message"] == ("The card encoder wasn't found. Check its USB cable, and that "
                                    "its driver (Silicon Labs CP210x) is installed on that computer, "
-                                   "then try again.")
+                                   "then try again. Encoder error 1003.")
         assert h.runner.status()["connected"] is False
         h.sim.plug_in()
         h.sim.place_card(initialized=True)
@@ -425,7 +425,7 @@ def test_dead_usb_port_reported_by_the_card_reader_reconnects_on_retry():
         h.sim.unplug(card_id_code=4)
         live = await h.live(job_id, "needs_attention", 1)
         assert live["message"] == ("The card encoder stopped responding. Check the USB cable, "
-                                   "then try again.")
+                                   "then try again. Encoder error 4.")
         connects = h.sim.calls.count("GetDeviceInfo")
         h.sim.plug_in()
         h.sim.place_card(initialized=True)
@@ -473,7 +473,7 @@ def test_expired_key_is_dropped_and_try_again_works():
         job_id = h.submit()
         h.sim.place_card(initialized=True)
         await h.live(job_id, "needs_attention", 1, "The authorization from TT Hotel expired. "
-                                                   "Try again.")
+                                                   "Try again. Encoder error 13.")
         assert h.expired == 1
         h.runner.retry(job_id)
         await h.status(job_id, "done")
@@ -538,7 +538,7 @@ def test_skipped_card_is_not_used_for_the_next_one():
         foreign = h.sim.place_card(foreign=True)
         live = await h.live(job_id, "needs_attention", 1)
         assert live["message"] == ("This wristband belongs to another hotel or can't be set up. "
-                                   "Try a different wristband.")
+                                   "Try a different wristband. Encoder error 106.")
         h.runner.skip(job_id)
         await h.live(job_id, "waiting_for_card", 2, "Take that wristband off the encoder and use "
                                                     "a new one")
@@ -1002,3 +1002,20 @@ def test_cancellations_read_from_cards_in_one_shape():
         encoder._raw_cancellations("not json")
     with pytest.raises(EncoderError):
         encoder._raw_cancellations(42)
+
+
+def test_lookup_that_cant_connect_says_so_until_it_can():
+    """A look-up that can't open the encoder shows the encoder's code, and the status keeps the
+    problem (as a card does) until the encoder is next reached."""
+    async def scenario(h):
+        h.sim.fail_next("GetDeviceInfo", 2)
+        h.runner.start_lookup(card_wait=1)
+        await h.until(lambda: h.runner.lookup_state()["state"] == "error", "the look-up")
+        message = h.runner.lookup_state()["message"]
+        assert message == ("The card encoder reported a problem. Try again, or use a different "
+                           "wristband. Encoder error 2.")
+        assert h.runner.status()["error"] == message and h.runner.status()["connected"] is False
+        await h.released()
+        await h.runner.test()   # Reconnect
+        assert h.runner.status()["error"] is None and h.runner.status()["connected"] is True
+    run(scenario)

@@ -90,6 +90,8 @@ UNREACHABLE = -1000          # SN Web Socket couldn't be reached
 NO_REPLY = -1001             # ...or didn't answer in time
 BUSY = -1002                 # the encoder is making cards for someone else
 NO_LINK = -1003              # This computer (USB): Wristbands isn't open on that computer
+OUR_CODES = frozenset({UNREACHABLE, NO_REPLY, BUSY, NO_LINK})
+CONNECTING = ("GetDeviceInfo", "CE_ConnectComm")   # the requests that open the encoder's port
 UNEXPECTED = -9              # an answer without an errorCode (SN Web Socket's "exception" code)
 LOCAL_PREFIX = "local:"      # a computer in This computer (USB) mode: "local:<device ID>"
 LOCAL_RE = re.compile(r"^local:([1-9]\d{0,11})$")
@@ -180,12 +182,18 @@ class EncoderError(Exception):
         self.code = code
         self.operation = operation
         self.detail = detail
-        super().__init__(f"{operation} failed with code {code}: {self.message}")
+        super().__init__(f"{operation} failed with code {code}: {self._words()}")
+
+    def _words(self) -> str:
+        base = ERROR_MESSAGES.get(self.code, f"Card encoder error {self.code}")
+        return f"{base} ({self.detail})" if self.detail else base
 
     @property
     def message(self) -> str:
-        base = ERROR_MESSAGES.get(self.code, f"Card encoder error {self.code}")
-        return f"{base} ({self.detail})" if self.detail else base
+        """For admins: with the encoder's own code, unless the words already say it."""
+        if self.code in OUR_CODES or self.code not in ERROR_MESSAGES:
+            return self._words()
+        return f"{self._words()} (error {self.code})"
 
 
 # ---------------------------------------------------------------- wording
@@ -232,7 +240,13 @@ def summary_message(card_type: str, status: str, cards: list[dict]) -> str:
 
 
 def failure_message(code: int, card_type: str) -> str:
-    """A plain sentence for staff about an encoder problem, with what to do next."""
+    """A plain sentence for staff about an encoder problem, with what to do next, and the
+    encoder's own code (not one of ours) for whoever looks into it."""
+    words = _failure_words(code, card_type)
+    return words if code in OUR_CODES else f"{words} Encoder error {code}."
+
+
+def _failure_words(code: int, card_type: str) -> str:
     noun = card_noun(card_type)
     if code == UNREACHABLE:
         return ("Can't reach the card encoder's computer. Check that it's on and SN Web Socket "
@@ -277,7 +291,8 @@ def failure_message(code: int, card_type: str) -> str:
     if code in (34, 35, 37):
         return (f"The {noun} doesn't match the encoder's sector setting. Try a different {noun}, "
                 "or ask a manager to check the sector setting.")
-    return f"The {noun} couldn't be written. Try again, or use a different {noun}."
+    # A code not listed above: it may not have been writing at all (connecting, say).
+    return f"The card encoder reported a problem. Try again, or use a different {noun}."
 
 
 # ---------------------------------------------------------------- SN Web Socket
@@ -1229,8 +1244,9 @@ class EncoderRunner:
                 self._lookup.update(state="error", message="Look-up stopped.")
 
     async def test(self, port: str | None = None) -> str:
-        """Connect, read the versions and let go again, for the dashboard's Test encoder.
-        Raises EncoderError (BUSY while cards are being made)."""
+        """Connect, read the versions and let go again, for the dashboard's Test encoder and the
+        Wristbands screen's Reconnect: the status says how it went either way. Raises
+        EncoderError (BUSY while cards are being made)."""
         if self._busy():
             raise EncoderError(BUSY, "test")
         if self._relay is not None and not self._relay.connected:
@@ -1243,6 +1259,9 @@ class EncoderRunner:
                 version = await socket.version()
             except EncoderError as err:
                 self._note(err)
+                # As a card would (_prepare): through a browser link, the link says why.
+                if self._relay is None or err.code not in (UNREACHABLE, NO_REPLY, NO_LINK):
+                    self._set_status(False, self.explain(err.code))
                 raise
             finally:
                 await self._release()
@@ -1846,7 +1865,7 @@ class EncoderRunner:
                                "are no doors on it.")
                 else:
                     message = ("The doors on this wristband couldn't be read. Center it on the "
-                               "encoder, then try again.")
+                               f"encoder, then try again. Encoder error {err.code}.")
             except Exception:  # noqa: BLE001 - TT Hotel unreachable: the number is still useful
                 message = ("Couldn't reach TT Hotel to read the doors on this wristband. Check "
                            "the internet connection.")
@@ -1857,7 +1876,12 @@ class EncoderRunner:
             lookup.update(state="done", message=message)
         except EncoderError as err:
             self._note(err)
-            lookup.update(state="error", message=self.explain(err.code, "day_pass"))
+            message = self.explain(err.code, "day_pass")
+            # Couldn't connect: on show until it can (as for a card), not only on this look-up.
+            if err.operation in CONNECTING and (
+                    self._relay is None or err.code not in (UNREACHABLE, NO_REPLY, NO_LINK)):
+                self._set_status(False, message)
+            lookup.update(state="error", message=message)
 
     async def _link_for_lookup(self, lookup: dict, card_wait: float) -> bool:
         """This computer (USB): wait up to card_wait for the computer's browser link. False (and
