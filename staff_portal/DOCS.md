@@ -759,6 +759,10 @@ Maintenance…). Each one has:
   Connecteam section), people in that smart group join this department. Someone in several of
   these smart groups gets the first department in the list: drag departments to change the order.
 - **Role**: given to people who join it (or **Leave their role as it is**).
+- **Clock-in**: for people linked to Connecteam, **Must be clocked in** (everyone in it must be
+  clocked in to sign in), **Doesn't need to clock in**, or **Each person's own setting**. Someone
+  whose own setting you've changed by hand keeps theirs (see **Clocking in, by department or
+  person** in [the Connecteam section](#add-everyone-from-connecteam)).
 - **Key card**: what a key card made with **Make key card** opens (every door, whole buildings,
   whole floors or single doors, like a staff card), how many days it lasts, and whether it opens
   doors that are deadbolted from inside.
@@ -933,11 +937,27 @@ same request limits as the time clock checks (below) and never runs while Connec
 stopped. The Staff tab says when it last ran and what changed, and each sync that changes
 something is in **Activity**.
 
-**Clocking in, person by person.** **People added this way must be clocked in to sign in** (ticked
-by default) sets this for people the sync adds. You can change it for anyone linked to Connecteam,
-however they were added, with the **Must be clocked in to sign in** switch on their card on the
-Staff tab (or in **Edit**). Their card shows **Must be clocked in** or **Clock-in not required**.
-Once you've changed it for someone, the sync never changes it back.
+**Clocking in, by department or person.** **People added this way must be clocked in to sign in**
+(ticked by default) sets this for people the sync adds. A department can set it for everyone in
+it instead (Staff tab, **Departments**, **Edit**, **Clock-in**): **Must be clocked in**,
+**Doesn't need to clock in**, or **Each person's own setting**. You can also change it for anyone
+linked to Connecteam, however they were added, with the **Must be clocked in to sign in** switch
+on their row on the Staff tab (or in **Edit**).
+
+What counts for each person:
+
+1. Their own setting, if you've changed it by hand. Their department and the sync never change
+   it back.
+2. Otherwise their department's, if it sets one.
+3. Otherwise their own setting (for people the sync added, the one it gave them).
+
+Their row shows **Must be clocked in** or **Clock-in not required**, and where that comes from:
+**From Housekeeping** (their department), **Set by hand**, or, for people the sync added,
+**Default** (the setting above). When it's set by hand and their department sets one, **Use the
+department's setting** goes back to the department's. Changing a department's setting counts
+from the next sign-in (and, for anyone already signed in, from the next control they use).
+Moving someone to another department in **Edit** leaves the switch following the new
+department, unless you change the switch too.
 
 ### Staying within Connecteam's API limits
 
@@ -1104,8 +1124,9 @@ backups from older versions too. Restoring puts the setup back:
   and a restore never changes them. Wristband settings, door names, whether each door is a public
   door or a guest room (an older backup without that leaves it as it is), roles' wristband rules,
   departments, each person's department and Connecteam sync details, and how many digits each PIN
-  has (when that's known) are included. Whether remote lock-out was tested is never restored: test
-  it again on the new system.
+  has (when that's known) are included, and so are departments' clock-in settings (an older
+  backup has none, so each person's own setting counts). Whether remote lock-out was tested is
+  never restored: test it again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - **The activity log and the card history are merged, not replaced.** Entries in the backup that

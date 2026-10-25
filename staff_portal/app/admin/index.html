@@ -100,10 +100,11 @@
       <h2>Departments</h2>
       <div class="head-actions"><button class="btn" id="add-department">Add department</button></div>
     </div>
-    <p class="hint">A department gives its people a role and the key card made for them with
-      <b>Make key card</b>. With Connecteam's <b>Add everyone from Connecteam</b> on, people join the
-      department whose smart group they're in. Someone in several of these smart groups gets the first
-      one in this list: drag to change the order.</p>
+    <p class="hint">A department gives its people a role, the key card made for them with
+      <b>Make key card</b>, and whether they must be clocked in to sign in. With Connecteam's
+      <b>Add everyone from Connecteam</b> on, people join the department whose smart group they're in.
+      Someone in several of these smart groups gets the first one in this list: drag to change the
+      order.</p>
     <div id="department-list" class="area-list dept-list"></div>
   </section>
 
@@ -804,6 +805,13 @@
         <select name="smart_group_id"></select></label>
       <label>Role <small>Given to people who join it.</small><select name="role_id"></select></label>
     </div>
+    <label>Clock-in <small>For people linked to Connecteam. Someone's own setting, changed by hand
+        on the Staff tab, still wins.</small>
+      <select name="clock_in">
+        <option value="">Each person's own setting</option>
+        <option value="1">Must be clocked in</option>
+        <option value="0">Doesn't need to clock in</option>
+      </select></label>
     <div class="pick-block">
       <div class="pick-head">Key card</div>
       <label class="check"><input type="checkbox" name="has_card"> Make key cards for this department</label>

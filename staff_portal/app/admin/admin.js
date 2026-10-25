@@ -1034,7 +1034,7 @@
       const flags = [
         m.status === "disabled" ? ["Inactive", "revoked"] : null,
         m.locked ? ["Locked (wrong PINs)", "locked"] : null,
-        m.clock === "out" && m.require_clock_in ? ["Not clocked in", "pending"] : null,
+        m.clock === "out" && m.clock_in ? ["Not clocked in", "pending"] : null,
         m.ha_link_error ? ["HA link broken", "locked"] : null,
       ].filter(Boolean);
       const head = h("button", { type: "button", class: "staff-row-head", "aria-expanded": String(open),
@@ -1141,7 +1141,7 @@
   function clockBadge(m) {
     if (!m.connecteam_user_id) return null;
     if (!m.clock) {
-      return h("span", { class: "badge linked", title: m.require_clock_in
+      return h("span", { class: "badge linked", title: m.clock_in
         ? "Connecteam is turned off in Settings, so the clock isn't checked"
         : "Can sign in whether or not they're clocked in" }, "Connecteam");
     }
@@ -1166,11 +1166,14 @@
     }, "Back to your layout. The phone updates within a few seconds.");
   }
 
-  // Whether this person must be clocked in on Connecteam to sign in, as a switch on their card.
-  // Changing it here (or in Edit) is the admin's choice: the Connecteam sync never changes it back.
+  // Whether this person must be clocked in on Connecteam to sign in, as a switch on their card,
+  // and where that comes from (the server works it out: clock_in, clock_in_from): set by hand,
+  // their department, or their own default. Changing it here (or in Edit) is the admin's choice:
+  // their department and the Connecteam sync leave it alone, until "Use the department's setting".
   function clockRule(m) {
     if (!m.connecteam_user_id) return null;
-    const required = !!m.require_clock_in;
+    const required = !!m.clock_in;
+    const dept = departmentOf(m);
     const box = h("input", { type: "checkbox", role: "switch", checked: required,
       "aria-label": `${m.name} must be clocked in to sign in` });
     box.addEventListener("change", () => run(async () => {
@@ -1184,16 +1187,32 @@
     }, box.checked ? `${m.name} must be clocked in on Connecteam to sign in.`
       : `${m.name} can sign in without clocking in.`));
     const off = !state.connecteam?.enabled;
+    const from = {
+      department: [`From ${dept?.name || "their department"}`,
+        `Their department sets it for everyone in it. The switch sets it for ${m.name} alone.`],
+      person: ["Set by hand", byHand(m)],
+      default: m.connecteam_auto ? ["Default", "Follows \u201cPeople added this way must be clocked in\u201d " +
+        "in Settings \u2192 Connecteam"] : null,
+    }[m.clock_in_from];
+    const back = m.clock_in_from === "person" && dept && dept.clock_in != null
+      ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
+        await api("PATCH", `api/staff/${m.id}`, { clock_in_set: false });
+        await load();
+      }, `${m.name} now follows ${dept.name}: ${dept.clock_in ? "must be clocked in" : "no clock-in needed"}.`) },
+      "Use the department's setting") : null;
     return h("div", { class: "meta clock-rule" },
       h("span", { class: `badge ${required ? "pending" : "active"}`,
         title: off ? "Connecteam is turned off in Settings, so the clock isn't checked for anyone" : null },
       required ? "Must be clocked in" : "Clock-in not required"),
       h("label", { class: "switch" }, box, h("span", { class: "switch-track", "aria-hidden": "true" }),
         h("span", null, "Must be clocked in to sign in")),
-      m.clock_in_set && m.connecteam_auto
-        ? h("span", { class: "hint-inline", title: "Set by hand, so the Connecteam sync leaves it as it is" },
-          "set by hand") : null);
+      from ? h("span", { class: "hint-inline", title: from[1] }, from[0]) : null,
+      back);
   }
+
+  const byHand = (m) => m.connecteam_auto
+    ? "Set by hand, so their department and the Connecteam sync leave it as it is"
+    : "Set by hand, so their department doesn't change it";
 
   // Their department, saved as soon as it's picked (shown once there are departments).
   function departmentSelect(m) {
@@ -1247,13 +1266,32 @@
     const ctBox = $("[data-ct]", dialog);
     ctBox.hidden = !ctId;
     $("[data-ct-label]", dialog).textContent = ctUser ? `Connecteam: ${ctUser.name}` : "Linked to Connecteam";
-    form.elements["require_clock_in"].checked = m ? !!m.require_clock_in
-      : state.settings.connecteam_auto_clock_in !== "0";
+    // The clock-in rule as it stands. Until it's touched, it follows the department picked here
+    // (the server only sets it by hand when it differs from that).
+    const clockBox = form.elements["require_clock_in"];
+    const deptSelect = form.elements["department_id"];
+    const clockFor = (deptId) => {
+      const rule = state.departments.find((d) => d.id === deptId)?.clock_in;
+      if (m?.clock_in_set || rule == null) {
+        return m ? !!m.require_clock_in : state.settings.connecteam_auto_clock_in !== "0";
+      }
+      return !!rule;
+    };
+    let clockTouched = false;
+    clockBox.checked = m ? !!m.clock_in : clockFor(null);
+    clockBox.onchange = () => { clockTouched = true; };
+    deptSelect.onchange = () => {
+      if (!clockTouched) clockBox.checked = clockFor(deptSelect.value ? Number(deptSelect.value) : null);
+    };
     const ctNote = $("[data-ct-note]", dialog);
-    ctNote.textContent = m?.connecteam_auto
-      ? `Added by the Connecteam sync, which keeps their department up to date${m.clock_in_set
-        ? ". The clock-in rule was set by hand, so the sync leaves it as it is." : ". Changing the clock-in " +
-          "rule here makes it yours: the sync never changes it back."}` : "";
+    const clockNote = !m ? ""
+      : m.clock_in_from === "department" ? `The clock-in rule comes from ${departmentOf(m)?.name || "their department"}. ` +
+        `Changing it here sets it for ${m.name} alone.`
+      : m.clock_in_from === "person" ? `The clock-in rule was set by hand, so ${m.connecteam_auto
+        ? "their department and the sync leave it as it is" : "their department doesn't change it"}.`
+      : m.connecteam_auto ? "Changing the clock-in rule here makes it yours: the sync never changes it back." : "";
+    ctNote.textContent = [m?.connecteam_auto ? "Added by the Connecteam sync, which keeps their department up to date." : "",
+      clockNote].filter(Boolean).join(" ");
     ctNote.hidden = !ctNote.textContent;
     // Their Connecteam kiosk code as the PIN: fetched by the add-on, never shown here.
     const kiosk = form.elements["use_kiosk_code"];
@@ -3185,7 +3223,9 @@
       role ? `Role: ${role.name}` : "Role left alone",
       d.card_access == null ? "No key card"
         : `Key card: ${accessSummary(d.card_access)}, ${plural(d.card_days, "day")}` +
-          (d.card_lockout ? ", opens deadbolted doors" : "")].join(" · ");
+          (d.card_lockout ? ", opens deadbolted doors" : ""),
+      d.clock_in == null ? (state.connecteam?.enabled ? "Clock-in: each person's own" : null)
+        : d.clock_in ? "Clock-in: must be clocked in" : "Clock-in: not needed"].filter(Boolean).join(" · ");
   }
 
   function renderDepartments() {
@@ -3239,6 +3279,7 @@
     $("[data-title]", dialog).textContent = d ? `Edit ${d.name}` : "Add department";
     form.elements["name"].value = d ? d.name : "";
     fillRoleOptions(form.elements["role_id"], d ? d.role_id : null, "Leave their role as it is");
+    form.elements["clock_in"].value = d?.clock_in == null ? "" : String(Number(d.clock_in));
 
     // Smart groups come from Connecteam (cached by the add-on for hours), only when asked for.
     const groupSelect = form.elements["smart_group_id"];
@@ -3319,6 +3360,7 @@
       if (problem) return;
       const body = { name, smart_group_id: groupSelect.value || null,
         role_id: form.elements["role_id"].value ? Number(form.elements["role_id"].value) : null,
+        clock_in: form.elements["clock_in"].value === "" ? null : form.elements["clock_in"].value === "1",
         card_access: hasCard.checked ? access : null };
       if (hasCard.checked) {
         body.card_days = days;
@@ -5160,7 +5202,7 @@
         ["copy", "Keep both", "Add the file's version with “(imported)” after the name."],
         ["replace", "Replace them", kind === "roles"
           ? "Use the file's access settings. Phones keep their role."
-          : kind === "departments" ? "Use the file's smart group, role and key card. People stay in them."
+          : kind === "departments" ? "Use the file's smart group, role, key card and clock-in rule. People stay in them."
           : "Use the file's PIN and settings. Anyone whose PIN changes is signed out, people you've " +
             "turned off stay off, and Home Assistant links are kept.", "danger"],
       ]);
