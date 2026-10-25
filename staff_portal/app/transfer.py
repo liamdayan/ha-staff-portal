@@ -14,7 +14,8 @@ What files never contain:
   the door names and hiding chosen here travel, and land on doors the system already has.
 Departments (with their key card templates) are in backups; a backup from before departments
 leaves the ones here as they are.
-Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry.
+Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
+many digits each has when that's known (files from before 0.8.3 don't say: unknown).
 """
 
 import base64
@@ -25,7 +26,7 @@ import os
 import re
 import time
 
-from db import PRIVATE_SETTINGS, card_access_choice, page_choice
+from db import PRIVATE_SETTINGS, card_access_choice, page_choice, pin_length
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
@@ -370,15 +371,16 @@ def export_staff(db, version: str) -> dict:
         return {"entities": entities,
                 "areas": {area_names[a]: lvl for a, lvl in areas.items() if a in area_names}}
     return _envelope("staff", version, staff=[
-        {"name": r["name"], "pin_hash": r["pin_hash"], "enabled": r["status"] != "disabled",
+        {"name": r["name"], "pin_hash": r["pin_hash"], "pin_length": pin_length(r["pin_length"]),
+         "enabled": r["status"] != "disabled",
          "phones": sorted(allowed.get(r["id"], [])),
          "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"]),
          "role": roles.get(r["role_id"]), "pages": _page_names(layout, page_choice(r["layout_pages"])),
          "overrides": overrides(r["id"]), "wristbands": permission_choice(r["wristbands"]),
          "department": departments.get(r["department_id"])}
-        for r in db.conn.execute("""SELECT id, name, pin_hash, status, connecteam_user_id,
-                                    require_clock_in, role_id, layout_pages, wristbands,
-                                    department_id FROM staff ORDER BY name""")])
+        for r in db.conn.execute("""SELECT id, name, pin_hash, pin_length, status,
+                                    connecteam_user_id, require_clock_in, role_id, layout_pages,
+                                    wristbands, department_id FROM staff ORDER BY name""")])
 
 
 def export_departments(db, version: str) -> dict:
@@ -478,7 +480,8 @@ def _import_staff(db, rows: list, mode: str) -> dict:
     phones = {r["name"].lower(): r["id"] for r in db.conn.execute(
         "SELECT id, name FROM devices WHERE status != 'revoked'")}
     existing = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM staff")}
-    current = {r["id"]: r for r in db.conn.execute("SELECT id, status, pin_hash FROM staff")}
+    current = {r["id"]: r for r in db.conn.execute(
+        "SELECT id, status, pin_hash, pin_length FROM staff")}
     roles = {r["name"].lower(): r["id"] for r in db.conn.execute("SELECT id, name FROM roles")}
     departments = {d["name"].lower(): d["id"] for d in db.departments()}
     area_ids = {a["name"].lower(): a["id"] for a in db.areas()}
@@ -495,6 +498,7 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             result["bad_pin"] += 1
             continue
         status = "active" if raw.get("enabled", True) is not False else "disabled"
+        length = pin_length(raw.get("pin_length"))   # unknown in older files, or if damaged
         device_ids = []
         for phone in raw.get("phones") if isinstance(raw.get("phones"), list) else []:
             device_id = phones.get(str(phone).lower())
@@ -513,9 +517,11 @@ def _import_staff(db, rows: list, mode: str) -> dict:
                 # property) mustn't quietly let them back in.
                 status = "disabled"
                 result["kept_off"].append(name)
+            if length is None and pin_hash == old["pin_hash"]:
+                length = pin_length(old["pin_length"])   # the same PIN: its length is known here
             db.conn.execute(
-                """UPDATE staff SET pin_hash = ?, status = ?, failed_pins = 0, locked_until = NULL
-                   WHERE id = ?""", (pin_hash, status, staff_id))
+                """UPDATE staff SET pin_hash = ?, pin_length = ?, status = ?, failed_pins = 0,
+                   locked_until = NULL WHERE id = ?""", (pin_hash, length, status, staff_id))
             if pin_hash != old["pin_hash"] or status == "disabled":
                 result["signed_out"].append(staff_id)   # a new PIN means signing in again
             result["replaced"] += 1
@@ -523,8 +529,9 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             if staff_id:
                 name = _unique(name, set(existing), 40)
             staff_id = db.conn.execute(
-                "INSERT INTO staff (name, pin_hash, status, created_at) VALUES (?, ?, ?, ?)",
-                (name, pin_hash, status, time.time())).lastrowid
+                """INSERT INTO staff (name, pin_hash, pin_length, status, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name, pin_hash, length, status, time.time())).lastrowid
             link = _connecteam_id(raw.get("connecteam_user_id"))
             if link and not db.conn.execute("SELECT 1 FROM staff WHERE connecteam_user_id = ?",
                                             (link,)).fetchone():
@@ -652,12 +659,12 @@ def make_backup(db, branding, version: str) -> dict:
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, pin_only, layout_pages, created_at, last_seen, encoder_url,
-                        encoder_port, encoder_auto, encoder_auto_ip FROM devices
+                        encoder_port, encoder_auto, encoder_auto_ip, pin_length FROM devices
                         WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in, role_id, layout_pages, wristbands, department_id,
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                      connecteam_note FROM staff"""),
+                      connecteam_note, pin_length FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
                             card_days, card_lockout, created_at FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
@@ -796,7 +803,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "role_set": flag(row.get("role_set")),
                       "pin_from_connecteam": flag(row.get("pin_from_connecteam")) if link else 0,
                       "connecteam_note": (_name(row.get("connecteam_note"), 120) or None
-                                          if isinstance(row.get("connecteam_note"), str) else None)})
+                                          if isinstance(row.get("connecteam_note"), str) else None),
+                      # Backups from before 0.8.3 don't know it: the PIN pad waits for a pause.
+                      "pin_length": pin_length(row.get("pin_length"))})
     staff_ids = {m["id"] for m in staff}
     staff_entities = {(r["staff_id"], r["entity_id"]): ("view" if r["level"] == "control" and not controllable(r["entity_id"])
                                                          else r["level"])
@@ -829,6 +838,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         devices.append({"id": device_id, "name": name, "role_id": role_id, "status": status,
                         "kind": "computer" if row.get("kind") == "computer" else "phone",
                         "token_hash": token_hash, "pin_hash": pin_hash,
+                        "pin_length": pin_length(row.get("pin_length")) if pin_hash else None,
                         "signin_mode": row.get("signin_mode") if row.get("signin_mode") in ("staff", "role") else "phone",
                         "staff_all": 0 if row.get("staff_all") in (0, False) else 1,
                         "pin_only": 1 if row.get("pin_only") in (1, True) else 0,

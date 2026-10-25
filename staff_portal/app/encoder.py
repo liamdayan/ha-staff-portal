@@ -896,7 +896,7 @@ class EncoderRunner:
             self._lookup_wake.set()
         self._lookup_args = (str(port or "auto"), _seconds_between(card_wait, 0.1, 600))
         self._lookup = {"state": "waiting", "card_number": None, "card": [], "raw": [],
-                        "cancellations": [],
+                        "cancellations": [], "read": False, "blank": False,
                         "message": WAITING_MESSAGE if self._busy() else QUEUED_MESSAGE,
                         "started_at": time.time(), "_stop": False}
         if _LOOKUP not in self._queue:
@@ -906,7 +906,9 @@ class EncoderRunner:
     def lookup_state(self) -> dict | None:
         """{"state": "waiting"|"done"|"error", "card_number", "card" (card_records()),
         "cancellations" (card_cancellations(): the cards a lost card notice or replacement card
-        cancels; None when they couldn't be read), "message"}, or None before any look-up."""
+        cancels; None when they couldn't be read), "read" (the doors were read, so an empty
+        "card" really is a card with none), "blank" (blank, or not this hotel's), "message"}, or
+        None before any look-up."""
         if self._lookup is None:
             return None
         return {k: (list(v) if isinstance(v, list) else v) for k, v in self._lookup.items()
@@ -1492,7 +1494,7 @@ class EncoderRunner:
             try:
                 hotel_info = await self._hotel_info(fresh=False)
                 raw = await socket.read_card(hotel_info)
-                lookup.update(raw=raw, card=card_records(raw))
+                lookup.update(raw=raw, card=card_records(raw), read=True)
                 try:
                     lookup["cancellations"] = card_cancellations(
                         await socket.read_cancellations(hotel_info))
@@ -1501,6 +1503,7 @@ class EncoderRunner:
                     lookup["cancellations"] = None
             except EncoderError as err:
                 if err.code in NEEDS_INIT:
+                    lookup["blank"] = True
                     message = ("This wristband is blank or belongs to another hotel, so there "
                                "are no doors on it.")
                 else:

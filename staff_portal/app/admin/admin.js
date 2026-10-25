@@ -555,7 +555,12 @@
       // A card encoder plugs into a computer. Offered once Wristbands is on (or one is already set).
       encoderBox.hidden = word !== "computer" || !(wristbandsOn() || (d && d.encoder_mode !== "off"));
     };
-    kindSelect.onchange = syncKind;
+    let pinOnlyTouched = false;   // ticked or unticked by hand: changing Type leaves it be
+    kindSelect.onchange = () => {
+      syncKind();
+      // A new computer hides names by default (Hide names starts ticked); a phone shows them.
+      if (!d && !pinOnlyTouched) form.elements["pin_only"].checked = kindSelect.value === "computer";
+    };
     syncKind();
     form.elements["name"].value = d ? d.name : "";
     fillRoleOptions(form.elements["role_id"], d ? d.role_id : state.roles[0]?.id);
@@ -570,7 +575,10 @@
     const mode = form.elements["signin_mode"];
     mode.value = d?.signin_mode === "staff" ? "staff" : "phone";
     form.elements["staff_all"].checked = d ? !!d.staff_all : true;
-    form.elements["pin_only"].checked = !!d?.pin_only;
+    // Existing devices keep their choice. A new computer starts PIN-only: a front desk screen
+    // is in view of guests, so it shouldn't list everyone's names (untick to show them).
+    form.elements["pin_only"].checked = d ? !!d.pin_only : kindSelect.value === "computer";
+    form.elements["pin_only"].onchange = () => { pinOnlyTouched = true; };
     const pick = $("[data-staff-list]", dialog);
     pick.replaceChildren(...state.staff.map((m) => h("label", { class: "check" },
       h("input", { type: "checkbox", value: m.id, checked: !!d?.staff_ids.includes(m.id) }),

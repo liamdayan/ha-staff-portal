@@ -131,6 +131,10 @@ button { cursor: pointer; }
 .pin-dots { display: flex; gap: 16px; margin: 14px 0 4px; min-height: 16px; }
 .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--muted); transition: background 0.15s, border-color 0.15s; }
 .dot.on { background: var(--text); border-color: var(--text); }
+/* The PIN typed is being checked (it signs in by itself, so show that something's happening). */
+.pin-dots.checking .dot.on { animation: pin-checking 0.9s ease-in-out infinite alternate; }
+@keyframes pin-checking { to { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .pin-dots.checking .dot.on { animation: none; opacity: 0.5; } }
 .pin-error { color: var(--alert); min-height: 22px; margin: 0; }
 .pinpad { display: grid; grid-template-columns: repeat(3, 78px); gap: 16px; margin-top: 8px; }
 .key {
@@ -718,6 +722,7 @@ body.with-tabs .toast { bottom: calc(env(safe-area-inset-bottom) + 76px); }
 .wb-actions .btn { flex: 1 1 140px; max-width: 240px; min-height: 50px; }
 .wb-actions .btn.primary { margin-top: 0; }
 .wb-actions-start { justify-content: flex-start; }
+.wb-record-note { margin: 10px 4px 0; font-size: 14px; }
 .wb-stop { color: var(--alert); }
 .wb-hero .hero-number { font-size: 24px; white-space: normal; overflow-wrap: anywhere; }
 

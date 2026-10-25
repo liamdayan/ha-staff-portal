@@ -247,6 +247,10 @@ MIGRATIONS = {
         # Automatic, when several helpers were found: the address of the one an admin chose for
         # this computer (NULL = the only one found). Matched again after every search.
         "encoder_auto_ip": "TEXT",
+        # How many digits the device's own PIN has, recorded when it's set (PINs are stored
+        # scrambled, so it can't be worked out later). NULL = not known: the PIN pad then waits
+        # for a pause instead of signing in as soon as the last digit is typed.
+        "pin_length": "INTEGER",
     },
     "staff": {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
@@ -278,6 +282,8 @@ MIGRATIONS = {
         # Why the sync turned them off ("No usable kiosk code in Connecteam"); NULL otherwise.
         # Only people the sync turned off are turned on again by it.
         "connecteam_note": "TEXT",
+        # How many digits their PIN has, as for devices (NULL = not known).
+        "pin_length": "INTEGER",
     },
     "wb_jobs": {
         # Who a staff card is for (made from the Staff tab, or matched by name), their department
@@ -317,7 +323,8 @@ DEFAULT_SETTINGS = {
     "accent_color": "#2f6f4f",
     "icon_background": "#ffffff",
     "public_url": "",
-    "pin_timeout_minutes": "15",
+    "pin_timeout_minutes": "15",            # phones (the key is older than computers)
+    "pin_timeout_computer_minutes": "5",    # computers: a desk is left unattended more often
     "max_pin_attempts": "5",
     "enroll_hours": "72",
     "ha_logbook": "1",
@@ -394,7 +401,7 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
                 "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
                 "require_clock_in", "role_id", "layout_pages", "wristbands", "department_id",
                 "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
-                "connecteam_note"}
+                "connecteam_note", "pin_length"}
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
                      "card_lockout"}
 
@@ -413,6 +420,14 @@ def check_pin(pin: str, stored: str) -> bool:
     salt_hex, digest_hex = stored.split("$", 1)
     digest = hashlib.scrypt(pin.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
     return secrets.compare_digest(digest.hex(), digest_hex)
+
+
+def pin_length(value) -> int | None:
+    """A stored PIN length: 4 to 8, or None when it isn't known (or is damaged), which only
+    means the PIN pad waits for a pause before signing in."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 4 <= value <= 8:
+        return None
+    return value
 
 
 def card_access_choice(raw) -> list[dict] | None:
@@ -720,8 +735,10 @@ class Database:
 
     def create_device(self, name: str, role_id: int | None, pin: str | None) -> int:
         cur = self.conn.execute(
-            "INSERT INTO devices (name, role_id, pin_hash, created_at) VALUES (?, ?, ?, ?)",
-            (name, role_id, hash_pin(pin) if pin else None, time.time()),
+            """INSERT INTO devices (name, role_id, pin_hash, pin_length, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, role_id, hash_pin(pin) if pin else None, len(pin) if pin else None,
+             time.time()),
         )
         self.conn.commit()
         self.new_enroll_code(cur.lastrowid)
@@ -731,7 +748,7 @@ class Database:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
                    "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since",
-                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip"}
+                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip", "pin_length"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -810,13 +827,19 @@ class Database:
         return [(r["id"], r["pin_hash"]) for r in self.conn.execute("SELECT id, pin_hash FROM staff")
                 if ids is None or r["id"] in ids]
 
+    def staff_pin_lengths(self, device: dict) -> list[int | None]:
+        """The PIN length of each active person allowed on a shared device (None: not known)."""
+        ids = {m["id"] for m in self.staff_for_device(device)}
+        return [pin_length(r["pin_length"]) for r in self.conn.execute(
+            "SELECT id, pin_length FROM staff") if r["id"] in ids]
+
     def staff_allowed_on(self, staff_id: int, device: dict) -> bool:
         return any(m["id"] == staff_id for m in self.staff_for_device(device))
 
     def create_staff(self, name: str, pin: str) -> int:
         cur = self.conn.execute(
-            "INSERT INTO staff (name, pin_hash, created_at) VALUES (?, ?, ?)",
-            (name, hash_pin(pin), time.time()),
+            "INSERT INTO staff (name, pin_hash, pin_length, created_at) VALUES (?, ?, ?, ?)",
+            (name, hash_pin(pin), len(pin), time.time()),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -953,13 +976,13 @@ class Database:
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
                    connecteam_user_id, require_clock_in, role_id, layout_pages, wristbands,
                    department_id, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                   connecteam_note)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   connecteam_note, pin_length)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
                   m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"],
                   m["wristbands"], m.get("department_id"), m.get("connecteam_auto", 0),
                   m.get("clock_in_set", 0), m.get("role_set", 0), m.get("pin_from_connecteam", 0),
-                  m.get("connecteam_note")) for m in snap["staff"]])
+                  m.get("connecteam_note"), m.get("pin_length")) for m in snap["staff"]])
             c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
                       "(SELECT id FROM departments)")
             c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
@@ -969,12 +992,12 @@ class Database:
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
                    staff_all, layout_pages, created_at, last_seen, kind, pin_only, encoder_url,
-                   encoder_port, encoder_auto, encoder_auto_ip)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   encoder_port, encoder_auto, encoder_auto_ip, pin_length)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
                   d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
                   d["kind"], d["pin_only"], d["encoder_url"], d["encoder_port"], d["encoder_auto"],
-                  d["encoder_auto_ip"])
+                  d["encoder_auto_ip"], d.get("pin_length"))
                  for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
@@ -1345,6 +1368,15 @@ class Database:
     def key_card(self, card_id: int) -> dict | None:
         """One staff card made (by its wb_cards ID), in any state."""
         return next(iter(self._key_card_rows(["c.id = ?"], [card_id], 1)), None)
+
+    def wb_card(self, card_id: int) -> dict | None:
+        """One card written by any job (a wristband or a staff card), by its wb_cards ID, with
+        the name it was made for."""
+        row = self.conn.execute(
+            """SELECT c.id, c.job_id, c.status, c.card_number, c.state, j.name, j.card_type
+               FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id WHERE c.id = ?""",
+            (card_id,)).fetchone()
+        return dict(row) if row else None
 
     def set_card_state(self, card_id: int, state: str, by: str | None) -> None:
         assert state in CARD_STATES

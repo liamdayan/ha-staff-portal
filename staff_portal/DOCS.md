@@ -308,7 +308,9 @@ phones: a role, layout pages, PINs, per-person sign-in and locked controls all w
 
 1. In **Phones & computers**, click **Add computer**, name it (such as *Front desk computer*) and
    pick a role. For a computer several people use, set **Who uses it** to **Shared** so each
-   person signs in with their own PIN (they can type it on the keyboard).
+   person signs in with their own PIN (they can type it on the keyboard). A new Shared or
+   Role-based computer starts with **Hide names** ticked (see below), so the screen doesn't list
+   everyone; untick it to show names.
 2. A setup link appears instead of a QR code. Click **Copy link** and open it in the browser on
    that computer (Chrome, Edge, Safari or Firefox). Whoever sets it up first gets access, so only
    open it on the computer you're setting up.
@@ -343,7 +345,17 @@ each person sign in with their own PIN so every action is recorded under their n
 
 On the phone, the app now asks **"Who's using this phone?"**. The person taps their name,
 enters their PIN, and the header shows who's signed in. **Sign out** returns to the name list,
-and they're signed out automatically after the idle time set in **Settings**.
+and they're signed out automatically after the idle time set in **Settings** (phones and
+computers each have their own, see [Security settings](#security-settings)).
+
+**Signing in without OK.** When every PIN that can sign in on a device has the same number of
+digits (everyone allowed on a shared device, or the device's own PIN), the PIN pad signs in as
+soon as the last digit is typed. Otherwise it signs in about a second after the typing stops,
+once at least 4 digits are typed. **OK** (or **Enter** on a keyboard) always works too. The
+device is only ever told that shared number of digits: never a PIN, and never one person's own
+length. Staff Access can only know a PIN's length from when it's set (they're stored scrambled),
+so PINs set before 0.8.3, and PINs from older backups or staff files, count as unknown until
+they're set again, and devices with any of them wait for the pause.
 
 - What they can control still comes from the **phone's role** (it's a kiosk device). To give
   each person their own access instead, make it role-based (next section).
@@ -365,6 +377,8 @@ The device never receives the list of names. Because a wrong guess could match a
 PINs count against the device, which locks after **Lock phone after wrong PINs** wrong PINs in
 a row (within 15 minutes), or 20 in a day, until you unlock it on the **Phones & computers** tab.
 If two people still share a PIN from before, that PIN can't sign in; give one of them a new PIN.
+New Shared and Role-based **computers** start with this ticked, since a front desk screen is in
+view of guests; new phones start with names shown. Devices you already have keep their setting.
 
 ## Role-based devices: each person's own access
 
@@ -432,8 +446,9 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   checkout time on the checkout date (11:00 AM unless you change it).
 - **Staff cards:** a staff member's name, how many cards, what they open (every door, whole
   buildings, whole floors or single doors) and the last day they work (until 11:59 PM that day).
-- **Look up a wristband:** put it on the encoder to see its card number, who it was made for and
-  by whom, when it stops working and which doors it opens.
+- **Look up a wristband:** put it on the encoder to see what's on it first (its card number,
+  which doors it opens and until when), then our record of it: who it was made for and by whom,
+  and its state. A card with nothing on it says **This card has no doors on it** (see below).
 - **Card log:** every wristband and card made, with who made it, when and the card numbers.
 
 Every card has a named maker: it's recorded under the person signed in, so wristbands are only
@@ -547,6 +562,22 @@ built to use a small share and never get the account blocked:
   were last synced and, while stopped or paused, why.
 - Wristbands makes **no Connecteam requests**: it uses the same sign-in and clock-in checks as
   the rest of the app.
+
+### Looking up a card
+
+**Look up** reads the card itself, so it shows the truth even when our record is out of date:
+
+- **This card has no doors on it.** The card was cleared, or cancelled in TT Hotel's own program
+  or app, or it's blank. It opens nothing. If our record still said **Active**, it's marked
+  **Revoked** ("Found cleared on the encoder") and the activity log says so. A card that only
+  reads as blank or another hotel's is left as it is in our records, because a changed **Card
+  sectors** setting can make a working card read that way.
+- **Revoke (wipe this card)** clears the card on the encoder (it's already there), with the usual
+  progress screen, and marks it revoked. It's offered to people whose role sees everyone's cards,
+  and to whoever made that card. The dashboard's **Revoke** works as before.
+- Staff Portal can't see a card reported lost in the TT Hotel app. Active cards say so: use
+  **Report lost** in Staff Access (Staff tab → **Key cards**) so the card is tracked and locked
+  out.
 
 ### Troubleshooting
 
@@ -879,8 +910,10 @@ Always on:
 
 - Only Home Assistant **administrators** can open Staff Access. Other Home Assistant users get
   "Only Home Assistant administrators can open Staff Access."
-- Phones with a PIN ask for it again after **Ask for PIN again after** minutes without being
-  touched, even with the app left open on the screen.
+- Phones and computers with a PIN ask for it again after **Ask for PIN again after (minutes)**
+  without being touched, even with the app left open on the screen. Phones and computers each have
+  their own (under **Settings → Security**: **phones**, 15 minutes by default, and **computers**,
+  5 minutes by default, since a desk is walked away from more often). Both are 1 to 1440 minutes.
 - Each phone can send up to 60 actions a minute, and one action per device each second, so a
   stuck button or a script can't flood your equipment.
 - Each phone or computer can try to sign in at most 15 times a minute, and shared ones lock after
@@ -932,7 +965,8 @@ that back:
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
 - The Connecteam Client Secret and the TT Hotel Client Secret and password are never in a backup,
   and a restore never changes them. Wristband settings, door names, roles' wristband rules,
-  departments and each person's department and Connecteam sync details are included; the card log
+  departments, each person's department and Connecteam sync details, and how many digits each PIN
+  has (when that's known) are included; the card log
   and key cards stay as they are. Whether remote lock-out was tested is never restored: test it
   again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps

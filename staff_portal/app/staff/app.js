@@ -6,6 +6,8 @@
   const POLL_MS = 5000;
   const FAST_POLL_MS = 1500;   // while a change is waiting to be confirmed by the device
   const CONFIRM_MS = 90000;    // how long a change may take to show up before we say so
+  const PIN_PAUSE_MS = 1000;   // a PIN of unknown length signs in once typing stops this long
+  const PIN_LENGTHS = new Set([4, 5, 6, 7, 8]);
 
   const local = storage(() => window.localStorage);
   const session = storage(() => window.sessionStorage);
@@ -86,6 +88,11 @@
   function isDesktop() {
     return window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
       !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  }
+
+  // The property name from Settings, for messages ("Can't reach Hot Lake Lodge").
+  function portalName() {
+    return me?.property_name || "Staff Portal";
   }
 
   // "phone" or "computer", for messages.
@@ -373,17 +380,27 @@
     }
     let pin = "";
     let busy = false;
+    let pause = null;
+    // Every PIN that can sign in here has this many digits (the server says so only when that's
+    // true for everyone): sign in as soon as it's typed. Otherwise sign in after a short pause.
+    let length = PIN_LENGTHS.has(me?.pin_length) ? me.pin_length : null;
 
     const draw = () => {
-      dots.replaceChildren(...Array.from({ length: Math.max(4, pin.length) }, (_, i) =>
+      dots.classList.toggle("checking", busy);
+      dots.replaceChildren(...Array.from({ length: Math.max(length || 4, pin.length) }, (_, i) =>
         h("span", { class: i < pin.length ? "dot on" : "dot" })));
     };
-    const submit = async () => {
+    // auto: signed in by itself at the known length, which the server checks is still right.
+    const submit = async (auto = false) => {
+      clearTimeout(pause);
       if (busy || pin.length < 4) return;
       busy = true;
-      const res = await api("POST", "/api/unlock",
-        member ? { pin, staff_id: member.id } : { pin });
+      draw();
+      const body = member ? { pin, staff_id: member.id } : { pin };
+      if (auto && length) body.length = length;
+      const res = await api("POST", "/api/unlock", body);
       busy = false;
+      if (!pad.isConnected) return;   // another screen took over meanwhile
       if (res.status === 200) {
         session.set(SESSION_KEY, res.data.session);
         return boot();
@@ -391,16 +408,39 @@
       if (res.status === 423 || res.status === 401 || res.status === 0) return handleAuthError(res);
       // 404: the device was switched to shared sign-in (or the person was removed): ask again.
       if (res.status === 404) return showWho();
+      if (res.status === 409 && res.data.error === "pin_length_changed") {
+        // Someone's PIN has a different length now: nothing was checked, so keep what's typed
+        // and let them finish (then OK, or a pause, signs in).
+        length = PIN_LENGTHS.has(res.data.pin_length) ? res.data.pin_length : null;
+        if (me) me.pin_length = length;
+        draw();
+        return typed();
+      }
       pin = "";
       draw();
       error.textContent = res.data.error || "Wrong PIN.";
     };
+    // After each digit: sign in at the known length, else once they stop typing (or at 8 digits,
+    // the most a PIN has). Never with fewer than 4, and never again by itself after a failure.
+    const typed = () => {
+      clearTimeout(pause);
+      if (busy || pin.length < 4) return;
+      if (length) {
+        if (pin.length === length) submit(true);
+        return;
+      }
+      if (pin.length >= 8) return submit();
+      pause = setTimeout(() => { if (pad.isConnected) submit(); }, PIN_PAUSE_MS);
+    };
     const press = (k) => {
+      if (busy) return;   // the PIN typed is being checked
+      if (k === "ok") return submit();
       if (k === "del") pin = pin.slice(0, -1);
-      else if (k === "ok") return submit();
       else if (pin.length < 8) pin += k;
       error.textContent = "";
       draw();
+      if (k !== "del") typed();
+      else clearTimeout(pause);
     };
     for (const k of ["1", "2", "3", "4", "5", "6", "7", "8", "9", "del", "0", "ok"]) {
       const label = k === "del" ? "⌫" : k === "ok" ? "OK" : k;
@@ -975,7 +1015,7 @@
     const side = h("aside", { class: "desk-side" },
       h("div", { class: "desk-brand" }, logo,
         h("div", { class: "desk-brand-text" },
-          h("div", { class: "desk-name" }, me?.property_name || "Staff Portal"),
+          h("div", { class: "desk-name" }, portalName()),
           h("div", { class: "desk-sub" }, me?.app_name || "Staff"))),
       nav,
       h("div", { class: "desk-foot" },
@@ -1896,7 +1936,7 @@
     }
     if (!quiet) {
       wbShow("home", wbHomeHead(),
-        wbNote("error", res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection.`
+        wbNote("error", res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
           : res.data.error || "Wristbands couldn't be loaded."),
         h("button", { type: "button", class: "btn primary", onclick: () => wbHome() }, "Try again"));
       wb.homeKey = null;
@@ -2526,7 +2566,7 @@
     button.removeAttribute("aria-busy");
     if (res.status === 200) return wbShowJob(res.data.job);
     if (wbAuthError(res)) return;
-    const text = res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection, then try again.`
+    const text = res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.`
       : res.data.error || "That didn't work. Try again.";
     if (res.data.field && wbSetError(f, res.data.field, text)) return wbFocusField(f, res.data.field);
     f.els.problem.textContent = text;
@@ -2551,7 +2591,7 @@
       dots: h("ol", { class: "wb-dots", "aria-label": "Progress" }),
       meta: h("p", { class: "wb-meta" }),
       conn: h("p", { class: "wb-conn", role: "status", hidden: true },
-        "Can't reach Staff Portal right now. Still trying…"),
+        `Can't reach ${portalName()} right now. Still trying…`),
       actions: h("div", { class: "wb-actions" }),
       results: h("div", { class: "wb-results" }),
       box: null, phase: null, mode: null,
@@ -2685,7 +2725,7 @@
     } else if (wbAuthError(res)) {
       return;
     } else {
-      toast(res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection.`
+      toast(res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
         : res.data.error || "That didn't work. Try again.", true);
     }
     wbScheduleJob();
@@ -2723,7 +2763,7 @@
       wb.lost += 1;
       if (wb.lost >= WB_LOST_AFTER) {
         wb.lookup = { state: "error", card: [], job: null,
-          message: `Can't reach Staff Portal. Check this ${word()}'s connection, then try again.` };
+          message: `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.` };
       }
     } else {
       wb.lookup = { state: "error", card: [], job: null, message: res.data.error || "That didn't work. Try again." };
@@ -2747,25 +2787,39 @@
     }
     const job = look.job;
     const kind = job && (WB_TYPES[job.type] || WB_TYPES.day_pass);
-    const until = job?.expires_label || (look.card || []).find((r) => r.expires_label)?.expires_label;
-    const hero = (value, label) => h("div", { class: "hero-value" },
+    const doors = look.card || [];
+    // What the card itself says comes first: the encoder just read it. Our record can be out of
+    // date (a card cancelled in TT Hotel's own app, say).
+    const last = doors.reduce((a, r) => (Number(r.expires_at) > Number(a?.expires_at || 0) ? r : a), null);
+    const hero = (value, label, alert) => h("div", { class: alert ? "hero-value alert" : "hero-value" },
       h("div", { class: "hero-number" }, value), h("div", { class: "hero-label" }, label));
-    // Our record of this very card, when it's a staff card: its state, and the lost card it also
-    // cancels if it was made as a replacement.
-    const mine = job && wbKeyCard(job)
+    // Our record of this very card: its state, and the lost card it also cancels if it was made
+    // as a replacement.
+    const mine = job && (job.kind || "write") === "write"
       ? job.cards.find((c) => c.status === "written" && wbSameCard(c.card_number, look.card_number)) : null;
     const state = mine ? wbCardState(job, mine) : null;
     const done = look.state === "done";
-    const revoke = done && mine && wbCanRevoke(job, mine)
+    const noun = job?.type === "staff" || !job ? "card" : "wristband";
+    // The server says who may wipe it (people who see every card, or whoever made it), and
+    // checks again when asked.
+    const revoke = done && look.can_revoke && look.card_number
       ? h("button", { type: "button", class: "btn wb-stop",
-        onclick: (ev) => wbRevoke(mine, job.name, ev.currentTarget) }, "Revoke this card") : null;
+        onclick: (ev) => wbLookupRevoke(look.card_number, job?.name, ev.currentTarget) },
+      "Revoke (wipe this card)") : null;
     fill(v.body,
       look.state === "error" ? wbNote("error", look.message || "That didn't work. Try again.") : null,
       done ? h("div", { class: "hero-values wb-hero" },
-        hero(look.card_number || "—", "Card number"), until ? hero(until, "Works until") : null,
-        mine ? hero(WB_STATE_WORDS[state] || "Unknown", "State") : null) : null,
-      done && mine ? wbStateNote(state, look.card?.length > 0) : null,
+        hero(look.card_number || "—", "Card number"),
+        look.empty ? hero("No doors", "On the card", true)
+          : last?.expires_label ? hero(last.expires_label, "Works until") : null) : null,
+      done && look.empty ? wbNote("error", look.blank ? "It's blank, or set up for another hotel."
+        : "It opens nothing: it's been cleared, or cancelled in TT Hotel's own program or app.",
+      `This ${noun} has no doors on it`) : null,
       done && look.message ? wbNote("", look.message) : null,
+      doors.length ? h("section", { class: "group" },
+        h("h2", null, job?.type === "staff" ? "On the card" : "On the wristband"),
+        wbRows(doors.map((r) => [r.label, r.expires_label ? `Until ${r.expires_label}` : "—"]))) : null,
+      done && (!job || job.type === "staff") ? wbNoticeSection(look.cancellations) : null,
       job ? h("section", { class: "group" }, h("h2", null, "Our record"), wbRows([
         ["Made for", job.name],
         ["Kind", `${kind.title} · ${wbPlural(job.count, kind.noun)}`],
@@ -2773,13 +2827,13 @@
         ["Made", wbWhen(job.created_at)],
         ["Opens", job.summary || null],
         ["Works until", job.expires_label || null],
-        ["State", mine ? WB_STATE_WORDS[state] || "Unknown" : null, state !== "active"],
+        ["State", mine ? WB_STATE_WORDS[state] || "Unknown" : null, !!mine && state !== "active"],
+        ["Revoked", mine && state === "revoked" && mine.state_by || null],
         ["Replaces lost card", mine?.cancelled_card || null],
-      ])) : null,
-      look.card?.length ? h("section", { class: "group" },
-        h("h2", null, job?.type === "staff" ? "On the card" : "On the wristband"),
-        wbRows(look.card.map((r) => [r.label, r.expires_label ? `Until ${r.expires_label}` : "—"]))) : null,
-      done && (!job || job.type === "staff") ? wbNoticeSection(look.cancellations) : null,
+      ]), done && mine && !look.empty ? wbStateNote(state, doors.length > 0) : null,
+      done && state === "active" ? h("p", { class: "muted wb-sub wb-record-note" },
+        "Reported lost in the TT Hotel app? Staff Portal can't see that \u2014 use Report lost in Staff " +
+        "Access so it's tracked.") : null) : null,
       h("div", { class: "wb-actions wb-actions-start" }, h("button", { type: "button", class: "btn primary",
         onclick: () => wbOpenLookup(true) }, look.state === "error" ? "Try again" : "Look up another"), revoke));
   }
@@ -2873,7 +2927,7 @@
     } else if (res.status === 403) {
       return wbNoAccess(res.data.error);
     } else {
-      log.error = res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection.`
+      log.error = res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
         : res.data.error || "The card log couldn't be loaded.";
     }
     wbDrawLog();
@@ -3023,22 +3077,36 @@
   // Revoke a staff card with it in hand: the encoder waits for that exact card, clears it, and
   // it's marked revoked. The encoding screen shows how it goes.
   async function wbRevoke(card, name, button) {
+    const who = name ? ` (${name})` : "";
+    return wbStartRevoke(`/api/wristbands/cards/${card.id}/revoke`, button,
+      `Revoke card ${card.card_number}${who}?\n\nYou'll put the card on the encoder next. ` +
+      "It's cleared so it opens nothing, and it can be given out again afterwards.");
+  }
+
+  // Wipe the card just looked up: it's still on the encoder. The server takes the card number
+  // from the look-up, and checks this person may revoke it.
+  async function wbLookupRevoke(number, name, button) {
+    const who = name ? ` (${name})` : "";
+    return wbStartRevoke("/api/wristbands/lookup/revoke", button,
+      `Revoke card ${number}${who}?\n\nLeave it on the encoder. It's wiped so it opens no doors, ` +
+      "and it can be given out again afterwards.");
+  }
+
+  async function wbStartRevoke(path, button, question) {
     const state = wb;
     if (!state || state.acting) return;
-    const who = name ? ` (${name})` : "";
-    if (!window.confirm(`Revoke card ${card.card_number}${who}?\n\nYou'll put the card on the encoder next. ` +
-      "It's cleared so it opens nothing, and it can be given out again afterwards.")) return;
+    if (!window.confirm(question)) return;
     state.acting = true;
     button?.classList.add("working");
     button?.setAttribute("aria-busy", "true");
-    const res = await api("POST", `/api/wristbands/cards/${card.id}/revoke`);
+    const res = await api("POST", path);
     if (wb !== state) return;
     state.acting = false;
     button?.classList.remove("working");
     button?.removeAttribute("aria-busy");
     if (res.status === 200 && res.data.job) return wbShowJob(res.data.job);
     if (wbAuthError(res)) return;
-    toast(res.status === 0 ? `Can't reach Staff Portal. Check this ${word()}'s connection, then try again.`
+    toast(res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.`
       : res.data.error || "That card couldn't be revoked. Try again.", true);
     if (res.status === 409 && state.screen === "log") wbLoadLog(false);   // its state may have changed
   }
