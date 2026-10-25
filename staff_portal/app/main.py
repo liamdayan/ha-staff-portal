@@ -2303,9 +2303,11 @@ async def api_encoder_link(request: web.Request):
     return ws
 
 
-async def serve_link(link: EncoderLink, relay, device_id: int) -> None:
+async def serve_link(link: EncoderLink, relay, device_id: int, check=None) -> None:
     """Hand the browser's messages to the relay until the link closes, checking its session and
-    access every LINK_CHECK_SECONDS. Messages are never logged: answers carry the hotel key."""
+    access every LINK_CHECK_SECONDS. Messages are never logged: answers carry the hotel key.
+    check: a coroutine function saying why the link may not stay open, instead of link_refusal
+    (the dashboard's own link)."""
     ws = link.ws
     loop = asyncio.get_running_loop()
     checked = window = loop.time()
@@ -2335,7 +2337,8 @@ async def serve_link(link: EncoderLink, relay, device_id: int) -> None:
                 relay.feed(link.number, data)
         if msg is None or loop.time() - checked >= LINK_CHECK_SECONDS:
             checked = loop.time()
-            refusal = link_refusal(device_id, link.session, link.staff_id)
+            refusal = (await check() if check else
+                       link_refusal(device_id, link.session, link.staff_id))
             if refusal:
                 await ws.close(code=LINK_SIGNED_OUT if refusal == "signed_out"
                                else LINK_NOT_ALLOWED, message=refusal.encode())
@@ -2365,6 +2368,173 @@ async def close_all_links(app: web.Application) -> None:
     links = list(open_links.values())
     await asyncio.gather(*(link.ws.close(code=LINK_STOPPING, message=b"stopping")
                            for link in links if not link.ws.closed), return_exceptions=True)
+
+
+# ---------------------------------------------------------------- encoder links (dashboard)
+# This computer (the one you're using): the dashboard's card dialogs (Make key card, Revoke, a
+# lost card notice or replacement) can use the card encoder plugged into the computer the
+# dashboard is open on, with nothing set up. The dashboard page then does what the staff app does
+# in This computer (USB) mode: it keeps a WebSocket to the admin server, GET /api/encoder/link
+# (through Home Assistant's ingress, which admin_guard checks like any dashboard request), and
+# passes each request it's sent on to SN Web Socket on its own computer. A ticket first, POST
+# /api/encoder/ticket (refused like any change the dashboard itself didn't send): good once, for
+# LINK_TICKET_SECONDS, for the Home Assistant user it was given to. Each admin has one link and
+# one encoder address, dashboard_address(their user ID); a newer link of theirs (another tab, or
+# another computer) replaces the older one. A link closes when Wristbands is turned off or its
+# user is no longer an administrator. Through ingress a close code may not reach the page, so a
+# {"type": "closing", "why"} message goes first, and {"type": "linked"} says it was taken.
+
+DASHBOARD_LOCAL_USER = "local"   # the dashboard opened on this computer itself (no ingress)
+NO_DASHBOARD_LINK = "Open this card dialog again to connect the card encoder on this computer."
+DASHBOARD_NOT_LINKED = ("The card encoder on this computer isn't connected. Wait for it to "
+                        "connect, then try again.")
+DASHBOARD_WRISTBANDS_OFF = "Wristbands is turned off. Turn it on in the Wristbands tab first."
+dashboard_tickets: dict[str, tuple[str, float]] = {}   # ticket -> (user, expires at)
+recent_dashboard_tickets: dict[str, list[float]] = {}
+dashboard_links: dict[str, EncoderLink] = {}           # user -> their link
+
+
+def from_loopback(request: web.Request) -> bool:
+    try:
+        return ipaddress.ip_address(request.remote or "").is_loopback
+    except ValueError:
+        return False
+
+
+def admin_user(request: web.Request) -> str | None:
+    """Who's using the dashboard: their Home Assistant user ID (ingress sends it, and admin_guard
+    has checked they're an administrator), DASHBOARD_LOCAL_USER on this computer itself, else
+    None."""
+    user = request.headers.get("X-Remote-User-Id", "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", user):
+        return user
+    return DASHBOARD_LOCAL_USER if from_loopback(request) else None
+
+
+async def dashboard_link_refusal(user: str, ingress: bool) -> str | None:
+    """Why an admin's dashboard link may not stay open: "not_allowed" once Wristbands is turned
+    off, or (through ingress) they're no longer an administrator. None: it may. Home Assistant
+    not answering leaves it open (it was checked when it opened)."""
+    if db.settings().get("wristbands_enabled") != "1":
+        return "not_allowed"
+    if ingress:
+        try:
+            if not await ha.is_admin(user):
+                return "not_allowed"
+        except (HomeAssistantError, OSError, asyncio.TimeoutError) as err:
+            log.info("Couldn't check Home Assistant user %s: %s", user, err)
+    return None
+
+
+def dashboard_tickets_too_busy(user: str) -> bool:
+    now = time.time()
+    times = [t for t in recent_dashboard_tickets.get(user, []) if now - t < 60]
+    busy = len(times) >= LINK_TICKETS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_dashboard_tickets[user] = times
+    return busy
+
+
+async def admin_encoder_ticket(request: web.Request):
+    """A ticket to open this admin's dashboard link with: {"ticket", "expires_in", "path"}."""
+    user = admin_user(request)
+    if user is None:
+        raise json_error(web.HTTPForbidden, NO_DASHBOARD_LINK)
+    if db.settings().get("wristbands_enabled") != "1":
+        return bad_request(DASHBOARD_WRISTBANDS_OFF, 409)
+    if dashboard_tickets_too_busy(user):
+        return bad_request("Too many requests at once. Wait a moment and try again.", 429)
+    now = time.time()
+    if len(dashboard_tickets) >= MAX_LINK_TICKETS:   # the oldest go first
+        for key in sorted(dashboard_tickets, key=lambda k: dashboard_tickets[k][1])[
+                :len(dashboard_tickets) - MAX_LINK_TICKETS + 1]:
+            del dashboard_tickets[key]
+    ticket = secrets.token_urlsafe(24)
+    dashboard_tickets[ticket] = (user, now + LINK_TICKET_SECONDS)
+    return web.json_response({"ticket": ticket, "expires_in": LINK_TICKET_SECONDS,
+                              "path": "api/encoder/link"})
+
+
+async def admin_encoder_link(request: web.Request):
+    """This admin's dashboard link (GET /api/encoder/link?ticket=...): a WebSocket for as long as
+    a card dialog uses This computer. Only card jobs this admin starts there use it."""
+    user = admin_user(request)
+    entry = dashboard_tickets.pop(request.query.get("ticket", "")[:64], None)
+    if not entry or entry[1] < time.time() or entry[0] != user:
+        raise json_error(web.HTTPUnauthorized, NO_DASHBOARD_LINK)
+    ingress = not from_loopback(request)
+    if await dashboard_link_refusal(user, ingress):
+        raise json_error(web.HTTPForbidden, DASHBOARD_WRISTBANDS_OFF)
+    # No compression: messages carry the hotel key, and they're small anyway.
+    ws = web.WebSocketResponse(heartbeat=LINK_HEARTBEAT, max_msg_size=MAX_LINK_MESSAGE,
+                               timeout=LINK_CLOSE_SECONDS, compress=False)
+    if not ws.can_prepare(request).ok:
+        return bad_request("Open this address as a WebSocket.")
+    await ws.prepare(request)
+    who = admin_name(request)
+
+    async def check():
+        refusal = await dashboard_link_refusal(user, ingress)
+        if refusal:
+            await say_closing(ws, refusal)
+        return refusal
+    relay = encoders.dashboard_relay(user)
+    number = relay.attach(ws.send_json)
+    link = EncoderLink(number, ws, user, 0)
+    old, dashboard_links[user] = dashboard_links.get(user), link
+    if old is not None:
+        background(close_dashboard_link(old, LINK_REPLACED, "replaced"), "close an encoder link")
+    log.info("Card encoder link opened from the dashboard (%s)", who)
+    try:
+        await ws.send_json({"type": "linked"})
+        await serve_link(link, relay, 0, check)
+    except Exception as err:  # noqa: BLE001 - a link that breaks just closes
+        log.warning("Card encoder link from the dashboard (%s) failed: %r", who, err)
+    finally:
+        relay.detach(number)
+        if dashboard_links.get(user) is link:
+            del dashboard_links[user]
+        if not ws.closed:
+            await ws.close()
+        log.info("Card encoder link closed from the dashboard (%s)", who)
+    return ws
+
+
+async def say_closing(ws: web.WebSocketResponse, why: str) -> None:
+    """Tell the dashboard why its link is closing (its close code may not get through ingress)."""
+    try:
+        await ws.send_json({"type": "closing", "why": why})
+    except Exception:  # noqa: BLE001 - closing anyway
+        pass
+
+
+async def close_dashboard_link(link: EncoderLink, code: int, why: str) -> None:
+    if not link.ws.closed:
+        await say_closing(link.ws, why)
+        await link.ws.close(code=code, message=why.encode())
+
+
+async def close_dashboard_links(app: web.Application) -> None:
+    """When the add-on stops: close every dashboard link, so stopping doesn't wait for them."""
+    await asyncio.gather(*(close_dashboard_link(link, LINK_STOPPING, "stopping")
+                           for link in list(dashboard_links.values())), return_exceptions=True)
+
+
+def dashboard_encoder(request: web.Request) -> dict:
+    """This computer: the encoder on the computer this admin has the dashboard open on. Its link
+    must be open (the dialog opens it before starting a job), and a job of theirs still
+    unfinished there comes back ("job") to finish or stop first. Returned like
+    chosen_encoder."""
+    user = admin_user(request)
+    relay = encoders.find_dashboard_relay(user) if user else None
+    if relay is None or not relay.connected:
+        raise json_error(web.HTTPConflict, DASHBOARD_NOT_LINKED)
+    job = encoder_job(relay.url)
+    if job:
+        raise json_error(web.HTTPConflict, "A card job on this computer isn't finished yet. "
+                         "Finish it or stop it first.", job=job_view(job, None))
+    return {"id": None, "name": "This computer", "encoder_url": relay.url, "encoder_port": None}
 
 
 STAFF_SECURITY_HEADERS = {
@@ -2500,9 +2670,11 @@ async def admin_index(request: web.Request):
                         f'<style nonce="{nonce}">\n{read("admin.css")}\n</style>')
     html = html.replace('<script src="static/admin.js"></script>',
                         f'<script nonce="{nonce}">\n{script}\n</script>')
+    # connect-src: SN Web Socket on the admin's own computer too (This computer, in the card
+    # dialogs); 'self' takes the dashboard's own link through ingress (same-origin ws or wss).
     csp = (f"default-src 'self'; script-src 'nonce-{nonce}'; style-src 'self' 'nonce-{nonce}'; "
-           "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
-           "form-action 'none'; frame-ancestors 'self'")
+           f"img-src 'self' data:; connect-src 'self' {LOCAL_HELPERS}; object-src 'none'; "
+           "base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
     return web.Response(text=html, content_type="text/html", headers={
         "Cache-Control": "no-store", "Content-Security-Policy": csp,
         "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin"})
@@ -4260,9 +4432,12 @@ def dashboard_encoders() -> list[dict]:
     return [{**e, "status": encoder_status(e["url"])} for e in found.values()]
 
 
-def chosen_encoder(data: dict) -> dict:
-    """The encoder a dashboard card job uses: the computer chosen ("device_id"), or the only
+def chosen_encoder(data: dict, request: web.Request | None = None) -> dict:
+    """The encoder a dashboard card job uses: This computer ("encoder": "here", the one the
+    dashboard is open on: dashboard_encoder), the computer chosen ("device_id"), or the only
     one there is. Returned like a device row (id, name, encoder_url, encoder_port)."""
+    if data.get("encoder") == "here" and request is not None:
+        return dashboard_encoder(request)
     encoders = dashboard_encoders()
     if not encoders:
         raise json_error(web.HTTPBadRequest, NO_ENCODER)
@@ -4476,7 +4651,7 @@ async def admin_make_key_card(request: web.Request):
     old = current[0] if current and mode == "replace" else None
     plan, zone = await dashboard_plan(member["name"], dept["card_access"], dept["card_days"],
                                       dept["card_lockout"], f"{dept['name']} key card")
-    device = chosen_encoder(data)
+    device = chosen_encoder(data, request)
     job_id = start_dashboard_job(
         request, device, card_type="staff", name=plan.name, count=1,
         records=[r.to_dict() for r in plan.records], summary=plan.summary,
@@ -4512,7 +4687,7 @@ async def admin_key_card_action(request: web.Request):
     if action == "revoke":
         if card["state"] != "active":
             return bad_request(f"This card is already {card['state']}.", 409)
-        device = chosen_encoder(data)
+        device = chosen_encoder(data, request)
         job_id = start_revoke_job(card, device, actor=who, staff_id=None, role=None,
                                   ip=request.remote, source="dashboard")
         db.log(who, f"Started revoking key {card_label(card)}",
@@ -4523,7 +4698,7 @@ async def admin_key_card_action(request: web.Request):
     if action == "notice":
         if expired:
             return bad_request("This card has already expired, so it can't open any door.", 409)
-        device = chosen_encoder(data)
+        device = chosen_encoder(data, request)
         job_id = start_dashboard_job(
             request, device, card_type="staff", name=card["holder_name"] or card["name"],
             count=1, records=[], summary=f"Lost card notice for card {card['card_number']}",
@@ -4543,7 +4718,7 @@ async def admin_key_card_action(request: web.Request):
         days = max(1, int((card["expires_at"] - time.time()) // 86400)) if not expired else 30
     plan, zone = await dashboard_plan(card["holder_name"] or card["name"], access, days,
                                       lockout, "Replacement card")
-    device = chosen_encoder(data)
+    device = chosen_encoder(data, request)
     job_id = start_dashboard_job(
         request, device, card_type="staff", name=plan.name, count=1,
         records=[r.to_dict() for r in plan.records], summary=plan.summary,
@@ -4730,7 +4905,7 @@ async def admin_remote_test(request: web.Request):
         plan, zone = await dashboard_plan(REMOTE_TEST_NAME, [{"level": "door",
                                                               "door": door["lock_id"]}],
                                           1, False, "")
-        device = chosen_encoder(data)
+        device = chosen_encoder(data, request)
         job_id = start_dashboard_job(
             request, device, card_type="staff", name=REMOTE_TEST_NAME, count=1,
             records=[r.to_dict() for r in plan.records], summary=plan.summary,
@@ -5215,6 +5390,9 @@ def admin_app() -> web.Application:
     app.router.add_get("/api/wristbands/jobs", admin_wristband_jobs)
     app.router.add_post(r"/api/devices/{id:\d{1,12}}/encoder-test", admin_encoder_test)
     app.router.add_post("/api/wristbands/encoders/find", admin_find_encoders)
+    app.router.add_post("/api/encoder/ticket", admin_encoder_ticket)   # This computer's link
+    app.router.add_get("/api/encoder/link", admin_encoder_link)
+    app.on_shutdown.append(close_dashboard_links)
     app.router.add_post("/api/restore/preview", admin_restore_preview)
     app.router.add_post("/api/restore", admin_restore)
     app.router.add_get("/api/safety-backups", admin_safety_backups)

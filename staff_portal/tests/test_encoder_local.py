@@ -233,8 +233,9 @@ def test_staff_page_may_reach_sn_web_socket_on_its_own_computer(tmp_path, monkey
             resp = await p.staff.get("/api/me")   # the fallback on everything else
             assert "connect-src 'self' ws://127.0.0.1:8102 ws://localhost:8102;" in (
                 resp.headers["Content-Security-Policy"])
-            # Not the dashboard, nor its preview of the staff app.
-            for path in ("/", "/preview"):
+            # Not the dashboard's preview of the staff app. (The dashboard itself may, for This
+            # computer: test_encoder_dashboard.)
+            for path in ("/preview",):
                 resp = await p.admin.get(path)
                 assert resp.status == 200
                 assert "connect-src 'self';" in resp.headers["Content-Security-Policy"], path

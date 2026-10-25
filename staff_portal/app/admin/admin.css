@@ -695,6 +695,9 @@ tr.kc-lost td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .job-dot.failed { background: var(--warn); color: #fff; }
 .job-meta { margin: 4px 0 0; }
 .job-conn { color: var(--warn); }
+.job-here { margin: 6px 0 0; text-wrap: pretty; }
+.job-here strong { color: var(--warn); }
+.here-note { margin: 0 0 4px; text-wrap: pretty; overflow-wrap: anywhere; }
 .job-actions { justify-content: center; flex-wrap: wrap; align-items: center; }
 .job-actions.working { opacity: 0.6; pointer-events: none; }
 .job-made { font-size: 13px; color: var(--muted); margin-right: auto; text-align: left; }

@@ -502,6 +502,10 @@ offered on shared or role-based computers where each person signs in with their 
        A card started for that encoder from elsewhere (such as **Make key card** on the Staff
        tab) waits until it's open (for **Wait for each card**), then needs attention. **Test
        encoder** goes through it too, so open Wristbands there first.
+     - To make staff key cards from the dashboard on the computer you're using, none of this is
+       needed: choose **This computer (the one you're using)** in **Make key card** (see
+       [Make key card](#make-key-card)). The dashboard then does what Wristbands does here, for
+       your own computer, while its card dialog is open.
      - **The first time**, Chrome or Edge asks whether the staff app may **access other apps and
        services on this device** (that's SN Web Socket): choose **Allow**. It only asks once SN
        Web Socket is running on that computer, so start it first; until then the header says
@@ -661,6 +665,10 @@ built to use a small share and never get the account blocked:
   for the site (the icon at the left of the address bar; **Local network access** in older
   versions). **"Allow this site to reach the card encoder"** (**Encoder not allowed**): nobody
   answered the browser's question; click **Try again** and choose **Allow**.
+- **"Open Home Assistant at its https address to use this computer's encoder"** (the dashboard's
+  **This computer**): the browser only lets a secure page reach the encoder. Open Home Assistant
+  at its https address rather than `http://<its IP>:8123`, or choose a computer's encoder. Its
+  other messages are listed under [Make key card](#make-key-card).
 - **"Can't reach the card encoder's computer."** (Automatic or Address) Check that the computer
   is on, SN Web Socket is running, the address in **Phones & computers → Edit** is right, and
   nothing (such as Windows Firewall) blocks port 8102 from Home Assistant.
@@ -698,8 +706,10 @@ built to use a small share and never get the account blocked:
 **Security.** The TT Hotel details never reach a browser or phone: the add-on talks to TT Hotel
 itself. The encoder's short-lived key from TT Hotel goes only where cards are made: with **This
 computer (USB)**, through the signed-in staff app on that computer while a card is made or looked up
-(open it there at its https address); with **Automatic** or **Address**, from the add-on to SN Web
-Socket over your network, and only to an address you entered or confirmed. SN Web Socket accepts
+(open it there at its https address); with the dashboard's **This computer**, through your own
+browser while a key card you started is made (only an administrator's dashboard, through Home
+Assistant, gets one); with **Automatic** or **Address**, from the add-on to SN Web Socket over your
+network, and only to an address you entered or confirmed. SN Web Socket accepts
 commands from anything on your network, with no password, so keep the front-desk computer on the
 staff network (not guest Wi-Fi). The Client Secret and password are never shown again after saving
 (leave the boxes blank to keep them) and are never in backups (only a migration file
@@ -727,11 +737,46 @@ and imported on the Backup tab (roles are matched by name).
 ### Make key card
 
 Every person's card on the Staff tab says what **Make key card** would make for them, from their
-department. Click it, have a blank card (or a card to reuse) ready at the front-desk encoder, and
-the dashboard walks you through it like the staff app: place the card, wait, take it off, with
-**Try again** and **Stop** if it doesn't work. With more than one card encoder, it asks which one.
-An encoder set to **This computer (USB)** is reached through that computer, so **Wristbands** must
-be open there (the card waits for it). The card is recorded as made by you, for that person.
+department. Click it, have a blank card (or a card to reuse) ready at the encoder, and the
+dashboard walks you through it like the staff app: place the card, wait, take it off, with **Try
+again** and **Stop** if it doesn't work. The card is recorded as made by you (your Home Assistant
+name), from the dashboard, for that person.
+
+It asks which card encoder to use, with **This computer (the one you're using)** first:
+
+- **This computer (the one you're using):** the encoder plugged into the computer you have Staff
+  Access open on. Nothing to set up in Phones & computers: just plug the encoder in and start TT
+  Hotel's **SN Web Socket** on that computer (see [Setting up the front-desk
+  computer](#setting-up-the-front-desk-computer)). The dialog connects to it and says how it's
+  going:
+  - **Connecting to the card encoder on this computer…** Wait a moment; the card starts as soon as
+    it's ready.
+  - **Choose Allow when the browser asks.** The first time, Chrome or Edge asks whether the site
+    may **access other apps and services on this device** (that's SN Web Socket): choose
+    **Allow**. **Allow this site to reach the card encoder** means nobody answered: click **Try
+    again**, then **Allow**.
+  - **This browser is blocking the card encoder.** Click the icon at the left of the address bar
+    and allow **Apps on device** for the site (**Local network access** in older versions). It
+    connects by itself once it's allowed.
+  - **SN Web Socket isn't running on this computer.** Start it, with the encoder plugged in, then
+    click **Try again**.
+  - **Open Home Assistant at its https address to use this computer's encoder.** Browsers only let
+    a secure page reach the encoder, so it doesn't work with Home Assistant opened at
+    `http://<its IP>:8123`. Open Home Assistant at its https address (your Home Assistant Cloud
+    or own domain address), or choose another encoder.
+  - **Connected in another window.** A card dialog of yours is using it in another window or tab
+    (or on another computer): **Use it here** takes it back.
+
+  Each Home Assistant administrator has their own: only the cards they start from the dashboard go
+  to their own computer. Keep the dialog open until the card is done. If the page is closed
+  mid-card, the card needs attention, and the next card you start on this computer shows that one
+  first, to **Try again** or **Stop**. On a front-desk computer that also has Wristbands open,
+  make one card at a time: the staff app and the dashboard share its encoder.
+- **A computer's card encoder** (set up in Phones & computers). One set to **This computer (USB)**
+  is reached through that computer, so **Wristbands** must be open there (the card waits for it).
+
+With no computer's encoder set up, This computer is used without asking. **Revoke**, **Write a
+notice card**, **Make a replacement card** and the remote lock-out test card ask the same way.
 
 If the person already has an active key card, you choose:
 
@@ -749,8 +794,9 @@ card number. Each
 row shows who it's for, the card number, what it opens, who made it and when, when it stops
 working, its state and, for a lost card, how many of its doors it's been locked out of.
 
-- **Revoke** (you have the card): choose the encoder, put that card on it, and it's cleared, so
-  it opens nothing; it can be used again for a new card. Only that exact card is cleared: any
+- **Revoke** (you have the card): choose the encoder (**This computer** for the one plugged into
+  the computer you're using), put that card on it, and it's cleared, so it opens nothing; it can
+  be used again for a new card. Only that exact card is cleared: any
   other card gets "That's card 123…, not 456…" and is left as it is.
 - **Report lost** (you don't have it): the card is marked lost and the next screen shows each
   door it opens, which it keeps opening until it expires unless it's locked out there.

@@ -50,7 +50,9 @@ injected hotel_info(fresh=...) coroutine.
 
 A computer in This computer (USB) mode has one runner of its own, at the address "local:<its
 device ID>". A job that starts while its link isn't connected waits for it (card_wait) and then
-needs attention; a link that drops during a job is a failed card like any other.
+needs attention; a link that drops during a job is a failed card like any other. The dashboard
+does the same for the computer an admin has it open on (This computer, in its card dialogs),
+through a link of its own (DashboardRelay) at "local:dashboard-<their Home Assistant user ID>".
 """
 
 import asyncio
@@ -95,6 +97,10 @@ CONNECTING = ("GetDeviceInfo", "CE_ConnectComm")   # the requests that open the 
 UNEXPECTED = -9              # an answer without an errorCode (SN Web Socket's "exception" code)
 LOCAL_PREFIX = "local:"      # a computer in This computer (USB) mode: "local:<device ID>"
 LOCAL_RE = re.compile(r"^local:([1-9]\d{0,11})$")
+# The computer an admin has the dashboard open on (This computer, in Make key card and the like):
+# "local:dashboard-<their Home Assistant user ID>", one per admin.
+DASHBOARD_PREFIX = "local:dashboard-"
+DASHBOARD_RE = re.compile(r"^local:dashboard-([A-Za-z0-9_-]{1,64})$")
 MAX_RELAYS = 1000            # computers' links kept at once (one per computer)
 # The only requests the add-on ever sends through a computer's browser (This computer (USB)):
 # the ones the runner below uses, and nothing else. The staff app forwards this list only.
@@ -342,6 +348,19 @@ def local_device(url) -> int | None:
     """The computer a "local:<device ID>" address belongs to, else None."""
     match = LOCAL_RE.match(url) if isinstance(url, str) else None
     return int(match[1]) if match else None
+
+
+def dashboard_address(user: str) -> str:
+    """The address of the encoder on the computer an admin has the dashboard open on."""
+    if not DASHBOARD_RE.match(f"{DASHBOARD_PREFIX}{user}"):
+        raise ValueError("not a dashboard user")
+    return f"{DASHBOARD_PREFIX}{user}"
+
+
+def dashboard_user(url) -> str | None:
+    """The admin a "local:dashboard-<user>" address belongs to, else None."""
+    match = DASHBOARD_RE.match(url) if isinstance(url, str) else None
+    return match[1] if match else None
 
 
 def _reason(err: BaseException) -> str:
@@ -693,6 +712,11 @@ class LocalRelay:
             return f"Connected{version}"
         return f"Wristbands is open on {self.name()}; checking SN Web Socket there"
 
+    def problem(self, code: int) -> str | None:
+        """Its own words for a problem reaching SN Web Socket through it, or None for the
+        runner's (EncoderRunner.explain)."""
+        return None
+
     # ------------------------------------------------------------ requests
 
     async def exchange(self, function: str, params: dict, timeout: float) -> tuple[int, dict]:
@@ -734,6 +758,51 @@ class LocalRelay:
         pending = self._pending
         if pending is not None and not pending[2].done():
             pending[2].set_exception(EncoderError(code, pending[1], detail))
+
+
+class DashboardRelay(LocalRelay):
+    """The dashboard's own link (This computer, in Make key card, Revoke and the lost card
+    dialogs): the same messages as a computer's, from the dashboard page open on the computer an
+    admin is using, while a card dialog there needs it. One per Home Assistant user, at
+    dashboard_address(user); there's no device behind it."""
+
+    def __init__(self, user: str):
+        super().__init__(0)
+        self.user = user
+        self.url = dashboard_address(user)
+
+    def name(self) -> str:
+        return "this computer"
+
+    def missing_message(self) -> str:
+        return "Connecting to the card encoder on this computer…"
+
+    def summary(self) -> str:
+        if not self.connected:
+            return "Not connected"
+        if self.helper == "blocked":
+            return "This browser is blocking the card encoder"
+        if self.helper == "unreachable":
+            return "Can't reach SN Web Socket on this computer: is it running?"
+        if self.helper == "ready":
+            version = f" (SN Web Socket {self.helper_version})" if self.helper_version else ""
+            return f"Connected{version}"
+        return "Checking SN Web Socket on this computer"
+
+    def problem(self, code: int) -> str | None:
+        if code == NO_LINK:
+            return ("The card encoder on this computer isn't connected. Keep this page open, "
+                    "then try again.")
+        if code == UNREACHABLE and self.helper == "blocked":
+            return ("This browser is blocking the card encoder. Allow Apps on device for this "
+                    "site (or choose Allow when it asks), then try again.")
+        if code == UNREACHABLE:
+            return ("Can't reach SN Web Socket on this computer. Check that it's running, then "
+                    "try again.")
+        if code == NO_REPLY:
+            return ("SN Web Socket on this computer stopped answering. Check that it's running, "
+                    "then try again.")
+        return None
 
 
 class RelaySocket(SNCommands):
@@ -1197,6 +1266,9 @@ class EncoderRunner:
         relay = self._relay
         if relay is None:
             return failure_message(code, card_type)
+        own = relay.problem(code)   # the dashboard's own link says it its own way
+        if own:
+            return own
         if code == NO_LINK:
             return f"{relay.missing_message()}, then try again."
         if code == UNREACHABLE and relay.helper == "blocked":
@@ -1913,7 +1985,8 @@ class Encoders:
 
     A computer in This computer (USB) mode is at local_address(its device ID), and reaches SN
     Web Socket through relay(its device ID), its browser link. local_name(device_id) (optional)
-    gives that computer's name, for messages."""
+    gives that computer's name, for messages. The computer an admin has the dashboard open on is
+    at dashboard_address(their user ID), through dashboard_relay(their user ID)."""
 
     def __init__(self, hotel_info, on_update, *, poll: float = POLL_SECONDS,
                  timeout: float = CALL_TIMEOUT, attention_timeout: float = ATTENTION_TIMEOUT,
@@ -1926,6 +1999,7 @@ class Encoders:
                          "hotel_info_expired": hotel_info_expired}
         self._runners: dict[str, EncoderRunner] = {}
         self._relays: dict[int, LocalRelay] = {}
+        self._dashboard_relays: dict[str, DashboardRelay] = {}
         self._session: aiohttp.ClientSession | None = None
         self._closing: set[asyncio.Task] = set()
 
@@ -1945,6 +2019,22 @@ class Encoders:
     def find_relay(self, device_id: int) -> LocalRelay | None:
         """A computer's browser link, without starting one."""
         return self._relays.get(device_id)
+
+    def dashboard_relay(self, user: str) -> DashboardRelay:
+        """An admin's dashboard link (one per Home Assistant user, kept while the add-on runs)."""
+        relay = self._dashboard_relays.get(user)
+        if relay is not None:
+            return relay
+        if len(self._dashboard_relays) >= MAX_RELAYS:   # forget ones nothing uses
+            used = {r._relay for r in self._runners.values()}
+            for old_user, old in list(self._dashboard_relays.items()):
+                if not old.connected and old not in used:
+                    del self._dashboard_relays[old_user]
+        relay = self._dashboard_relays[user] = DashboardRelay(user)
+        return relay
+
+    def find_dashboard_relay(self, user: str) -> DashboardRelay | None:
+        return self._dashboard_relays.get(user)
 
     def get(self, url: str) -> EncoderRunner:
         runner = self._runners.get(url)
@@ -1967,10 +2057,11 @@ class Encoders:
         except Exception as err:  # noqa: BLE001 - unknown just means nothing lingering
             log.warning("Couldn't read the last card made on an encoder: %r", err)
             lingering = None
-        device_id = local_device(url)
+        device_id, user = local_device(url), dashboard_user(url)
+        relay = (self.relay(device_id) if device_id else
+                 self.dashboard_relay(user) if user else None)
         runner = EncoderRunner(url, self._session, self._hotel_info, self._on_update,
-                               lingering=lingering,
-                               relay=self.relay(device_id) if device_id else None, **self._options)
+                               lingering=lingering, relay=relay, **self._options)
         self._runners[url] = runner
         return runner
 
@@ -1991,7 +2082,7 @@ class Encoders:
     async def close_all(self) -> None:
         """Stop every runner (after the web servers, so no link is open any more)."""
         runners, self._runners = list(self._runners.values()), {}
-        self._relays = {}
+        self._relays, self._dashboard_relays = {}, {}
         for runner in runners:
             try:
                 await runner.close()
