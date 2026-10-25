@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+
+- **Fixed: Staff Portal now stops cleanly** when Home Assistant updates or restarts it, letting go
+  of the card encoder first (Home Assistant used to report that it "did not handle SIGTERM").
+
 ## 0.8.1
 
 - **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after

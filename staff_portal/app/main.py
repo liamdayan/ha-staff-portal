@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -3309,8 +3310,15 @@ async def main():
         runners.append(runner)
     log.info("Staff Portal %s: admin on :%s (ingress), staff app on :%s",
              VERSION, ADMIN_PORT, STAFF_PORT)
+    # Home Assistant stops the add-on with SIGTERM (on update, restart or shutdown): treat it as a
+    # normal exit so the cleanup below runs, which also lets go of every card encoder.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
     try:
-        await asyncio.Event().wait()
+        await stop.wait()
+        log.info("Stopping Staff Portal")
     finally:
         clock_task.cancel()
         doors_task.cancel()
