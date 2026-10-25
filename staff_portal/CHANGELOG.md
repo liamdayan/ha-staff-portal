@@ -21,9 +21,22 @@
 - **New: who may make what.** On the **Roles** tab, each role (and on role-based computers, each
   person) gets card types, which doors, the longest stay and staff card, and whether they see
   everyone's cards. The add-on checks every request again, and refusals are logged.
-- **New: Card encoder address** on a computer in **Phones & computers → Edit**, with
-  **Test encoder**. The add-on talks to the encoder through TT Hotel's free SN Web Socket on that
-  computer, and lets go of it after each batch so the TT Hotel program can use it too.
+- **New: Card encoder** on a computer in **Phones & computers → Edit**: **Off** (the default),
+  **Automatic** or an **Address**, with **Test encoder**. The add-on talks to the encoder through
+  TT Hotel's free SN Web Socket on that computer, and lets go of it after each batch so the TT
+  Hotel program can use it too.
+- **New: Automatic card encoders.** Staff Access finds SN Web Socket on the networks in Home
+  Assistant's network setting (private networks, at most 254 addresses each, or the networks
+  entered under **Wristbands → Advanced**), so the desk computer no longer needs a fixed IP
+  address. It looks at startup, when an Automatic encoder isn't found or stops answering (at
+  most every 10 minutes) and when you click **Find encoders**, and never while nothing uses
+  Automatic. With several front-desk computers, choose which one each desk uses. A typed address
+  always wins.
+- **Tools now sit above the pages** in the staff app's sidebar and in the phone's tab bar, so
+  Wristbands is the first thing staff see at the desk.
+- **New: why Wristbands won't show.** Each computer's card says so when Wristbands won't appear
+  there: Wristbands turned off, no card encoder (or none found), Kiosk mode for one person or
+  team, or a shared computer whose role can't make wristbands.
 - TT Hotel requests are kept to a small share of the free 30,000 a month: at most about one
   every 8 minutes while cards are being made (the encoder's key is reused), a door sync every 6
   hours, and a hard cap of 7,500 a month. When TT Hotel says stop, Staff Access stays stopped
@@ -31,8 +44,8 @@
 
 **Backups**
 
-- Backups include wristband settings, door names and roles' and people's wristband rules, never
-  the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
+- Backups include wristband settings, door names, roles' and people's wristband rules and each
+  computer's card encoder setting, never the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
   older version of the add-on refuses a 0.8.0 backup.
 
 ## 0.7.1

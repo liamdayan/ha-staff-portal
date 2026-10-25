@@ -77,8 +77,8 @@
     <div class="section-head"><h2>Wristbands</h2></div>
     <p class="hint wb-intro">Staff signed in on a front-desk computer make TT Hotel wristbands and key
       cards on the card encoder plugged into it. Set up your TT Hotel account and the defaults here,
-      enter each front-desk computer's encoder address in <button class="linkish" data-goto="phones">Phones
-      &amp; computers</button> → Edit, and choose who may make which cards on the
+      set each front-desk computer's card encoder (Automatic is easiest) in <button class="linkish"
+      data-goto="phones">Phones &amp; computers</button> → Edit, and choose who may make which cards on the
       <button class="linkish" data-goto="roles">Roles</button> tab. Every card is recorded with who made it.</p>
     <form id="wb-form" class="settings">
       <fieldset>
@@ -185,6 +185,11 @@
           <label>Most doors on one card <small>A whole floor or building counts as one.</small>
             <input name="wb_max_records" type="number" min="1" max="64" required></label>
         </div>
+        <label>Networks to search for encoders <small>For Automatic card encoders. Leave blank to use
+          Home Assistant's (Settings → System → Network). Otherwise up to 4 private networks, each
+          /24 or smaller, such as 192.168.1.0/24.</small>
+          <input name="wb_scan_subnets" maxlength="200" placeholder="From Home Assistant" autocomplete="off"
+            spellcheck="false"></label>
       </fieldset>
       <div class="form-actions"><button class="btn primary" type="submit">Save wristband settings</button></div>
     </form>
@@ -192,9 +197,15 @@
       <fieldset>
         <legend>Card encoders</legend>
         <p class="hint">Each front-desk computer with an encoder runs TT Hotel's free <b>SN Web Socket</b>
-          helper. Give that computer a fixed address on your network, then enter it in Phones &amp;
-          computers → Edit. Staff Access connects to the encoder itself, so it works through your
-          Cloudflare Tunnel too. Between jobs the encoder is free for the TT Hotel program.</p>
+          helper. In Phones &amp; computers → Edit, set its <b>Card encoder</b> to <b>Automatic</b>
+          and Staff Access finds it on the networks in Home Assistant's network setting (or the ones
+          entered under Advanced), even if its address changes. Or enter its address. Staff Access
+          connects to the encoder itself, so it works through your Cloudflare Tunnel too. Between
+          jobs the encoder is free for the TT Hotel program.</p>
+        <div class="ct-status">
+          <span id="wb-discovery" class="hint"></span>
+          <button class="btn" type="button" id="wb-find-encoders">Find encoders</button>
+        </div>
         <div id="wb-encoders" class="area-list"></div>
       </fieldset>
       <fieldset>
@@ -479,11 +490,30 @@
       <p class="hint" data-no-staff>Add people on the Staff tab first.</p>
     </div>
     <div class="dialog-group" data-encoder hidden>
-      <label>Card encoder address <small>For making wristbands: this computer's address on your network,
-        where TT Hotel's SN Web Socket helper runs. Leave blank if it has no encoder.</small>
+      <label>Card encoder <small>For making wristbands, on the encoder plugged into this computer
+        (TT Hotel's SN Web Socket helper must be running on it).</small>
+        <select name="encoder_mode">
+          <option value="off">Off: no card encoder</option>
+          <option value="auto">Automatic: find it on the network</option>
+          <option value="address">Address: enter this computer's address</option>
+        </select></label>
+      <div data-encoder-auto hidden>
+        <p class="hint" data-encoder-auto-status></p>
+        <label data-encoder-choice hidden>Which encoder <small>More than one computer runs SN Web Socket.
+          Choose the one at this desk. If its address changes, Staff Access looks for it at the same
+          address again, and uses whichever one is found if only one is.</small>
+          <select name="encoder_auto_ip"></select></label>
+        <div class="ct-status">
+          <span class="hint" data-encoder-find-result></span>
+          <button class="btn" type="button" data-encoder-find>Find encoders</button>
+        </div>
+      </div>
+      <label data-encoder-address hidden>Card encoder address <small>This computer's address on your
+        network: just its IP address is enough. Use this for a computer on another network, or to
+        pin a desk to one computer.</small>
         <input name="encoder_url" maxlength="100" placeholder="ws://192.168.1.50:8102" autocomplete="off"
           spellcheck="false"></label>
-      <label>Encoder port <small>Leave on Automatic unless the encoder isn't found; then enter its COM
+      <label data-encoder-port>Encoder port <small>Leave on Automatic unless the encoder isn't found; then enter its COM
         port from Windows Device Manager.</small>
         <input name="encoder_port" maxlength="40" list="encoder-ports" placeholder="Automatic"
           autocomplete="off" spellcheck="false"></label>

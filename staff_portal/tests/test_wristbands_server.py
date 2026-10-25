@@ -38,6 +38,7 @@ os.environ["TTHOTEL_API"] = f"http://127.0.0.1:{TT_PORT}"
 import main  # noqa: E402
 import transfer  # noqa: E402
 import tthotel  # noqa: E402
+import discovery  # noqa: E402
 import encoder_sim  # noqa: E402
 from db import Database  # noqa: E402
 
@@ -94,6 +95,8 @@ class Portal:
         main.wristbands_tested[0] = main.doors_synced[0] = 0.0
         main.encoders_tested.clear()
         main.ha_zone.update(name=None, at=float("-inf"), tried=float("-inf"))
+        main.discovery = main.Discovery(lambda: main.encoder_networks(),
+                                        lambda: main.encoder_auto_wanted())
         main.tthotel.forget()
         self.db = main.db
         self.db.update_settings({"wristbands_enabled": "1", "ha_logbook": "0",
@@ -754,6 +757,8 @@ def test_time_zone_is_home_assistants_unless_set(tmp_path, monkeypatch):
         # Home Assistant out of reach and its zone never read: no guessing, no cards.
         p.db.update_settings({"wb_time_zone": ""})
         main.ha_zone.update(name=None, at=float("-inf"), tried=float("-inf"))
+        main.discovery = main.Discovery(lambda: main.encoder_networks(),
+                                        lambda: main.encoder_auto_wanted())
         down[0] = True
         assert await main.wristband_zone() is None
         assert await main.wristband_zone() is None
@@ -958,3 +963,279 @@ def test_testing_an_encoder_from_the_dashboard(tmp_path):
                 assert ("Admin", "Tested the encoder on Front Desk PC", True) in actions
                 assert ("Admin", "Tested the encoder on Back Office", False) in actions
     run(scenario())
+
+
+# ---------------------------------------------------------------- Automatic card encoders
+
+def network_answer(address="127.0.0.1", prefix=30):
+    """Home Assistant's {"type": "network"} answer, as a fake ws_command."""
+    async def ws_command(payload, timeout=10.0):
+        assert payload == {"type": "network"}
+        return {"adapters": [{"name": "lo", "enabled": True, "auto": True, "default": True,
+                              "ipv4": [{"address": address, "network_prefix": prefix}],
+                              "ipv6": []}], "configured_adapters": []}
+    return ws_command
+
+
+def helper(ip, port=8102):
+    return {"ip": ip, "url": f"ws://{ip}:{port}", "version": "", "found_at": time.time()}
+
+
+async def search_done():
+    for _ in range(300):
+        if not main.discovery.scanning:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the search didn't finish")
+
+
+def test_automatic_encoder_is_found_and_used(tmp_path, monkeypatch):
+    # 127.0.0.0/8 isn't private, so it may only be searched in this test.
+    monkeypatch.setattr(discovery, "PRIVATE_NETWORKS",
+                        (*discovery.PRIVATE_NETWORKS, discovery.ipaddress.ip_network("127.0.0.0/8")))
+    monkeypatch.setattr(main.ha, "ws_command", network_answer())
+
+    async def scenario():
+        async with Simulator() as sim:
+            port = sim._runner.addresses[0][1]
+            p = Portal(tmp_path, encoder_url=None)
+            p.db.update_device(p.device, encoder_auto=1)
+            main.discovery.port = port
+            async with p:
+                ana = p.db.staff(p.ana)
+                # Nothing found yet: no Wristbands here, and a search starts by itself.
+                assert main.wristband_permissions(p.db.device(p.device), ana)["types"] == []
+                assert main.discovery.scanning and main.discovery.scans == 1
+                await search_done()
+                url = f"ws://127.0.0.1:{port}"
+                device = p.db.device(p.device)
+                assert main.encoder_address(device) == url
+                assert main.wristband_permissions(device, ana)["types"] == FRONT_DESK["types"]
+                assert main.tthotel_wanted()
+                # The staff app and the dashboard use the encoder that was found.
+                who = await p.sign_in(p.ana)
+                status, reply = await p.call("GET", "/api/wristbands", who)
+                assert status == 200 and "encoder" in reply, reply
+                status, reply = await p.admin_call("POST", f"/api/devices/{p.device}/encoder-test")
+                assert status == 200 and reply["version"], reply
+                status, state = await p.admin_call("GET", "/api/state")
+                card = next(d for d in state["devices"] if d["id"] == p.device)
+                assert card["encoder_mode"] == "auto" and card["encoder_address"] == url
+                assert card["encoder_text"] == "Automatic: 127.0.0.1"
+                assert card["wristbands_note"] is None
+                assert url in state["wristbands"]["encoders"]
+                assert state["wristbands"]["discovery"]["helpers"][0]["ip"] == "127.0.0.1"
+                # Typed the same way by hand on another computer: the same runner, so they
+                # take turns with the encoder.
+                other, _ = p.computer("Back Office", "role", f"WS://127.0.0.1:{port}/".lower())
+                p.db.update_device(other, encoder_url=main.transfer.encoder_url(url))
+                assert main.encoder_address(p.db.device(other)) == url
+                assert main.encoders.find(url) is main.encoders.get(
+                    main.encoder_address(p.db.device(other)))
+                # A typed address always wins over Automatic.
+                p.db.update_device(p.device, encoder_url="ws://127.0.0.1:1")
+                assert main.encoder_address(p.db.device(p.device)) == "ws://127.0.0.1:1"
+                assert main.encoder_mode(p.db.device(p.device)) == "address"
+            assert main.discovery.scans == 1
+    run(scenario())
+
+
+def test_which_helper_an_automatic_computer_uses(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path, encoder_url=None)
+        p.db.update_device(p.device, encoder_auto=1)
+        found = main.discovery
+        found.scanned_at, found.networks = time.time(), ["192.168.1.0/24"]
+        found._auto_at = time.monotonic()      # as if it had just searched
+        device = lambda: p.db.device(p.device)   # noqa: E731
+        # None found.
+        assert main.encoder_address(device()) is None
+        assert main.encoder_text(device()) == "Automatic: no encoder found on 192.168.1.0/24"
+        assert "hasn't been found" in main.wristbands_note(device())
+        # One found: used.
+        found.helpers = [helper("192.168.1.50")]
+        assert main.encoder_address(device()) == "ws://192.168.1.50:8102"
+        assert main.encoder_text(device()) == "Automatic: 192.168.1.50"
+        # Several: someone chooses, and the choice is remembered by its address.
+        found.helpers = [helper("192.168.1.50"), helper("192.168.1.60")]
+        assert main.encoder_address(device()) is None
+        assert main.encoder_text(device()) == "Automatic: 2 found, choose one"
+        async with p:
+            status, reply = await p.admin_call("PATCH", f"/api/devices/{p.device}",
+                                               {"encoder_mode": "auto",
+                                                "encoder_auto_ip": "192.168.1.60"})
+            assert status == 200, reply
+        assert device()["encoder_auto_ip"] == "192.168.1.60"
+        assert main.encoder_address(device()) == "ws://192.168.1.60:8102"
+        # It moved: back to the only one found, or a choice again if there are several.
+        found.helpers = [helper("192.168.1.61")]
+        assert main.encoder_address(device()) == "ws://192.168.1.61:8102"
+        found.helpers = [helper("192.168.1.50"), helper("192.168.1.61")]
+        assert main.encoder_address(device()) is None
+        # While searching, and after a search that couldn't run.
+        found.helpers = []
+        found.error = "Couldn't read Home Assistant's network setting."
+        assert main.encoder_text(device()) == f"Automatic: {found.error}"
+        assert found.scans == 0                # all within 10 minutes of the last search
+    run(scenario())
+
+
+def test_no_searching_unless_something_uses_automatic(tmp_path, monkeypatch):
+    asked = []
+
+    async def ws_command(payload, timeout=10.0):
+        asked.append(payload)
+        # One address (a /32), so nothing on a real network is swept.
+        return {"adapters": [{"name": "eth0", "enabled": True,
+                              "ipv4": [{"address": "192.168.77.10", "network_prefix": 32}]}]}
+    monkeypatch.setattr(main.ha, "ws_command", ws_command)
+
+    async def scenario():
+        p = Portal(tmp_path)                      # a typed address only
+        main.discovery._probe_timeout = 0.01
+        async with p:
+            device = p.db.device(p.device)
+            assert main.wristband_permissions(device, p.db.staff(p.ana))["types"]
+            assert main.discovery.scan_soon() is False
+            await p.admin_call("GET", "/api/state")
+            # Automatic, but Wristbands is off: still no search.
+            p.db.update_settings({"wristbands_enabled": "0"})
+            p.db.update_device(p.device, encoder_url=None, encoder_auto=1)
+            assert main.encoder_address(p.db.device(p.device)) is None
+            assert main.discovery.scan_soon() is False
+            assert main.discovery.scans == 0 and not asked
+            # Find encoders works anyway, at most every 30 seconds.
+            status, reply = await p.admin_call("POST", "/api/wristbands/encoders/find")
+            assert status == 200, reply
+            assert reply["discovery"]["networks"] == ["192.168.77.10/32"]
+            assert reply["discovery"]["helpers"] == [] and asked == [{"type": "network"}]
+            assert any(d["encoder_text"] == "Automatic: no encoder found on 192.168.77.10/32"
+                       for d in reply["devices"])
+            status, reply = await p.admin_call("POST", "/api/wristbands/encoders/find")
+            assert status == 429 and "seconds" in reply["error"]
+            assert ("Admin", "Looked for card encoders", True) in p.activity()
+            # Wristbands on: an encoder that isn't found, or stops answering, is looked for
+            # again, at most every 10 minutes.
+            p.db.update_settings({"wristbands_enabled": "1"})
+            main.encoder_address(p.db.device(p.device))
+            assert main.discovery.scans == 1          # the button's search was just now
+            main.discovery._auto_at -= discovery.AUTO_SCAN_GAP
+            main.encoder_address(p.db.device(p.device))
+            assert main.discovery.scans == 2
+            await search_done()
+            main.discovery.helpers = [helper("192.168.77.20", 1)]
+            runner = main.encoders.get("ws://192.168.77.20:1")
+            runner.reachable = True
+            main.discovery._auto_at -= discovery.AUTO_SCAN_GAP
+            main.encoder_address(p.db.device(p.device))
+            assert main.discovery.scans == 2          # found and answering: no search
+            runner.reachable = False
+            main.encoder_address(p.db.device(p.device))
+            assert main.discovery.scans == 3
+            main.encoder_address(p.db.device(p.device))
+            assert main.discovery.scans == 3
+            await search_done()
+            # Networks typed in settings are searched instead of Home Assistant's.
+            p.db.update_settings({"wb_scan_subnets": "10.9.8.0/30"})
+            assert [str(n) for n in await main.encoder_networks()] == ["10.9.8.0/30"]
+            assert len(asked) == 3              # the button and two searches of its own
+    run(scenario())
+
+
+def test_card_encoder_setting_on_devices(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            status, reply = await p.admin_call("POST", "/api/devices", {
+                "name": "Desk 2", "kind": "computer", "signin_mode": "role",
+                "encoder_mode": "auto"})
+            assert status == 200, reply
+            desk = reply["id"]
+            device = p.db.device(desk)
+            assert device["encoder_auto"] == 1 and device["encoder_url"] is None
+            path = f"/api/devices/{desk}"
+            for body, url, auto, chosen in (
+                    ({"encoder_mode": "auto", "encoder_auto_ip": " 192.168.1.60 "}, None, 1,
+                     "192.168.1.60"),
+                    ({"encoder_mode": "auto", "encoder_auto_ip": ""}, None, 1, None),
+                    ({"encoder_mode": "address", "encoder_url": "192.168.1.50"},
+                     "ws://192.168.1.50:8102", 0, None),
+                    ({"encoder_mode": "off", "encoder_url": "192.168.1.50"}, None, 0, None),
+                    ({"encoder_url": "192.168.1.51"}, "ws://192.168.1.51:8102", 0, None)):
+                status, reply = await p.admin_call("PATCH", path, body)
+                assert status == 200, (body, reply)
+                device = p.db.device(desk)
+                assert (device["encoder_url"], device["encoder_auto"],
+                        device["encoder_auto_ip"]) == (url, auto, chosen), body
+            for bad in ({"encoder_mode": "address"}, {"encoder_mode": "address", "encoder_url": ""},
+                        {"encoder_mode": "sometimes"},
+                        {"encoder_mode": "auto", "encoder_auto_ip": "printer"},
+                        {"encoder_mode": "auto", "encoder_auto_ip": "fe80::1"}):
+                status, reply = await p.admin_call("PATCH", path, bad)
+                assert status == 400 and reply["error"], bad
+            # New computers have none.
+            status, reply = await p.admin_call("POST", "/api/devices", {"name": "Desk 3",
+                                                                        "kind": "computer"})
+            device = p.db.device(reply["id"])
+            assert device["encoder_auto"] == 0 and device["encoder_url"] is None
+            # The networks to search, in Wristbands settings.
+            status, _ = await p.admin_call("PUT", "/api/settings",
+                                           {"wb_scan_subnets": "192.168.1.0/24 10.0.0.7/30"})
+            assert status == 200
+            assert p.db.settings()["wb_scan_subnets"] == "192.168.1.0/24, 10.0.0.4/30"
+            for bad in ("192.168.0.0/16", "8.8.8.0/24", "nonsense"):
+                status, reply = await p.admin_call("PUT", "/api/settings", {"wb_scan_subnets": bad})
+                assert status == 400 and reply["error"], bad
+            status, _ = await p.admin_call("PUT", "/api/settings", {"wb_scan_subnets": ""})
+            assert status == 200 and p.db.settings()["wb_scan_subnets"] == ""
+    run(scenario())
+
+
+def test_automatic_encoders_in_backups(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path, encoder_url=None)
+        p.db.update_device(p.device, encoder_auto=1, encoder_auto_ip="192.168.1.60")
+        async with p:
+            status, backup = await p.admin_call("GET", "/api/backup")
+            row = next(d for d in backup["devices"] if d["id"] == p.device)
+            assert row["encoder_auto"] == 1 and row["encoder_auto_ip"] == "192.168.1.60"
+            p.db.update_device(p.device, encoder_auto=0, encoder_auto_ip=None)
+            status, reply = await p.admin_call("POST", "/api/restore", {"backup": backup})
+            assert status == 200, reply
+            device = p.db.device(p.device)
+            assert device["encoder_auto"] == 1 and device["encoder_auto_ip"] == "192.168.1.60"
+            # Damaged values are dropped; backups from before Automatic mean Off.
+            for row in backup["devices"]:
+                row["encoder_auto_ip"] = "<script>"
+            status, reply = await p.admin_call("POST", "/api/restore", {"backup": backup})
+            assert status == 200 and p.db.device(p.device)["encoder_auto_ip"] is None
+            for row in backup["devices"]:
+                row.pop("encoder_auto")
+                row.pop("encoder_auto_ip")
+            status, reply = await p.admin_call("POST", "/api/restore", {"backup": backup})
+            assert status == 200, reply
+            assert p.db.device(p.device)["encoder_auto"] == 0
+    run(scenario())
+
+
+def test_why_wristbands_wont_show_on_a_computer(tmp_path):
+    p = Portal(tmp_path)
+    note = lambda: main.wristbands_note(p.db.device(p.device))   # noqa: E731
+    assert note() is None                                  # role-based, with an encoder
+    p.db.update_device(p.device, signin_mode="phone")
+    assert "Kiosk mode" in note() and "Shared" in note()
+    p.db.update_device(p.device, signin_mode="staff", role_id=p.no_cards)
+    assert "its role can't make any wristbands" in note()
+    p.db.update_device(p.device, role_id=p.front_desk)
+    assert note() is None
+    p.db.update_device(p.device, encoder_url=None)
+    assert "has no card encoder" in note()
+    p.db.update_device(p.device, encoder_auto=1)
+    assert "hasn't been found yet" in note()
+    p.db.update_settings({"wristbands_enabled": "0"})
+    assert "Wristbands is turned off" in note()
+    p.db.update_device(p.device, encoder_auto=0)
+    assert note() is None                                  # no wristbands meant here at all
+    p.db.update_settings({"wristbands_enabled": "1"})
+    p.db.update_device(p.device, kind="phone")
+    assert note() is None                                  # only computers

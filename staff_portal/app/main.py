@@ -41,6 +41,7 @@ import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
 from tthotel import TTHotel, TTHotelError
 from encoder import EncoderError, Encoders
+from discovery import Discovery, DiscoveryError, describe, ha_networks, parse_networks
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -131,10 +132,10 @@ def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
 
 def tthotel_wanted() -> bool:
     """Whether anything needs TT Hotel's door list: Wristbands is on and some computer has a
-    card encoder (so TT Hotel isn't asked for nothing)."""
+    card encoder, typed in or Automatic (so TT Hotel isn't asked for nothing)."""
     return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
-        "SELECT 1 FROM devices WHERE encoder_url IS NOT NULL AND status != 'revoked' LIMIT 1"
-    ).fetchone() is not None
+        "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_auto = 1) "
+        "AND status != 'revoked' LIMIT 1").fetchone() is not None
 
 
 def load_setting_object(key: str) -> dict:
@@ -167,6 +168,40 @@ LINGERING_CARD_SECONDS = 3600   # a card made this recently may still be on the 
 encoders = Encoders(tthotel.hotel_info, lambda *update: save_job_progress(*update),
                     hotel_info_expired=tthotel.hotel_info_expired,
                     last_card=lambda url: db.wb_last_card(url, time.time() - LINGERING_CARD_SECONDS))
+
+# A computer whose card encoder is set to Automatic uses the SN Web Socket helper found on the
+# network (discovery.py) instead of a typed address: the staff app comes through the tunnel, so
+# the desk computer's address can't be learned from its requests.
+NETWORK_UNKNOWN = ("Couldn't read Home Assistant's network setting. Try again, or enter the "
+                   "network to search in Wristbands settings.")
+
+
+async def encoder_networks() -> list:
+    """The networks to look for card encoders on: the ones typed in Wristbands settings, else
+    the ones in Home Assistant's network setting (Settings > System > Network)."""
+    typed = db.settings().get("wb_scan_subnets", "")
+    if typed.strip():
+        try:
+            return parse_networks(typed)
+        except ValueError as err:
+            raise DiscoveryError(str(err)) from None
+    try:
+        answer = await ha.ws_command({"type": "network"})
+    except HomeAssistantError as err:
+        log.info("Couldn't read Home Assistant's network setting: %s", err)
+        raise DiscoveryError(NETWORK_UNKNOWN) from None
+    return ha_networks(answer)
+
+
+def encoder_auto_wanted() -> bool:
+    """Whether encoders may be looked for without an admin asking: Wristbands is on and some
+    computer's card encoder is set to Automatic."""
+    return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
+        "SELECT 1 FROM devices WHERE encoder_auto = 1 AND encoder_url IS NULL "
+        "AND status != 'revoked' LIMIT 1").fetchone() is not None
+
+
+discovery = Discovery(lambda: encoder_networks(), lambda: encoder_auto_wanted())
 
 
 def needs_clock_in(member: dict | None) -> bool:
@@ -523,7 +558,7 @@ def wristband_permissions(device: dict, member: dict | None) -> dict:
     """What the person signed in on this device may make now (wristbands.NO_ACCESS: nothing).
     Nothing unless Wristbands is turned on, the device has a card encoder, and someone signed
     in with their own PIN on a shared or role-based device."""
-    if (not member or not is_shared(device) or not device.get("encoder_url")
+    if (not member or not is_shared(device) or not encoder_address(device)
             or db.settings().get("wristbands_enabled") != "1"):
         return no_access()
     if role_based(device):
@@ -1275,7 +1310,8 @@ async def wristband_caller(request: web.Request, change: bool = False,
     else:
         device, member = authenticate(request)
     perms = wristband_permissions(device, member)
-    if not perms["types"]:
+    address = encoder_address(device, rescan=False)
+    if not perms["types"] or not address:
         if change:
             db.log(actor_name(device, member), "Blocked: wristbands", role=role_label(device, member),
                    ok=False, ip=client_ip(request))
@@ -1283,7 +1319,8 @@ async def wristband_caller(request: web.Request, change: bool = False,
     if limit and wristbands_too_busy(device["id"]):
         raise json_error(web.HTTPTooManyRequests,
                          "Too many requests at once. Wait a moment and try again.")
-    return device, member, perms
+    # From here on the device's encoder_url is the encoder it uses now, typed in or found.
+    return {**device, "encoder_url": address}, member, perms
 
 
 def door_name(door: dict) -> str:
@@ -1543,6 +1580,77 @@ async def api_lookup(request: web.Request):
                               "job": job and job_view(job, zone), "message": message})
 
 
+# Which encoder a computer uses: Off, Automatic (found on the network) or a typed address.
+
+def encoder_mode(device: dict) -> str:
+    """"address" (typed in; it always wins), "auto" or "off"."""
+    if device.get("encoder_url"):
+        return "address"
+    return "auto" if device.get("encoder_auto") else "off"
+
+
+def encoder_address(device: dict, rescan: bool = True) -> str | None:
+    """Where this computer's card encoder is now: the address typed in, else (Automatic) the SN
+    Web Socket helper found for it, else None. Spelled as transfer.encoder_url spells a typed
+    one, so one encoder still gets one runner. With `rescan`, an Automatic encoder that wasn't
+    found, or has stopped answering, has the network searched again (at most every 10 minutes,
+    and only while something uses Automatic)."""
+    mode = encoder_mode(device)
+    if mode != "auto":
+        return device.get("encoder_url") if mode == "address" else None
+    helper, why = discovery.resolve(device.get("encoder_auto_ip"))
+    url = transfer.encoder_url(helper["url"]) if helper else None
+    if rescan and why != "choose":
+        runner = encoders.find(url)
+        if url is None or (runner is not None and runner.reachable is False):
+            discovery.scan_soon()
+    return url
+
+
+def encoder_text(device: dict) -> str | None:
+    """How a computer's encoder is set and what it resolves to, for the dashboard: "Automatic:
+    192.168.1.50", "Automatic: 2 found, choose one", ... None when it has none."""
+    mode = encoder_mode(device)
+    if mode != "auto":
+        return device["encoder_url"] if mode == "address" else None
+    helper, why = discovery.resolve(device.get("encoder_auto_ip"))
+    if helper:
+        return f"Automatic: {helper['ip']}"
+    if discovery.scanning:
+        return "Automatic: looking for encoders…"
+    if discovery.error:
+        return f"Automatic: {discovery.error}"
+    if discovery.scanned_at is None:
+        return "Automatic: not looked for yet. Click Find encoders."
+    if why == "choose":
+        return f"Automatic: {len(discovery.helpers)} found, choose one"
+    return f"Automatic: no encoder found on {describe(discovery.networks)}"
+
+
+def wristbands_note(device: dict) -> str | None:
+    """Why Wristbands won't show on this computer, for its card in the dashboard (None if it
+    can, as far as the computer goes: on a role-based one it still depends on each person)."""
+    if device.get("kind") != "computer" or device.get("status") == "revoked":
+        return None
+    mode = encoder_mode(device)
+    if db.settings().get("wristbands_enabled") != "1":
+        return ("Wristbands won't show here: Wristbands is turned off (Wristbands tab)."
+                if mode != "off" else None)
+    if mode == "off":
+        return "Wristbands won't show here: it has no card encoder (Edit → Card encoder)."
+    if not encoder_address(device, rescan=False):
+        return "Wristbands won't show here: its card encoder hasn't been found yet."
+    if not is_shared(device):
+        return ("Wristbands won't show here: in Kiosk mode for one person or team, no one signs "
+                "in. Edit it and choose Role-based, or Shared.")
+    if not role_based(device):
+        role = db.role(device["role_id"]) if device.get("role_id") else None
+        if not role or not (role["wristbands"] or {}).get("types"):
+            return ("Wristbands won't show here: it's Shared, and its role can't make any "
+                    "wristbands (Roles tab).")
+    return None
+
+
 # The encoder runners (encoder.py, one per encoder address) are only used through these.
 
 lookups: dict[str, tuple[int, int]] = {}   # encoder address -> (device, person) looking up there
@@ -1748,6 +1856,10 @@ def device_payload() -> list[dict]:
         d["staff_ids"] = db.device_staff_ids(d["id"])
         d["layout_pages"] = device_page_choice(d)
         d["custom_order"] = f"d:{d['id']}" in owners
+        d["encoder_mode"] = encoder_mode(d)
+        d["encoder_address"] = encoder_address(d, rescan=False)   # the one it uses now
+        d["encoder_text"] = encoder_text(d)
+        d["wristbands_note"] = wristbands_note(d)
     return devices
 
 
@@ -2253,12 +2365,31 @@ def parse_pin(value) -> str | None:
 SN_WEB_SOCKET_PORT = 8102   # where TT Hotel's SN Web Socket helper listens on the desk computer
 
 
+ENCODER_MODES = ("off", "auto", "address")
+
+
 def clean_encoder_fields(data: dict) -> dict:
-    """encoder_url / encoder_port from a device form, checked. The address may be typed as just
-    the desk computer's IP address; blank means no encoder. A blank or "auto" port lets the
-    helper find the encoder itself."""
+    """The card encoder from a device form, checked: encoder_mode ("off", "auto" or "address";
+    left out, a typed encoder_url alone decides, as before Automatic), encoder_url,
+    encoder_auto_ip (Automatic: the helper chosen when several were found; blank = the only
+    one) and encoder_port. The address may be typed as just the desk computer's IP address;
+    blank means no encoder. A blank or "auto" port lets the helper find the encoder itself."""
     fields = {}
-    if "encoder_url" in data:
+    mode = data.get("encoder_mode")
+    if mode is not None and mode not in ENCODER_MODES:
+        raise ValueError("Choose Off, Automatic or Address for the card encoder.")
+    if mode is not None:
+        fields.update(encoder_url=None, encoder_auto=1 if mode == "auto" else 0)
+        if mode != "auto":
+            fields["encoder_auto_ip"] = None
+    if "encoder_auto_ip" in data and mode in (None, "auto"):
+        raw = str(data["encoder_auto_ip"] or "").strip()
+        if raw and not transfer.encoder_ip(raw):
+            raise ValueError("Choose one of the encoders found, or leave it on the only one.")
+        fields["encoder_auto_ip"] = transfer.encoder_ip(raw)
+    if mode == "address" and not str(data.get("encoder_url") or "").strip():
+        raise ValueError("Enter the encoder's address, or choose Automatic.")
+    if "encoder_url" in data and mode in (None, "address"):
         url = str(data["encoder_url"] or "").strip().rstrip("/")
         if url and "://" not in url:
             url = "ws://" + url
@@ -2299,6 +2430,8 @@ async def admin_create_device(request: web.Request):
         db.update_device(device_id, kind=kind)
     if encoder:
         db.update_device(device_id, **encoder)
+        if encoder.get("encoder_auto"):
+            discovery.scan_soon()   # only while Wristbands is on
     if pages is not None:
         db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
@@ -2351,6 +2484,8 @@ async def admin_update_device(request: web.Request):
             if dev_id == device["id"]:
                 pin_sessions.pop(token, None)
     db.update_device(device["id"], **fields)
+    if fields.get("encoder_auto"):
+        discovery.scan_soon()   # not looked for yet, say (at most every 10 minutes)
     db.log(admin_name(request), f"Updated phone {fields.get('name', device['name'])}")
     return web.json_response({"ok": True})
 
@@ -2748,6 +2883,8 @@ def clean_wristband_settings(data: dict) -> dict:
             raise ValueError("Sectors must be 16 digits, each 0 or 1, as set in TT Hotel "
                              "(its default is 0000000000011111).")
         values["wb_sectors"] = sectors
+    if "wb_scan_subnets" in data:
+        values["wb_scan_subnets"] = describe(parse_networks(data["wb_scan_subnets"]))
     return values
 
 
@@ -2799,10 +2936,10 @@ async def wristbands_state() -> dict:
     """TT Hotel's connection and request counts, each encoder's status (all from memory), and
     Home Assistant's time zone, so the dashboard can say which zone cards use (read at most every
     few hours, and only while Wristbands is on)."""
-    urls = sorted({d["encoder_url"] for d in db.devices() if d["encoder_url"]})
+    urls = sorted({encoder_address(d, rescan=False) for d in db.devices()} - {None})
     zone = await ha_time_zone() if tthotel_settings()[0] else ha_zone["name"]
     return {**tthotel.state(), "encoders": {url: encoder_status(url) for url in urls},
-            "ha_time_zone": zone}
+            "discovery": discovery.state(), "ha_time_zone": zone}
 
 
 def door_view(door: dict) -> dict:
@@ -2876,15 +3013,20 @@ async def admin_encoder_test(request: web.Request):
     device = db.device(int(request.match_info["id"]))
     if not device:
         raise web.HTTPNotFound()
-    if not device["encoder_url"]:
-        return bad_request("Enter the encoder address for this computer and save it first.")
+    url = encoder_address(device, rescan=False)
+    if not url:
+        return bad_request(
+            f"No encoder has been found for this computer ({encoder_text(device)}). Click Find "
+            "encoders, or enter its address." if encoder_mode(device) == "auto" else
+            "Choose this computer's card encoder (Automatic or its address) and save it first.")
+    device = {**device, "encoder_url": url}
     now = time.time()
     if now - encoders_tested.get(device["id"], 0) < WRISTBAND_TEST_GAP:
         return bad_request("Wait a few seconds before testing again.", 429)
     if len(encoders_tested) > 1000:
         encoders_tested.clear()
     encoders_tested[device["id"]] = now
-    if encoder_busy(device["encoder_url"]):
+    if encoder_busy(url):
         return bad_request("The encoder is making cards right now. Test it when it's done.", 409)
     try:
         version = await test_encoder(device)
@@ -2894,6 +3036,21 @@ async def admin_encoder_test(request: web.Request):
         return bad_request(err.message, 502)
     db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=str(version)[:200])
     return web.json_response({"version": version})
+
+
+async def admin_find_encoders(request: web.Request):
+    """Find encoders: look for SN Web Socket helpers on the network now, and say what was found.
+    Works whether or not anything uses Automatic yet."""
+    wait = discovery.admin_wait()
+    if wait > 0:
+        return bad_request(f"Encoders were looked for a moment ago. Try again in {int(wait) + 1} "
+                           "seconds.", 429)
+    found = await discovery.find()
+    detail = (f"{len(found['helpers'])} found on {describe(found['networks'])}"
+              if not found["error"] else found["error"])
+    db.log(admin_name(request), "Looked for card encoders", detail=detail[:200],
+           ok=not found["error"])
+    return web.json_response({"discovery": found, "devices": device_payload()})
 
 
 async def admin_wristband_jobs(request: web.Request):
@@ -3085,6 +3242,7 @@ def admin_app() -> web.Application:
     app.router.add_patch(r"/api/wristbands/doors/{id:\d{1,16}}", admin_update_door)
     app.router.add_get("/api/wristbands/jobs", admin_wristband_jobs)
     app.router.add_post(r"/api/devices/{id:\d{1,12}}/encoder-test", admin_encoder_test)
+    app.router.add_post("/api/wristbands/encoders/find", admin_find_encoders)
     app.router.add_post("/api/restore/preview", admin_restore_preview)
     app.router.add_post("/api/restore", admin_restore)
     app.router.add_get("/api/safety-backups", admin_safety_backups)
@@ -3139,6 +3297,7 @@ async def main():
     await connecteam.start()
     await tthotel.start()
     recover_wristband_jobs()
+    discovery.scan_soon()   # only while Wristbands is on and a computer's encoder is Automatic
     clock_task = asyncio.create_task(connecteam.run())
     doors_task = asyncio.create_task(tthotel.run())
     raise_file_limit()
@@ -3157,6 +3316,7 @@ async def main():
         doors_task.cancel()
         for runner in runners:
             await runner.cleanup()
+        await discovery.close()
         await encoders.close_all()   # lets go of every encoder
         await tthotel.close()
         await connecteam.close()

@@ -208,9 +208,16 @@ MIGRATIONS = {
         "kind": "TEXT NOT NULL DEFAULT 'phone'",
         # The card encoder at this computer's desk: the address of TT Hotel's SN Web Socket
         # helper on the desk PC (ws://192.168.1.50:8102), and which USB port it's on (NULL =
-        # found automatically). NULL address = no encoder, so no Wristbands on this device.
+        # found automatically). NULL address and not encoder_auto = no encoder, so no Wristbands
+        # on this device.
         "encoder_url": "TEXT",
         "encoder_port": "TEXT",
+        # 1 = Automatic: no address typed, so the add-on finds SN Web Socket on the network
+        # (discovery.py). A typed encoder_url always wins over it. 0 with no address = no encoder.
+        "encoder_auto": "INTEGER NOT NULL DEFAULT 0",
+        # Automatic, when several helpers were found: the address of the one an admin chose for
+        # this computer (NULL = the only one found). Matched again after every search.
+        "encoder_auto_ip": "TEXT",
     },
     "staff": {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
@@ -285,6 +292,8 @@ DEFAULT_SETTINGS = {
     "wb_sectors": "0000000000011111",  # card sectors TT Hotel uses (its default: 12 to 16)
     "wb_card_wait": "60",            # seconds to wait for a wristband on the encoder
     "wb_max_records": "20",          # most doors written onto one card
+    "wb_scan_subnets": "",           # networks searched for Automatic encoders (blank: the ones
+                                     # in Home Assistant's network setting)
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -567,7 +576,7 @@ class Database:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
                    "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since",
-                   "encoder_url", "encoder_port"}
+                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -780,11 +789,12 @@ class Database:
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
                    staff_all, layout_pages, created_at, last_seen, kind, pin_only, encoder_url,
-                   encoder_port)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   encoder_port, encoder_auto, encoder_auto_ip)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
                   d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
-                  d["kind"], d["pin_only"], d["encoder_url"], d["encoder_port"])
+                  d["kind"], d["pin_only"], d["encoder_url"], d["encoder_port"], d["encoder_auto"],
+                  d["encoder_auto_ip"])
                  for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())

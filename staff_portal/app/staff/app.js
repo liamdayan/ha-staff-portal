@@ -684,7 +684,7 @@
     autoSections = new Map(sections);
     if (isDesk()) {
       // No pages: the sidebar jumps to each area instead.
-      const nav = h("nav", { class: "desk-nav", "aria-label": "Areas" }, areaNav(entities), toolNav());
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Areas" }, toolNav(), areaNav(entities));
       return deskShell({ nav, title: "All devices", content: root });
     }
     root.append(...rearrangeButton());
@@ -702,7 +702,7 @@
     if (view.detail && !detailItem) view.detail = null;
 
     if (isDesk()) {
-      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" }, pageNav(pages, current), toolNav());
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" }, toolNav(), pageNav(pages, current));
       // On a computer the card's details open in a panel beside the page instead of replacing it.
       const drawer = detailItem ? h("div", { class: "drawer-wrap" },
         h("div", { class: "drawer-backdrop", onclick: closeDetail }),
@@ -1069,7 +1069,8 @@
     then?.();
   }
 
-  // The sidebar's tools, under their own heading. A flat list (empty when there are none).
+  // The sidebar's tools, under their own heading above the pages. A flat list (empty when there
+  // are none).
   function toolNav() {
     const tools = toolsFor(lastData);
     if (!tools.length) return [];
@@ -1081,13 +1082,15 @@
     }, h("span", null, TOOL_NAMES[name])))];
   }
 
-  // The phone's tab bar: the pages (or the device list, without pages), then the tools. Only
-  // there when there's something to switch between.
+  // The phone's tab bar: the tools first, then the pages (or the device list, without pages).
+  // Only there when there's something to switch between.
   function tabBar(data, current) {
-    const tabs = data?.layout
-      ? data.layout.pages.map((p, i) => [p.name, !view.tool && i === current, () => openPage(p.id)])
-      : data?.entities.length ? [["Devices", !view.tool, () => closeTool()]] : [];
-    for (const name of toolsFor(data)) tabs.push([TOOL_NAMES[name], view.tool === name, () => openTool(name)]);
+    const tabs = toolsFor(data).map((name) => [TOOL_NAMES[name], view.tool === name, () => openTool(name)]);
+    if (data?.layout) {
+      data.layout.pages.forEach((p, i) => tabs.push([p.name, !view.tool && i === current, () => openPage(p.id)]));
+    } else if (data?.entities.length) {
+      tabs.push(["Devices", !view.tool, () => closeTool()]);
+    }
     if (tabs.length < 2) return null;
     return h("nav", { class: "tabbar", "aria-label": "Pages" }, tabs.map(([label, on, go]) =>
       h("button", { class: on ? "tab active" : "tab", "aria-current": on ? "page" : null, onclick: go }, label)));
@@ -1101,7 +1104,7 @@
     const content = wbState().root;   // kept across redraws, so what's typed survives them
     if (isDesk()) {
       const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" },
-        data.layout ? pageNav(data.layout.pages, -1) : areaNav(data.entities), toolNav());
+        toolNav(), data.layout ? pageNav(data.layout.pages, -1) : areaNav(data.entities));
       return deskShell({ nav, title: TOOL_NAMES[view.tool], content, actions: null });
     }
     const tabs = tabBar(data, -1);

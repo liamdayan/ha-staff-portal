@@ -16,6 +16,7 @@ Staff PINs are only ever stored scrambled (scrypt), and that is what exports car
 
 import base64
 import binascii
+import ipaddress
 import json
 import os
 import re
@@ -28,7 +29,7 @@ from permissions import controllable, offered
 from wristbands import NO_ACCESS, clean_permissions, permission_choice
 
 FORMAT = "staff-portal"
-BACKUP_SCHEMA = 3          # 3: wristbands (0.8.0)
+BACKUP_SCHEMA = 3          # 3: wristbands and card encoders (0.8.0)
                            # 2: role pages, people's roles, pages and own changes (0.7.0)
 READABLE_SCHEMAS = (1, 2, 3)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members", "backup": "a full backup"}
@@ -129,6 +130,15 @@ def encoder_url(url: str) -> str | None:
         return None
     base, _, port = url.rpartition(":")
     return f"{base}:{int(port)}" if base.count(":") == 1 and port.isdigit() else url
+
+
+def encoder_ip(value) -> str | None:
+    """The address of the SN Web Socket helper chosen for an Automatic encoder (an IPv4 address,
+    spelled one way), or None."""
+    try:
+        return str(ipaddress.IPv4Address(str(value).strip())) if value else None
+    except ValueError:
+        return None
 
 
 def encoder_port_ok(port: str) -> bool:
@@ -496,7 +506,8 @@ def make_backup(db, branding, version: str) -> dict:
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
                         staff_all, pin_only, layout_pages, created_at, last_seen, encoder_url,
-                        encoder_port FROM devices WHERE status != 'deleted'"""),
+                        encoder_port, encoder_auto, encoder_auto_ip FROM devices
+                        WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in, role_id, layout_pages, wristbands FROM staff"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
@@ -639,7 +650,10 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                         "created_at": _time(row.get("created_at"), time.time()),
                         "last_seen": _time(row.get("last_seen")),
                         "encoder_url": encoder_url(url),
-                        "encoder_port": port if encoder_port_ok(port) else None})
+                        "encoder_port": port if encoder_port_ok(port) else None,
+                        # Backups from before Automatic encoders have neither: Off.
+                        "encoder_auto": 1 if row.get("encoder_auto") in (1, True) else 0,
+                        "encoder_auto_ip": encoder_ip(row.get("encoder_auto_ip"))})
     device_ids = {d["id"] for d in devices}
     staff_devices = {(r["staff_id"], r["device_id"]) for r in _rows(data, "staff_devices", MAX_LINK_ROWS)
                      if r.get("staff_id") in staff_ids and r.get("device_id") in device_ids}

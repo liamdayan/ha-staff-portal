@@ -445,8 +445,10 @@ offered on shared or role-based computers where each person signs in with their 
    from [tthotelpro.net/download](https://www.tthotelpro.net/download) and leave it running
    whenever staff make wristbands. It lets Staff Access reach the encoder over your network.
    Plug the encoder in and let Windows install its driver.
-2. Give that computer a **fixed IP address** on your network (a DHCP reservation in your router),
-   so the address you enter below keeps working.
+2. With **Automatic** (below), Staff Access finds that computer on your network by itself, so a
+   fixed IP address isn't required. It's still a good idea (a DHCP reservation in your router):
+   the encoder is found straight away after a restart instead of after a search, and it's needed
+   if you enter the address yourself.
 3. In TT Hotel on that computer, sign in as the hotel's admin and open **Settings → Integration
    credentials**. You'll copy four things from there: the Client ID, Client Secret, username and
    password. The password there is already scrambled (32 letters and numbers); use it exactly as
@@ -464,12 +466,35 @@ offered on shared or role-based computers where each person signs in with their 
 3. Under **Doors**, rename doors to what staff call them (TT Hotel keeps its own names) and hide
    any staff should never pick. A hidden door can still be one of the day-pass or overnight
    doors.
-4. In **Phones & computers**, click **Edit** on the front-desk computer and enter its **Card
-   encoder address**: just the computer's IP address (such as `192.168.1.50`) is enough, or
-   `ws://192.168.1.50:8102`. Leave **Encoder port** on Automatic unless the encoder isn't found.
-   **Test encoder** checks that Staff Access can reach it. The computer must be **Shared** or
-   **Role-based**. If two computers share one encoder, enter the same address on both (the same
-   IP address, not an IP on one and a name on the other), so they take turns with it.
+4. In **Phones & computers**, click **Edit** on the front-desk computer and set **Card encoder**
+   to **Automatic** (the easy way), then click **Find encoders**. Staff Access looks for SN Web
+   Socket on your network and shows what it found, such as **Automatic: 192.168.1.50**. Leave
+   **Encoder port** on Automatic unless the encoder isn't found. **Test encoder** checks that
+   Staff Access can reach it. The computer must be **Shared** or **Role-based**.
+   - **Which networks are searched:** the ones in Home Assistant's network setting (**Settings →
+     System → Network**, under Network adapter), private IPv4 networks only, and at most the 254
+     addresses around Home Assistant's own address on each. To search others, enter them under
+     **Wristbands → Advanced → Networks to search for encoders** (such as `192.168.20.0/24`).
+     Only SN Web Socket's port (8102) is tried, and only its greeting is read, so nothing on the
+     network (the encoder included) is changed by a search.
+   - **When it searches:** when the add-on starts, when an Automatic computer's encoder isn't
+     found or stops answering (at most every 10 minutes), and when you click **Find encoders**
+     (on the computer's Edit screen or the Wristbands tab). It never searches while no computer
+     uses Automatic, except when you click Find encoders.
+   - **Several front-desk computers:** if more than one runs SN Web Socket, each Automatic
+     computer shows **2 found, choose one**: pick the one at that desk under **Which encoder**.
+     Staff Access remembers that address; if it changes, it uses whichever one is found if only
+     one is, otherwise it asks again. For several desks it's simpler to give each computer a
+     fixed IP address and choose **Address**.
+   - **Address:** enter it yourself for a computer on another network, or to pin a desk to one
+     computer: just its IP address (such as `192.168.1.50`) is enough, or
+     `ws://192.168.1.50:8102`. An address always wins over Automatic. If two computers share one
+     encoder, enter the same address on both (the same IP address, not an IP on one and a name on
+     the other), so they take turns with it.
+
+   Each computer's card says why Wristbands won't show on it, if it won't: Wristbands turned
+   off, no card encoder (or none found yet), Kiosk mode for one person or team (it needs
+   **Shared** or **Role-based**), or a shared computer whose role can't make wristbands.
 5. On the **Roles** tab, under **Wristbands**, choose what each role may make: day passes,
    overnight wristbands, staff cards (and whether those may open single doors, floors, buildings
    or every door), which doors they may put on cards (all doors, or chosen buildings, floors and
@@ -528,6 +553,11 @@ built to use a small share and never get the account blocked:
 - **"Can't reach the card encoder's computer."** Check that the computer is on, SN Web Socket is
   running, the address in **Phones & computers → Edit** is right, and nothing (such as Windows
   Firewall) blocks port 8102 from Home Assistant.
+- **"Automatic: no encoder found on 192.168.1.0/24."** The same checks, and that the computer is
+  on that network: if it's on another one (a separate VLAN for the front desk, say), enter that
+  network under **Wristbands → Advanced → Networks to search for encoders**, or enter the
+  computer's address instead of Automatic. **"Couldn't read Home Assistant's network setting"**
+  means Home Assistant didn't answer; enter the network there too, or try again later.
 - **"The card encoder isn't plugged in"** or **"Couldn't connect to the card encoder."** Check
   the USB cable. The classic TT Hotel program and SN Web Socket can't hold the encoder at the
   same time: Staff Access lets go of it after each batch, so close the TT Hotel program's card
