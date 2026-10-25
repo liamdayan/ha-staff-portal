@@ -933,6 +933,8 @@ async def api_me(request: web.Request):
         # So the PIN pad can sign in without OK: only when every PIN that could sign in here has
         # this many digits (None: it waits for a pause instead).
         "pin_length": device_pin_length(device),
+        # ...and how long it waits for more digits when it doesn't know (Settings).
+        "pin_pause_ms": max(PIN_PAUSE_MIN_MS, min(PIN_PAUSE_MAX_MS, db.setting_int("pin_pause_ms"))),
     })
 
 
@@ -3856,8 +3858,12 @@ BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", 
                  "control_lock", "connecteam_enabled", "wristbands_enabled", "wb_lockout_daypass",
                  "wb_lockout_overnight", "wb_lockout_staff", "connecteam_auto_staff",
                  "connecteam_auto_clock_in", "wb_remote_lockout")
+PIN_PAUSE_MIN_MS, PIN_PAUSE_MAX_MS = 200, 5000
 REMOTE_LOCKOUT_APIS = ("reversed", "plain")   # TT Hotel's two calls for enrolling a card number
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minutes", 1, 1440),
+                   # Any shorter and someone tapping a 6-digit PIN at an ordinary pace is signed
+                   # in (and told it's wrong) after 4 digits.
+                   ("pin_pause_ms", PIN_PAUSE_MIN_MS, PIN_PAUSE_MAX_MS),
                    ("max_pin_attempts", 3, 20),
                    ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120),
                    ("connecteam_poll_minutes", 30, 240), ("tthotel_sync_hours", 1, 48),

@@ -331,6 +331,8 @@ DEFAULT_SETTINGS = {
     "public_url": "",
     "pin_timeout_minutes": "15",            # phones (the key is older than computers)
     "pin_timeout_computer_minutes": "5",    # computers: a desk is left unattended more often
+    # Where PINs differ in length, the PIN pad signs in once typing stops this long (ms).
+    "pin_pause_ms": "500",
     "max_pin_attempts": "5",
     "enroll_hours": "72",
     "ha_logbook": "1",

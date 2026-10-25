@@ -339,6 +339,12 @@ If several people share one phone (a maintenance phone passed between shifts, sa
 each person sign in with their own PIN so every action is recorded under their name.
 
 1. In **Staff**, click **Add staff member** for each person, with a name and a 4- to 8-digit PIN.
+
+   The Staff tab lists one thin row per person: name, role, department, anything that needs a look
+   (inactive, locked, not clocked in) and when they last signed in. Click a row for everything
+   else and its buttons. Search by name, role or department, and sort by **Department** (each
+   department folds away with a click), **Name** or **Role**; this browser remembers the sort
+   and the folded departments.
 2. In **Phones**, click **Edit** on the shared phone and set **Who uses it** to
    **Shared: each person signs in with their own PIN**. Leave **Everyone on the Staff tab**
    ticked, or untick it and pick who may use that phone.
@@ -350,8 +356,10 @@ computers each have their own, see [Security settings](#security-settings)).
 
 **Signing in without OK.** When every PIN that can sign in on a device has the same number of
 digits (everyone allowed on a shared device, or the device's own PIN), the PIN pad signs in as
-soon as the last digit is typed. Otherwise it signs in half a second after the typing stops,
-once at least 4 digits are typed. **OK** (or **Enter** on a keyboard) always works too. The
+soon as the last digit is typed. Otherwise it signs in once the typing stops for a moment, with
+at least 4 digits typed: half a second to start with, set in **Settings → Security** as **Sign in
+after the last PIN digit (ms)** (200 to 5,000). Too short, and someone who types slowly is signed
+in before they've finished, as a wrong PIN. **OK** (or **Enter** on a keyboard) always works too. The
 device is only ever told that shared number of digits: never a PIN, and never one person's own
 length. Staff Access can only know a PIN's length from when it's set (they're stored scrambled),
 so PINs set before 0.8.3, and PINs from older backups or staff files, count as unknown until
@@ -395,7 +403,7 @@ computer can show the boiler controls to Maintenance and only the cabin locks to
 
 To set one up:
 
-1. **Give people roles.** On the **Staff** tab, pick each person's **Role** on their card (or in
+1. **Give people roles.** On the **Staff** tab, open each person's row and pick their **Role** (or in
    **Edit**). Roles work as staff groups: each person has one.
 2. **Choose each role's pages.** On the **Roles** tab, open the role and use **Pages**. (On the
    **Layout** tab, **Choose devices** on a page or group also lists roles once you have a

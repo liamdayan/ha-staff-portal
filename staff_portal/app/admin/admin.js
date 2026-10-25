@@ -942,83 +942,200 @@
     return parts.join(", ");
   }
 
+  // Staff tab: one thin row per person, opened for everything about them. Sorted by department
+  // (each one a group that folds away), name or role, and searchable. The sort and the folded
+  // departments are remembered in this browser; who's opened and the search aren't.
+  const STAFF_VIEW_KEY = "staff-portal.staff-view";
+  const STAFF_SORTS = ["department", "name", "role"];
+  const staffView = { q: "", sort: "department", folded: new Set(), open: new Set() };
+  try {
+    const saved = JSON.parse(localStorage.getItem(STAFF_VIEW_KEY) || "null");
+    if (STAFF_SORTS.includes(saved?.sort)) staffView.sort = saved.sort;
+    if (Array.isArray(saved?.folded)) staffView.folded = new Set(saved.folded.map(String));
+  } catch { /* nothing remembered, or storage is off: the defaults */ }
+
+  function saveStaffView() {
+    try {
+      localStorage.setItem(STAFF_VIEW_KEY,
+        JSON.stringify({ sort: staffView.sort, folded: [...staffView.folded] }));
+    } catch { /* not remembered this time */ }
+  }
+
+  const roleName = (m) => state.roles.find((r) => r.id === m.role_id)?.name || "";
+  const departmentOf = (m) => state.departments.find((d) => d.id === m.department_id) || null;
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+
   function renderStaff() {
     const list = $("#staff-list");
+    $("#staff-tools").hidden = !state.staff.length;
     if (!state.staff.length) {
       list.replaceChildren(h("div", { class: "empty" },
         "No staff yet. Add the people who share phones, each with their own PIN. Then set a ",
         "phone to \u201cShared\u201d (Phones \u2192 Edit) so they can sign in on it."));
       return;
     }
-    list.replaceChildren(...state.staff.map((m) => {
-      const status = m.status === "disabled" ? ["Inactive", "revoked"]
-        : m.locked ? ["Locked for now (wrong PINs)", "locked"] : ["Active", "active"];
-      const phones = phonesFor(m);
-      const roleSelect = h("select", { "aria-label": `Role for ${m.name}` });
-      fillRoleOptions(roleSelect, m.role_id, "No role");
-      roleSelect.addEventListener("change", () => run(async () => {
-        await api("PATCH", `api/staff/${m.id}`, { role_id: roleSelect.value || null });
-        await load();
-      }, `${m.name}'s role changed. It applies on role-based devices within a few seconds.`));
-      const own = ownChangesText(m);
-      const dept = state.departments.find((d) => d.id === m.department_id);
-      const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit"),
-        h("button", { class: "btn", onclick: () => openPersonAccess(m.id) }, "Access")];
-      if (wristbandsOn()) {
-        actions.splice(1, 0, h("button", { class: "btn", onclick: () => run(() => makeKeyCard(m)) }, "Make key card"));
-      }
-      if (m.locked) {
-        actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
-          await api("POST", `api/staff/${m.id}/unlock`);
-          await load();
-        }, `${m.name} can sign in again.`) }, "Unlock"));
-      }
-      if (m.ha_user) {
-        actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") },
-          m.ha_link_error ? "Relink HA user" : "Change HA user"));
-        actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
-          if (!await askConfirm(`Unlink ${m.name} from Home Assistant user ${m.ha_user}?`, "Unlink")) return false;
-          await api("DELETE", `api/staff/${m.id}/link`);
-          await load();
-        }, "Unlinked.") }, "Unlink"));
-      } else {
-        actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
-      }
-      actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
-        if (!await askConfirm(`Delete ${m.name}? Their past activity stays in the log.`, "Delete")) return false;
-        await api("DELETE", `api/staff/${m.id}`);
-        await load();
-      }, "Deleted.") }, "Delete"));
-      return h("article", { class: `card phone ${m.status === "disabled" ? "revoked" : ""}` },
-        h("div", { class: "phone-head" },
-          h("div", null,
-            h("h3", null, m.name),
-            h("div", { class: "meta" },
-              h("span", { class: `badge ${status[1]}` }, status[0]),
-              m.ha_user ? h("span", {
-                class: m.ha_link_error ? "badge locked" : "badge linked",
-                title: m.ha_link_error || "Actions show in Home Assistant as this user",
-              }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
-              m.connecteam_auto ? h("span", { class: "badge linked",
-                title: "Added by Add everyone from Connecteam, which keeps their department up to date" },
-              "From Connecteam") : null,
-              clockBadge(m),
-              h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
-            m.connecteam_note && m.status === "disabled" ? h("div", { class: "meta wb-note" },
-              `Turned off: ${m.connecteam_note}.`, m.connecteam_note.startsWith("No usable kiosk code")
-                ? " Give them a PIN with Edit, and tick Can sign in." : "") : null,
-            h("div", { class: "meta" }, phones.length
-              ? `Can sign in on: ${phones.join(", ")}`
-              : "Not on any shared phone yet"),
-            own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null,
-            wristbandsOn() ? keyCardLine(m, dept) : null,
-            clockRule(m)),
-          h("div", { class: "staff-selects" },
-            h("label", { class: "inline-select" }, "Role", roleSelect),
-            departmentSelect(m))),
-        h("div", { class: "card-actions" }, actions));
-    }));
+    // By department only once there are departments (it's by name until then).
+    const departments = state.departments.length > 0;
+    const sort = staffView.sort === "department" && !departments ? "name" : staffView.sort;
+    document.querySelectorAll("#staff-sort button").forEach((b) => {
+      b.hidden = b.dataset.sort === "department" && !departments;
+      b.setAttribute("aria-checked", String(b.dataset.sort === sort));
+    });
+    const q = staffView.q.trim().toLowerCase();
+    const shown = state.staff.filter((m) => !q || [m.name, roleName(m), departmentOf(m)?.name,
+      m.ha_user].some((text) => text && text.toLowerCase().includes(q)));
+    $("#staff-count").textContent = q ? `${shown.length} of ${state.staff.length}`
+      : `${state.staff.length} ${state.staff.length === 1 ? "person" : "people"}`;
+    if (!shown.length) {
+      list.replaceChildren(h("div", { class: "empty" }, `No one matches \u201c${staffView.q.trim()}\u201d.`));
+      return;
+    }
+    if (sort === "department") {
+      const groups = state.departments.map((d) => [String(d.id), d.name,
+        shown.filter((m) => m.department_id === d.id)]);
+      groups.push(["none", "No department", shown.filter((m) => !departmentOf(m))]);
+      list.replaceChildren(...groups.filter(([, , people]) => people.length)
+        .map(([key, title, people]) => staffGroup(key, title, people.sort(byName), !!q)));
+      return;
+    }
+    // By role: people with a role first, by role, then by name.
+    const order = sort === "role"
+      ? (a, b) => (!roleName(a) - !roleName(b)) || roleName(a).localeCompare(roleName(b)) || byName(a, b)
+      : byName;
+    list.replaceChildren(...shown.sort(order).map((m) => staffRow(m, sort)));
   }
+
+  // A department and its people. A search shows every match, folded or not.
+  function staffGroup(key, title, people, searching) {
+    const folded = staffView.folded.has(key) && !searching;
+    const body = h("div", { class: "staff-group-body" }, folded ? [] : people.map((m) => staffRow(m, "department")));
+    const head = h("button", { type: "button", class: "staff-group-head", "aria-expanded": String(!folded),
+      onclick: () => {
+        if (staffView.folded.has(key)) staffView.folded.delete(key);
+        else staffView.folded.add(key);
+        saveStaffView();
+        const fold = staffView.folded.has(key) && !searching;
+        head.setAttribute("aria-expanded", String(!fold));
+        body.replaceChildren(...(fold ? [] : people.map((m) => staffRow(m, "department"))));
+      } },
+    h("span", { class: "chev", "aria-hidden": "true" }), h("span", { class: "staff-group-name" }, title),
+    h("span", { class: "count" }, String(people.length)));
+    return h("section", { class: "staff-group" }, head, body);
+  }
+
+  // One person: a thin row (name, role, department, anything that needs a look, last sign-in),
+  // opened for everything else and what can be done.
+  function staffRow(m, sort) {
+    const item = h("article", { class: `staff-row ${m.status === "disabled" ? "revoked" : ""}` });
+    const draw = () => {
+      const open = staffView.open.has(m.id);
+      item.classList.toggle("open", open);
+      const sub = [roleName(m) || "No role", sort !== "department" ? departmentOf(m)?.name : null];
+      const flags = [
+        m.status === "disabled" ? ["Inactive", "revoked"] : null,
+        m.locked ? ["Locked (wrong PINs)", "locked"] : null,
+        m.clock === "out" && m.require_clock_in ? ["Not clocked in", "pending"] : null,
+        m.ha_link_error ? ["HA link broken", "locked"] : null,
+      ].filter(Boolean);
+      const head = h("button", { type: "button", class: "staff-row-head", "aria-expanded": String(open),
+        onclick: () => {
+          if (staffView.open.has(m.id)) staffView.open.delete(m.id);
+          else staffView.open.add(m.id);
+          draw();
+          item.querySelector(".staff-row-head").focus({ preventScroll: true });
+        } },
+      h("span", { class: "chev", "aria-hidden": "true" }),
+      h("span", { class: "staff-row-main" }, h("span", { class: "staff-row-name" }, m.name),
+        h("span", { class: "staff-row-sub" }, sub.filter(Boolean).join(" \u00b7 "))),
+      h("span", { class: "staff-row-side" },
+        flags.map(([text, cls]) => h("span", { class: `badge ${cls}` }, text)),
+        h("span", { class: "staff-row-seen", title: "Last signed in" }, ago(m.last_seen))));
+      item.replaceChildren(head, open ? h("div", { class: "staff-row-body" }, staffDetails(m)) : "");
+    };
+    draw();
+    return item;
+  }
+
+  // Everything about one person, and what can be done (an opened row).
+  function staffDetails(m) {
+    const status = m.status === "disabled" ? ["Inactive", "revoked"]
+      : m.locked ? ["Locked for now (wrong PINs)", "locked"] : ["Active", "active"];
+    const phones = phonesFor(m);
+    const roleSelect = h("select", { "aria-label": `Role for ${m.name}` });
+    fillRoleOptions(roleSelect, m.role_id, "No role");
+    roleSelect.addEventListener("change", () => run(async () => {
+      await api("PATCH", `api/staff/${m.id}`, { role_id: roleSelect.value || null });
+      await load();
+    }, `${m.name}'s role changed. It applies on role-based devices within a few seconds.`));
+    const own = ownChangesText(m);
+    const dept = departmentOf(m);
+    const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit"),
+      h("button", { class: "btn", onclick: () => openPersonAccess(m.id) }, "Access")];
+    if (wristbandsOn()) {
+      actions.splice(1, 0, h("button", { class: "btn", onclick: () => run(() => makeKeyCard(m)) }, "Make key card"));
+    }
+    if (m.locked) {
+      actions.unshift(h("button", { class: "btn primary", onclick: () => run(async () => {
+        await api("POST", `api/staff/${m.id}/unlock`);
+        await load();
+      }, `${m.name} can sign in again.`) }, "Unlock"));
+    }
+    if (m.ha_user) {
+      actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") },
+        m.ha_link_error ? "Relink HA user" : "Change HA user"));
+      actions.push(h("button", { class: "btn subtle", onclick: () => run(async () => {
+        if (!await askConfirm(`Unlink ${m.name} from Home Assistant user ${m.ha_user}?`, "Unlink")) return false;
+        await api("DELETE", `api/staff/${m.id}/link`);
+        await load();
+      }, "Unlinked.") }, "Unlink"));
+    } else {
+      actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
+    }
+    actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
+      if (!await askConfirm(`Delete ${m.name}? Their past activity stays in the log.`, "Delete")) return false;
+      await api("DELETE", `api/staff/${m.id}`);
+      await load();
+    }, "Deleted.") }, "Delete"));
+    return [
+      h("div", { class: "phone-head" },
+        h("div", null,
+          h("div", { class: "meta" },
+            h("span", { class: `badge ${status[1]}` }, status[0]),
+            m.ha_user ? h("span", {
+              class: m.ha_link_error ? "badge locked" : "badge linked",
+              title: m.ha_link_error || "Actions show in Home Assistant as this user",
+            }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
+            m.connecteam_auto ? h("span", { class: "badge linked",
+              title: "Added by Add everyone from Connecteam, which keeps their department up to date" },
+            "From Connecteam") : null,
+            clockBadge(m),
+            h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
+          m.connecteam_note && m.status === "disabled" ? h("div", { class: "meta wb-note" },
+            `Turned off: ${m.connecteam_note}.`, m.connecteam_note.startsWith("No usable kiosk code")
+              ? " Give them a PIN with Edit, and tick Can sign in." : "") : null,
+          h("div", { class: "meta" }, phones.length
+            ? `Can sign in on: ${phones.join(", ")}`
+            : "Not on any shared phone yet"),
+          own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null,
+          wristbandsOn() ? keyCardLine(m, dept) : null,
+          clockRule(m)),
+        h("div", { class: "staff-selects" },
+          h("label", { class: "inline-select" }, "Role", roleSelect),
+          departmentSelect(m))),
+      h("div", { class: "card-actions" }, actions),
+    ];
+  }
+
+  document.querySelectorAll("#staff-sort button").forEach((b) => b.addEventListener("click", () => {
+    staffView.sort = b.dataset.sort;
+    saveStaffView();
+    renderStaff();
+  }));
+  $("#staff-search").addEventListener("input", (e) => {
+    staffView.q = e.target.value.slice(0, 60);
+    renderStaff();
+  });
+  $("#staff-search").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
 
   // Connecteam link and, for clocked-in-only people, whether they're on the clock right now.
   function clockBadge(m) {

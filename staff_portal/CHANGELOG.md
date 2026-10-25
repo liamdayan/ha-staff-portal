@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.10
+
+**Staff tab**
+
+- **A thin row per person**: their name, role and department, anything that needs a look
+  (inactive, locked, not clocked in, a broken Home Assistant link) and when they last signed
+  in. Click a row for everything else and its buttons (Edit, Make key card, Access and so on).
+- **Search** by name, role, department or Home Assistant user.
+- **Sort** by department, name or role. By department, each department is a group with a count
+  that folds away with a click. The sort and the folded departments are remembered in that
+  browser.
+
+**Signing in**
+
+- **New setting: how long the PIN pad waits after the last digit**, in milliseconds (Settings →
+  Security; 500 to start with, 200 to 5,000). It's used where PINs differ in length; where they
+  all have the same number of digits, the PIN pad still signs in at the last one. Phones and
+  computers use a new value the next time they show the PIN pad.
+
 ## 0.8.9
 
 **Card encoders**

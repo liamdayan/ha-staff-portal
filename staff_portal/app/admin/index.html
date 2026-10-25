@@ -54,7 +54,17 @@
     <p class="hint">For shared phones: each person taps their name and enters their own PIN, so
       every action is recorded under their name. What they can control comes from the phone's role.</p>
     <p class="hint sync-line" id="staff-sync-status" hidden></p>
-    <div id="staff-list" class="cards"></div>
+    <div class="kc-filters staff-tools" id="staff-tools" hidden>
+      <input type="search" id="staff-search" placeholder="Search by name, role or department" maxlength="60"
+        autocomplete="off" aria-label="Search staff">
+      <div class="seg seg-state" role="radiogroup" aria-label="Sort staff by" id="staff-sort">
+        <button type="button" role="radio" data-sort="department" aria-checked="true">Department</button>
+        <button type="button" role="radio" data-sort="name" aria-checked="false">Name</button>
+        <button type="button" role="radio" data-sort="role" aria-checked="false">Role</button>
+      </div>
+      <span class="count" id="staff-count"></span>
+    </div>
+    <div id="staff-list" class="staff-list"></div>
 
     <div id="keycards-section" hidden>
       <div class="section-head kc-head">
@@ -574,9 +584,14 @@
         <div class="row">
           <label>Ask for PIN again after (minutes): phones<input name="pin_timeout_minutes" type="number" min="1" max="1440"></label>
           <label>Ask for PIN again after (minutes): computers<input name="pin_timeout_computer_minutes" type="number" min="1" max="1440"></label>
+          <label>Sign in after the last PIN digit (ms)<input name="pin_pause_ms" type="number" min="200" max="5000" step="50"></label>
           <label>Lock phone after wrong PINs<input name="max_pin_attempts" type="number" min="3" max="20"></label>
           <label>Setup QR codes expire after (hours)<input name="enroll_hours" type="number" min="1" max="720"></label>
         </div>
+        <p class="hint">The PIN pad signs in by itself, without OK. Where every PIN that can sign in on a
+          phone or computer has the same number of digits, it signs in at the last one. Otherwise it waits
+          this long after the last digit (500 ms to start with; 200 to 5,000). Shorter is quicker, but too
+          short signs in people who type slowly before they've finished, as a wrong PIN.</p>
       </fieldset>
       <div class="form-actions"><button class="btn primary" type="submit">Save settings</button></div>
     </form>

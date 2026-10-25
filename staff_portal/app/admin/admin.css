@@ -734,3 +734,51 @@ tr.kc-lost td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 /* min-width: 0 lets the key card table scroll sideways on a phone instead of widening the page. */
 #keycards-section { min-width: 0; }
 .kc-table th { position: relative; }   /* keeps the hidden "Actions" heading inside the table */
+
+/* Staff tab: a thin row per person, opened for everything; by department, each department is a
+   group that folds away. */
+.staff-tools { margin-top: 14px; }
+.staff-list { display: grid; gap: 6px; }
+.staff-group { display: grid; gap: 6px; }
+.staff-group + .staff-group { margin-top: 12px; }
+.staff-group-head, .staff-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.staff-group-head { padding: 6px 4px; font-size: 15px; font-weight: 700; border-bottom: 1px solid var(--line); }
+.staff-group-body { display: grid; gap: 6px; }
+.staff-row { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.staff-row-head { padding: 9px 14px; border-radius: var(--radius-sm); flex-wrap: wrap; }
+.staff-row-head:hover { background: var(--card-2); }
+.staff-row.open .staff-row-head { border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+.staff-group-head:focus-visible, .staff-row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.staff-row-main { display: flex; align-items: baseline; gap: 4px 10px; flex: 1 1 200px; min-width: 0; flex-wrap: wrap; }
+.staff-row-name { font-weight: 600; }
+.staff-row.revoked .staff-row-name { color: var(--muted); }
+.staff-row-sub { color: var(--muted); font-size: 13px; }
+.staff-row-side { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+.staff-row-seen { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 76px; text-align: right; }
+.staff-row-body { padding: 6px 18px 16px 42px; border-top: 1px solid var(--line); }
+.chev {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 5px 0 3px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s var(--ease);
+}
+[aria-expanded="true"] > .chev { transform: rotate(45deg); }
+@media (max-width: 600px) {
+  .staff-row-body { padding-left: 14px; padding-right: 14px; }
+  .staff-row-seen { min-width: 0; }
+}

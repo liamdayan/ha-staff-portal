@@ -828,7 +828,7 @@ def test_revoke_wrong_card_left_on_needs_attention_and_blank_cards_are_not_clear
                                   "encoder, then try again.")
         h.sim.place_card("12345")   # the same number without the leading zeros, but blank
         h.runner.retry(job_id)
-        await h.until(lambda: h.jobs[job_id]["message"].startswith(
+        await h.until(lambda: (h.jobs[job_id]["message"] or "").startswith(
             "Card 0012345 couldn't be cleared"), "the blank card to be refused")
         h.runner.skip(job_id)
         job = await h.status(job_id, "done")

@@ -201,6 +201,23 @@ def test_a_pin_pad_signing_in_at_an_old_length_is_told_and_nothing_is_counted(tm
     run(scenario())
 
 
+def test_pin_pause_is_a_setting_within_limits(tmp_path):
+    """How long the PIN pad waits after the last digit (where PIN lengths differ) is set in
+    Settings, in milliseconds, and reaches the PIN pad with /api/me; out of range is held to it."""
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            desk = {"Authorization": f"Bearer {p.token}"}
+            assert (await me(p, desk))["pin_pause_ms"] == 500
+            for asked, kept in ((300, 300), (50, 200), (99999, 5000)):
+                status, reply = await p.admin_call("PUT", "/api/settings", {"pin_pause_ms": asked})
+                assert status == 200, reply
+                assert (await me(p, desk))["pin_pause_ms"] == kept
+            status, reply = await p.admin_call("PUT", "/api/settings", {"pin_pause_ms": "soon"})
+            assert status == 400, reply
+    run(scenario())
+
+
 def test_pin_lengths_are_recorded_wherever_pins_are_set(tmp_path):
     async def scenario():
         p = Portal(tmp_path)

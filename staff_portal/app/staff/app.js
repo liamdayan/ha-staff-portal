@@ -7,6 +7,7 @@
   const FAST_POLL_MS = 1500;   // while a change is waiting to be confirmed by the device
   const CONFIRM_MS = 90000;    // how long a change may take to show up before we say so
   const PIN_PAUSE_MS = 500;    // a PIN of unknown length signs in once typing stops this long
+                               // (unless Settings says otherwise: me.pin_pause_ms)
   const PIN_LENGTHS = new Set([4, 5, 6, 7, 8]);
 
   const local = storage(() => window.localStorage);
@@ -491,7 +492,8 @@
         return;
       }
       if (pin.length >= 8) return submit();
-      pause = setTimeout(() => { if (pad.isConnected) submit(); }, PIN_PAUSE_MS);
+      const wait = Number.isInteger(me?.pin_pause_ms) ? me.pin_pause_ms : PIN_PAUSE_MS;
+      pause = setTimeout(() => { if (pad.isConnected) submit(); }, wait);
     };
     const press = (k) => {
       if (busy) return;   // the PIN typed is being checked
