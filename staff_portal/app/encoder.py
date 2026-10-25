@@ -341,7 +341,12 @@ class SNWebSocket:
 
     async def connect_encoder(self, port: str = "auto") -> dict:
         """Open the encoder's USB port: "auto" lets SN Web Socket find it (GetDeviceInfo, which
-        also reports the encoder's version), else the port named (COM3, /dev/ttyUSB0)."""
+        also reports the encoder's version), else the port named (COM3, /dev/ttyUSB0).
+
+        Lets go of the port first: after TT Hotel's own program has used the encoder, SN Web
+        Socket can be left holding a dead handle to it and refuses to reconnect until the cable is
+        replugged. Closing that handle first lets it open the port afresh."""
+        await self.disconnect_encoder()
         if not port or port == "auto":
             reply = await self.call("GetDeviceInfo", transformCardNo=True)
             data = reply.get("data")

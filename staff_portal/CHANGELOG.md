@@ -51,6 +51,9 @@
 - **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after
   looking one up waited for it to be lifted off the encoder first. A looked-up wristband can now be
   reused straight away.
+- **Fixed: the encoder sometimes wouldn't reconnect after TT Hotel's own program used it** until
+  its cable was replugged. Staff Portal now releases any old connection in SN Web Socket before
+  connecting.
 
 ## 0.7.1
 
