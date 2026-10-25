@@ -7,6 +7,7 @@ import os
 import secrets
 import sqlite3
 import time
+import urllib.parse
 
 from wristbands import permission_choice
 
@@ -395,9 +396,27 @@ ACTIVITY_MAX_ROWS = 50_000
 WB_JOBS_KEEP_DAYS = 2 * 365    # card records outlive the activity log: wristbands can be asked
 WB_JOBS_MAX_ROWS = 100_000     # about long after they were made
 WB_ACTIVE = ("queued", "running", "needs_attention")   # card jobs that haven't finished
+# The same as SQL, spelled out: SQLite only uses the partial index below for a query that spells
+# out the same statuses (not one that passes them as parameters).
+UNFINISHED = f"status IN ({', '.join(repr(status) for status in WB_ACTIVE)})"
 WB_JOB_STATUSES = (*WB_ACTIVE, "done", "cancelled")
 WB_CARD_STATUSES = ("pending", "written", "failed", "skipped", "cancelled")
 WB_JOB_FIELDS = {"status", "message", "finished_at"}
+
+# Indexes on columns MIGRATIONS may have added, so they're made after it.
+INDEXES = f"""
+-- Each encoder's unfinished job: looked for whenever a job starts.
+CREATE INDEX IF NOT EXISTS wb_jobs_unfinished ON wb_jobs (encoder_url) WHERE {UNFINISHED};
+-- One person's card log.
+CREATE INDEX IF NOT EXISTS wb_jobs_staff ON wb_jobs (staff_id, ts);
+-- Staff key cards: the Key cards list, and the count of each person's (on every dashboard load).
+CREATE INDEX IF NOT EXISTS wb_jobs_key_cards ON wb_jobs (card_type, expires_at)
+    WHERE kind = 'write';
+"""
+DB_FILE = "staff_portal.db"
+CARD_NUMBER_DIGITS = 6         # a card log search this many digits or longer is a card number
+BUSY_SECONDS = 5               # how long a write waits for another connection's (a backup's)
+WAL_LIMIT = 16 * 1024 * 1024   # the write-ahead log is cut back to this after a checkpoint
 WB_CARD_FIELDS = {"status", "card_number", "error", "written_at", "state", "state_at", "state_by",
                   "cancelled_card"}
 WB_JOB_KINDS = ("write", "revoke", "notice")
@@ -490,8 +509,18 @@ def page_choice(raw) -> list[str] | None:
 class Database:
     def __init__(self, data_dir: str):
         os.makedirs(data_dir, exist_ok=True)
-        self.conn = sqlite3.connect(os.path.join(data_dir, "staff_portal.db"))
+        self.path = os.path.join(data_dir, DB_FILE)
+        self.conn = sqlite3.connect(self.path, timeout=BUSY_SECONDS)
         self.conn.row_factory = sqlite3.Row
+        self.read_only = False
+        self._settings = None   # settings(), read once and kept until they change
+        # A write-ahead log: a commit is added to staff_portal.db-wal rather than rewriting the
+        # file, and with synchronous=NORMAL it doesn't wait for the disk (only checkpoints do).
+        # Waiting four times on every change froze the whole add-on for tens of milliseconds a
+        # time on an SD card or eMMC. A power cut can lose the last few changes, never the file.
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA synchronous = NORMAL")
+        self.conn.execute(f"PRAGMA journal_size_limit = {WAL_LIMIT}")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
         for table, columns in MIGRATIONS.items():
@@ -499,6 +528,7 @@ class Database:
             for column, kind in columns.items():
                 if column not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        self.conn.executescript(INDEXES)
         for key, value in DEFAULT_SETTINGS.items():
             self.conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -508,14 +538,52 @@ class Database:
             """INSERT OR IGNORE INTO device_tokens (token_hash, device_id, issued_at)
                SELECT token_hash, id, ? FROM devices WHERE token_hash IS NOT NULL""", (time.time(),))
         self.conn.commit()
+        # Statistics for choosing indexes (a quick sample of each table, not a full read): all of
+        # them the first time, then for tables much changed since (all tables without them too,
+        # from SQLite 3.46).
+        self.conn.execute("PRAGMA analysis_limit = 1000")
+        analyzed = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone()
+        self.conn.execute("PRAGMA optimize = 0x10002" if analyzed else "ANALYZE")
+        self.conn.commit()
+
+    def close(self) -> None:
+        """On the way out: the write-ahead log goes back into the file, so /data holds one
+        up-to-date file while the add-on is stopped."""
+        try:
+            if not self.read_only:
+                self.conn.execute("PRAGMA optimize")
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            self.conn.close()
+
+    def reader(self) -> "Database":
+        """This database, read-only, on a connection of its own: for reading a lot at once (a
+        backup) in a worker thread, made and used there, while the add-on carries on. Everything
+        read through it is one moment's (the write-ahead log keeps that moment while the add-on
+        writes). close() it when done."""
+        other = object.__new__(Database)
+        other.path = self.path
+        other.conn = sqlite3.connect(f"file:{urllib.parse.quote(self.path)}?mode=ro", uri=True,
+                                     timeout=BUSY_SECONDS)
+        other.conn.row_factory = sqlite3.Row
+        other.read_only = True
+        other._settings = None
+        other.conn.execute("BEGIN")   # one moment: from the first read to close()
+        return other
 
     # Settings
 
     def settings(self) -> dict:
-        return {r["key"]: r["value"] for r in self.conn.execute(
-            "SELECT key, value FROM settings WHERE key != 'layout'")}
+        # Read on nearly every request, several times: kept, and read again after a change.
+        # A copy each time, since callers add to it.
+        if self._settings is None:
+            self._settings = {r["key"]: r["value"] for r in self.conn.execute(
+                "SELECT key, value FROM settings WHERE key != 'layout'")}
+        return dict(self._settings)
 
     def update_settings(self, values: dict) -> None:
+        self._settings = None
         for key, value in values.items():
             if key in DEFAULT_SETTINGS:
                 self.conn.execute(
@@ -1088,6 +1156,8 @@ class Database:
         except Exception:
             c.rollback()
             raise
+        finally:
+            self._settings = None   # read again, whichever way it went
         return [r["ha_refresh_token"] for table in links.values() for r in table.values()
                 if r["ha_refresh_token"] and r["ha_refresh_token"] not in kept], merged
 
@@ -1420,7 +1490,8 @@ class Database:
     def wb_jobs(self, limit: int = 50, before: float | None = None, staff_id: int | None = None,
                 q: str = "", kinds: tuple[str, ...] | None = None) -> list[dict]:
         """Card jobs, newest first: everyone's, or one person's. q matches part of the name the
-        cards were made for, or of a card number. kinds: only these job kinds (None: all)."""
+        cards were made for, or the start of a card number. kinds: only these job kinds (None:
+        all)."""
         where, params = ["ts < ?"], [before or time.time() + 1]
         if kinds is not None:
             where.append(f"kind IN ({', '.join('?' * len(kinds))})")
@@ -1429,11 +1500,18 @@ class Database:
             where.append("staff_id = ?")
             params.append(staff_id)
         q = str(q or "").strip()[:60]
-        if q:
+        # Card numbers by how they start, through their index (a number anywhere in one read
+        # every card ever made).
+        number = "id IN (SELECT job_id FROM wb_cards WHERE card_number >= ? AND card_number < ?)"
+        if q.isascii() and q.isdigit() and len(q) >= CARD_NUMBER_DIGITS:
+            # Long enough to be a card number, and no name holds that many digits: only card
+            # numbers, which spares reading every name ever used.
+            where.append(number)
+            params += [q, q + "\x7f"]
+        elif q:
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            where.append("""(name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM wb_cards c
-                             WHERE c.job_id = wb_jobs.id AND c.card_number LIKE ? ESCAPE '\\'))""")
-            params += [like, like]
+            where.append(f"(name LIKE ? ESCAPE '\\' OR {number})")
+            params += [like, q, q + "\x7f"]
         return self._wb_job_rows(self.conn.execute(
             f"SELECT * FROM wb_jobs WHERE {' AND '.join(where)} ORDER BY ts DESC, id DESC LIMIT ?",
             (*params, limit)))
@@ -1441,9 +1519,8 @@ class Database:
     def active_wb_job(self, encoder_url: str) -> dict | None:
         """The unfinished card job on an encoder, if there is one."""
         row = self.conn.execute(
-            f"""SELECT id FROM wb_jobs WHERE encoder_url = ?
-                AND status IN ({", ".join("?" * len(WB_ACTIVE))}) ORDER BY id LIMIT 1""",
-            (encoder_url, *WB_ACTIVE)).fetchone()
+            f"SELECT id FROM wb_jobs WHERE encoder_url = ? AND {UNFINISHED} ORDER BY id LIMIT 1",
+            (encoder_url,)).fetchone()
         return self.wb_job(row[0]) if row else None
 
     def wb_card_job(self, card_number: str) -> dict | None:
@@ -1494,9 +1571,7 @@ class Database:
     def cancel_unfinished_wb_jobs(self, message: str) -> list[int]:
         """Close every unfinished card job (the add-on restarted while they ran, so nothing is
         working on them any more). Returns their IDs."""
-        ids = [r[0] for r in self.conn.execute(
-            f"SELECT id FROM wb_jobs WHERE status IN ({', '.join('?' * len(WB_ACTIVE))})",
-            WB_ACTIVE)]
+        ids = [r[0] for r in self.conn.execute(f"SELECT id FROM wb_jobs WHERE {UNFINISHED}")]
         for job_id in ids:
             self.cancel_wb_job(job_id, message)
         return ids
@@ -1559,8 +1634,8 @@ class Database:
         if q:
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             where.append("(j.name LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\' "
-                         "OR c.card_number LIKE ? ESCAPE '\\')")
-            params += [like, like, like]
+                         "OR (c.card_number >= ? AND c.card_number < ?))")   # how it starts
+            params += [like, like, q, q + "\x7f"]
         return self._key_card_rows(where, params, max(1, min(limit, 500)))
 
     def key_card(self, card_id: int) -> dict | None:

@@ -8,6 +8,9 @@ arch:
 init: true
 startup: application
 boot: auto
+# Just before Home Assistant backs the add-on up: put the database's write-ahead log back
+# into the file (app/checkpoint.py).
+backup_pre: python /app/checkpoint.py
 homeassistant_api: true
 ingress: true
 ingress_port: 8099

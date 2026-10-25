@@ -85,7 +85,8 @@ encoder, without opening TT Hotel's own software.
 - **Staff cards:** a single door, whole floors, whole buildings, or every door, until a date.
 - **Look up a wristband:** set it on the encoder to see what's on the card, who it was made
   for, by whom and until when, and wipe it with **Revoke**.
-- **Card log** of every card made, with who made it, searchable by name or card number.
+- **Card log** of every card made, with who made it, searchable by name or the start of a card
+  number.
 - **Permissions per role and person:** which kinds of card someone may make, and which doors
   (all, a building, a floor or single doors), down to the longest stay and how long a staff
   card may last.
@@ -206,8 +207,9 @@ Home Assistant sidebar ──ingress──▶ Staff Access :8099 ──▶ Home 
 
 The add-on runs two small web servers in one process. The staff app talks only to the add-on,
 never to Home Assistant directly. The add-on holds the Home Assistant connection, decides what
-each device may see and do, and sends allowed actions on. Everything is stored in SQLite in the
-add-on's `/data` folder, which Home Assistant includes in its backups.
+each device may see and do, and sends allowed actions on. Everything is stored in SQLite (with a
+write-ahead log, so a busy shift never waits on the disk) in the add-on's `/data` folder, which
+Home Assistant includes in its backups.
 
 ## Repository layout
 
@@ -227,6 +229,7 @@ staff_portal/
     migrate.py               Encrypted migration files for moving to another install
     connecteam.py            Connecteam users and time clock (OAuth 2.0)
     db.py                    SQLite storage
+    checkpoint.py            Run just before Home Assistant backs the add-on up (backup_pre)
     ha.py                    Home Assistant REST and WebSocket client
     branding.py              Logo handling and home-screen icons
     admin/                   Admin dashboard (plain HTML, JS and CSS; no build step)

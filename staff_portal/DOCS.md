@@ -451,6 +451,8 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   which doors it opens and until when), then our record of it: who it was made for and by whom,
   and its state. A card with nothing on it says **This card has no doors on it** (see below).
 - **Card log:** every wristband and card made, with who made it, when and the card numbers.
+  Search finds names holding what's typed, and card numbers starting with it (six digits or
+  more search card numbers only).
 
 Every card has a named maker: it's recorded under the person signed in, so wristbands are only
 offered on shared or role-based computers where each person signs in with their own PIN.
@@ -715,7 +717,8 @@ If the person already has an active key card, you choose:
 
 **Key cards** on the Staff tab lists every staff key card, made here or at a front-desk computer
 (cards made in the staff app are matched to the person by name), newest first. Filter by
-**Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or card number. Each
+**Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or by the start of a
+card number. Each
 row shows who it's for, the card number, what it opens, who made it and when, when it stops
 working, its state and, for a lost card, how many of its doors it's been locked out of.
 
@@ -1045,6 +1048,14 @@ backups from older versions too. Restoring puts the setup back:
   listed under **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a
   restore.
 - A damaged file or one from a newer version is refused, and nothing changes.
+- The staff app carries on while a backup is made. A restore holds it up for a moment (about a
+  second with years of card history), then everyone signs in again.
+
+**The database.** Staff Access keeps everything in one SQLite file, `staff_portal.db`, with a
+write-ahead log beside it (`staff_portal.db-wal`) that's put back into the file now and then,
+when the add-on stops, and just before Home Assistant backs the add-on up. A change waits for the
+log rather than the disk, so busy shifts don't hold anyone up on an SD card or eMMC; a power cut
+can lose the last few changes, but never the database.
 
 **Migrate to another install.** This moves everything to another install of the add-on, for
 example when you switch Home Assistant from one add-on repository to another (such as from a test

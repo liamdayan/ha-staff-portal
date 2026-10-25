@@ -29,6 +29,20 @@
   saved. A backup file may now be up to 96 MB as uploaded, and 192 MB unpacked.
 - Only one backup, restore or migration runs at a time; another one is asked to wait.
 
+**Faster under load**
+
+- **The database no longer waits for the disk on every change** (SQLite's write-ahead log). On
+  an SD card or eMMC, common in Home Assistant boxes, every change could hold up the staff app and
+  the dashboard for 40–200 ms, adding up to seconds in a busy shift; now it takes under a
+  millisecond. A power cut can lose the last few changes, never the database. Just before Home
+  Assistant backs the add-on up, the log is put back into the database file.
+- Making a backup, the copy saved before a restore, and a migration file no longer hold up the
+  staff app: with years of card history, about two seconds before, a tenth of a second now.
+- Faster with a long card history: starting a card, each person's own card log, the key card
+  counts on the dashboard, and finding a card by its number.
+- **Changed: card numbers are found by how they start**, in the card log and the Key cards list,
+  not by digits in the middle. Six digits or more search card numbers only.
+
 ## 0.8.5
 
 **Card encoders: This computer (USB)**

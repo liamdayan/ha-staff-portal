@@ -4838,11 +4838,25 @@ def attachment(body: bytes, name: str, content_type: str) -> web.Response:
         "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
 
 
+def read_everything(build):
+    """build(database) on a read-only connection of its own, as one moment: for a worker thread,
+    so reading everything (logs and all, which takes seconds on a big install) doesn't hold up
+    the add-on."""
+    reader = db.reader()
+    try:
+        return build(reader)
+    finally:
+        reader.close()
+
+
+def backup_of(database) -> dict:
+    return transfer.make_backup(database, branding, VERSION)
+
+
 @one_at_a_time
 async def admin_backup(request: web.Request):
     db.log(admin_name(request), "Downloaded a full backup")
-    # Read here (the database is only used on the event loop), packed off it.
-    body = await asyncio.to_thread(transfer.pack_backup, transfer.make_backup(db, branding, VERSION))
+    body = await asyncio.to_thread(lambda: transfer.pack_backup(read_everything(backup_of)))
     return attachment(body, f"staff-portal-backup-{time.strftime('%Y-%m-%d')}.json.gz",
                       "application/gzip")
 
@@ -4879,9 +4893,9 @@ async def check_backup(data) -> dict:
 
 async def save_safety_backup() -> str:
     """Save a copy of everything here (logs too) before a restore or migration replaces it, so
-    it can be undone. Read on the event loop, packed and written off it."""
-    return await asyncio.to_thread(transfer.save_safety_backup, DATA_DIR,
-                                   transfer.make_backup(db, branding, VERSION))
+    it can be undone. Read, packed and written off the event loop."""
+    return await asyncio.to_thread(
+        lambda: transfer.save_safety_backup(DATA_DIR, read_everything(backup_of)))
 
 
 async def unlink_dropped(tokens: list[str]) -> None:
@@ -4991,9 +5005,8 @@ async def admin_migrate_create(request: web.Request):
     db.log(admin_name(request), "Created a migration file",
            detail="It opens for 24 hours, only with the code shown when it was made.")
     code = migrate.new_code()
-    # Read here (the database is only used on the event loop), encrypted off it.
-    file = await asyncio.to_thread(migrate.seal, migrate.make_snapshot(db, branding, VERSION),
-                                   code, VERSION)
+    file = await asyncio.to_thread(lambda: migrate.seal(read_everything(
+        lambda database: migrate.make_snapshot(database, branding, VERSION)), code, VERSION))
     return web.json_response(
         {"code": code, "file": file, "expires_at": file["expires_at"],
          "filename": f"staff-portal-migration-{time.strftime('%Y-%m-%d-%H%M')}.json"},
@@ -5255,6 +5268,7 @@ async def main():
         await tthotel.close()
         await connecteam.close()
         await ha.close()
+        db.close()
 
 
 if __name__ == "__main__":

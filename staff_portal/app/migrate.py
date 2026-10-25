@@ -101,7 +101,8 @@ def _key(code: str, salt: bytes, n: int, r: int, p: int) -> bytes:
 
 def make_snapshot(db, branding, version: str) -> dict:
     """Everything a migration carries: a full backup with its logs, and under "migrate" what a
-    backup never has. Reads the database, so it runs on the event loop."""
+    backup never has. Reads the database it's given (main.read_everything's, off the event
+    loop)."""
     rows = lambda sql, *params: [dict(r) for r in db.conn.execute(sql, params)]
     settings = db.settings()
     data = transfer.make_backup(db, branding, version)
