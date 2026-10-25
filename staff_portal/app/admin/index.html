@@ -89,7 +89,7 @@
       <div class="table-wrap">
         <table class="activity kc-table">
           <thead><tr><th>Holder</th><th>Card</th><th>Opens</th><th>Made</th><th>Works until</th>
-            <th>State</th><th><span class="sr">Actions</span></th></tr></thead>
+            <th>State</th><th>Last used</th><th><span class="sr">Actions</span></th></tr></thead>
           <tbody id="kc-rows"></tbody>
         </table>
       </div>
@@ -298,6 +298,52 @@
         </div>
         <div id="wb-doors" class="wb-doors"></div>
       </fieldset>
+    </div>
+    <div id="door-activity-section">
+      <div class="section-head wb-jobs-head">
+        <h2>Door activity</h2>
+        <button class="btn" id="da-refresh">Refresh</button>
+      </div>
+      <p class="hint">Who opened which door and how (card, app, passcode…), as TT Hotel reports it,
+        newest first. Each key card's <b>Last used</b> comes from here. A lost or revoked card tried at
+        a door is marked here and noted in Activity. Kept for 180 days.</p>
+      <div class="settings">
+        <fieldset>
+          <legend>Connect TT Hotel</legend>
+          <p class="hint">Only doors connected to a gateway report. TT Hotel sends to the staff app's
+            address, so it must be set in <button class="linkish" data-goto="settings">Settings</button>.</p>
+          <ol class="da-steps">
+            <li>Copy this address.</li>
+            <li>In TT Hotel, signed in as the hotel's admin, open <b>Settings → Integration</b>.</li>
+            <li>Paste it into <b>Callback URL</b> and save.</li>
+          </ol>
+          <div class="da-address" id="da-address-row">
+            <input id="da-address" readonly aria-label="Address for TT Hotel" spellcheck="false">
+            <button class="btn" type="button" id="da-copy">Copy</button>
+          </div>
+          <p class="hint" id="da-status"></p>
+          <label class="check-row"><input type="checkbox" id="da-alert-ha">
+            <span>Tell Home Assistant when a lost or revoked card is tried
+            <small>A notification in Home Assistant, at most one per card every 10 minutes. It's always
+            noted in Activity.</small></span></label>
+          <div class="ct-status">
+            <span class="hint">The address is the only key: if it got out, make a new one and paste it
+              into TT Hotel again. The old one stops working at once.</span>
+            <button class="btn" type="button" id="da-new">Make a new address</button>
+          </div>
+        </fieldset>
+      </div>
+      <div class="kc-filters da-filters">
+        <select id="da-door" aria-label="Show door"><option value="">All doors</option></select>
+        <label class="check"><input type="checkbox" id="da-problems"> Problems only</label>
+      </div>
+      <div class="table-wrap">
+        <table class="activity da-table">
+          <thead><tr><th>When</th><th>Door</th><th>Who</th><th>How</th><th>Result</th></tr></thead>
+          <tbody id="da-rows"></tbody>
+        </table>
+      </div>
+      <button class="btn more" id="da-more" hidden>Show older</button>
     </div>
     <div class="section-head wb-jobs-head">
       <h2>Cards made</h2>

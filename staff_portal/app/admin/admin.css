@@ -782,3 +782,34 @@ tr.kc-lost td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
   .staff-row-body { padding-left: 14px; padding-right: 14px; }
   .staff-row-seen { min-width: 0; }
 }
+
+/* Door activity (Wristbands tab): TT Hotel's lock records, and a lost or revoked card tried */
+#door-activity-section { min-width: 0; }
+.da-steps { margin: 0; padding-left: 20px; }
+.da-steps li { margin: 3px 0; }
+.da-address { display: flex; gap: 8px; align-items: center; }
+.da-address[hidden] { display: none; }
+.da-address input { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.da-filters select { border: 1px solid transparent; background: var(--card); color: var(--text); max-width: 100%;
+  border-radius: var(--radius-sm); padding: 7px 12px; min-height: 38px; box-shadow: var(--shadow); }
+.da-filters select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+tr.da-alert td { background: color-mix(in srgb, var(--danger) 7%, transparent); }
+tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.activity .sub.da-alert-note { color: var(--danger); font-weight: 650; }
+.da-refused { color: var(--danger); }
+.kc-table td:nth-child(7) { min-width: 120px; }
+#door-activity-section .linkish { padding: 0; }
+/* On a phone each record is a small block: when and result, door and how, then who. */
+@media (max-width: 600px) {
+  .da-table thead { display: none; }
+  .da-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas:
+    "when result" "door how" "who who"; column-gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .da-table tr:last-child { border-bottom: 0; }
+  .da-table td { border: 0; padding: 1px 14px; min-width: 0; overflow-wrap: anywhere; }
+  .da-table td:nth-child(1) { grid-area: when; font-weight: 600; }
+  .da-table td:nth-child(2) { grid-area: door; }
+  .da-table td:nth-child(3) { grid-area: who; }
+  .da-table td:nth-child(4) { grid-area: how; color: var(--muted); text-align: right; }
+  .da-table td:nth-child(5) { grid-area: result; text-align: right; }
+  .da-table td.empty { grid-column: 1 / -1; padding: 24px 14px; }
+}

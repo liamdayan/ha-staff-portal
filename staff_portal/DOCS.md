@@ -457,8 +457,10 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   buildings, whole floors or single doors) and the last day they work (until 11:59 PM that day).
 - **Look up a wristband:** put it on the encoder to see what's on it first (its card number,
   which doors it opens and until when), then our record of it: who it was made for and by whom,
-  and its state. A card with nothing on it says **This card has no doors on it** (see below).
-- **Card log:** every wristband and card made, with who made it, when and the card numbers.
+  its state and where it was last used. A card with nothing on it says **This card has no doors
+  on it** (see below).
+- **Card log:** every wristband and card made, with who made it, when and the card numbers, and
+  where each card was last used (with [Door activity](#door-activity) set up).
   Search finds names holding what's typed, and card numbers starting with it (six digits or
   more search card numbers only).
 
@@ -591,7 +593,7 @@ built to use a small share and never get the account blocked:
 - Making cards or looking one up needs a short-lived key for the encoder from TT Hotel (valid 10
   minutes). Staff Access fetches one when it's needed and reuses it for about 8 minutes, so a
   busy desk uses at most about one request every 8 minutes, however many wristbands it makes.
-  The card log costs nothing.
+  The card log and [Door activity](#door-activity) cost nothing.
 - If TT Hotel can't be reached, day passes and overnight wristbands can still be made with the
   last key; blank wristbands (never used before) and staff cards for whole floors, buildings or
   every door need a fresh one, so they need the internet.
@@ -626,6 +628,65 @@ built to use a small share and never get the account blocked:
 - Staff Portal can't see a card reported lost in the TT Hotel app. Active cards say so: use
   **Report lost** in Staff Access (Staff tab → **Key cards**) so the card is tracked and locked
   out.
+- **Last used** (with [Door activity](#door-activity) set up) says where and when the card was
+  last tried at a door, such as "Pool Gate, today 3:12 PM", with "refused" if the door didn't open.
+
+### Door activity
+
+For doors connected to a TT Hotel gateway, TT Hotel can tell Staff Access every time a door is
+opened, or a card is refused, as it happens. Staff Access then shows:
+
+- **Door activity** on the Wristbands tab, newest first: when, which door, who (the card made here
+  and its number, or TT Hotel's own name for it: the app user, or the card's or passcode's name),
+  how (card, app, passcode, fingerprint…) and whether the door **opened** or **refused**. Choose
+  one door, or tick **Problems only** for refused tries, alarms (tamper, locked after wrong tries)
+  and the lost cards below.
+- **Last used** for each card: in the staff app's card log and Look up ("Pool Gate, today 3:12
+  PM"), and in the dashboard's Key cards list.
+- **Lost or revoked cards tried at a door.** When a card marked **Lost** or **Revoked** here is
+  tried at a door after it was marked, or TT Hotel reports that a card it deleted was tried, the
+  row is highlighted, the activity log says so ("Lost card tried at Pool Gate", or "Lost card
+  opened Pool Gate"), and Home Assistant shows a notification naming the card and the door. Each
+  card alerts at most once every 10 minutes, and its next notification replaces the last one; at
+  most 20 alerts go out a minute in all (Door activity still lists every try).
+  Untick **Tell Home Assistant when a lost or revoked card is tried** to keep it to the activity
+  log.
+
+To set it up:
+
+1. Set the **staff app address** in **Settings** (see section 2): TT Hotel reaches Staff Access
+   through your Cloudflare Tunnel, like the phones do.
+2. On the **Wristbands** tab, under **Door activity**, click **Copy** next to the address. It looks
+   like `https://staff.yourdomain.com/tthotel/records/…`.
+3. In TT Hotel, signed in as the hotel's admin, open **Settings → Integration**, paste it into
+   **Callback URL** and save.
+4. Open a door that has a gateway, then click **Refresh** under Door activity: it's listed, and
+   the section says when the last record arrived.
+
+What to know:
+
+- Only doors connected to a gateway report, while the gateway is online (one that was offline
+  sends what it missed when it's back). Doors without a gateway never show up here.
+- Records for a door Staff Access doesn't know are left out, and the section says so: click **Sync
+  from TT Hotel**.
+- The address is the only key, so give it only to TT Hotel. **Make a new address** replaces it
+  (it asks first): the old one stops working at once, so paste the new one into TT Hotel straight
+  away. Anything sent to a wrong address gets "not found".
+- Staff Access only stores what TT Hotel sends, matches the cards and sends the alerts. It makes no
+  TT Hotel requests for it and never opens or changes anything because of it.
+- A card is matched whether TT Hotel writes its number with or without leading zeros, or with its
+  bytes the other way round (TT Hotel says card readers of different makes show the same card
+  either way). A card number that was cleared and made again is the newer card from when it was
+  made.
+- Passcodes are never stored: a passcode is shown by its name in TT Hotel.
+- Each door's battery level is updated from its records.
+- The time shown is the lock's own clock, unless it's clearly wrong (more than 30 days behind TT
+  Hotel's, or 5 minutes ahead), when TT Hotel's is used.
+- Door activity keeps 50,000 records and 180 days. It isn't in backups (TT Hotel keeps its own
+  six months). Neither is the address, and a restore never changes it; a migration file carries it,
+  so TT Hotel's Callback URL keeps working on the new install.
+- Each address can send 300 deliveries a minute. Staff Access reads at most 300 records (64 KB)
+  from one, and always answers TT Hotel "success", so TT Hotel never sends the same ones again.
 
 ### Troubleshooting
 
@@ -747,7 +808,8 @@ If the person already has an active key card, you choose:
 **Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or by the start of a
 card number. Each
 row shows who it's for, the card number, what it opens, who made it and when, when it stops
-working, its state and, for a lost card, how many of its doors it's been locked out of.
+working, its state and, for a lost card, how many of its doors it's been locked out of, and
+where it was last used (with [Door activity](#door-activity) set up).
 
 - **Revoke** (you have the card): choose the encoder, put that card on it, and it's cleared, so
   it opens nothing; it can be used again for a new card. Only that exact card is cleared: any
@@ -1057,8 +1119,8 @@ backups from older versions too. Restoring puts the setup back:
   one added to the file by someone else. The restore warning lists them first. So an old backup
   can't bring back a lost phone you revoked, and an edited file can't add a working phone.
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
-- The Connecteam Client Secret and the TT Hotel Client Secret and password are never in a backup,
-  and a restore never changes them. Wristband settings, door names, roles' wristband rules,
+- The Connecteam Client Secret, the TT Hotel Client Secret and password, and the Door activity
+  address are never in a backup, and a restore never changes them. Wristband settings, door names, roles' wristband rules,
   departments, each person's department and Connecteam sync details, and how many digits each PIN
   has (when that's known) are included. Whether remote lock-out was tested is never restored: test
   it again on the new system.
@@ -1091,8 +1153,8 @@ Unlike a backup, a migration file carries everything, so nothing needs pairing o
 
 - phones and computers stay signed in, and setup QR codes already handed out keep working;
 - staff PINs, phone PINs and links to Home Assistant users;
-- the TT Hotel Client Secret, password and sign-in, the Connecteam Client Secret, and both
-  request counts;
+- the TT Hotel Client Secret, password and sign-in, the Connecteam Client Secret, both request
+  counts, and the Door activity address (TT Hotel's Callback URL keeps working);
 - the whole door list, the activity log and the card history.
 
 The steps (they're also on the **Backup** tab):

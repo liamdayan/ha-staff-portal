@@ -6,8 +6,8 @@ The old install makes a migration file: a full backup (logs included) plus what 
 carries, so nothing has to be set up or typed again on the new install:
 - device tokens (by hash, as stored) and the record of tokens issued, so every enrolled phone and
   computer stays signed in, and the setup codes of phones still waiting to be set up;
-- the Connecteam and TT Hotel secrets, TT Hotel's sign-in and both request counts, and whether
-  remote lock-out was tested;
+- the Connecteam and TT Hotel secrets, TT Hotel's sign-in and both request counts, whether
+  remote lock-out was tested, and the Door activity address's secret;
 - the whole door list, and Home Assistant user links.
 
 All of it is encrypted with AES-256-GCM under a key made (scrypt) from a one-time code: 20
@@ -35,6 +35,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+import doorlog
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
 from wristbands import MAC_RE
@@ -288,6 +289,11 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
     tested = raw.get("wb_remote_lockout_tested")
     secret_values["wb_remote_lockout_tested"] = (
         tested if isinstance(tested, str) and re.fullmatch(r"\d{1,12}", tested) else "")
+    # The Door activity address, so TT Hotel's Callback URL keeps working (a file from before it
+    # existed leaves this install's own).
+    callback = raw.get("tthotel_callback_token")
+    if isinstance(callback, str) and doorlog.TOKEN_RE.match(callback):
+        secret_values["tthotel_callback_token"] = callback
 
     # The door list, every column (a backup only has names and hiding, for doors already here).
     doors, lock_ids = None, set()

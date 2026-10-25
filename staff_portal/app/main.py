@@ -45,6 +45,7 @@ import transfer
 from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
+import doorlog
 import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
 from tthotel import TTHotel, TTHotelError
@@ -1490,6 +1491,7 @@ def job_view(job: dict, zone: ZoneInfo | None) -> dict:
         phase, current, message = job["status"], None, job["message"] or finished_message(job)
     else:
         phase, current, message = "queued", None, "Waiting for the encoder…"
+    used = db.cards_last_used([c.get("id") for c in job["cards"] if c["status"] == "written"])
     return {"id": job["id"], "type": job["card_type"], "name": job["name"], "count": job["count"],
             "summary": job["summary"], "expires_at": job["expires_at"],
             "expires_label": (wristbands.format_expiry(job["expires_at"], time.time(), zone)
@@ -1503,7 +1505,10 @@ def job_view(job: dict, zone: ZoneInfo | None) -> dict:
             "cards": [{"id": c.get("id"), "seq": c["seq"], "status": c["status"],
                        "card_number": c["card_number"], "error": c["error"],
                        "state": c.get("state", "active"), "state_by": c.get("state_by"),
-                       "cancelled_card": c.get("cancelled_card")} for c in job["cards"]]}
+                       "cancelled_card": c.get("cancelled_card"),
+                       # When and where it was last used (door activity), or None.
+                       "last_used": last_used_view(used.get(c.get("id")), zone)}
+                      for c in job["cards"]]}
 
 
 def visible_job(request: web.Request, member: dict, perms: dict) -> dict:
@@ -2440,6 +2445,8 @@ def staff_app() -> web.Application:
     app.router.add_post("/api/wristbands/lookup/revoke", api_lookup_revoke)
     app.router.add_post("/api/encoder/ticket", api_encoder_ticket)
     app.router.add_get("/api/encoder/link", api_encoder_link)
+    # TT Hotel's lock records (door activity): the secret address is the only way in.
+    app.router.add_post(r"/tthotel/records/{token:[A-Za-z0-9_-]{1,100}}", tthotel_records)
     app.on_shutdown.append(close_all_links)
     return app
 
@@ -3857,7 +3864,7 @@ async def admin_activity(request: web.Request):
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
                  "control_lock", "connecteam_enabled", "wristbands_enabled", "wb_lockout_daypass",
                  "wb_lockout_overnight", "wb_lockout_staff", "connecteam_auto_staff",
-                 "connecteam_auto_clock_in", "wb_remote_lockout")
+                 "connecteam_auto_clock_in", "wb_remote_lockout", "wb_lost_card_alert")
 PIN_PAUSE_MIN_MS, PIN_PAUSE_MAX_MS = 200, 5000
 REMOTE_LOCKOUT_APIS = ("reversed", "plain")   # TT Hotel's two calls for enrolling a card number
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minutes", 1, 1440),
@@ -4216,6 +4223,174 @@ async def admin_wristband_jobs(request: web.Request):
     return web.json_response({"jobs": [job_view(job, zone) for job in jobs]})
 
 
+# ---------------------------------------------------------------- door activity (TT Hotel)
+# TT Hotel pushes lock records for doors on a gateway to its "Callback URL" (Settings >
+# Integration): <staff app address>/tthotel/records/<token>, on the staff app's server, since
+# that's what the Cloudflare Tunnel reaches. The secret token is the only way in (no device or
+# dashboard sign-in). Records are stored, matched to cards made here (a card's "Last used"), and
+# a lost or revoked card tried at a door is noted in the activity log and Home Assistant. Nothing
+# else ever happens because of them: no TT Hotel request, no card job, no command.
+
+CALLBACK_PER_MINUTE = 300     # deliveries from one address (TT Hotel sends one per few records)
+CARD_ALERT_GAP = 600          # one alert per card this often at most, however often it's tried
+ALERTS_PER_MINUTE = 20        # and this many alerts in all, so even a leaked address can't flood
+                              # the activity log or Home Assistant (Door activity lists them all)
+DOOR_ACTIVITY_PAGE = 50
+DOOR_ALERTS = {"lost": ("Lost card", "was reported lost"),
+               "revoked": ("Revoked card", "was revoked"),
+               "deleted": ("Deleted card", "was deleted in TT Hotel")}
+callback_requests: dict[str, collections.deque] = {}   # address -> times of its deliveries
+card_alerts: dict[str, float] = {}                      # card -> when it last alerted
+recent_alerts: collections.deque = collections.deque()  # when the last alerts were
+# The last delivery with the right address, for the dashboard (since the add-on started).
+door_delivery = {"at": None, "kept": 0, "dropped": 0, "lock_id": None, "known": True}
+
+
+def callback_token() -> str:
+    """The secret part of the Door activity address, made the first time it's needed."""
+    token = db.settings().get("tthotel_callback_token", "")
+    if not doorlog.TOKEN_RE.match(token):
+        token = doorlog.new_token()
+        db.update_settings({"tthotel_callback_token": token})
+    return token
+
+
+def callbacks_too_busy(ip: str) -> bool:
+    now = time.time()
+    if len(callback_requests) > 1000:   # addresses can be many: forget the quiet ones
+        for key in [k for k, times in callback_requests.items() if not times or now - times[-1] > 60]:
+            del callback_requests[key]
+        if len(callback_requests) > 1000:
+            callback_requests.clear()
+    times = callback_requests.setdefault(ip, collections.deque())
+    while times and now - times[0] > 60:
+        times.popleft()
+    if len(times) >= CALLBACK_PER_MINUTE:
+        return True
+    times.append(now)
+    return False
+
+
+async def tthotel_records(request: web.Request):
+    """Lock records from TT Hotel. The right address always gets "success", whatever was sent,
+    so TT Hotel never sends the same thing again and again; what can't be read is dropped, and
+    so are records for doors TT Hotel hasn't listed here (sync the doors)."""
+    if callbacks_too_busy(client_ip(request)):
+        return web.Response(status=429, text="Too many requests.")
+    token = db.settings().get("tthotel_callback_token", "")
+    if not token or not secrets.compare_digest(request.match_info["token"].encode(), token.encode()):
+        raise web.HTTPNotFound()
+    try:
+        async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
+            body = await request.read()   # at most the staff app's client_max_size
+    except TimeoutError:
+        raise web.HTTPRequestTimeout(text="The request took too long to arrive.") from None
+    except web.HTTPRequestEntityTooLarge:
+        log.warning("TT Hotel sent more lock records at once than Staff Access reads; dropped")
+        body = b""
+    now = time.time()
+    lock_id, records, dropped = doorlog.read_delivery(body, request.content_type, now)
+    known = lock_id is not None and db.wb_door(lock_id) is not None
+    added = db.add_lock_records(lock_id, records, now) if known and records else []
+    door_delivery.update(at=now, kept=len(added), lock_id=lock_id, known=known or lock_id is None,
+                         dropped=dropped + (0 if known else len(records)))
+    if any(r["alert"] for r in added):   # TT Hotel isn't kept waiting for them
+        background(door_alerts(lock_id, added, now), "note a lost card tried at a door")
+    return web.Response(text="success")
+
+
+async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
+    """A lost, revoked or deleted card tried at a door: a line in the activity log and (if that's
+    on) a Home Assistant notification, one per card, replaced by the next, at most every
+    CARD_ALERT_GAP seconds per card (and ALERTS_PER_MINUTE in all)."""
+    door = door_name(db.wb_door(lock_id) or {"name": "", "alias": "", "tt_name": "",
+                                             "lock_id": lock_id})
+    zone = await wristband_zone()
+    if len(card_alerts) > 1000:
+        for key in [k for k, at in card_alerts.items() if now - at > CARD_ALERT_GAP]:
+            del card_alerts[key]
+    for record in added:
+        if not record["alert"]:
+            continue
+        card = record["card"]
+        number = card["card_number"] if card else record["card_number"]
+        key = f"card {card['id']}" if card else f"number {number or record['username']}"
+        while recent_alerts and now - recent_alerts[0] > 60:
+            recent_alerts.popleft()
+        if (now - card_alerts.get(key, float("-inf")) < CARD_ALERT_GAP
+                or len(recent_alerts) >= ALERTS_PER_MINUTE):
+            continue
+        card_alerts[key] = now
+        recent_alerts.append(now)
+        what, why = DOOR_ALERTS[record["alert"]]
+        action = f"{what} {'opened' if record['success'] else 'tried at'} {door}"
+        name = card["name"] if card else record["username"]
+        label = f"Card {number}" if number else "A card"
+        label += f" ({name})" if name else ""
+        when = doorlog.when_label(record["at"], now, zone) if zone else ""
+        db.log("Door activity", action, ok=False,
+               detail=f"{label} · {'opened' if record['success'] else 'refused'}"
+                      f"{f' · {when}' if when else ''}")
+        if db.settings().get("wb_lost_card_alert") != "1":
+            continue
+        message = (f"{label} {why}. It was tried at {door}{f' {when}' if when else ''}, and "
+                   f"{'the door opened' if record['success'] else 'the door refused it'}. "
+                   "See Staff Access, Wristbands tab, Door activity.")
+        tag = re.sub(r"[^0-9A-Za-z]", "", str(card["id"] if card else number or record["username"]))
+        background(ha.call_service("persistent_notification", "create", {
+            "title": action, "message": message,
+            "notification_id": f"staff_access_card_{tag[:40] or lock_id}"}),
+            "tell Home Assistant a lost card was tried")
+
+
+def last_used_view(row: dict | None, zone: ZoneInfo | None) -> dict | None:
+    """A card's newest lock record (db.cards_last_used) as the apps show it, or None."""
+    if not row:
+        return None
+    door = door_name({"name": row["door_name"] or "", "alias": row["door_alias"] or "",
+                      "tt_name": row["door_tt_name"] or "", "lock_id": row["lock_id"]})
+    return {"at": row["at"], "door": door, "ok": bool(row["success"]),
+            "label": doorlog.used_label(door, row["at"], bool(row["success"]), time.time(), zone)}
+
+
+def lock_record_view(row: dict) -> dict:
+    door = door_name({"name": row["door_name"] or "", "alias": row["door_alias"] or "",
+                      "tt_name": row["door_tt_name"] or "", "lock_id": row["lock_id"]})
+    return {"id": row["id"], "at": row["at"], "lock_id": row["lock_id"], "door": door,
+            # Who: the card made here it matched, else TT Hotel's name for it (a card's or
+            # passcode's name, the app user).
+            "who": row["card_name"] or row["username"] or "",
+            "card_id": row["card_id"], "card_number": row["card_card_number"] or row["card_number"],
+            "how": doorlog.HOW.get(row["record_type"], "Other"), "ok": bool(row["success"]),
+            "alarm": row["record_type"] in doorlog.ALARM_TYPES, "alert": row["alert"],
+            "problem": bool(row["problem"]), "battery": row["battery"]}
+
+
+async def admin_door_activity(request: web.Request):
+    """The Door activity section: the address for TT Hotel, the last delivery, and the records,
+    newest first (one door's, or problems only)."""
+    door, before = request.query.get("door", ""), request.query.get("before", "")
+    if not re.fullmatch(r"(\d{1,16})?", door) or not re.fullmatch(r"(\d{1,12})?", before):
+        return bad_request("invalid value")
+    rows = db.lock_records(DOOR_ACTIVITY_PAGE, int(before) if before else None,
+                           int(door) if door else None, request.query.get("problems") == "1")
+    s = db.settings()
+    return web.json_response({
+        "address": doorlog.callback_address(s.get("public_url", ""), callback_token()),
+        "alert_ha": s.get("wb_lost_card_alert") == "1",
+        "last_record": db.last_lock_record(), "delivery": door_delivery,
+        "records": [lock_record_view(r) for r in rows], "more": len(rows) == DOOR_ACTIVITY_PAGE})
+
+
+async def admin_new_door_address(request: web.Request):
+    """Make a new address: the old one stops working at once (TT Hotel needs the new one)."""
+    db.update_settings({"tthotel_callback_token": doorlog.new_token()})
+    db.log(admin_name(request), "Made a new Door activity address",
+           detail="Paste it into TT Hotel's Callback URL")
+    return web.json_response({"address": doorlog.callback_address(
+        db.settings().get("public_url", ""), callback_token())})
+
+
 # ---------------------------------------------------------------- staff key cards (dashboard)
 # Every staff card made (from the staff app or the Staff tab) is listed on the Staff tab, and
 # can be revoked (cleared on an encoder, card in hand), reported lost, and then locked out of
@@ -4313,10 +4488,11 @@ def card_doors(records: list, doors: list[dict] | None = None) -> list[dict]:
 
 
 def key_card_view(card: dict, zone: ZoneInfo | None, doors: bool = False,
-                  door_rows: list[dict] | None = None) -> dict:
+                  door_rows: list[dict] | None = None, used: dict | None = None) -> dict:
     """A staff card as the Key cards list shows it. "state" is active, expired, revoked or lost.
     doors: also every door it opens (for a lost card, the doors to lock it out of). door_rows:
-    db.wb_doors(), when already read."""
+    db.wb_doors(), when already read. used: db.cards_last_used() for these cards, when already
+    read."""
     now = time.time()
     state = "expired" if card["state"] == "active" and card["expires_at"] <= now else card["state"]
     door_rows = db.wb_doors() if door_rows is None else door_rows
@@ -4332,6 +4508,8 @@ def key_card_view(card: dict, zone: ZoneInfo | None, doors: bool = False,
             "state": state, "state_at": card["state_at"], "state_by": card["state_by"],
             "cancelled_card": card["cancelled_card"], "allow_lockout": bool(card["allow_lockout"]),
             "remote_running": card["id"] in remote_running,
+            "last_used": last_used_view((db.cards_last_used([card["id"]]) if used is None
+                                         else used).get(card["id"]), zone),
             "lockouts": [{"lock_id": lo["lock_id"],
                           "door": door_name(names[lo["lock_id"]]) if lo["lock_id"] in names
                           else f"Door {lo['lock_id']}",
@@ -4385,8 +4563,9 @@ async def admin_key_cards(request: web.Request):
                          int(before) if before else None)
     zone = await wristband_zone()
     door_rows = db.wb_doors()
-    return web.json_response({"cards": [key_card_view(c, zone, c["state"] == "lost", door_rows)
-                                        for c in cards],
+    used = db.cards_last_used([c["id"] for c in cards])
+    return web.json_response({"cards": [key_card_view(c, zone, c["state"] == "lost", door_rows,
+                                                      used) for c in cards],
                               "more": len(cards) == KEY_CARD_PAGE,
                               "encoders": [{k: e[k] for k in ("device_id", "name", "status")}
                                            for e in dashboard_encoders()],
@@ -5213,6 +5392,8 @@ def admin_app() -> web.Application:
     app.router.add_get("/api/wristbands/doors", admin_wristband_doors)
     app.router.add_patch(r"/api/wristbands/doors/{id:\d{1,16}}", admin_update_door)
     app.router.add_get("/api/wristbands/jobs", admin_wristband_jobs)
+    app.router.add_get("/api/door-activity", admin_door_activity)
+    app.router.add_post("/api/door-activity/address", admin_new_door_address)
     app.router.add_post(r"/api/devices/{id:\d{1,12}}/encoder-test", admin_encoder_test)
     app.router.add_post("/api/wristbands/encoders/find", admin_find_encoders)
     app.router.add_post("/api/restore/preview", admin_restore_preview)
