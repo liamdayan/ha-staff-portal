@@ -1,5 +1,138 @@
 # Changelog
 
+## 0.8.3
+
+**Signing in**
+
+- **New: separate idle times for phones and computers.** **Settings → Security** now has **Ask
+  for PIN again after (minutes)** for **phones** (the existing setting, still 15 minutes) and for
+  **computers** (5 minutes by default). Each device signs out after its own, on the add-on and in
+  the app.
+- **Sign in without pressing OK.** The PIN pad signs in as soon as the last digit is typed when
+  every PIN that can sign in on that device has the same number of digits, and otherwise about a
+  second after the typing stops (once at least 4 digits are typed). OK and Enter still work. Only
+  that shared number of digits is ever sent to the device, never anyone's own, and never a PIN.
+  PINs set before 0.8.3 count as "not known" until they're set again, so devices with them wait
+  for the pause.
+- **New computers hide names.** Adding a computer that's **Shared** or **Role-based** now ticks
+  **Hide names: people just type their PIN**, so a front desk screen doesn't list everyone. Phones
+  still show names, and existing devices are unchanged.
+- Messages such as "Can't reach …" in the staff app use your **Property name** instead of "Staff
+  Portal".
+
+**Look up a wristband**
+
+- **Look up shows what's on the card first.** A card with no doors on it (cleared, or cancelled in
+  TT Hotel's own program or app) now says **This card has no doors on it**, and if our record
+  still said Active it's marked **Revoked** ("Found cleared on the encoder") and logged. Otherwise
+  the card's own doors and end time come first, then our record.
+- **New: Revoke (wipe this card)** on a looked-up card, for people who see everyone's cards or who
+  made it: the card is already on the encoder, so it's cleared straight away, with the usual
+  progress screen.
+- Active cards say that a card reported lost in the TT Hotel app isn't known to Staff Portal: use
+  **Report lost** in Staff Access so it's tracked.
+
+**Staff key cards, departments and lost cards**
+
+- **New: Key cards list** on the Staff tab: every staff key card (made in the dashboard or the
+  staff app), filtered by Active, Expired, Revoked or Lost and searchable by name or card number,
+  with who made it, what it opens and when it stops working.
+- **New: Make key card** on each person's card on the Staff tab, from their department's key card
+  template, with the same live progress as the front desk. If they already have one, choose
+  **Replace their current card** (the new card cancels the old one at each door it's tapped on)
+  or **Add another card**.
+- **New: Revoke** a card you have in hand: the encoder waits for that exact card and clears it.
+  Any other card is left alone ("That's card 123…, not 456…"). People who may see everyone's
+  cards can revoke from the staff app's card log too, which now shows each staff card's state.
+- **New: Report lost**, then lock the card out door by door with a **lost card notice** (a spare
+  card carrying a cancellation of the lost number, ticked off per door) or a **replacement card**.
+  **Look up** shows what a notice card cancels.
+- **New, experimental: remote lock-out** of a lost card on doors with a gateway, through TT Hotel
+  (2 requests a door, a busy gateway tried again at most 3 times, minutes apart). Off by default,
+  and usable only after the **Test remote lock-out** walkthrough confirms it works with your
+  locks. A number locked out this way is retired on that door for good.
+- **New: Departments** (Staff tab): a Connecteam smart group, a role and a key card template
+  (doors, days, deadbolt) each. In backups and exports.
+
+**Connecteam**
+
+- **New: Add everyone from Connecteam.** Every active Connecteam user becomes a staff member, with
+  their kiosk code as their PIN (or turned off, with a note, when it can't be used), in the
+  department of their smart group and with its role. Checked about once an hour within the
+  existing request limits, plus **Sync staff now**. People archived in Connecteam are turned off,
+  never deleted; people added by hand are never changed.
+- **New: clock-in per person.** People the sync adds must be clocked in by default (a setting).
+  A **Must be clocked in to sign in** switch on each linked person's Staff card (and in **Edit**)
+  turns it off or on for just them, and the sync never changes it back.
+
+**Backups**
+
+- Backups include departments, each person's department and Connecteam sync details, the new
+  idle time for computers and how many digits each PIN has, never whether remote lock-out was
+  tested. Older backups still restore (with no departments, and PIN lengths not known).
+
+## 0.8.2
+
+- **Fixed: Staff Portal now stops cleanly** when Home Assistant updates or restarts it, letting go
+  of the card encoder first (Home Assistant used to report that it "did not handle SIGTERM").
+
+## 0.8.1
+
+- **Fixed: a wristband you just looked up couldn't be written.** Making wristbands right after
+  looking one up waited for it to be lifted off the encoder first. A looked-up wristband can now be
+  reused straight away.
+- **Fixed: the encoder sometimes wouldn't reconnect after TT Hotel's own program used it** until
+  its cable was replugged. Staff Portal now releases any old connection in SN Web Socket before
+  connecting.
+
+## 0.8.0
+
+**Wristbands (TT Hotel key cards)**
+
+- **New: make TT Hotel wristbands and key cards at the front desk.** Staff signed in on a
+  front-desk computer with a card encoder open **Wristbands** and make **day passes** (a party's
+  wristbands for the day-pass doors, until 8:00 PM), **overnight** wristbands (their rooms plus
+  shared doors, until checkout at 11:00 AM) and **staff cards** (single doors, floors, buildings
+  or every door, until a chosen day). The screen walks them through each wristband on the
+  encoder, with **Try again**, **Skip this one** and **Stop** if one doesn't work.
+- **New: adjustable times.** Set when day passes stop working and the checkout time on the new
+  **Wristbands** tab. After the end time, the day pass is greyed out and says why.
+- **New: Look up a wristband** shows its card number, who it was made for and by whom, when it
+  stops working and which doors it opens. The **Card log** lists every card made, with its
+  numbers; the **Wristbands** tab's **Cards made** shows everyone's.
+- **New: Wristbands tab** for the TT Hotel account (**Test connection**), the day-pass and
+  overnight doors, staff-card defaults, the time zone, the card encoders and the door list
+  (**Sync from TT Hotel**, rename or hide doors).
+- **New: who may make what.** On the **Roles** tab, each role (and on role-based computers, each
+  person) gets card types, which doors, the longest stay and staff card, and whether they see
+  everyone's cards. The add-on checks every request again, and refusals are logged.
+- **New: Card encoder** on a computer in **Phones & computers → Edit**: **Off** (the default),
+  **Automatic** or an **Address**, with **Test encoder**. The add-on talks to the encoder through
+  TT Hotel's free SN Web Socket on that computer, and lets go of it after each batch so the TT
+  Hotel program can use it too.
+- **New: Automatic card encoders.** Staff Access finds SN Web Socket on the networks in Home
+  Assistant's network setting (private networks, at most 254 addresses each, or the networks
+  entered under **Wristbands → Advanced**), so the desk computer no longer needs a fixed IP
+  address. It looks at startup, when an Automatic encoder isn't found or stops answering (at
+  most every 10 minutes) and when you click **Find encoders**, and never while nothing uses
+  Automatic. With several front-desk computers, choose which one each desk uses. A typed address
+  always wins.
+- **Tools now sit above the pages** in the staff app's sidebar and in the phone's tab bar, so
+  Wristbands is the first thing staff see at the desk.
+- **New: why Wristbands won't show.** Each computer's card says so when Wristbands won't appear
+  there: Wristbands turned off, no card encoder (or none found), Kiosk mode for one person or
+  team, or a shared computer whose role can't make wristbands.
+- TT Hotel requests are kept to a small share of the free 30,000 a month: at most about one
+  every 8 minutes while cards are being made (the encoder's key is reused), a door sync every 6
+  hours, and a hard cap of 7,500 a month. When TT Hotel says stop, Staff Access stays stopped
+  across restarts. Wristbands makes no Connecteam requests.
+
+**Backups**
+
+- Backups include wristband settings, door names, roles' and people's wristband rules and each
+  computer's card encoder setting, never the TT Hotel Client Secret or password. Older backups
+  still restore (with no wristbands). An older version of the add-on refuses a 0.8.0 backup.
+
 ## 0.7.1
 
 - **Controls lock when the screen turns off.** As soon as the phone's screen goes off or the app

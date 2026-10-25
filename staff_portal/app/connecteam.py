@@ -5,6 +5,10 @@ Uses Connecteam's OAuth 2.0 client-credentials flow (Integration Center -> OAuth
 add-on only ever holds a client ID and secret it was given, never anyone's password. Scopes
 needed: users.read, time_clock.read. A user's kiosk code (users.read) can become their PIN.
 
+The staff sync (main.py) adds every active Connecteam user as a person, using the same cached
+user list (one request, at most hourly) and the smart groups each user is in. The list of smart
+groups itself (for choosing a department's group) is cached for SMART_GROUPS_TTL.
+
 Who is clocked in comes from the time clock's time activities: a shift with no end yet is a
 person on the clock. One check covers everyone (one request per time clock). Connecteam's rate
 limits are per account and shared with every other integration (Expert: 100 a minute, 10,000 a
@@ -53,6 +57,9 @@ LOW_DAY_SHARE = 0.10         # pause when the account has less than this share l
 LOW_MINUTE_LEFT = 10         # pause for the minute when the account has fewer left than this
 CLOCKS_TTL = 6 * 3600        # how long the list of time clocks is reused
 USERS_TTL = 5 * 60           # how long the user list is reused
+SMART_GROUPS_TTL = 6 * 3600  # how long the list of smart groups is reused
+MAX_USER_PAGES = 100         # 50,000 users; guards against a server that ignores the offset
+MAX_GROUPS = 5000            # smart groups kept from one reply
 MAX_FORCE_GAP = 15 * 60      # on-demand checks slow to this while Connecteam keeps failing
 FORCED_SHARE = 0.75          # on-demand checks stop at this share of the daily cap, keeping the
                              # rest for the scheduled ones
@@ -81,6 +88,8 @@ class Connecteam:
         self._last_token_try = 0.0
         self._clocks: tuple[list[str], float] | None = None
         self._users: tuple[list[dict], float] | None = None
+        self._groups: tuple[list[dict], float] | None = None
+        self._token_lock = asyncio.Lock()
         self._recent = collections.deque()      # times of requests in the last minute
         self.clocked_in: set[str] = set()
         self.checked_at: float | None = None    # last successful check
@@ -202,6 +211,12 @@ class Connecteam:
         return client_id, secret, region
 
     async def _access_token(self) -> str:
+        # One at a time: a time clock check and the staff sync starting together must share one
+        # new token, not have the second turned away by the minute's wait between token requests.
+        async with self._token_lock:
+            return await self._new_access_token()
+
+    async def _new_access_token(self) -> str:
         creds = self._credentials()
         if self._token and self._token_for == creds and self._token[1] > time.time():
             return self._token[0]
@@ -281,8 +296,9 @@ class Connecteam:
         self.halted = reason
 
     async def users(self, max_age: float = USERS_TTL) -> list[dict]:
-        """Active Connecteam users as [{"id", "name", "kiosk_code"}], sorted by name.
-        kiosk_code is None unless it's usable as a PIN (4 to 8 digits)."""
+        """Active Connecteam users as [{"id", "name", "kiosk_code", "groups"}], sorted by name.
+        kiosk_code is None unless it's usable as a PIN (4 to 8 digits); groups are the IDs (as
+        text) of the smart groups they're in."""
         if self._users and time.time() - self._users[1] < max_age:
             return self._users[0]
         return await self._call(self._fetch_users)
@@ -297,14 +313,42 @@ class Connecteam:
                     continue
                 name = " ".join(str(u.get(k) or "").strip() for k in ("firstName", "lastName")).strip()
                 code = str(u.get("kioskCode") or "").strip()
+                groups = u.get("smartGroupsIds")
                 found.append({"id": str(u["userId"]), "name": name or f"User {u['userId']}",
-                              "kiosk_code": code if code.isdigit() and 4 <= len(code) <= 8 else None})
-            if len(page) < 500 or offset > 50_000:
+                              "kiosk_code": code if code.isdigit() and 4 <= len(code) <= 8 else None,
+                              "groups": [str(g) for g in groups[:MAX_GROUPS]
+                                         if isinstance(g, int) and not isinstance(g, bool)]
+                              if isinstance(groups, list) else []})
+            if len(page) < 500 or offset >= 500 * (MAX_USER_PAGES - 1):
                 break
             offset += 500
         found.sort(key=lambda u: u["name"].lower())
         self._users = (found, time.time())
         return found
+
+    async def smart_groups(self, max_age: float = SMART_GROUPS_TTL) -> list[dict]:
+        """Connecteam's smart groups as [{"id", "name", "users"}], sorted by name (cached)."""
+        if self._groups and time.time() - self._groups[1] < max_age:
+            return self._groups[0]
+        return await self._call(self._fetch_smart_groups)
+
+    async def _fetch_smart_groups(self) -> list[dict]:
+        data = await self._get("/users/v1/smart-groups")
+        found = []
+        for g in _first_list(data, "groups")[:MAX_GROUPS]:
+            if not isinstance(g, dict) or isinstance(g.get("id"), bool) or not isinstance(g.get("id"), int):
+                continue
+            users = g.get("numberOfUsers")
+            found.append({"id": str(g["id"]), "name": str(g.get("name") or f"Group {g['id']}")[:80],
+                          "users": users if isinstance(users, int) and not isinstance(users, bool)
+                          else None})
+        found.sort(key=lambda g: g["name"].lower())
+        self._groups = (found, time.time())
+        return found
+
+    def known_group_names(self) -> dict[str, str]:
+        """{smart group ID: name} from the last list read, of any age (never asks Connecteam)."""
+        return {g["id"]: g["name"] for g in self._groups[0]} if self._groups else {}
 
     async def kiosk_code(self, user_id: str) -> str | None:
         """One user's kiosk code, if it's usable as a PIN (from the cached list when recent)."""
@@ -403,6 +447,7 @@ class Connecteam:
         self._last_token_try = 0.0
         self._clocks = None
         self._users = None
+        self._groups = None
         self.clocked_in = set()
         self.checked_at = None
         self.last_error = None

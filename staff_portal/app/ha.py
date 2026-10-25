@@ -240,6 +240,15 @@ class HomeAssistant:
             data["entity_id"] = entity_id
         await self._request("POST", "/services/logbook/log", json=data)
 
+    async def config(self) -> dict:
+        """Home Assistant's general settings (Wristbands reads its time zone from these)."""
+        if not self.session:
+            raise HomeAssistantError("not started")
+        data = await self._request("GET", "/config")
+        if not isinstance(data, dict):
+            raise HomeAssistantError("unexpected answer to /config")
+        return data
+
     # ------------------------------------------------------------ linked users
 
     async def _core_request(self, method: str, path: str, **kwargs):

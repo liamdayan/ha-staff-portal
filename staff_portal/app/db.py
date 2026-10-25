@@ -1,4 +1,4 @@
-"""SQLite storage for roles, phones, settings and the activity log."""
+"""SQLite storage for roles, phones, settings, the activity log and wristband records."""
 
 import hashlib
 import json
@@ -6,6 +6,8 @@ import os
 import secrets
 import sqlite3
 import time
+
+from wristbands import permission_choice
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -120,6 +122,89 @@ CREATE TABLE IF NOT EXISTS staff_areas (
     level TEXT NOT NULL CHECK (level IN ('none', 'view', 'control')),
     PRIMARY KEY (staff_id, area_id)
 );
+
+-- Wristbands. None of these tables refer to people, devices or roles with foreign keys: a
+-- restore deletes and re-adds those, and must never wipe the door list or the card records.
+-- The doors TT Hotel lists for the property, plus the names and hiding chosen here.
+CREATE TABLE IF NOT EXISTS wb_doors (
+    lock_id INTEGER PRIMARY KEY,
+    tt_name TEXT NOT NULL DEFAULT '',
+    alias TEXT NOT NULL DEFAULT '',
+    mac TEXT NOT NULL,
+    lock_type INTEGER NOT NULL DEFAULT 1,
+    building_number INTEGER,
+    building_name TEXT NOT NULL DEFAULT '',
+    floor_number INTEGER,
+    floor_name TEXT NOT NULL DEFAULT '',
+    battery INTEGER,
+    has_gateway INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL DEFAULT '',       -- name shown to staff; '' = TT Hotel's alias or name
+    hidden INTEGER NOT NULL DEFAULT 0,   -- left out of the staff app's door lists
+    active INTEGER NOT NULL DEFAULT 1,   -- 0 once TT Hotel stops listing it (kept for old cards)
+    synced_at REAL NOT NULL
+);
+-- Every card job: who asked for which cards, on which computer, and how it went.
+CREATE TABLE IF NOT EXISTS wb_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    card_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    records TEXT NOT NULL,               -- JSON list of what's written on each card
+    summary TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    allow_lockout INTEGER NOT NULL DEFAULT 0,
+    staff_id INTEGER,
+    device_id INTEGER,
+    actor TEXT NOT NULL,
+    role TEXT,
+    ip TEXT,
+    encoder_url TEXT NOT NULL,
+    status TEXT NOT NULL,                -- queued|running|needs_attention|done|cancelled
+    message TEXT,
+    finished_at REAL
+);
+CREATE TABLE IF NOT EXISTS wb_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    status TEXT NOT NULL,                -- pending|written|failed|skipped|cancelled
+    card_number TEXT,
+    error TEXT,
+    written_at REAL,
+    UNIQUE (job_id, seq)
+);
+CREATE INDEX IF NOT EXISTS wb_jobs_ts ON wb_jobs (ts DESC);
+CREATE INDEX IF NOT EXISTS wb_cards_number ON wb_cards (card_number);
+-- Locking a lost staff card out, door by door: a lost card notice tapped on the door, a
+-- replacement card carrying its cancellation, or a remote lock-out through the door's gateway.
+CREATE TABLE IF NOT EXISTS wb_lockouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL,            -- wb_cards.id of the lost (or replaced) card
+    lock_id INTEGER NOT NULL,
+    method TEXT NOT NULL,                -- remote|notice|replacement
+    status TEXT NOT NULL,                -- pending|done|failed
+    detail TEXT,
+    tries INTEGER NOT NULL DEFAULT 0,
+    at REAL NOT NULL,
+    UNIQUE (card_id, lock_id, method)
+);
+CREATE INDEX IF NOT EXISTS wb_lockouts_card ON wb_lockouts (card_id);
+
+-- Departments: which Connecteam smart group people come from, the role they get, and the key
+-- card made for them from the Staff tab. No foreign keys, like the wristband tables: people and
+-- roles are deleted and re-added by a restore. Departments are in backups.
+CREATE TABLE IF NOT EXISTS departments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    smart_group_id TEXT,                 -- Connecteam smart group it follows (NULL = by hand only)
+    role_id INTEGER,                     -- role given to people in it (NULL = leave roles alone)
+    card_access TEXT,                    -- JSON list like a staff card's "access"; NULL = no key card
+    card_days INTEGER NOT NULL DEFAULT 30,
+    card_lockout INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -150,6 +235,22 @@ MIGRATIONS = {
         # 'phone' or 'computer' (a front desk PC, say). Same app and rules; it only changes how
         # the device is set up and described.
         "kind": "TEXT NOT NULL DEFAULT 'phone'",
+        # The card encoder at this computer's desk: the address of TT Hotel's SN Web Socket
+        # helper on the desk PC (ws://192.168.1.50:8102), and which USB port it's on (NULL =
+        # found automatically). NULL address and not encoder_auto = no encoder, so no Wristbands
+        # on this device.
+        "encoder_url": "TEXT",
+        "encoder_port": "TEXT",
+        # 1 = Automatic: no address typed, so the add-on finds SN Web Socket on the network
+        # (discovery.py). A typed encoder_url always wins over it. 0 with no address = no encoder.
+        "encoder_auto": "INTEGER NOT NULL DEFAULT 0",
+        # Automatic, when several helpers were found: the address of the one an admin chose for
+        # this computer (NULL = the only one found). Matched again after every search.
+        "encoder_auto_ip": "TEXT",
+        # How many digits the device's own PIN has, recorded when it's set (PINs are stored
+        # scrambled, so it can't be worked out later). NULL = not known: the PIN pad then waits
+        # for a pause instead of signing in as soon as the last digit is typed.
+        "pin_length": "INTEGER",
     },
     "staff": {
         # Too many wrong PINs locks a person out for a while (not permanently), so one
@@ -163,11 +264,56 @@ MIGRATIONS = {
         # phone's; NULL = their role's pages).
         "role_id": "INTEGER REFERENCES roles(id) ON DELETE SET NULL",
         "layout_pages": "TEXT",
+        # Which wristbands and cards they may make, and for which doors (JSON, see
+        # wristbands.py; NULL = the same as their role).
+        "wristbands": "TEXT",
+        # Their department (no foreign key: departments are replaced by a restore).
+        "department_id": "INTEGER",
+        # 1 = added by the Connecteam staff sync, which keeps them up to date. People added by
+        # hand are never touched by it.
+        "connecteam_auto": "INTEGER NOT NULL DEFAULT 0",
+        # 1 once an admin changed require_clock_in (or their role) by hand: the sync leaves that
+        # alone from then on.
+        "clock_in_set": "INTEGER NOT NULL DEFAULT 0",
+        "role_set": "INTEGER NOT NULL DEFAULT 0",
+        # 1 = their PIN is their Connecteam kiosk code, so it follows when the code changes.
+        # An admin typing a PIN sets it back to 0.
+        "pin_from_connecteam": "INTEGER NOT NULL DEFAULT 0",
+        # Why the sync turned them off ("No usable kiosk code in Connecteam"); NULL otherwise.
+        # Only people the sync turned off are turned on again by it.
+        "connecteam_note": "TEXT",
+        # How many digits their PIN has, as for devices (NULL = not known).
+        "pin_length": "INTEGER",
+    },
+    "wb_jobs": {
+        # Who a staff card is for (made from the Staff tab, or matched by name), their department
+        # and where it was made ('staff_app' or 'dashboard'). No foreign keys.
+        "holder_staff_id": "INTEGER",
+        "department_id": "INTEGER",
+        "source": "TEXT",
+        # 'write' makes cards; 'revoke' clears one particular card; 'notice' writes a lost card
+        # notice. target_card(_id) is the card revoked, noticed or replaced; a write or notice
+        # with target_card also carries its cancellation, valid until cancel_until.
+        "kind": "TEXT NOT NULL DEFAULT 'write'",
+        "target_card_id": "INTEGER",
+        "target_card": "TEXT",
+        "cancel_until": "REAL",
+    },
+    "wb_cards": {
+        # A staff card's state: active, revoked (cleared, or replaced) or lost; when, and by whom.
+        "state": "TEXT NOT NULL DEFAULT 'active'",
+        "state_at": "REAL",
+        "state_by": "TEXT",
+        # The number of a lost or replaced card this card also carries a cancellation for.
+        "cancelled_card": "TEXT",
     },
     "roles": {
         # Pages for people with this role on role-based devices (JSON like a phone's choice;
         # NULL = every page). Kiosk devices choose their own pages.
         "layout_pages": "TEXT",
+        # Which wristbands and cards people with this role may make (JSON, see wristbands.py;
+        # NULL = none).
+        "wristbands": "TEXT",
     },
 }
 
@@ -177,7 +323,8 @@ DEFAULT_SETTINGS = {
     "accent_color": "#2f6f4f",
     "icon_background": "#ffffff",
     "public_url": "",
-    "pin_timeout_minutes": "15",
+    "pin_timeout_minutes": "15",            # phones (the key is older than computers)
+    "pin_timeout_computer_minutes": "5",    # computers: a desk is left unattended more often
     "max_pin_attempts": "5",
     "enroll_hours": "72",
     "ha_logbook": "1",
@@ -193,11 +340,70 @@ DEFAULT_SETTINGS = {
     "connecteam_poll_minutes": "60",
     "connecteam_usage": "{}",        # requests made today (internal: never shown or backed up)
     "require_pin": "0",
+    # Wristbands (TT Hotel key cards made on a desk's card encoder)
+    "wristbands_enabled": "0",
+    "tthotel_region": "global",      # "china" for accounts on TT Hotel's China servers
+    "tthotel_client_id": "",
+    "tthotel_client_secret": "",     # never sent to the browser or put in backups
+    "tthotel_username": "",
+    "tthotel_password_md5": "",      # as TT Hotel shows it (already MD5); never sent or backed up
+    "tthotel_sync_hours": "6",
+    "tthotel_token": "{}",           # TT Hotel sign-in, kept for its 90 days (internal)
+    "tthotel_usage": "{}",           # requests made this month (internal: never shown or backed up)
+    "wb_time_zone": "",              # blank: Home Assistant's time zone
+    "wb_daypass_end": "20:00",       # day passes stop working at this time today
+    "wb_daypass_doors": "[]",        # TT Hotel lock IDs a day pass opens
+    "wb_daypass_max": "20",
+    "wb_checkout_time": "11:00",     # overnight cards stop working at this time on checkout day
+    "wb_overnight_doors": "[]",      # shared doors every overnight card opens, besides the room
+    "wb_overnight_max": "20",
+    "wb_staff_days": "90",           # how far ahead a staff card's end date may be
+    "wb_staff_max": "5",
+    "wb_lockout_daypass": "0",       # 1: the card also opens a door that's been deadbolted inside
+    "wb_lockout_overnight": "0",
+    "wb_lockout_staff": "1",
+    "wb_sectors": "0000000000011111",  # card sectors TT Hotel uses (its default: 12 to 16)
+    "wb_card_wait": "60",            # seconds to wait for a wristband on the encoder
+    "wb_max_records": "20",          # most doors written onto one card
+    "wb_scan_subnets": "",           # networks searched for Automatic encoders (blank: the ones
+                                     # in Home Assistant's network setting)
+    # Connecteam staff sync: add every active Connecteam user as a person, and whether people it
+    # adds must be clocked in (each person's own setting wins once an admin changes it).
+    "connecteam_auto_staff": "0",
+    "connecteam_auto_clock_in": "1",
+    # Remote lock-out of lost cards through door gateways (experimental, off until tested):
+    # which TT Hotel call enrolls the card number, and when the owner confirmed it works.
+    "wb_remote_lockout": "0",
+    "wb_remote_lockout_api": "reversed",
+    "wb_remote_lockout_tested": "",  # set only by the test helper, never from a form or backup
 }
+
+# Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
+# not put in backups, and not taken from one.
+PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
+                    "tthotel_password_md5", "tthotel_token", "tthotel_usage")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180
 ACTIVITY_MAX_ROWS = 50_000
+WB_JOBS_KEEP_DAYS = 2 * 365    # card records outlive the activity log: wristbands can be asked
+WB_JOBS_MAX_ROWS = 100_000     # about long after they were made
+WB_ACTIVE = ("queued", "running", "needs_attention")   # card jobs that haven't finished
+WB_JOB_FIELDS = {"status", "message", "finished_at"}
+WB_CARD_FIELDS = {"status", "card_number", "error", "written_at", "state", "state_at", "state_by",
+                  "cancelled_card"}
+WB_JOB_KINDS = ("write", "revoke", "notice")
+CARD_STATES = ("active", "revoked", "lost")
+LOCKOUT_METHODS = ("remote", "notice", "replacement")
+LOCKOUT_STATUSES = ("pending", "done", "failed")
+KEY_CARD_FILTERS = ("active", "expired", "revoked", "lost", "all")
+STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
+                "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
+                "require_clock_in", "role_id", "layout_pages", "wristbands", "department_id",
+                "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
+                "connecteam_note", "pin_length"}
+DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
+                     "card_lockout"}
 
 
 def hash_token(token: str) -> str:
@@ -214,6 +420,28 @@ def check_pin(pin: str, stored: str) -> bool:
     salt_hex, digest_hex = stored.split("$", 1)
     digest = hashlib.scrypt(pin.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
     return secrets.compare_digest(digest.hex(), digest_hex)
+
+
+def pin_length(value) -> int | None:
+    """A stored PIN length: 4 to 8, or None when it isn't known (or is damaged), which only
+    means the PIN pad waits for a pause before signing in."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 4 <= value <= 8:
+        return None
+    return value
+
+
+def card_access_choice(raw) -> list[dict] | None:
+    """A department's stored key card template: None when there is none, otherwise the list of
+    access entries ({"level": "all"}, {"level": "door", "door": lock ID}, ...). Damaged means an
+    empty list, which makes no card, never a wider one; wristbands.plan checks every entry again
+    whenever a card is made."""
+    if raw is None or raw == "":
+        return None
+    try:
+        value = raw if isinstance(raw, list) else json.loads(raw)
+    except (TypeError, ValueError, RecursionError):
+        return []
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
 
 
 def page_choice(raw) -> list[str] | None:
@@ -285,10 +513,10 @@ class Database:
             return int(DEFAULT_SETTINGS[key])
 
     def name_taken(self, table: str, name: str, except_id: int | None = None) -> bool:
-        """Whether another role, area or staff member already has this name, ignoring capitals
+        """Whether another role, area, department or staff member already has this name, ignoring capitals
         ("Bob" and "bob" would be confusing on a phone, and import and restore match names
         that way)."""
-        assert table in ("roles", "areas", "staff")
+        assert table in ("roles", "areas", "staff", "departments")
         row = self.conn.execute(
             f"SELECT 1 FROM {table} WHERE name = ? COLLATE NOCASE AND id != ? LIMIT 1",
             (name, except_id if except_id is not None else -1)).fetchone()
@@ -302,6 +530,7 @@ class Database:
             role["entities"] = self.role_entities(role["id"])
             role["areas"] = self.role_areas(role["id"])
             role["layout_pages"] = page_choice(role["layout_pages"])
+            role["wristbands"] = permission_choice(role["wristbands"])
             # Devices that use the role themselves: role-based devices take each person's.
             role["device_count"] = self.conn.execute(
                 "SELECT COUNT(*) FROM devices WHERE role_id = ? AND status != 'revoked' AND signin_mode != 'role'",
@@ -320,11 +549,18 @@ class Database:
         role["entities"] = self.role_entities(role_id)
         role["areas"] = self.role_areas(role_id)
         role["layout_pages"] = page_choice(role["layout_pages"])
+        role["wristbands"] = permission_choice(role["wristbands"])
         return role
 
     def set_role_pages(self, role_id: int, pages: list[str] | None) -> None:
         self.conn.execute("UPDATE roles SET layout_pages = ? WHERE id = ?",
                           (None if pages is None else json.dumps(pages), role_id))
+        self.conn.commit()
+
+    def set_role_wristbands(self, role_id: int, permissions: dict | None) -> None:
+        """A role's wristband permissions, already checked (wristbands.clean_permissions)."""
+        self.conn.execute("UPDATE roles SET wristbands = ? WHERE id = ?",
+                          (None if permissions is None else json.dumps(permissions), role_id))
         self.conn.commit()
 
     def role_areas(self, role_id: int) -> dict[int, str]:
@@ -345,11 +581,15 @@ class Database:
         return cur.lastrowid
 
     def duplicate_role(self, role_id: int, name: str) -> int:
-        """A new role with the same device, area and page settings. Phones and people stay on
-        the original."""
+        """A new role with the same device, area, page and wristband settings. Phones and people
+        stay on the original."""
         new_id = self.create_role(name)
         self.update_role(new_id, name, self.role_entities(role_id), self.role_areas(role_id))
         self.set_role_pages(new_id, self.role(role_id)["layout_pages"])
+        # Copied as stored, so a damaged value stays damaged (no wristbands) in the copy too.
+        self.conn.execute("UPDATE roles SET wristbands = (SELECT wristbands FROM roles WHERE id = ?) "
+                          "WHERE id = ?", (role_id, new_id))
+        self.conn.commit()
         return new_id
 
     def update_role(self, role_id: int, name: str, entities: dict[str, str],
@@ -417,6 +657,59 @@ class Database:
         self.conn.execute("DELETE FROM roles WHERE id = ?", (role_id,))
         self.conn.commit()
 
+    # Departments (people's teams: their Connecteam smart group, role and key card template)
+
+    def departments(self) -> list[dict]:
+        """Every department, in order (a person in several mapped smart groups gets the first),
+        with card_access as a list (None: no key card template; damaged: an empty list, which
+        makes no card) and how many people are in each."""
+        found = [dict(r) for r in self.conn.execute(
+            "SELECT * FROM departments ORDER BY sort_order, id")]
+        counts = dict(self.conn.execute(
+            "SELECT department_id, COUNT(*) FROM staff WHERE department_id IS NOT NULL "
+            "GROUP BY department_id").fetchall())
+        for dept in found:
+            dept["card_access"] = card_access_choice(dept["card_access"])
+            dept["staff_count"] = counts.get(dept["id"], 0)
+        return found
+
+    def department(self, department_id) -> dict | None:
+        return next((d for d in self.departments() if d["id"] == department_id), None)
+
+    def create_department(self, name: str, **fields) -> int:
+        next_order = self.conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM departments").fetchone()[0]
+        cur = self.conn.execute(
+            "INSERT INTO departments (name, sort_order, created_at) VALUES (?, ?, ?)",
+            (name, next_order, time.time()))
+        self.conn.commit()
+        self.update_department(cur.lastrowid, **fields)
+        return cur.lastrowid
+
+    def update_department(self, department_id: int, **fields) -> None:
+        """Change a department; card_access is a list (stored as JSON) or None."""
+        sets = {k: v for k, v in fields.items() if k in DEPARTMENT_FIELDS}
+        if "card_access" in sets and sets["card_access"] is not None:
+            sets["card_access"] = json.dumps(sets["card_access"])
+        if not sets:
+            return
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        self.conn.execute(f"UPDATE departments SET {cols} WHERE id = ?",
+                          (*sets.values(), department_id))
+        self.conn.commit()
+
+    def reorder_departments(self, department_ids: list[int]) -> None:
+        self.conn.executemany("UPDATE departments SET sort_order = ? WHERE id = ?",
+                              [(i, did) for i, did in enumerate(department_ids, 1)])
+        self.conn.commit()
+
+    def delete_department(self, department_id: int) -> None:
+        """Delete a department. Its people stay, with no department."""
+        self.conn.execute("UPDATE staff SET department_id = NULL WHERE department_id = ?",
+                          (department_id,))
+        self.conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+        self.conn.commit()
+
     # Devices (staff phones)
 
     def devices(self) -> list[dict]:
@@ -442,8 +735,10 @@ class Database:
 
     def create_device(self, name: str, role_id: int | None, pin: str | None) -> int:
         cur = self.conn.execute(
-            "INSERT INTO devices (name, role_id, pin_hash, created_at) VALUES (?, ?, ?, ?)",
-            (name, role_id, hash_pin(pin) if pin else None, time.time()),
+            """INSERT INTO devices (name, role_id, pin_hash, pin_length, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (name, role_id, hash_pin(pin) if pin else None, len(pin) if pin else None,
+             time.time()),
         )
         self.conn.commit()
         self.new_enroll_code(cur.lastrowid)
@@ -452,7 +747,8 @@ class Database:
     def update_device(self, device_id: int, **fields) -> None:
         allowed = {"name", "role_id", "status", "pin_hash", "failed_pins", "kind",
                    "ha_user", "ha_refresh_token", "ha_link_error", "signin_mode", "staff_all",
-                   "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since"}
+                   "layout_pages", "failed_at", "pin_only", "failed_day_count", "failed_day_since",
+                   "encoder_url", "encoder_port", "encoder_auto", "encoder_auto_ip", "pin_length"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
@@ -478,12 +774,15 @@ class Database:
     def staff_list(self) -> list[dict]:
         result = []
         for r in self.conn.execute(
-                """SELECT s.*, r.name AS role_name FROM staff s LEFT JOIN roles r ON r.id = s.role_id
+                """SELECT s.*, r.name AS role_name, dp.name AS department_name FROM staff s
+                   LEFT JOIN roles r ON r.id = s.role_id
+                   LEFT JOIN departments dp ON dp.id = s.department_id
                    ORDER BY s.name COLLATE NOCASE"""):
             m = dict(r)
             m.pop("pin_hash")
             m.pop("ha_refresh_token")
             m["layout_pages"] = page_choice(m["layout_pages"])
+            m["wristbands"] = permission_choice(m["wristbands"])
             m["entities"], m["areas"] = self.staff_overrides(m["id"])
             result.append(m)
         return result
@@ -528,13 +827,19 @@ class Database:
         return [(r["id"], r["pin_hash"]) for r in self.conn.execute("SELECT id, pin_hash FROM staff")
                 if ids is None or r["id"] in ids]
 
+    def staff_pin_lengths(self, device: dict) -> list[int | None]:
+        """The PIN length of each active person allowed on a shared device (None: not known)."""
+        ids = {m["id"] for m in self.staff_for_device(device)}
+        return [pin_length(r["pin_length"]) for r in self.conn.execute(
+            "SELECT id, pin_length FROM staff") if r["id"] in ids]
+
     def staff_allowed_on(self, staff_id: int, device: dict) -> bool:
         return any(m["id"] == staff_id for m in self.staff_for_device(device))
 
     def create_staff(self, name: str, pin: str) -> int:
         cur = self.conn.execute(
-            "INSERT INTO staff (name, pin_hash, created_at) VALUES (?, ?, ?)",
-            (name, hash_pin(pin), time.time()),
+            "INSERT INTO staff (name, pin_hash, pin_length, created_at) VALUES (?, ?, ?, ?)",
+            (name, hash_pin(pin), len(pin), time.time()),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -545,10 +850,7 @@ class Database:
         return dict(row) if row else None
 
     def update_staff(self, staff_id: int, **fields) -> None:
-        allowed = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
-                   "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
-                   "require_clock_in", "role_id", "layout_pages"}
-        sets = {k: v for k, v in fields.items() if k in allowed}
+        sets = {k: v for k, v in fields.items() if k in STAFF_FIELDS}
         if not sets:
             return
         cols = ", ".join(f"{k} = ?" for k in sets)
@@ -622,9 +924,10 @@ class Database:
 
     def replace_everything(self, snap: dict) -> list[str]:
         """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
-        of it lands or none of it does. The activity log is kept. Home Assistant links are
-        kept for phones and staff that still exist with the same ID and name. Returns the Home
-        Assistant refresh tokens of links that didn't carry over, so the caller can revoke them."""
+        of it lands or none of it does. The activity log, the door list and the card records are
+        kept (departments come from the backup when it has them). Home Assistant links are kept for phones and staff that still exist with the same
+        ID and name. Returns the Home Assistant refresh tokens of links that didn't carry over, so
+        the caller can revoke them."""
         c = self.conn
         links = {
             table: {r["id"]: r for r in c.execute(
@@ -632,6 +935,7 @@ class Database:
                 f"{', token_hash' if table == 'devices' else ''} FROM {table}")}
             for table in ("devices", "staff")
         }
+        role_names = {r[0]: r[1] for r in c.execute("SELECT id, name FROM roles")}
         try:
             for table in ("phone_orders", "staff_devices", "staff_entities", "staff_areas",
                           "role_areas", "role_entities", "area_entities", "area_ha_areas",
@@ -641,30 +945,60 @@ class Database:
                           [(a["id"], a["name"], a["sort_order"], a["created_at"]) for a in snap["areas"]])
             c.executemany("INSERT INTO area_entities (area_id, entity_id) VALUES (?, ?)", snap["area_entities"])
             c.executemany("INSERT INTO area_ha_areas (area_id, ha_area_id) VALUES (?, ?)", snap["area_ha_areas"])
-            c.executemany("INSERT INTO roles (id, name, created_at, layout_pages) VALUES (?, ?, ?, ?)",
-                          [(r["id"], r["name"], r["created_at"], r["layout_pages"]) for r in snap["roles"]])
+            c.executemany("INSERT INTO roles (id, name, created_at, layout_pages, wristbands) "
+                          "VALUES (?, ?, ?, ?, ?)",
+                          [(r["id"], r["name"], r["created_at"], r["layout_pages"], r["wristbands"])
+                           for r in snap["roles"]])
             c.executemany("INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_entities"].items()])
             c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_areas"].items()])
+            # Departments travel in backups. A backup from before departments has none in it,
+            # and leaves the ones here as they are, each keeping its role by name: the backup's
+            # role IDs may belong to other roles (none of that name: no role).
+            if snap.get("departments") is not None:
+                c.execute("DELETE FROM departments")
+                c.executemany(
+                    """INSERT INTO departments (id, name, sort_order, smart_group_id, role_id,
+                       card_access, card_days, card_lockout, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(d["id"], d["name"], d["sort_order"], d["smart_group_id"], d["role_id"],
+                      d["card_access"], d["card_days"], d["card_lockout"], d["created_at"])
+                     for d in snap["departments"]])
+            else:
+                by_name = {r["name"].casefold(): r["id"] for r in snap["roles"]}
+                c.executemany("UPDATE departments SET role_id = ? WHERE id = ?", [
+                    (by_name.get(str(role_names.get(role_id, "")).casefold()), dept_id)
+                    for dept_id, role_id in c.execute(
+                        "SELECT id, role_id FROM departments WHERE role_id IS NOT NULL"
+                    ).fetchall()])
             c.executemany(
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
-                   connecteam_user_id, require_clock_in, role_id, layout_pages)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   connecteam_user_id, require_clock_in, role_id, layout_pages, wristbands,
+                   department_id, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
+                   connecteam_note, pin_length)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
-                  m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"])
-                 for m in snap["staff"]])
+                  m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"],
+                  m["wristbands"], m.get("department_id"), m.get("connecteam_auto", 0),
+                  m.get("clock_in_set", 0), m.get("role_set", 0), m.get("pin_from_connecteam", 0),
+                  m.get("connecteam_note"), m.get("pin_length")) for m in snap["staff"]])
+            c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
+                      "(SELECT id FROM departments)")
             c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["staff_entities"].items()])
             c.executemany("INSERT INTO staff_areas (staff_id, area_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["staff_areas"].items()])
             c.executemany(
                 """INSERT INTO devices (id, name, role_id, status, token_hash, pin_hash, signin_mode,
-                   staff_all, layout_pages, created_at, last_seen, kind, pin_only)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   staff_all, layout_pages, created_at, last_seen, kind, pin_only, encoder_url,
+                   encoder_port, encoder_auto, encoder_auto_ip, pin_length)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(d["id"], d["name"], d["role_id"], d["status"], d["token_hash"], d["pin_hash"],
                   d["signin_mode"], d["staff_all"], d["layout_pages"], d["created_at"], d["last_seen"],
-                  d["kind"], d["pin_only"]) for d in snap["devices"]])
+                  d["kind"], d["pin_only"], d["encoder_url"], d["encoder_port"], d["encoder_auto"],
+                  d["encoder_auto_ip"], d.get("pin_length"))
+                 for d in snap["devices"]])
             c.executemany("INSERT INTO staff_devices (staff_id, device_id) VALUES (?, ?)", snap["staff_devices"])
             c.executemany("INSERT INTO phone_orders (owner, data) VALUES (?, ?)", snap["phone_orders"].items())
             kept = set()
@@ -678,6 +1012,23 @@ class Database:
                         c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,
                                       ha_link_error = ? WHERE id = ?""",
                                   (old["ha_user"], old["ha_refresh_token"], old["ha_link_error"], row["id"]))
+            # Card jobs stay with the people who made them, by the same rule: a job whose maker
+            # isn't here any more under the same ID and name belongs to no one (people who may
+            # see every card still see it), so it can't turn up in someone else's card log.
+            same = {r["id"] for r in snap["staff"]
+                    if (old := links["staff"].get(r["id"])) and old["name"] == r["name"]}
+            makers = c.execute("SELECT DISTINCT staff_id FROM wb_jobs WHERE staff_id IS NOT NULL")
+            c.executemany("UPDATE wb_jobs SET staff_id = NULL WHERE staff_id = ?",
+                          [(r[0],) for r in makers.fetchall() if r[0] not in same])
+            # The same for whom a key card is for (the card's name stays on the record).
+            holders = c.execute(
+                "SELECT DISTINCT holder_staff_id FROM wb_jobs WHERE holder_staff_id IS NOT NULL")
+            c.executemany("UPDATE wb_jobs SET holder_staff_id = NULL WHERE holder_staff_id = ?",
+                          [(r[0],) for r in holders.fetchall() if r[0] not in same])
+            # Door names and hiding chosen here, for doors this system already knows (the door
+            # list itself comes from TT Hotel, and isn't replaced).
+            c.executemany("UPDATE wb_doors SET name = ?, hidden = ? WHERE lock_id = ?",
+                          [(d["name"], d["hidden"], d["lock_id"]) for d in snap["wristband_doors"]])
             for key, value in snap["settings"].items():
                 if key in DEFAULT_SETTINGS:
                     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
@@ -734,3 +1085,356 @@ class Database:
             (before or time.time() + 1, limit),
         )
         return [dict(r) for r in rows]
+
+    # Wristbands: the door list (mirrors TT Hotel's)
+
+    def wb_doors(self) -> list[dict]:
+        """Every door TT Hotel has listed, hidden and no-longer-listed ones too, by building,
+        floor and name."""
+        return [dict(r) for r in self.conn.execute(
+            """SELECT * FROM wb_doors ORDER BY building_number IS NULL, building_number,
+               floor_number IS NULL, floor_number,
+               COALESCE(NULLIF(name, ''), NULLIF(alias, ''), tt_name) COLLATE NOCASE, lock_id""")]
+
+    def wb_door(self, lock_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM wb_doors WHERE lock_id = ?", (lock_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_wb_door(self, lock_id: int, **fields) -> None:
+        """The name staff see for a door ('' = TT Hotel's), and whether it's hidden from them."""
+        sets = {k: v for k, v in fields.items() if k in ("name", "hidden")}
+        if not sets:
+            return
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        self.conn.execute(f"UPDATE wb_doors SET {cols} WHERE lock_id = ?", (*sets.values(), lock_id))
+        self.conn.commit()
+
+    def wb_last_sync(self) -> tuple[float | None, int]:
+        """(when TT Hotel's door list was last synced, how many doors it listed then)."""
+        row = self.conn.execute(
+            "SELECT MAX(synced_at), COUNT(*) FROM wb_doors WHERE active = 1").fetchone()
+        return row[0], row[1]
+
+    def sync_wb_doors(self, locks: list[dict]) -> dict[str, int]:
+        """Bring the door list in line with TT Hotel's (tthotel.hotel_locks()). New doors are
+        added and changed ones updated; names and hiding chosen here stay. A door TT Hotel no
+        longer lists is kept (old cards and records still name it) but can't be put on new cards.
+        Returns {"added", "updated", "removed", "total"}."""
+        c = self.conn
+        now = time.time()
+        existing = {r["lock_id"]: dict(r) for r in c.execute("SELECT * FROM wb_doors")}
+        cap = lambda value, n: str(value or "")[:n]
+        number = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
+        seen: set[int] = set()
+        added = updated = 0
+        try:
+            for lock in locks:
+                lock_id, mac = lock.get("lock_id"), str(lock.get("mac") or "")
+                if (number(lock_id) is None or lock_id <= 0 or lock_id in seen
+                        or len(mac) != 12 or any(ch not in "0123456789ABCDEF" for ch in mac)):
+                    continue   # unusable: a card can't be written for it
+                seen.add(lock_id)
+                values = {"tt_name": cap(lock.get("name"), 100), "alias": cap(lock.get("alias"), 100),
+                          "mac": mac, "lock_type": number(lock.get("lock_type")) or 1,
+                          "building_number": number(lock.get("building_number")),
+                          "building_name": cap(lock.get("building_name"), 100),
+                          "floor_number": number(lock.get("floor_number")),
+                          "floor_name": cap(lock.get("floor_name"), 100),
+                          "battery": number(lock.get("battery")),
+                          "has_gateway": 1 if lock.get("has_gateway") else 0}
+                old = existing.get(lock_id)
+                if old is None:
+                    added += 1
+                    c.execute(f"""INSERT INTO wb_doors (lock_id, {", ".join(values)}, active,
+                                  synced_at) VALUES (?, {", ".join("?" * len(values))}, 1, ?)""",
+                              (lock_id, *values.values(), now))
+                    continue
+                # Battery levels change all the time; they don't count as the door changing.
+                if not old["active"] or any(old[k] != v for k, v in values.items() if k != "battery"):
+                    updated += 1
+                cols = ", ".join(f"{k} = ?" for k in values)
+                c.execute(f"UPDATE wb_doors SET {cols}, active = 1, synced_at = ? WHERE lock_id = ?",
+                          (*values.values(), now, lock_id))
+            gone = [i for i, row in existing.items() if i not in seen and row["active"]]
+            c.executemany("UPDATE wb_doors SET active = 0 WHERE lock_id = ?", [(i,) for i in gone])
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        return {"added": added, "updated": updated, "removed": len(gone), "total": len(seen)}
+
+    # Wristbands: card jobs and the cards in them
+
+    def add_wb_job(self, *, card_type: str, name: str, count: int, records: list[dict],
+                   summary: str, expires_at: float, allow_lockout: bool, staff_id: int | None,
+                   device_id: int | None, actor: str, role: str | None, ip: str | None,
+                   encoder_url: str, holder_staff_id: int | None = None,
+                   department_id: int | None = None, source: str | None = None,
+                   kind: str = "write", target_card_id: int | None = None,
+                   target_card: str | None = None, cancel_until: float | None = None) -> int:
+        """Record a new card job (queued) with one pending card per wristband. Returns its ID.
+        kind: 'write' (make cards), 'revoke' (clear target_card) or 'notice' (a lost card
+        notice for target_card); a 'write' with target_card is a replacement that also carries
+        the old card's cancellation."""
+        assert kind in WB_JOB_KINDS
+        cap = lambda value, n: None if value is None else str(value)[:n]
+        c = self.conn
+        now = time.time()
+        try:
+            job_id = c.execute(
+                """INSERT INTO wb_jobs (ts, card_type, name, count, records, summary, expires_at,
+                   allow_lockout, staff_id, device_id, actor, role, ip, encoder_url, status,
+                   holder_staff_id, department_id, source, kind, target_card_id, target_card,
+                   cancel_until)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)""",
+                (now, card_type, cap(name, 80), count, json.dumps(records), cap(summary, 300),
+                 expires_at, int(bool(allow_lockout)), staff_id, device_id, cap(actor, 120),
+                 cap(role, 80), cap(ip, 64), encoder_url, holder_staff_id, department_id,
+                 cap(source, 20), kind, target_card_id, cap(target_card, 40),
+                 cancel_until)).lastrowid
+            c.executemany("INSERT INTO wb_cards (job_id, seq, status) VALUES (?, ?, 'pending')",
+                          [(job_id, seq) for seq in range(1, count + 1)])
+            # Keep WB_JOBS_KEEP_DAYS or WB_JOBS_MAX_ROWS, whichever is less, like the activity log.
+            old = [r[0] for r in c.execute(
+                f"""SELECT id FROM wb_jobs WHERE (ts < ? OR id <= ?)
+                    AND status NOT IN ({", ".join("?" * len(WB_ACTIVE))})""",
+                (now - WB_JOBS_KEEP_DAYS * 86400, job_id - WB_JOBS_MAX_ROWS, *WB_ACTIVE))]
+            c.executemany("DELETE FROM wb_lockouts WHERE card_id IN "
+                          "(SELECT id FROM wb_cards WHERE job_id = ?)", [(i,) for i in old])
+            c.executemany("DELETE FROM wb_cards WHERE job_id = ?", [(i,) for i in old])
+            c.executemany("DELETE FROM wb_jobs WHERE id = ?", [(i,) for i in old])
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        return job_id
+
+    def _wb_job_rows(self, rows) -> list[dict]:
+        jobs = [dict(r) for r in rows]
+        for job in jobs:
+            try:
+                job["records"] = json.loads(job["records"])
+            except ValueError:
+                job["records"] = []
+            job["cards"] = [dict(r) for r in self.conn.execute(
+                """SELECT id, seq, status, card_number, error, written_at, state, state_at,
+                   state_by, cancelled_card FROM wb_cards WHERE job_id = ? ORDER BY seq""",
+                (job["id"],))]
+        return jobs
+
+    def wb_job(self, job_id: int) -> dict | None:
+        """One card job with its cards (and the records written on them as a list)."""
+        return next(iter(self._wb_job_rows(
+            self.conn.execute("SELECT * FROM wb_jobs WHERE id = ?", (job_id,)))), None)
+
+    def wb_jobs(self, limit: int = 50, before: float | None = None, staff_id: int | None = None,
+                q: str = "", kinds: tuple[str, ...] | None = None) -> list[dict]:
+        """Card jobs, newest first: everyone's, or one person's. q matches part of the name the
+        cards were made for, or of a card number. kinds: only these job kinds (None: all)."""
+        where, params = ["ts < ?"], [before or time.time() + 1]
+        if kinds is not None:
+            where.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            params += list(kinds)
+        if staff_id is not None:
+            where.append("staff_id = ?")
+            params.append(staff_id)
+        q = str(q or "").strip()[:60]
+        if q:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("""(name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM wb_cards c
+                             WHERE c.job_id = wb_jobs.id AND c.card_number LIKE ? ESCAPE '\\'))""")
+            params += [like, like]
+        return self._wb_job_rows(self.conn.execute(
+            f"SELECT * FROM wb_jobs WHERE {' AND '.join(where)} ORDER BY ts DESC, id DESC LIMIT ?",
+            (*params, limit)))
+
+    def active_wb_job(self, encoder_url: str) -> dict | None:
+        """The unfinished card job on an encoder, if there is one."""
+        row = self.conn.execute(
+            f"""SELECT id FROM wb_jobs WHERE encoder_url = ?
+                AND status IN ({", ".join("?" * len(WB_ACTIVE))}) ORDER BY id LIMIT 1""",
+            (encoder_url, *WB_ACTIVE)).fetchone()
+        return self.wb_job(row[0]) if row else None
+
+    def wb_card_job(self, card_number: str) -> dict | None:
+        """The most recent job that wrote this card number (a card made, not one cleared or a
+        notice)."""
+        row = self.conn.execute(
+            """SELECT c.job_id FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+               WHERE c.card_number = ? AND c.status = 'written' AND j.kind = 'write'
+               ORDER BY c.written_at DESC, c.id DESC LIMIT 1""",
+            (str(card_number)[:40],)).fetchone()
+        return self.wb_job(row[0]) if row else None
+
+    def wb_last_card(self, encoder_url: str, since: float) -> str | None:
+        """The last card written on this encoder since then, if any (from jobs started up to a
+        day before, so only recent jobs are looked at)."""
+        row = self.conn.execute(
+            """SELECT c.card_number FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+               WHERE j.ts >= ? AND j.encoder_url = ? AND c.status = 'written'
+               AND c.card_number IS NOT NULL
+               AND c.written_at >= ? ORDER BY c.written_at DESC, c.id DESC LIMIT 1""",
+            (since - 86400, encoder_url, since)).fetchone()
+        return row[0] if row else None
+
+    def update_wb_job(self, job_id: int, **fields) -> None:
+        sets = {k: v for k, v in fields.items() if k in WB_JOB_FIELDS}
+        if sets:
+            cols = ", ".join(f"{k} = ?" for k in sets)
+            self.conn.execute(f"UPDATE wb_jobs SET {cols} WHERE id = ?", (*sets.values(), job_id))
+            self.conn.commit()
+
+    def update_wb_card(self, job_id: int, seq: int, **fields) -> None:
+        sets = {k: v for k, v in fields.items() if k in WB_CARD_FIELDS}
+        if sets:
+            cols = ", ".join(f"{k} = ?" for k in sets)
+            self.conn.execute(f"UPDATE wb_cards SET {cols} WHERE job_id = ? AND seq = ?",
+                              (*sets.values(), job_id, seq))
+            self.conn.commit()
+
+    def cancel_wb_job(self, job_id: int, message: str) -> None:
+        """Close an unfinished card job that nothing is working on any more. Cards not yet
+        written are marked cancelled."""
+        self.conn.execute("""UPDATE wb_jobs SET status = 'cancelled', message = ?, finished_at = ?
+                             WHERE id = ?""", (message, time.time(), job_id))
+        self.conn.execute("""UPDATE wb_cards SET status = 'cancelled'
+                             WHERE job_id = ? AND status IN ('pending', 'failed')""", (job_id,))
+        self.conn.commit()
+
+    def cancel_unfinished_wb_jobs(self, message: str) -> list[int]:
+        """Close every unfinished card job (the add-on restarted while they ran, so nothing is
+        working on them any more). Returns their IDs."""
+        ids = [r[0] for r in self.conn.execute(
+            f"SELECT id FROM wb_jobs WHERE status IN ({', '.join('?' * len(WB_ACTIVE))})",
+            WB_ACTIVE)]
+        for job_id in ids:
+            self.cancel_wb_job(job_id, message)
+        return ids
+
+    # Staff key cards: every staff card made, its state, and locking out lost ones
+
+    def _key_card_rows(self, where: list[str], params: list, limit: int) -> list[dict]:
+        rows = [dict(r) for r in self.conn.execute(
+            f"""SELECT c.id, c.job_id, c.seq, c.card_number, c.written_at, c.state, c.state_at,
+                c.state_by, c.cancelled_card, j.name, j.summary, j.records, j.expires_at,
+                j.allow_lockout, j.actor, j.ts AS made_at, j.source, j.holder_staff_id,
+                j.department_id, j.staff_id, j.encoder_url, s.name AS holder_name,
+                dp.name AS department_name
+                FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+                LEFT JOIN staff s ON s.id = j.holder_staff_id
+                LEFT JOIN departments dp ON dp.id = j.department_id
+                WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
+                AND c.card_number IS NOT NULL AND {' AND '.join(where or ['1'])}
+                ORDER BY c.id DESC LIMIT ?""", (*params, limit))]
+        for row in rows:
+            try:
+                row["records"] = json.loads(row["records"])
+            except ValueError:
+                row["records"] = []
+            row["lockouts"] = self.lockouts(row["id"])
+        return rows
+
+    def key_cards(self, state: str = "all", q: str = "", limit: int = 100,
+                  before: int | None = None, holder_staff_id: int | None = None) -> list[dict]:
+        """Staff cards made (one row per card written, whoever made it), newest first. state:
+        active (not expired), expired, revoked, lost or all. q matches part of the name the card
+        was made for, its holder's name, or its number. before: a card ID, for the next page."""
+        assert state in KEY_CARD_FILTERS
+        now = time.time()
+        where, params = [], []
+        if state == "active":
+            where += ["c.state = 'active'", "j.expires_at > ?"]
+            params.append(now)
+        elif state == "expired":
+            where += ["c.state = 'active'", "j.expires_at <= ?"]
+            params.append(now)
+        elif state != "all":
+            where.append("c.state = ?")
+            params.append(state)
+        if before is not None:
+            where.append("c.id < ?")
+            params.append(before)
+        if holder_staff_id is not None:
+            where.append("j.holder_staff_id = ?")
+            params.append(holder_staff_id)
+        q = str(q or "").strip()[:60]
+        if q:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(j.name LIKE ? ESCAPE '\\' OR s.name LIKE ? ESCAPE '\\' "
+                         "OR c.card_number LIKE ? ESCAPE '\\')")
+            params += [like, like, like]
+        return self._key_card_rows(where, params, max(1, min(limit, 500)))
+
+    def key_card(self, card_id: int) -> dict | None:
+        """One staff card made (by its wb_cards ID), in any state."""
+        return next(iter(self._key_card_rows(["c.id = ?"], [card_id], 1)), None)
+
+    def wb_card(self, card_id: int) -> dict | None:
+        """One card written by any job (a wristband or a staff card), by its wb_cards ID, with
+        the name it was made for."""
+        row = self.conn.execute(
+            """SELECT c.id, c.job_id, c.status, c.card_number, c.state, j.name, j.card_type
+               FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id WHERE c.id = ?""",
+            (card_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_card_state(self, card_id: int, state: str, by: str | None) -> None:
+        assert state in CARD_STATES
+        self.conn.execute("UPDATE wb_cards SET state = ?, state_at = ?, state_by = ? WHERE id = ?",
+                          (state, time.time(), None if by is None else str(by)[:120], card_id))
+        self.conn.commit()
+
+    def retire_card_number(self, card_number: str, keep_card_id: int, by: str) -> list[int]:
+        """A card number was just written again (a card is reusable once cleared): every older
+        record of it that still counts as active is marked revoked, so the list never shows two
+        live cards with one number. Returns their IDs."""
+        ids = [r[0] for r in self.conn.execute(
+            """SELECT id FROM wb_cards WHERE card_number = ? AND id != ? AND status = 'written'
+               AND state = 'active'""", (str(card_number)[:40], keep_card_id))]
+        self.conn.executemany(
+            "UPDATE wb_cards SET state = 'revoked', state_at = ?, state_by = ? WHERE id = ?",
+            [(time.time(), str(by)[:120], i) for i in ids])
+        self.conn.commit()
+        return ids
+
+    def lockouts(self, card_id: int) -> list[dict]:
+        """How locking out one card is going, door by door."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM wb_lockouts WHERE card_id = ? ORDER BY method, lock_id", (card_id,))]
+
+    def add_lockouts(self, card_id: int, lock_ids: list[int], method: str) -> None:
+        """Doors to lock a card out of by one method, as pending (doors already listed for that
+        method keep their progress)."""
+        assert method in LOCKOUT_METHODS
+        now = time.time()
+        self.conn.executemany(
+            """INSERT OR IGNORE INTO wb_lockouts (card_id, lock_id, method, status, at)
+               VALUES (?, ?, ?, 'pending', ?)""", [(card_id, i, method, now) for i in lock_ids])
+        self.conn.commit()
+
+    def set_lockout(self, card_id: int, lock_id: int, method: str, status: str,
+                    detail: str | None = None, tries: int | None = None) -> None:
+        assert status in LOCKOUT_STATUSES
+        self.conn.execute(
+            """UPDATE wb_lockouts SET status = ?, detail = ?, at = ?, tries = COALESCE(?, tries)
+               WHERE card_id = ? AND lock_id = ? AND method = ?""",
+            (status, None if detail is None else str(detail)[:300], time.time(), tries, card_id,
+             lock_id, method))
+        self.conn.commit()
+
+    def stop_remote_lockouts(self, detail: str) -> int:
+        """Remote lock-outs still pending (the add-on restarted while they ran) become failed, so
+        they can be started again. Returns how many."""
+        cur = self.conn.execute(
+            """UPDATE wb_lockouts SET status = 'failed', detail = ?, at = ?
+               WHERE method = 'remote' AND status = 'pending'""", (detail[:300], time.time()))
+        self.conn.commit()
+        return cur.rowcount
+
+    def active_key_card_counts(self) -> dict[int, int]:
+        """{person: how many active, unexpired key cards are theirs}, for the Staff tab."""
+        return dict(self.conn.execute(
+            """SELECT j.holder_staff_id, COUNT(*) FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+               WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
+               AND c.state = 'active' AND j.expires_at > ? AND j.holder_staff_id IS NOT NULL
+               GROUP BY j.holder_staff_id""", (time.time(),)).fetchall())

@@ -61,6 +61,12 @@ system.
   ranges for setpoints and the entity's own options for dropdowns.
 - **Connecteam (optional):** add staff from your Connecteam user list with their kiosk code as
   their PIN, and only let them sign in while they're clocked in.
+- **Wristbands (optional):** with TT Hotel locks, staff at a front-desk computer make RFID
+  wristbands and key cards on the desk's card encoder: day passes for a party, overnight
+  wristbands for their rooms until checkout, and staff cards. The day-pass end and checkout
+  times are adjustable. Each role decides which cards and doors, every card is recorded with who
+  made it, and **Look up a wristband** shows who it's for and what it opens. TT Hotel requests
+  stay well inside its free plan.
 - **Activity log** of every action and every blocked attempt. Actions can also show in Home
   Assistant's logbook, or be credited to a linked Home Assistant user.
 
@@ -96,9 +102,10 @@ system.
   requests.
 - **Optional:** require a PIN on every device, and only allow phones in through your Cloudflare
   Tunnel (with the tunnel's address detected for you).
-- **Backup files** never include Home Assistant sign-ins, pending setup codes or the Connecteam
-  secret. A restore only keeps phones signed in that this system set up and hasn't revoked, so an
-  old or edited backup can't bring back or add a working phone.
+- **Backup files** never include Home Assistant sign-ins, pending setup codes, the Connecteam
+  secret or the TT Hotel secret and password. A restore only keeps phones signed in that this
+  system set up and hasn't revoked, so an old or edited backup can't bring back or add a working
+  phone.
 
 ## Screenshots
 
@@ -132,7 +139,7 @@ recommended.
 
 The full guide is in [staff_portal/DOCS.md](staff_portal/DOCS.md), which is also shown on the
 add-on's **Documentation** tab. It covers tunnels, roles, areas, layouts, shared devices, locked
-controls, linking Home Assistant users, security settings and backups.
+controls, wristbands, linking Home Assistant users, security settings and backups.
 
 ## How it works
 

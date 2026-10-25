@@ -6,6 +6,8 @@
   const POLL_MS = 5000;
   const FAST_POLL_MS = 1500;   // while a change is waiting to be confirmed by the device
   const CONFIRM_MS = 90000;    // how long a change may take to show up before we say so
+  const PIN_PAUSE_MS = 1000;   // a PIN of unknown length signs in once typing stops this long
+  const PIN_LENGTHS = new Set([4, 5, 6, 7, 8]);
 
   const local = storage(() => window.localStorage);
   const session = storage(() => window.sessionStorage);
@@ -88,6 +90,11 @@
       !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   }
 
+  // The property name from Settings, for messages ("Can't reach Hot Lake Lodge").
+  function portalName() {
+    return me?.property_name || "Staff Portal";
+  }
+
   // "phone" or "computer", for messages.
   function word() {
     return (me?.kind || (isDesktop() ? "computer" : "phone")) === "computer" ? "computer" : "phone";
@@ -106,8 +113,9 @@
     const pinSession = session.get(SESSION_KEY);
     if (pinSession) headers["X-Session"] = pinSession;
     // Tell the server someone is actually using the phone, so their PIN session stays open.
-    // Background refreshes on an untouched phone don't, and it signs out when idle.
-    if (Date.now() - lastTouch < 60_000) headers["X-Active"] = "1";
+    // Background refreshes on an untouched phone don't, and it signs out when idle. Making
+    // wristbands counts too: staff are at the encoder then, not touching the screen.
+    if (Date.now() - lastTouch < 60_000 || wbKeepAwake()) headers["X-Active"] = "1";
     let res;
     try {
       res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -144,7 +152,9 @@
 
   // Leaving the dashboard (sign-out, lock, an error screen): forget what was on it, so nothing
   // (a late poll, Back, a window resize) can draw the previous person's screen again, and
-  // reset Rearrange so the next sign-in starts clean.
+  // reset Rearrange so the next sign-in starts clean. The Wristbands screen is forgotten too
+  // (a name typed, a job on screen); which tool was open is kept, so a front-desk computer
+  // stays on Wristbands for the next person who may use it.
   let screenEpoch = 0;
   function leaveDashboard() {
     screenEpoch += 1;
@@ -154,6 +164,8 @@
     rearranging = false;
     activeDrag = false;
     stopPolling();
+    wbReset();
+    session.del(WB_JOB_KEY);
   }
 
   function message(title, body, retry, retryLabel = "Try again") {
@@ -368,17 +380,27 @@
     }
     let pin = "";
     let busy = false;
+    let pause = null;
+    // Every PIN that can sign in here has this many digits (the server says so only when that's
+    // true for everyone): sign in as soon as it's typed. Otherwise sign in after a short pause.
+    let length = PIN_LENGTHS.has(me?.pin_length) ? me.pin_length : null;
 
     const draw = () => {
-      dots.replaceChildren(...Array.from({ length: Math.max(4, pin.length) }, (_, i) =>
+      dots.classList.toggle("checking", busy);
+      dots.replaceChildren(...Array.from({ length: Math.max(length || 4, pin.length) }, (_, i) =>
         h("span", { class: i < pin.length ? "dot on" : "dot" })));
     };
-    const submit = async () => {
+    // auto: signed in by itself at the known length, which the server checks is still right.
+    const submit = async (auto = false) => {
+      clearTimeout(pause);
       if (busy || pin.length < 4) return;
       busy = true;
-      const res = await api("POST", "/api/unlock",
-        member ? { pin, staff_id: member.id } : { pin });
+      draw();
+      const body = member ? { pin, staff_id: member.id } : { pin };
+      if (auto && length) body.length = length;
+      const res = await api("POST", "/api/unlock", body);
       busy = false;
+      if (!pad.isConnected) return;   // another screen took over meanwhile
       if (res.status === 200) {
         session.set(SESSION_KEY, res.data.session);
         return boot();
@@ -386,16 +408,39 @@
       if (res.status === 423 || res.status === 401 || res.status === 0) return handleAuthError(res);
       // 404: the device was switched to shared sign-in (or the person was removed): ask again.
       if (res.status === 404) return showWho();
+      if (res.status === 409 && res.data.error === "pin_length_changed") {
+        // Someone's PIN has a different length now: nothing was checked, so keep what's typed
+        // and let them finish (then OK, or a pause, signs in).
+        length = PIN_LENGTHS.has(res.data.pin_length) ? res.data.pin_length : null;
+        if (me) me.pin_length = length;
+        draw();
+        return typed();
+      }
       pin = "";
       draw();
       error.textContent = res.data.error || "Wrong PIN.";
     };
+    // After each digit: sign in at the known length, else once they stop typing (or at 8 digits,
+    // the most a PIN has). Never with fewer than 4, and never again by itself after a failure.
+    const typed = () => {
+      clearTimeout(pause);
+      if (busy || pin.length < 4) return;
+      if (length) {
+        if (pin.length === length) submit(true);
+        return;
+      }
+      if (pin.length >= 8) return submit();
+      pause = setTimeout(() => { if (pad.isConnected) submit(); }, PIN_PAUSE_MS);
+    };
     const press = (k) => {
+      if (busy) return;   // the PIN typed is being checked
+      if (k === "ok") return submit();
       if (k === "del") pin = pin.slice(0, -1);
-      else if (k === "ok") return submit();
       else if (pin.length < 8) pin += k;
       error.textContent = "";
       draw();
+      if (k !== "del") typed();
+      else clearTimeout(pause);
     };
     for (const k of ["1", "2", "3", "4", "5", "6", "7", "8", "9", "del", "0", "ok"]) {
       const label = k === "del" ? "⌫" : k === "ok" ? "OK" : k;
@@ -492,8 +537,10 @@
 
   // view: which layout page is open, and which group card's detail screen (if any).
   // The open page is remembered by its ID, so changing which pages a phone has doesn't
-  // silently switch staff to a different page.
-  const view = { pageId: session.get("page"), detail: null };
+  // silently switch staff to a different page. tool: a tool open instead of a page
+  // ("wristbands"), or null.
+  const view = { pageId: session.get("page"), detail: null,
+    tool: session.get("tool") === "wristbands" ? "wristbands" : null };
   let lastData = null;
 
   // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
@@ -578,20 +625,36 @@
     if (data.layout?.pages.length && !data.layout.pages.some((p) => p.id === view.pageId)) {
       view.pageId = data.layout.pages[0].id;
     }
-    const shape = JSON.stringify([isDesk(), data.layout
+    // A tool that's no longer offered here closes (saying so, if this person had it open); a
+    // tool that's all this person has opens by itself.
+    const tools = toolsFor(data);
+    if (view.tool && !tools.includes(view.tool)) {
+      if (wb) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
+      wbReset();
+      view.tool = null;
+      session.del("tool");
+    }
+    const nothingElse = !data.entities.length || (data.layout && !data.layout.pages.length);
+    if (!view.tool && nothingElse && tools.length) view.tool = tools[0];
+    const shape = JSON.stringify([isDesk(), view.tool, tools, data.layout
       ? [data.layout, view.pageId, view.detail]
       : data.entities.map((e) => [e.entity_id, e.area])]);
     if (shape !== render.shape || !tiles.size) {
       render.shape = shape;
-      if (!data.entities.length) {
+      if (view.tool) {
+        const next = new Map();
+        show(buildTool(data, next));
+        tiles = next;
+        render.pageId = null;
+        wbPlacePill();
+      } else if (!data.entities.length) {
         show(h("div", { class: "center message" },
           h("h1", null, "Nothing here yet"),
           h("p", null, me?.role_based ? "Your manager hasn't given you access to anything yet."
             : `Your manager hasn't given this ${word()} access to anything.`)));
         render.shape = null;
         return;
-      }
-      if (data.layout && !data.layout.pages.length) {
+      } else if (data.layout && !data.layout.pages.length) {
         show(h("div", { class: "center message" },
           h("h1", null, `Nothing on this ${word()} yet`),
           h("p", null, me?.role_based
@@ -600,15 +663,16 @@
               `Ask your manager to check the ${word()}'s pages and role.`)));
         render.shape = null;
         return;
+      } else {
+        const next = new Map();
+        // On a computer, opening or closing a card's panel redraws the page; keep its scroll position.
+        const keepScroll = isDesk() && render.pageId === view.pageId ? window.scrollY : null;
+        const root = data.layout ? buildLayout(data.layout, byId, next) : buildAutomatic(data.entities, next);
+        show(root);
+        tiles = next;
+        render.pageId = view.pageId;
+        if (keepScroll) window.scrollTo(0, keepScroll);
       }
-      const next = new Map();
-      // On a computer, opening or closing a card's panel redraws the page; keep its scroll position.
-      const keepScroll = isDesk() && render.pageId === view.pageId ? window.scrollY : null;
-      const root = data.layout ? buildLayout(data.layout, byId, next) : buildAutomatic(data.entities, next);
-      show(root);
-      tiles = next;
-      render.pageId = view.pageId;
-      if (keepScroll) window.scrollTo(0, keepScroll);
     }
     for (const t of tiles.values()) {
       // One device with odd data mustn't blank the rest of the screen.
@@ -657,15 +721,15 @@
       root.append(fold.el);
       sections.push([area, fold.el]);
     }
+    autoSections = new Map(sections);
     if (isDesk()) {
       // No pages: the sidebar jumps to each area instead.
-      const nav = h("nav", { class: "desk-nav", "aria-label": "Areas" }, h("div", { class: "desk-nav-label" }, "Areas"),
-        sections.map(([area, el]) => h("button", { type: "button",
-          onclick: () => el.scrollIntoView({ behavior: "smooth", block: "start" }) }, h("span", null, area))));
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Areas" }, toolNav(), areaNav(entities));
       return deskShell({ nav, title: "All devices", content: root });
     }
     root.append(...rearrangeButton());
-    return root;
+    const tabs = tabBar(lastData, -1);
+    return tabs ? h("div", { class: "layout has-tabs" }, root, tabs) : root;
   }
 
   function buildLayout(layout, byId, into) {
@@ -678,14 +742,7 @@
     if (view.detail && !detailItem) view.detail = null;
 
     if (isDesk()) {
-      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" }, h("div", { class: "desk-nav-label" }, "Pages"),
-        pages.map((p, i) => h("button", {
-          type: "button",
-          class: i === current ? "active" : null,
-          "aria-current": i === current ? "page" : null,
-          title: i < 9 ? `${p.name} (press ${i + 1})` : p.name,
-          onclick: () => openPage(p.id),
-        }, h("span", null, p.name), i < 9 ? h("kbd", null, String(i + 1)) : null)));
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" }, toolNav(), pageNav(pages, current));
       // On a computer the card's details open in a panel beside the page instead of replacing it.
       const drawer = detailItem ? h("div", { class: "drawer-wrap" },
         h("div", { class: "drawer-backdrop", onclick: closeDetail }),
@@ -694,17 +751,11 @@
       return deskShell({ nav, title: page.name, content: buildPage(page, byId, into), drawer });
     }
 
-    const root = h("div", { class: pages.length > 1 ? "layout has-tabs" : "layout" });
+    const tabs = tabBar(lastData, current);
+    const root = h("div", { class: tabs ? "layout has-tabs" : "layout" });
     root.append(detailItem ? buildDetail(detailItem, page, byId, into) : buildPage(page, byId, into));
     if (!detailItem) root.append(...rearrangeButton());
-    if (pages.length > 1) {
-      root.append(h("nav", { class: "tabbar", "aria-label": "Pages" }, pages.map((p, i) =>
-        h("button", {
-          class: i === current ? "tab active" : "tab",
-          "aria-current": i === current ? "page" : null,
-          onclick: () => openPage(p.id),
-        }, p.name))));
-    }
+    if (tabs) root.append(tabs);
     return root;
   }
 
@@ -915,6 +966,14 @@
   }
 
   function openPage(id) {
+    // Leaving Wristbands while cards are being made stops them, so that's asked first.
+    if (wbHolding()) {
+      wbLeave().then((ok) => { if (ok) openPage(id); });
+      return;
+    }
+    if (view.tool) wbAway();
+    view.tool = null;
+    session.del("tool");
     view.pageId = id;
     view.detail = null;
     session.set("page", id);
@@ -946,7 +1005,8 @@
   }
   deskQuery.addEventListener("change", () => { render.shape = null; rerender(); });
 
-  function deskShell({ nav, title, content, drawer = null }) {
+  // actions: what goes at the right of the page header (left out: Rearrange, if allowed).
+  function deskShell({ nav, title, content, drawer = null, actions }) {
     const logo = me?.has_logo ? h("img", { src: url("/logo.png"), alt: "" }) :
       h("span", { class: "desk-mark" }, (me?.property_name || "S").trim().charAt(0).toUpperCase());
     const who = lastData?.staff_name || me?.device || "";
@@ -955,7 +1015,7 @@
     const side = h("aside", { class: "desk-side" },
       h("div", { class: "desk-brand" }, logo,
         h("div", { class: "desk-brand-text" },
-          h("div", { class: "desk-name" }, me?.property_name || "Staff Portal"),
+          h("div", { class: "desk-name" }, portalName()),
           h("div", { class: "desk-sub" }, me?.app_name || "Staff"))),
       nav,
       h("div", { class: "desk-foot" },
@@ -963,8 +1023,10 @@
         h("div", { class: "desk-who" }, h("div", { class: "desk-who-name" }, who),
           h("div", { class: "desk-who-sub" }, [me?.shared ? me?.device : null, currentRole()].filter(Boolean).join(" \u00b7 "))),
         lockBtn));
-    const actions = lastData?.can_reorder
-      ? h("button", { class: "desk-action", type: "button", onclick: openRearrange }, "\u21c5 Rearrange") : null;
+    if (actions === undefined) {
+      actions = lastData?.can_reorder
+        ? h("button", { class: "desk-action", type: "button", onclick: openRearrange }, "\u21c5 Rearrange") : null;
+    }
     const main = h("main", { class: "desk-main" },
       h("header", { class: "desk-head" },
         h("h1", { class: "desk-title" }, title),
@@ -973,6 +1035,120 @@
         h("div", { class: "desk-actions" }, actions)),
       content);
     return h("div", { class: "desk-shell" }, side, main, drawer);
+  }
+
+  // The sidebar's pages; 1 to 9 on the keyboard open them. None is highlighted while a tool is
+  // open. Returned as a flat list to spread into the nav.
+  function pageNav(pages, current) {
+    if (!pages.length) return [];
+    return [h("div", { class: "desk-nav-label" }, "Pages"), ...pages.map((p, i) => {
+      const on = i === current && !view.tool;
+      return h("button", {
+        type: "button",
+        class: on ? "active" : null,
+        "aria-current": on ? "page" : null,
+        title: i < 9 ? `${p.name} (press ${i + 1})` : p.name,
+        onclick: () => openPage(p.id),
+      }, h("span", null, p.name), i < 9 ? h("kbd", null, String(i + 1)) : null);
+    })];
+  }
+
+  // Without pages, the sidebar jumps to each area of the device list.
+  let autoSections = new Map();   // area -> its section on screen
+  function areaNav(entities) {
+    const areas = [...new Set(entities.map((e) => e.area || "Other"))];
+    if (!areas.length) return [];
+    return [h("div", { class: "desk-nav-label" }, "Areas"), ...areas.map((area) =>
+      h("button", { type: "button", onclick: () => jumpToArea(area) }, h("span", null, area)))];
+  }
+
+  function jumpToArea(area) {
+    if (view.tool) return closeTool(() => jumpToArea(area));
+    autoSections.get(area)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ---------------------------------------------------------------- tools
+
+  // Screens beside the pages that don't come from the layout. Wristbands is offered only on a
+  // front-desk computer with a card encoder, to someone allowed to make at least one kind of
+  // card. The server says so with every poll, and checks again on every Wristbands request.
+  const TOOL_NAMES = { wristbands: "Wristbands" };
+  const TOOL_PAUSE_MS = 60000;   // after the server turns a tool down, how long before offering it again
+  let toolsPaused = 0;
+
+  function toolsFor(data) {
+    return !PREVIEW && data?.wristbands && Date.now() >= toolsPaused ? ["wristbands"] : [];
+  }
+
+  function openTool(name) {
+    if (view.tool === name) {
+      // Already open: back to its first screen, the way a tab bar's current tab does.
+      if (wb && wb.screen !== "home") wbBack();
+      return;
+    }
+    view.tool = name;
+    view.detail = null;
+    session.set("tool", name);
+    history.replaceState(null, "", "/");
+    window.scrollTo(0, 0);
+    rerender();
+  }
+
+  // Back from a tool to the device list (no pages), then `then` (jumping to an area, say).
+  function closeTool(then) {
+    if (wbHolding()) {
+      wbLeave().then((ok) => { if (ok) closeTool(then); });
+      return;
+    }
+    wbAway();
+    view.tool = null;
+    session.del("tool");
+    history.replaceState(null, "", "/");
+    window.scrollTo(0, 0);
+    rerender();
+    then?.();
+  }
+
+  // The sidebar's tools, under their own heading above the pages. A flat list (empty when there
+  // are none).
+  function toolNav() {
+    const tools = toolsFor(lastData);
+    if (!tools.length) return [];
+    return [h("div", { class: "desk-nav-label" }, "Tools"), ...tools.map((name) => h("button", {
+      type: "button",
+      class: view.tool === name ? "active" : null,
+      "aria-current": view.tool === name ? "page" : null,
+      onclick: () => openTool(name),
+    }, h("span", null, TOOL_NAMES[name])))];
+  }
+
+  // The phone's tab bar: the tools first, then the pages (or the device list, without pages).
+  // Only there when there's something to switch between.
+  function tabBar(data, current) {
+    const tabs = toolsFor(data).map((name) => [TOOL_NAMES[name], view.tool === name, () => openTool(name)]);
+    if (data?.layout) {
+      data.layout.pages.forEach((p, i) => tabs.push([p.name, !view.tool && i === current, () => openPage(p.id)]));
+    } else if (data?.entities.length) {
+      tabs.push(["Devices", !view.tool, () => closeTool()]);
+    }
+    if (tabs.length < 2) return null;
+    return h("nav", { class: "tabbar", "aria-label": "Pages" }, tabs.map(([label, on, go]) =>
+      h("button", { class: on ? "tab active" : "tab", "aria-current": on ? "page" : null, onclick: go }, label)));
+  }
+
+  // A tool's screen, framed like the pages: the same sidebar on a computer, tab bar on a phone.
+  function buildTool(data, into) {
+    // A stand-in tile, so polls don't rebuild the screen (render rebuilds whenever there are no
+    // tiles, which would wipe a form being typed in). Each poll lets the tool update itself.
+    into.set(`tool:${view.tool}`, { refresh: () => wbPoll() });
+    const content = wbState().root;   // kept across redraws, so what's typed survives them
+    if (isDesk()) {
+      const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" },
+        toolNav(), data.layout ? pageNav(data.layout.pages, -1) : areaNav(data.entities));
+      return deskShell({ nav, title: TOOL_NAMES[view.tool], content, actions: null });
+    }
+    const tabs = tabBar(data, -1);
+    return h("div", { class: tabs ? "layout has-tabs" : "layout" }, content, tabs);
   }
 
   // ---------------------------------------------------------------- rearrange (this phone only)
@@ -1150,8 +1326,13 @@
     window.scrollTo(0, 0);
   }
 
-  // Phone back button / swipe closes the detail screen instead of leaving the app.
+  // Phone back button / swipe closes the detail screen instead of leaving the app, and goes
+  // back to the list from a Wristbands screen.
   window.addEventListener("popstate", (ev) => {
+    if (view.tool === "wristbands" && wb && wb.screen !== "home" && !ev.state?.wb) {
+      wbPopped();
+      return;
+    }
     view.detail = ev.state?.detail || null;
     rerender();
   });
@@ -1511,6 +1692,1514 @@
     return tile;
   }
 
+  // ---------------------------------------------------------------- wristbands
+
+  // A front-desk computer with a TT Hotel card encoder makes wristbands (day passes and
+  // overnight guests) and staff key cards. Staff Portal talks to the encoder itself, so the TT
+  // Hotel keys never reach this page; this screen asks for cards and follows along. What it
+  // offers is only a guide: the server checks every request against the person's permissions.
+  const WB_POLL_MS = 700;            // the encoding screen follows the encoder this closely
+  const WB_HIDDEN_POLL_MS = 3000;    // ...and more slowly while the window is in the background
+  const WB_OPTIONS_MS = 15000;       // how often the encoder status and what can be made are checked
+  const WB_PREVIEW_MS = 400;         // a pause in changes before the summary is worked out again
+  const WB_SEARCH_MS = 350;          // a pause in typing before the card log is searched
+  const WB_LOG_PAGE = 50;            // jobs per page of the card log (the server's page size)
+  const WB_LOST_AFTER = 4;           // failed checks in a row before the screen says it can't connect
+  const WB_SEARCH_FROM = 9;          // doors in a list before it gets a search box
+  const WB_PREVIEW_NAME = "Guest";   // stands in for a name not typed yet, so the summary shows early
+  const WB_STAFF_UNTIL = "23:59";    // staff cards work to the end of their last day (the server's rule)
+  const WB_JOB_KEY = "wb_job";       // the job on screen, so reloading the page goes back to it
+  const WB_ACTIVE = new Set(["queued", "running", "needs_attention"]);
+  const WB_TYPES = {
+    day_pass: { title: "Day pass", noun: "wristband", icon: "band" },
+    overnight: { title: "Overnight", noun: "wristband", icon: "moon" },
+    staff: { title: "Staff card", noun: "card", icon: "card" },
+  };
+  const WB_CARD_WORDS = { written: "Made", failed: "Didn't work", skipped: "Skipped",
+    cancelled: "Not made", pending: "Not made", cleared: "Cleared" };
+  // A staff card's state, as the card log and look-up show it. "expired" isn't stored: it's an
+  // active card past its last day. A state not listed here (damaged data) shows as unknown and
+  // offers no Revoke.
+  const WB_STATE_WORDS = { active: "Active", expired: "Expired", revoked: "Revoked", lost: "Lost" };
+  // Line icons (24px grid, drawn with currentColor).
+  const WB_ICONS = {
+    band: '<rect x="2.5" y="8.5" width="19" height="7" rx="3.5"/><rect x="8.5" y="6" width="7" height="12" rx="2"/>',
+    moon: '<path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z"/>',
+    card: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><circle cx="9" cy="11" r="2"/>' +
+      '<path d="M5.8 15.8c.7-1.4 1.8-2 3.2-2s2.5.6 3.2 2M14.5 10h4M14.5 13h3"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+    list: ICONS.list,
+    up: '<path d="M12 19V5.5M6.5 11L12 5.5l5.5 5.5"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
+    alert: ICONS.alert,
+  };
+
+  // The Wristbands screen's state, from when it's first opened. Forgotten at sign-out (see
+  // leaveDashboard), so the next person never sees a name or a job from before.
+  let wb = null;
+
+  function wbState() {
+    if (!wb) {
+      wb = {
+        root: h("div", { class: "wb" }),
+        pill: h("span", { class: "wb-pill" }),
+        screen: "home", seq: 0, timer: null, rev: 0, acting: false, lost: 0,
+        options: null, optionsAt: 0, loading: false, homeKey: null,
+        form: null, job: null, jobView: null, lookup: null, lookView: null, log: null,
+      };
+      wbDrawPill();
+      wbShow("home", wbSpinner());
+      wbStart(wb);
+    }
+    return wb;
+  }
+
+  function wbReset() {
+    if (!wb) return;
+    wbQuiet();
+    wb = null;
+  }
+
+  // Stop whatever the screen on show was waiting to do (a poll, a summary, a search).
+  function wbQuiet() {
+    clearTimeout(wb.timer);
+    clearTimeout(wb.form?.timer);
+    clearTimeout(wb.log?.timer);
+  }
+
+  // Another page was opened. A form keeps what was typed for when Wristbands is opened again;
+  // anything else (a finished job, a look-up) starts again from the list.
+  function wbAway() {
+    if (!wb) return;
+    clearTimeout(wb.timer);
+    if (!WB_TYPES[wb.screen] && wb.screen !== "home") wbHome();
+  }
+
+  // Cards are being made (or one needs a decision) on the screen in front of us.
+  function wbHolding() {
+    return view.tool === "wristbands" && wb?.screen === "job" && !!wb.job && WB_ACTIVE.has(wb.job.status);
+  }
+
+  // Staff are at the encoder, not the screen, while cards are written or a wristband is looked
+  // up: that counts as using the computer, so it doesn't sign out halfway through.
+  function wbKeepAwake() {
+    if (!wb || view.tool !== "wristbands") return false;
+    if (wb.screen === "job") return wb.job?.status === "queued" || wb.job?.status === "running";
+    return wb.screen === "lookup" && wb.lookup?.state === "waiting";
+  }
+
+  // Sign-in problems go to their own screens as usual. A lost connection doesn't: the
+  // dashboard's own poll reports that, and a card job on screen mustn't vanish over a blip.
+  function wbAuthError(res) {
+    return res.status !== 0 && handleAuthError(res);
+  }
+
+  // The server says this person can't use Wristbands here any more (their role changed, or the
+  // encoder was taken off this computer): back to the pages, saying why.
+  function wbNoAccess(text) {
+    toast(text || `You can't make wristbands on this ${word()}.`, true);
+    wbReset();
+    toolsPaused = Date.now() + TOOL_PAUSE_MS;
+    view.tool = null;
+    session.del("tool");
+    rerender();
+  }
+
+  // replaceChildren, leaving out null and false (which it would print as text).
+  function fill(el, ...items) {
+    el.replaceChildren(...items.flat().filter((c) => c != null && c !== false));
+  }
+
+  function setText(el, text) {
+    if (el.textContent !== text) el.textContent = text;   // unchanged text isn't announced again
+  }
+
+  // Put up one of the Wristbands screens. Answers still on their way for the screen before
+  // are dropped when they arrive (they check wb.seq).
+  function wbShow(name, ...nodes) {
+    wbQuiet();
+    wb.seq += 1;
+    wb.screen = name;
+    wb.root.dataset.screen = name;
+    fill(wb.root, nodes);
+    wbPlacePill();
+    if (wb.root.isConnected) window.scrollTo(0, 0);
+    return wb.seq;
+  }
+
+  // Screens past the list get a history entry, so Back (a phone's, or the browser's) returns
+  // to the list instead of leaving the app.
+  function wbEnter(name) {
+    if (history.state?.wb) history.replaceState({ wb: name }, "", "/");
+    else history.pushState({ wb: name }, "", "/");
+  }
+
+  // Back to the list, through history when the screen has an entry so the two stay in step.
+  function wbBack() {
+    if (history.state?.wb) history.back();
+    else wbLeave().then((ok) => { if (ok && wb) wbHome(); });
+  }
+
+  async function wbPopped() {
+    const name = wb.screen;
+    if (!(await wbLeave())) {
+      history.pushState({ wb: name }, "", "/");   // staying: put the entry back
+      return;
+    }
+    if (wb) wbHome();
+  }
+
+  function wbStopQuestion(job) {
+    if (job.kind === "revoke") return `Stop revoking card ${job.target_card}? It keeps working until it's revoked.`;
+    if (job.kind === "notice") return "Stop making the lost card notice?";
+    const noun = (WB_TYPES[job.type] || WB_TYPES.day_pass).noun;
+    const made = job.cards.filter((c) => c.status === "written").length;
+    return `Stop making ${noun}s?` + (made ? ` The ${wbPlural(made, noun)} already made will still work.` : "");
+  }
+
+  // Leaving the encoding screen while cards are being made stops the job, so ask first.
+  // Resolves to whether to go ahead.
+  async function wbLeave() {
+    if (!wbHolding()) return true;
+    const job = wb.job;
+    if (!window.confirm(wbStopQuestion(job))) return false;
+    clearTimeout(wb.timer);
+    wb.job = null;
+    session.del(WB_JOB_KEY);
+    await api("POST", `/api/wristbands/jobs/${job.id}/cancel`);
+    return true;
+  }
+
+  // Esc on a computer: clear a search box, or step back where nothing would be lost. It never
+  // stops a job (that takes the Stop button) or drops what's been typed into a form.
+  function wbEscape(ev) {
+    const target = ev.target;
+    if (target?.type === "search" && target.value) {
+      target.value = "";
+      target.dispatchEvent(new Event("input"));
+      return true;
+    }
+    if (target?.type === "date" || wb.screen === "home" || wbHolding()) return false;
+    if (wb.form && (wb.form.name.trim() || wb.form.touched.size)) return false;
+    wbBack();
+    return true;
+  }
+
+  // ---- what can be made here, and the encoder's status
+
+  // First look: what this person may make here, and the job that was on screen before the
+  // page was reloaded, if it's still going.
+  async function wbStart(state) {
+    state.loading = true;
+    const saved = Number(session.get(WB_JOB_KEY)) || 0;
+    const [res, again] = await Promise.all([api("GET", "/api/wristbands"),
+      saved ? api("GET", `/api/wristbands/jobs/${saved}`) : null]);
+    if (wb !== state) return;
+    state.loading = false;
+    state.optionsAt = Date.now();
+    if (!wbTakeOptions(res)) return;
+    const job = again?.status === 200 ? again.data.job : null;
+    if (job && WB_ACTIVE.has(job.status) && state.screen === "home") return wbShowJob(job);
+    session.del(WB_JOB_KEY);
+    if (state.screen === "home") wbHome();
+  }
+
+  // With each dashboard poll while Wristbands is on screen: keep the encoder status, and what
+  // can be made right now (no day passes after closing, say), up to date.
+  function wbPoll() {
+    if (wb && !wb.loading && Date.now() - wb.optionsAt >= WB_OPTIONS_MS) wbRefreshOptions();
+  }
+
+  async function wbRefreshOptions() {
+    const state = wb;
+    state.loading = true;
+    const res = await api("GET", "/api/wristbands");
+    if (wb !== state) return;
+    state.loading = false;
+    state.optionsAt = Date.now();   // a failed check waits as long as a good one before the next
+    if (wbTakeOptions(res, true) && state.screen === "home") wbHome(true);
+  }
+
+  // Take a GET /api/wristbands answer. Returns whether it arrived. `quiet`: a background check,
+  // which leaves the screen alone if it fails.
+  function wbTakeOptions(res, quiet = false) {
+    if (res.status === 200) {
+      wb.options = res.data;
+      wbDrawPill();
+      return true;
+    }
+    if (wbAuthError(res)) return false;
+    if (res.status === 403) {
+      wbNoAccess(res.data.error);
+      return false;
+    }
+    if (!quiet) {
+      wbShow("home", wbHomeHead(),
+        wbNote("error", res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
+          : res.data.error || "Wristbands couldn't be loaded."),
+        h("button", { type: "button", class: "btn primary", onclick: () => wbHome() }, "Try again"));
+      wb.homeKey = null;
+    }
+    return false;
+  }
+
+  function wbDrawPill() {
+    const enc = wb.options?.encoder;
+    // The job on screen is fresher than the last status check (every WB_OPTIONS_MS).
+    const making = wb.screen === "job" && WB_ACTIVE.has(wb.job?.status);
+    const [cls, text] = enc?.error && !making ? ["error", "Encoder offline"]
+      : enc?.busy || making ? ["busy", "Encoder busy"]
+      : enc?.connected ? ["ok", "Encoder ready"]
+      : ["", "Checking encoder…"];
+    wb.pill.className = cls ? `wb-pill ${cls}` : "wb-pill";
+    wb.pill.title = enc?.error || "";
+    fill(wb.pill, h("span", { class: "wb-pill-dot", "aria-hidden": "true" }), text);
+  }
+
+  // The encoder status sits in the page header on a computer, beside the title on a phone.
+  function wbPlacePill() {
+    if (!wb?.root.isConnected) return;
+    const slot = isDesk() ? screen.querySelector(".desk-actions") : wb.root.querySelector(".wb-pill-slot");
+    if (slot && wb.pill.parentNode !== slot) slot.append(wb.pill);
+  }
+
+  // ---- the list: what to make, look up or check
+
+  // Whether to list a kind of card at all. One this person isn't allowed to make is left out;
+  // one that can't be made just now (after the day-pass cut-off, say) shows why. The options
+  // don't say which is which, so the server's wording for "not allowed" tells them apart.
+  function wbOffered(t) {
+    if (!t) return false;
+    if (typeof t.permitted === "boolean") return t.permitted;
+    return !!t.allowed || !/^You don't have permission/.test(t.reason || "");
+  }
+
+  function wbHomeHead() {
+    return h("div", { class: "wb-head wb-home-head" },
+      h("h1", { class: "page-title" }, "Wristbands"), h("span", { class: "wb-pill-slot" }));
+  }
+
+  // quiet: redrawn after a background check, only if something on it changed.
+  function wbHome(quiet = false) {
+    const o = wb.options;
+    if (!o) {
+      wbShow("home", wbSpinner());
+      if (!wb.loading) wbStart(wb);
+      return;
+    }
+    const key = JSON.stringify([o.enabled, o.reason, o.types, o.encoder?.error, o.see_all_cards]);
+    if (quiet && key === wb.homeKey) return;
+    wb.homeKey = key;
+    wbQuiet();
+    wb.form = wb.job = wb.lookup = wb.log = null;
+    const focused = quiet ? document.activeElement?.dataset?.choice : null;
+    const scrolled = window.scrollY;
+
+    const kinds = o.enabled ? Object.keys(WB_TYPES).filter((type) => wbOffered(o.types?.[type])) : [];
+    const make = kinds.map((type) => {
+      const t = o.types[type];
+      const sub = !t.allowed ? t.reason || "Can't be made right now."
+        : type === "day_pass" ? `Works until ${t.expires_label}`
+        : type === "overnight" ? `Room wristbands until checkout at ${wbClock(t.checkout_time)}`
+        : "Key cards for staff";
+      return wbChoice(type, WB_TYPES[type].title, sub, WB_TYPES[type].icon,
+        t.allowed ? () => wbOpenForm(type) : null);
+    });
+    wbShow("home", wbHomeHead(),
+      o.encoder?.error ? wbNote("error", o.encoder.error, "The card encoder isn't answering") : null,
+      !o.enabled && o.reason ? wbNote("", o.reason) : null,
+      make.length ? h("section", { class: "group" }, h("h2", null, "Make"),
+        h("div", { class: "wb-choices" }, make)) : null,
+      h("section", { class: "group" }, h("h2", null, "Check"),
+        h("div", { class: "wb-choices secondary" },
+          wbChoice("lookup", "Look up a wristband", "Who it's for and which doors it opens", "search",
+            () => wbOpenLookup()),
+          wbChoice("log", "Card log", o.see_all_cards ? "Every wristband and card made"
+            : "The wristbands and cards you've made", "list", () => wbOpenLog()))));
+    if (quiet) window.scrollTo(0, scrolled);
+    if (focused) wb.root.querySelector(`[data-choice="${focused}"]`)?.focus();
+  }
+
+  // One big button on the list. Without `go` it can't be used right now: it stays focusable
+  // and says why when pressed.
+  function wbChoice(key, title, sub, icon, go) {
+    return h("button", {
+      type: "button",
+      class: go ? "wb-choice" : "wb-choice disabled",
+      "aria-disabled": go ? null : "true",
+      "data-choice": key,
+      onclick: () => (go ? go() : toast(sub)),
+    }, wbIcon(icon, "wb-choice-icon"),
+    h("span", { class: "wb-choice-text" }, h("span", { class: "wb-choice-title" }, title),
+      h("span", { class: "wb-choice-sub" }, sub)),
+    go ? h("span", { class: "chevron", "aria-hidden": "true" }, "›") : null);
+  }
+
+  function wbSubHead(title) {
+    return h("div", { class: "detail-head wb-head" },
+      h("button", { class: "back-btn", type: "button", onclick: () => wbBack() }, "‹ Wristbands"),
+      h("div", { class: "wb-title-row" }, h("h1", null, title), h("span", { class: "wb-pill-slot" })));
+  }
+
+  // ---- the forms: day pass, overnight, staff card
+
+  function wbOpenForm(type) {
+    const o = wb.options;
+    const t = o?.types?.[type];
+    if (!t?.allowed) return toast(t?.reason || "That can't be made right now.");
+    const f = {
+      type, t, name: "", count: 1, touched: new Set(), submitted: false, busy: false,
+      doors: new Set(t.door_ids || []), rooms: new Set(),
+      checkout: t.default_checkout || "", expiresOn: t.default_expires_on || "",
+      access: { all: false, buildings: new Set(), floors: new Set(), doors: new Set() },
+      doorById: new Map((o.doors || []).map((d) => [d.id, d])),
+      plan: null, planOk: false, note: "", noteShown: false, ask: 0, timer: null, fields: {}, els: {},
+    };
+    wb.form = f;
+    wbEnter(type);
+    wbShow(type, wbSubHead(WB_TYPES[type].title), wbFormView(f));
+    wbDrawSummary(f);
+    wbPreview(f);
+    if (isDesk()) f.fields.name.control.focus({ preventScroll: true });
+  }
+
+  function wbFormView(f) {
+    const { type, t } = f;
+    const o = wb.options;
+    const staff = type === "staff";
+    const name = h("input", { class: "field", type: "text", maxlength: "80", autocomplete: "off",
+      autocapitalize: "words", spellcheck: "false", enterkeyhint: "go",
+      placeholder: staff ? "Their full name" : "Guest or party name" });
+    name.addEventListener("input", () => {
+      f.name = name.value;
+      wbChanged(f, "name", false);
+    });
+    const people = [
+      wbField(f, "name", staff ? "Staff member's name" : "Guest name", name),
+      wbField(f, "count", staff ? "How many cards" : "Party size",
+        wbStepper(f, staff ? "How many cards" : "Party size", t.max || 1, staff ? "card" : "guest"),
+        staff ? null : h("p", { class: "wb-hint" }, "One wristband per guest.")),
+    ];
+    const sections = [h("section", { class: "wb-card" }, people)];
+    if (type === "day_pass") {
+      sections.push(h("section", { class: "wb-card" },
+        wbDoorsField(f, "Doors", "Every day pass opens these doors.")));
+    } else if (type === "overnight") {
+      const shared = new Set(t.door_ids || []);
+      const rooms = (o.doors || []).filter((d) => !shared.has(d.id));
+      const checkout = h("input", { class: "field", type: "date", value: f.checkout, min: o.today,
+        max: t.max_nights ? wbAddDays(o.today, t.max_nights) : null });
+      f.els.checkoutHint = h("p", { class: "wb-hint", "aria-live": "polite" });
+      checkout.addEventListener("input", () => {
+        f.checkout = checkout.value;
+        wbDrawDates(f);
+        wbChanged(f, "checkout");
+      });
+      sections.push(
+        h("section", { class: "wb-card" }, wbField(f, "room_ids", "Rooms",
+          wbDoorPicker(f.rooms, "rooms", rooms, () => wbChanged(f, "room_ids")),
+          h("p", { class: "wb-hint" }, "Pick every room in the booking."))),
+        h("section", { class: "wb-card" },
+          wbField(f, "checkout", "Checkout date", checkout, f.els.checkoutHint),
+          shared.size || t.can_edit_doors
+            ? wbDoorsField(f, "Shared doors", "Every overnight wristband opens these too.") : null));
+    } else {
+      const expires = h("input", { class: "field", type: "date", value: f.expiresOn, min: o.today,
+        max: t.max_days ? wbAddDays(o.today, t.max_days) : null });
+      f.els.expiresHint = h("p", { class: "wb-hint", "aria-live": "polite" });
+      expires.addEventListener("input", () => {
+        f.expiresOn = expires.value;
+        wbDrawDates(f);
+        wbChanged(f, "expires_on");
+      });
+      sections.push(
+        h("section", { class: "wb-card" }, wbField(f, "access", "Opens", wbAccessPicker(f))),
+        h("section", { class: "wb-card" }, wbField(f, "expires_on", "Works until", expires, f.els.expiresHint)));
+    }
+    wbDrawDates(f);
+    f.els.summary = h("div", { class: "readings wb-summary" });
+    f.els.note = h("p", { class: "wb-plan-note", hidden: true });
+    f.els.problem = h("p", { class: "wb-form-error", role: "alert", hidden: true });
+    f.els.submit = h("button", { class: "btn primary wb-submit", type: "submit" });
+    return h("form", { class: "wb-form", novalidate: true,
+      onsubmit: (ev) => { ev.preventDefault(); wbSubmit(f); } },
+    h("div", { class: "wb-main" }, sections),
+    h("section", { class: "wb-side", "aria-label": "Summary" }, h("h2", null, "Summary"),
+      f.els.summary, f.els.note, f.els.problem, f.els.submit));
+  }
+
+  // A labelled form field with room for an error underneath. `control` is an input (labelled
+  // with for=) or a group of controls (labelled with aria-labelledby).
+  function wbField(f, key, label, control, hint = null) {
+    const id = `wb-${key}`;
+    const error = h("p", { class: "wb-error", id: `${id}-error`, hidden: true });
+    let title;
+    if (control.matches("input, select, textarea")) {
+      control.id = id;
+      title = h("label", { class: "wb-label", for: id }, label);
+    } else {
+      title = h("div", { class: "wb-label", id: `${id}-label` }, label);
+      control.setAttribute("role", "group");
+      control.setAttribute("aria-labelledby", title.id);
+    }
+    const el = h("div", { class: "wb-field" }, title, control, hint, error);
+    f.fields[key] = { el, control, error };
+    return el;
+  }
+
+  // Shows an error under a field. Returns false if this form has no such field.
+  function wbSetError(f, key, text) {
+    const field = f.fields[key];
+    if (!field) return false;
+    field.error.textContent = text;
+    field.error.hidden = false;
+    field.control.setAttribute("aria-invalid", "true");
+    field.control.setAttribute("aria-describedby", field.error.id);
+    return true;
+  }
+
+  function wbClearError(f, key) {
+    const field = f.fields[key];
+    if (!field || field.error.hidden) return;
+    field.error.hidden = true;
+    field.control.removeAttribute("aria-invalid");
+    field.control.removeAttribute("aria-describedby");
+  }
+
+  function wbFocusField(f, key) {
+    const control = f.fields[key]?.control;
+    const target = control?.matches("input") ? control
+      : control?.querySelector("input:not(:disabled), button");
+    target?.focus();
+  }
+
+  // Something on the form changed: its error goes, and the summary is worked out again (a
+  // new name doesn't change what's made, so that's only shown).
+  function wbChanged(f, key, preview = true) {
+    f.touched.add(key);
+    wbClearError(f, key);
+    f.els.problem.hidden = true;
+    if (preview) wbSchedulePreview(f);
+    wbDrawSummary(f);
+  }
+
+  // Party size or number of cards: big - and + buttons, and the number can be typed as well.
+  function wbStepper(f, label, max, unit) {
+    const input = h("input", { class: "target wb-count", type: "number", inputmode: "numeric",
+      min: "1", max: String(max), value: String(f.count), "aria-label": label });
+    const less = h("button", { type: "button", class: "round", "aria-label": `One fewer ${unit}` }, "−");
+    const more = h("button", { type: "button", class: "round", "aria-label": `One more ${unit}` }, "+");
+    const set = (n, typed = false) => {
+      n = Math.min(max, Math.max(1, n));
+      if (!typed) input.value = String(n);
+      // aria-disabled rather than disabled, so the button keeps keyboard focus at the limit.
+      less.setAttribute("aria-disabled", String(n <= 1));
+      more.setAttribute("aria-disabled", String(n >= max));
+      if (n !== f.count) {
+        f.count = n;
+        wbChanged(f, "count");
+      }
+    };
+    less.addEventListener("click", () => set(f.count - 1));
+    more.addEventListener("click", () => set(f.count + 1));
+    input.addEventListener("input", () => {
+      const n = parseInt(input.value, 10);
+      if (Number.isFinite(n)) set(n, true);
+    });
+    input.addEventListener("change", () => { input.value = String(f.count); });
+    set(f.count);
+    return h("div", { class: "stepper wb-stepper" }, less, input, more);
+  }
+
+  // The doors every card of this kind opens, chosen by a manager. Someone allowed to change
+  // them can, for this card only. Doors hidden from the lists stay on it either way.
+  function wbDoorsField(f, label, hint) {
+    const listed = f.doorById;
+    const unlisted = [...f.doors].filter((id) => !listed.has(id)).length;
+    const text = h("p", { class: "wb-doors-text" });
+    const draw = () => {
+      const names = [...f.doors].filter((id) => listed.has(id)).map((id) => listed.get(id).name);
+      if (unlisted) names.push(wbPlural(unlisted, names.length ? "other door" : "door"));
+      text.textContent = names.length ? names.join(", ") : "None";
+    };
+    draw();
+    const line = h("div", { class: "wb-doors-line" }, text);
+    const box = h("div", { class: "wb-doors-box" }, line);
+    if (f.t.can_edit_doors) {
+      let picker = null;
+      const toggle = h("button", { type: "button", class: "btn wb-change", "aria-expanded": "false" }, "Change");
+      toggle.addEventListener("click", () => {
+        if (!picker) {
+          picker = wbDoorPicker(f.doors, "doors", [...listed.values()], () => {
+            draw();
+            wbChanged(f, "door_ids");
+          });
+          box.append(picker);
+        } else {
+          picker.hidden = !picker.hidden;
+        }
+        toggle.setAttribute("aria-expanded", String(!picker.hidden));
+        toggle.textContent = picker.hidden ? "Change" : "Hide list";
+      });
+      line.append(toggle);
+    }
+    return wbField(f, "door_ids", label, box, h("p", { class: "wb-hint" }, hint));
+  }
+
+  // Doors grouped as building > floor, in the server's order (building, floor, then name).
+  function wbGroups(doors) {
+    const buildings = new Map();
+    for (const d of doors) {
+      const bKey = d.building ?? "none";
+      let b = buildings.get(bKey);
+      if (!b) {
+        b = { key: bKey, building: d.building ?? null, floors: new Map(),
+          name: d.building == null ? "Other doors" : d.building_name || `Building ${d.building}` };
+        buildings.set(bKey, b);
+      }
+      const fKey = d.floor ?? "none";
+      let fl = b.floors.get(fKey);
+      if (!fl) {
+        fl = { floor: d.floor ?? null, doors: [],
+          name: d.floor == null ? "No floor" : d.floor_name || `Floor ${d.floor}` };
+        b.floors.set(fKey, fl);
+      }
+      fl.doors.push(d);
+    }
+    return [...buildings.values()].map((b) => ({ ...b, floors: [...b.floors.values()] }));
+  }
+
+  function wbMatches(d, q) {
+    return [d.name, d.building_name, d.floor_name].some((s) => String(s || "").toLowerCase().includes(q));
+  }
+
+  function wbSearchBox(what) {
+    return h("input", { class: "field wb-search", type: "search", autocomplete: "off",
+      placeholder: `Search ${what}`, "aria-label": `Search ${what}` });
+  }
+
+  function wbChip(label, remove) {
+    return h("button", { type: "button", class: "wb-chip", "aria-label": `Remove ${label}`, onclick: remove },
+      label, h("span", { "aria-hidden": "true" }, "×"));
+  }
+
+  // Doors to tick, grouped by building and floor, with a search box for big properties.
+  // `selected` (a Set of lock IDs) is changed in place; onChange runs after each change.
+  function wbDoorPicker(selected, what, doors, onChange) {
+    const byId = new Map(doors.map((d) => [d.id, d]));
+    const all = wbGroups(doors);
+    const manyFloors = new Set(all.filter((g) => g.floors.length > 1).map((g) => g.key));
+    const boxes = new Map();
+    const search = doors.length >= WB_SEARCH_FROM ? wbSearchBox(what) : null;
+    const chips = h("div", { class: "wb-chips" });
+    const tree = h("div", { class: "wb-tree" });
+    const set = (id, on) => {
+      if (on) selected.add(id);
+      else selected.delete(id);
+      const box = boxes.get(id);
+      if (box) box.checked = on;
+      drawChips();
+      onChange();
+    };
+    const drawChips = () => {
+      const picked = [...selected].filter((id) => byId.has(id));
+      fill(chips, picked.length ? picked.map((id) => wbChip(byId.get(id).name, () => set(id, false)))
+        : h("span", { class: "muted" }, `No ${what} picked yet`));
+    };
+    const drawTree = () => {
+      const q = search?.value.trim().toLowerCase() || "";
+      boxes.clear();
+      const groups = wbGroups(q ? doors.filter((d) => wbMatches(d, q)) : doors);
+      fill(tree, groups.length ? groups.map((g) => h("section", { class: "wb-building" },
+        all.length > 1 ? h("h3", { class: "wb-building-name" }, g.name) : null,
+        g.floors.map((fl) => h("div", { class: "wb-floor" },
+          manyFloors.has(g.key) ? h("h4", { class: "wb-floor-name" }, fl.name) : null,
+          h("div", { class: "wb-doors" }, fl.doors.map((d) => {
+            const box = h("input", { type: "checkbox", checked: selected.has(d.id) });
+            box.addEventListener("change", () => set(d.id, box.checked));
+            boxes.set(d.id, box);
+            return h("label", { class: "wb-check" }, box, h("span", { class: "wb-check-text" }, d.name));
+          })))))) : h("p", { class: "muted wb-empty" },
+        q ? `Nothing matches “${search.value.trim()}”.` : `There are no ${what} to pick from.`));
+    };
+    search?.addEventListener("input", drawTree);
+    search?.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter") return;
+      ev.preventDefault();   // Enter here ticks the one door found; it doesn't make the card
+      if (boxes.size === 1) {
+        const [id] = boxes.keys();
+        set(id, !selected.has(id));
+      }
+    });
+    drawChips();
+    drawTree();
+    return h("div", { class: "wb-picker" }, search, chips, tree);
+  }
+
+  // The access list to send for a staff card: only the widest choices (a ticked building
+  // already opens its floors and doors).
+  function wbAccessEntries(a, byId) {
+    if (a.all) return [{ level: "all" }];
+    const out = [...a.buildings].map((b) => ({ level: "building", building: b }));
+    for (const key of a.floors) {
+      const [b, fl] = key.split(":").map(Number);
+      if (!a.buildings.has(b)) out.push({ level: "floor", building: b, floor: fl });
+    }
+    for (const id of a.doors) {
+      const d = byId.get(id);
+      if (d && d.building != null && (a.buildings.has(d.building) ||
+        (d.floor != null && a.floors.has(`${d.building}:${d.floor}`)))) continue;
+      out.push({ level: "door", door: id });
+    }
+    return out;
+  }
+
+  // What a staff card opens: every door, whole buildings, whole floors or single doors, as far
+  // as this person's own access reaches. Ticking a building covers its floors and doors.
+  function wbAccessPicker(f) {
+    const levels = new Set(f.t.levels || []);
+    const a = f.access;
+    const doors = wb.options.doors || [];
+    const byId = f.doorById;
+    const all = wbGroups(doors);
+    const buildingName = new Map();
+    const floorName = new Map();
+    for (const g of all) {
+      if (g.building == null) continue;
+      buildingName.set(g.building, g.name);
+      for (const fl of g.floors) {
+        if (fl.floor != null) floorName.set(`${g.building}:${fl.floor}`, `${g.name}, ${fl.name}`);
+      }
+    }
+    const rows = [];   // { input, el, isOn, isCovered }
+    const chips = h("div", { class: "wb-chips" });
+    const changed = () => {
+      sync();
+      wbChanged(f, "access");
+    };
+    const toggleIn = (set, key) => (on) => (on ? set.add(key) : set.delete(key));
+    const row = (cls, text, sub, isOn, setOn, isCovered) => {
+      const input = h("input", { type: "checkbox" });
+      input.addEventListener("change", () => {
+        setOn(input.checked);
+        changed();
+      });
+      const el = h("label", { class: cls ? `wb-check ${cls}` : "wb-check" }, input,
+        h("span", { class: "wb-check-text" }, text, sub ? h("small", null, sub) : null));
+      rows.push({ input, el, isOn, isCovered });
+      return el;
+    };
+    const floorCovered = (b) => a.all || a.buildings.has(b);
+    const doorCovered = (d) => a.all || (d.building != null && (a.buildings.has(d.building) ||
+      (d.floor != null && a.floors.has(`${d.building}:${d.floor}`))));
+    const sync = () => {
+      for (const r of rows) {
+        const covered = r.isCovered();
+        r.input.disabled = covered;
+        r.input.checked = covered || r.isOn();
+        r.el.classList.toggle("covered", covered);
+      }
+      const entries = wbAccessEntries(a, byId);
+      fill(chips, entries.length ? entries.map((e) => {
+        const label = e.level === "all" ? "All doors"
+          : e.level === "building" ? buildingName.get(e.building) || `Building ${e.building}`
+          : e.level === "floor" ? floorName.get(`${e.building}:${e.floor}`) || `Floor ${e.floor}`
+          : byId.get(e.door)?.name || "A door";
+        return wbChip(label, () => {
+          if (e.level === "all") a.all = false;
+          else if (e.level === "building") a.buildings.delete(e.building);
+          else if (e.level === "floor") a.floors.delete(`${e.building}:${e.floor}`);
+          else a.doors.delete(e.door);
+          changed();
+        });
+      }) : h("span", { class: "muted" }, "Nothing picked yet"));
+    };
+
+    const allRow = levels.has("all")
+      ? row("wb-all", "All doors", "Every door, including ones added later", () => a.all,
+        (on) => { a.all = on; }, () => false) : null;
+    const treeLevels = ["building", "floor", "door"].some((l) => levels.has(l));
+    const search = treeLevels && doors.length >= WB_SEARCH_FROM ? wbSearchBox("doors") : null;
+    const tree = treeLevels ? h("div", { class: "wb-tree" }) : null;
+    const drawTree = () => {
+      rows.length = allRow ? 1 : 0;
+      const q = search?.value.trim().toLowerCase() || "";
+      const groups = wbGroups(q ? doors.filter((d) => wbMatches(d, q)) : doors);
+      fill(tree, groups.length ? groups.map((g) => h("section", { class: "wb-building" },
+        levels.has("building") && g.building != null
+          ? row("wb-whole", g.name, "Whole building", () => a.buildings.has(g.building),
+            toggleIn(a.buildings, g.building), () => a.all)
+          : h("h3", { class: "wb-building-name" }, g.name),
+        g.floors.map((fl) => {
+          const key = `${g.building}:${fl.floor}`;
+          return h("div", { class: "wb-floor" },
+            levels.has("floor") && g.building != null && fl.floor != null
+              ? row("wb-whole", fl.name, "Whole floor", () => a.floors.has(key), toggleIn(a.floors, key),
+                () => floorCovered(g.building))
+              : h("h4", { class: "wb-floor-name" }, fl.name),
+            levels.has("door") ? h("div", { class: "wb-doors" }, fl.doors.map((d) =>
+              row("", d.name, null, () => a.doors.has(d.id), toggleIn(a.doors, d.id), () => doorCovered(d))))
+              : null);
+        }))) : h("p", { class: "muted wb-empty" },
+        q ? `Nothing matches “${search.value.trim()}”.` : "There are no doors you can give access to."));
+      sync();
+    };
+    search?.addEventListener("input", () => { if (tree) drawTree(); });
+    search?.addEventListener("keydown", (ev) => { if (ev.key === "Enter") ev.preventDefault(); });
+    if (tree) drawTree();
+    else sync();
+    return h("div", { class: "wb-picker" }, allRow, search, chips, tree);
+  }
+
+  // When the cards stop working, worked out here as dates change (the summary then gets the
+  // server's own words for it).
+  function wbDrawDates(f) {
+    const { t } = f;
+    const today = wb.options.today;
+    if (f.type === "overnight") {
+      const nights = f.checkout ? wbDaysBetween(today, f.checkout) : NaN;
+      f.els.checkoutHint.textContent = !f.checkout ? "Pick the day they check out."
+        : !(nights >= 0) ? "That date has already passed."
+        : `Wristbands stop working at ${wbExpiryLabel(f.checkout, t.checkout_time)} · ` +
+          (nights ? wbPlural(nights, "night") : "checking out today");
+    } else if (f.type === "staff") {
+      f.els.expiresHint.textContent = (f.expiresOn
+        ? `Cards stop working at ${wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL)}.` : "Pick the last day it works.") +
+        (t.max_days ? ` Up to ${wbPlural(t.max_days, "day")} from today.` : "");
+    }
+  }
+
+  // The request as the server takes it (see the design's request JSON). For the summary, a name
+  // not typed yet is stood in for, so the doors and end time show straight away.
+  function wbRequest(f, forPreview) {
+    const body = { type: f.type, name: f.name.trim() || (forPreview ? WB_PREVIEW_NAME : ""), count: f.count };
+    // The manager's doors go only when changed, so someone who may not change them never trips.
+    const defaults = f.t.door_ids || [];
+    if (f.doors.size !== new Set(defaults).size || defaults.some((id) => !f.doors.has(id))) {
+      body.door_ids = [...f.doors];
+    }
+    if (f.type === "overnight") Object.assign(body, { room_ids: [...f.rooms], checkout: f.checkout });
+    if (f.type === "staff") {
+      Object.assign(body, { access: wbAccessEntries(f.access, f.doorById), expires_on: f.expiresOn });
+    }
+    return body;
+  }
+
+  function wbSchedulePreview(f) {
+    clearTimeout(f.timer);
+    f.els.summary.classList.add("updating");
+    f.timer = setTimeout(() => wbPreview(f), WB_PREVIEW_MS);
+  }
+
+  // Ask the server what this would make: the doors in words and when the cards stop working.
+  // Only the latest answer counts. A problem shows under its field once that field has been
+  // used (or Make was pressed), and as a quiet note in the summary until then.
+  async function wbPreview(f) {
+    clearTimeout(f.timer);
+    const ask = (f.ask += 1);
+    f.els.summary.classList.add("updating");
+    const res = await api("POST", "/api/wristbands/preview", wbRequest(f, true));
+    if (wb?.form !== f || ask !== f.ask) return;
+    f.els.summary.classList.remove("updating");
+    f.noteShown = false;
+    if (res.status === 200) {
+      f.plan = res.data.plan;
+      f.planOk = true;
+      f.note = "";
+      for (const key of Object.keys(f.fields)) if (key !== "name") wbClearError(f, key);
+    } else if (wbAuthError(res)) {
+      return;
+    } else {
+      f.planOk = false;
+      f.note = res.status === 0 ? "Can't check this right now."
+        : res.status === 429 ? "Checking again when you next change something."
+        : res.data.error || "This can't be made as it is.";
+      const field = res.data.field;
+      if (field && (f.submitted || f.touched.has(field))) f.noteShown = wbSetError(f, field, f.note);
+    }
+    wbDrawSummary(f);
+  }
+
+  function wbDrawSummary(f) {
+    const { type, t } = f;
+    const until = f.planOk ? f.plan.expires_label
+      : type === "day_pass" ? t.expires_label
+      : type === "overnight" ? (f.checkout ? wbExpiryLabel(f.checkout, t.checkout_time) : "—")
+      : f.expiresOn ? wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL) : "—";
+    fill(f.els.summary, [...wbRows([
+      ["For", f.name.trim() || "—"],
+      [type === "staff" ? "Cards" : "Wristbands", String(f.count)],
+      ["Opens", f.planOk ? f.plan.summary || "—" : "—"],
+      ["Works until", until],
+    ]).children]);
+    f.els.note.textContent = f.note;
+    f.els.note.hidden = !f.note || f.noteShown;
+    setText(f.els.submit, `Make ${wbPlural(f.count, WB_TYPES[type].noun)}`);
+  }
+
+  async function wbSubmit(f) {
+    if (f.busy) return;
+    f.submitted = true;
+    f.els.problem.hidden = true;
+    const staff = f.type === "staff";
+    // Quick checks first: they save a trip and point at the field. The server checks it all.
+    const missing = !f.name.trim() ? ["name", staff ? "Enter the staff member's name." : "Enter the guest's name."]
+      : f.type === "overnight" && !f.rooms.size ? ["room_ids", "Pick at least one room."]
+      : f.type === "overnight" && !f.checkout ? ["checkout", "Pick a checkout date."]
+      : staff && !wbAccessEntries(f.access, f.doorById).length ? ["access", "Choose what this card opens."]
+      : staff && !f.expiresOn ? ["expires_on", "Pick the last day it works."]
+      : null;
+    if (missing) {
+      wbSetError(f, ...missing);
+      wbFocusField(f, missing[0]);
+      return;
+    }
+    f.busy = true;
+    const button = f.els.submit;
+    button.classList.add("working");
+    button.setAttribute("aria-busy", "true");
+    const res = await api("POST", "/api/wristbands/jobs", wbRequest(f, false));
+    if (wb?.form !== f) return;
+    f.busy = false;
+    button.classList.remove("working");
+    button.removeAttribute("aria-busy");
+    if (res.status === 200) return wbShowJob(res.data.job);
+    if (wbAuthError(res)) return;
+    const text = res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.`
+      : res.data.error || "That didn't work. Try again.";
+    if (res.data.field && wbSetError(f, res.data.field, text)) return wbFocusField(f, res.data.field);
+    f.els.problem.textContent = text;
+    f.els.problem.hidden = false;
+  }
+
+  // ---- the encoding screen: one card after another on the encoder
+
+  function wbShowJob(job) {
+    wbQuiet();
+    wb.form = null;
+    wb.job = job;
+    wb.lost = 0;
+    wb.rev += 1;
+    session.set(WB_JOB_KEY, String(job.id));
+    wbEnter("job");
+    const v = wb.jobView = {
+      eyebrow: h("div", { class: "wb-eyebrow" }),
+      visual: h("div", { class: "wb-visual", "aria-hidden": "true" }),
+      step: h("div", { class: "wb-step" }),
+      prompt: h("h1", { class: "wb-prompt", tabindex: "-1" }),
+      dots: h("ol", { class: "wb-dots", "aria-label": "Progress" }),
+      meta: h("p", { class: "wb-meta" }),
+      conn: h("p", { class: "wb-conn", role: "status", hidden: true },
+        `Can't reach ${portalName()} right now. Still trying…`),
+      actions: h("div", { class: "wb-actions" }),
+      results: h("div", { class: "wb-results" }),
+      box: null, phase: null, mode: null,
+    };
+    v.box = h("section", { class: "wb-job" }, v.eyebrow, v.visual,
+      h("div", { class: "wb-say", "aria-live": "polite" }, v.step, v.prompt), v.dots, v.meta, v.conn, v.actions);
+    wbShow("job", h("div", { class: "wb-head wb-job-head" },
+      h("button", { class: "back-btn", type: "button", onclick: () => wbBack() }, "‹ Wristbands"),
+      h("span", { class: "wb-pill-slot" })), v.box, v.results);
+    v.prompt.focus({ preventScroll: true });
+    wbDrawJob();
+    wbScheduleJob();
+  }
+
+  function wbDrawJob() {
+    const job = wb.job;
+    const v = wb.jobView;
+    const kind = WB_TYPES[job.type] || WB_TYPES.day_pass;
+    const Noun = cap(kind.noun);
+    const active = WB_ACTIVE.has(job.status);
+    const total = job.cards.length || job.count;
+    const write = (job.kind || "write") === "write";
+    setText(v.eyebrow, `${wbJobTitle(job)} · ${job.name}`);
+    setText(v.step, active && job.current && total > 1 ? `${Noun} ${job.current} of ${total}` : "");
+    setText(v.prompt, job.message || "");
+    if (job.phase !== v.phase) {
+      v.phase = job.phase;
+      const [icon, cls] = {
+        waiting_for_card: [kind.icon === "card" ? "card" : "band", "pulse"], remove_card: ["up", "lift"],
+        needs_attention: ["alert", "alert"],
+        done: ["check", "ok"], cancelled: ["stop", "quiet"],
+      }[job.phase] || [null, ""];   // queued, writing: a spinner
+      v.visual.className = cls ? `wb-visual ${cls}` : "wb-visual";
+      fill(v.visual, icon ? wbIcon(icon) : h("div", { class: "spinner" }));
+    }
+    v.box.classList.toggle("attention", job.status === "needs_attention");
+    v.box.classList.toggle("finished", !active);
+    v.dots.hidden = total < 2;
+    fill(v.dots, job.cards.map((c) => {
+      const now = active && c.seq === job.current && c.status === "pending";
+      const words = now ? "in progress" : c.status === "pending" ? "waiting"
+        : (WB_CARD_WORDS[c.status] || c.status).toLowerCase();
+      return h("li", { class: `wb-dot ${now ? "current" : c.status}` },
+        h("span", { "aria-hidden": "true" }, c.status === "written" ? "✓" : String(c.seq)),
+        h("span", { class: "wb-sr" }, `${Noun} ${c.seq}: ${words}`));
+    }));
+    setText(v.meta, job.kind === "revoke" ? `Only card ${job.target_card} is cleared. Any other card is left as it is.`
+      : !write ? `For card ${job.target_card}`
+      : [job.expires_label && `Works until ${job.expires_label}`, job.summary].filter(Boolean).join(" · "));
+    v.conn.hidden = wb.lost < WB_LOST_AFTER;
+    wbDrawPill();
+
+    const mode = job.status === "needs_attention" ? "attention" : active ? "active" : "finished";
+    if (mode === v.mode) return;
+    v.mode = mode;
+    const button = (label, cls, onclick) => h("button", { type: "button", class: cls, onclick }, label);
+    if (mode === "attention") {
+      const retry = button("Try again", "btn primary", () => wbDecide("retry"));
+      fill(v.actions, retry, button("Skip this one", "btn", () => wbDecide("skip")),
+        button("Stop", "btn wb-stop", () => wbStop()));
+      retry.focus({ preventScroll: true });
+    } else if (mode === "active") {
+      fill(v.actions, button("Stop", "btn wb-stop", () => wbStop()));
+    } else {
+      session.del(WB_JOB_KEY);
+      if (!wb.loading) wbRefreshOptions();   // the encoder is free again: say so now
+      const done = button("Done", "btn primary", () => wbBack());
+      fill(v.actions, done);
+      fill(v.results, write ? h("section", { class: "group" }, h("h2", null, `${Noun}s`),
+        wbRows(job.cards.map((c) => [`${Noun} ${c.seq}`,
+          c.status === "written" ? c.card_number || "Made" : WB_CARD_WORDS[c.status] || cap(c.status),
+          c.status === "failed"])))
+        : h("section", { class: "group" }, h("h2", null, "Result"), wbRows([wbOtherResult(job)])));
+      done.focus({ preventScroll: true });
+    }
+  }
+
+  function wbScheduleJob() {
+    clearTimeout(wb.timer);
+    if (wb.screen === "job" && wb.job && WB_ACTIVE.has(wb.job.status) && !wb.acting) {
+      wb.timer = setTimeout(wbPollJob, document.visibilityState === "visible" ? WB_POLL_MS : WB_HIDDEN_POLL_MS);
+    }
+  }
+
+  async function wbPollJob() {
+    const state = wb;
+    const job = state?.job;
+    if (!job) return;
+    const rev = state.rev;
+    const res = await api("GET", `/api/wristbands/jobs/${job.id}`);
+    // Signed out, left, or a button was pressed meanwhile (its answer is newer): drop this one.
+    if (wb !== state || state.job?.id !== job.id || state.screen !== "job" || rev !== state.rev) return;
+    if (res.status === 200) {
+      state.lost = 0;
+      state.job = res.data.job;
+    } else if (wbAuthError(res)) {
+      return;
+    } else if (res.status === 403) {
+      return wbNoAccess(res.data.error);
+    } else if (res.status === 404) {
+      session.del(WB_JOB_KEY);
+      toast("That card job isn't available any more.", true);
+      return wbHome();
+    } else {
+      state.lost += 1;
+    }
+    wbDrawJob();
+    wbScheduleJob();
+  }
+
+  function wbStop() {
+    if (wb.job && window.confirm(wbStopQuestion(wb.job))) wbDecide("cancel");
+  }
+
+  // Try again, Skip this one or Stop.
+  async function wbDecide(action) {
+    const state = wb;
+    const job = state.job;
+    if (state.acting || !job) return;
+    state.acting = true;
+    state.rev += 1;   // a check already on its way would show the job from before this
+    clearTimeout(state.timer);
+    state.jobView.actions.classList.add("working");
+    const res = await api("POST", `/api/wristbands/jobs/${job.id}/${action}`);
+    if (wb !== state || state.job?.id !== job.id) return;
+    state.acting = false;
+    state.jobView.actions.classList.remove("working");
+    if (res.status === 200) {
+      state.job = res.data.job;
+      wbDrawJob();
+    } else if (wbAuthError(res)) {
+      return;
+    } else {
+      toast(res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
+        : res.data.error || "That didn't work. Try again.", true);
+    }
+    wbScheduleJob();
+  }
+
+  // ---- look up a wristband
+
+  // again: "Look up another" (already on this screen, so no new history entry).
+  async function wbOpenLookup(again = false) {
+    if (!again) wbEnter("lookup");
+    wb.lookView = { body: h("div", { class: "wb-lookup" }), key: null };
+    wb.lookup = { state: "waiting", message: "Getting the encoder ready…", card: [], job: null };
+    wb.lost = 0;
+    const seq = wbShow("lookup", wbSubHead("Look up a wristband"), wb.lookView.body);
+    wbDrawLookup();
+    const res = await api("POST", "/api/wristbands/lookup");
+    if (wb?.seq === seq) wbTakeLookup(res);
+  }
+
+  async function wbPollLookup() {
+    const seq = wb.seq;
+    const res = await api("GET", "/api/wristbands/lookup");
+    if (wb?.seq === seq) wbTakeLookup(res);
+  }
+
+  function wbTakeLookup(res) {
+    if (res.status === 200) {
+      wb.lost = 0;
+      wb.lookup = res.data;
+    } else if (wbAuthError(res)) {
+      return;
+    } else if (res.status === 403) {
+      return wbNoAccess(res.data.error);
+    } else if (res.status === 0 || res.status >= 500) {
+      wb.lost += 1;
+      if (wb.lost >= WB_LOST_AFTER) {
+        wb.lookup = { state: "error", card: [], job: null,
+          message: `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.` };
+      }
+    } else {
+      wb.lookup = { state: "error", card: [], job: null, message: res.data.error || "That didn't work. Try again." };
+    }
+    wbDrawLookup();
+    if (wb.lookup.state === "waiting") wb.timer = setTimeout(wbPollLookup, WB_POLL_MS);
+  }
+
+  function wbDrawLookup() {
+    const look = wb.lookup;
+    const v = wb.lookView;
+    const key = JSON.stringify(look);
+    if (key === v.key) return;   // the same answer again: leave the screen (and its animation) be
+    v.key = key;
+    if (look.state === "waiting") {
+      fill(v.body, h("section", { class: "wb-job" },
+        h("div", { class: "wb-visual pulse", "aria-hidden": "true" }, wbIcon("band")),
+        h("h1", { class: "wb-prompt", "aria-live": "polite" }, look.message || "Place the wristband on the encoder"),
+        h("p", { class: "wb-meta" }, "Its number, who it was made for and which doors it opens will show here.")));
+      return;
+    }
+    const job = look.job;
+    const kind = job && (WB_TYPES[job.type] || WB_TYPES.day_pass);
+    const doors = look.card || [];
+    // What the card itself says comes first: the encoder just read it. Our record can be out of
+    // date (a card cancelled in TT Hotel's own app, say).
+    const last = doors.reduce((a, r) => (Number(r.expires_at) > Number(a?.expires_at || 0) ? r : a), null);
+    const hero = (value, label, alert) => h("div", { class: alert ? "hero-value alert" : "hero-value" },
+      h("div", { class: "hero-number" }, value), h("div", { class: "hero-label" }, label));
+    // Our record of this very card: its state, and the lost card it also cancels if it was made
+    // as a replacement.
+    const mine = job && (job.kind || "write") === "write"
+      ? job.cards.find((c) => c.status === "written" && wbSameCard(c.card_number, look.card_number)) : null;
+    const state = mine ? wbCardState(job, mine) : null;
+    const done = look.state === "done";
+    const noun = job?.type === "staff" || !job ? "card" : "wristband";
+    // The server says who may wipe it (people who see every card, or whoever made it), and
+    // checks again when asked.
+    const revoke = done && look.can_revoke && look.card_number
+      ? h("button", { type: "button", class: "btn wb-stop",
+        onclick: (ev) => wbLookupRevoke(look.card_number, job?.name, ev.currentTarget) },
+      "Revoke (wipe this card)") : null;
+    fill(v.body,
+      look.state === "error" ? wbNote("error", look.message || "That didn't work. Try again.") : null,
+      done ? h("div", { class: "hero-values wb-hero" },
+        hero(look.card_number || "—", "Card number"),
+        look.empty ? hero("No doors", "On the card", true)
+          : last?.expires_label ? hero(last.expires_label, "Works until") : null) : null,
+      done && look.empty ? wbNote("error", look.blank ? "It's blank, or set up for another hotel."
+        : "It opens nothing: it's been cleared, or cancelled in TT Hotel's own program or app.",
+      `This ${noun} has no doors on it`) : null,
+      done && look.message ? wbNote("", look.message) : null,
+      doors.length ? h("section", { class: "group" },
+        h("h2", null, job?.type === "staff" ? "On the card" : "On the wristband"),
+        wbRows(doors.map((r) => [r.label, r.expires_label ? `Until ${r.expires_label}` : "—"]))) : null,
+      done && (!job || job.type === "staff") ? wbNoticeSection(look.cancellations) : null,
+      job ? h("section", { class: "group" }, h("h2", null, "Our record"), wbRows([
+        ["Made for", job.name],
+        ["Kind", `${kind.title} · ${wbPlural(job.count, kind.noun)}`],
+        ["Made by", job.made_by],
+        ["Made", wbWhen(job.created_at)],
+        ["Opens", job.summary || null],
+        ["Works until", job.expires_label || null],
+        ["State", mine ? WB_STATE_WORDS[state] || "Unknown" : null, !!mine && state !== "active"],
+        ["Revoked", mine && state === "revoked" && mine.state_by || null],
+        ["Replaces lost card", mine?.cancelled_card || null],
+      ]), done && mine && !look.empty ? wbStateNote(state, doors.length > 0) : null,
+      done && state === "active" ? h("p", { class: "muted wb-sub wb-record-note" },
+        "Reported lost in the TT Hotel app? Staff Portal can't see that \u2014 use Report lost in Staff " +
+        "Access so it's tracked.") : null) : null,
+      h("div", { class: "wb-actions wb-actions-start" }, h("button", { type: "button", class: "btn primary",
+        onclick: () => wbOpenLookup(true) }, look.state === "error" ? "Try again" : "Look up another"), revoke));
+  }
+
+  // What a revoked, lost or expired card on the encoder means for the person holding it.
+  function wbStateNote(state, hasDoors) {
+    if (state === "revoked") {
+      return wbNote("error", hasDoors ? "Doors are still written on it, so keep it out of use."
+        : "It's been cleared and can be used again.", "This card was revoked");
+    }
+    if (state === "lost") {
+      return wbNote("error", "Keep it out of use and tell a manager it's been found.", "This card was reported lost");
+    }
+    if (state === "expired") return wbNote("", "Its last day has passed, so it no longer opens doors.", "Expired");
+    if (!state) return wbNote("error", "Its record couldn't be read. Treat it as not working.", "Unknown state");
+    return null;
+  }
+
+  // The lost card notice on a card read off the encoder (CE_ReadCancellationInfo): the card numbers
+  // that locks refuse once it's tapped on them. null: the encoder didn't read it.
+  function wbNoticeSection(cancellations) {
+    if (!Array.isArray(cancellations)) return null;
+    if (!cancellations.length) {
+      return h("section", { class: "group" }, h("h2", null, "Lost card notice"),
+        wbRows([["Lost card notice", "None on this card"]]));
+    }
+    return h("section", { class: "group" }, h("h2", null, "Lost card notice"),
+      h("p", { class: "muted wb-sub" }, "Each lock this card is tapped on stops opening for these cards."),
+      wbRows(cancellations.slice(0, 20).map((c) => [
+        c?.card_number ? `Cancels card ${c.card_number}` : "Cancels a card the encoder couldn't read",
+        Number(c?.expires_at) > 0 ? `Until ${wbWhen(c.expires_at)}` : "—", true])));
+  }
+
+  // ---- the card log
+
+  function wbOpenLog() {
+    wbEnter("log");
+    const log = wb.log = { q: "", jobs: [], hasMore: false, loading: false, error: "", open: new Set(),
+      ask: 0, timer: null, list: h("div", { class: "wb-log" }),
+      moreBtn: h("button", { type: "button", class: "btn wb-more", hidden: true, onclick: () => wbLoadLog(true) },
+        "Show older") };
+    const search = h("input", { class: "field wb-search", type: "search", autocomplete: "off", maxlength: "60",
+      placeholder: "Search by name or card number", "aria-label": "Search the card log" });
+    const go = () => {
+      clearTimeout(log.timer);
+      log.q = search.value.trim();
+      wbLoadLog(false);
+    };
+    search.addEventListener("input", () => {
+      clearTimeout(log.timer);
+      log.timer = setTimeout(go, WB_SEARCH_MS);
+    });
+    search.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        go();
+      }
+    });
+    wbShow("log", wbSubHead("Card log"),
+      h("p", { class: "muted wb-sub" }, wb.options?.see_all_cards
+        ? "Every wristband and card made here, newest first. Open a staff card to revoke it (have the card in hand)."
+        : "The wristbands and cards you've made, newest first."),
+      search, log.list, log.moreBtn);
+    if (isDesk()) search.focus({ preventScroll: true });
+    wbLoadLog(false);
+  }
+
+  // older: the next page down, after what's shown.
+  async function wbLoadLog(older) {
+    const state = wb;
+    const log = state?.log;
+    if (!log) return;
+    const seq = state.seq;
+    const ask = (log.ask += 1);
+    const params = new URLSearchParams();
+    if (log.q) params.set("q", log.q);
+    if (older && log.jobs.length) params.set("before", String(log.jobs[log.jobs.length - 1].created_at));
+    log.loading = true;
+    wbDrawLog();
+    const query = params.toString();
+    const res = await api("GET", `/api/wristbands/log${query ? `?${query}` : ""}`);
+    if (wb !== state || state.seq !== seq || ask !== log.ask) return;
+    log.loading = false;
+    if (res.status === 200) {
+      const jobs = Array.isArray(res.data.jobs) ? res.data.jobs : [];
+      log.jobs = older ? [...log.jobs, ...jobs] : jobs;
+      log.hasMore = jobs.length >= WB_LOG_PAGE;
+      log.error = "";
+    } else if (wbAuthError(res)) {
+      return;
+    } else if (res.status === 403) {
+      return wbNoAccess(res.data.error);
+    } else {
+      log.error = res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection.`
+        : res.data.error || "The card log couldn't be loaded.";
+    }
+    wbDrawLog();
+  }
+
+  function wbDrawLog() {
+    const log = wb.log;
+    const focused = document.activeElement?.dataset?.job;
+    const days = [];
+    for (const job of log.jobs) {
+      const day = wbDayName(job.created_at);
+      if (days[days.length - 1]?.day !== day) days.push({ day, jobs: [] });
+      days[days.length - 1].jobs.push(job);
+    }
+    log.list.classList.toggle("updating", log.loading && log.jobs.length > 0);
+    fill(log.list,
+      log.error ? wbNote("error", log.error) : null,
+      days.map((d) => h("section", { class: "group" }, h("h2", null, d.day),
+        h("div", { class: "readings wb-log-list" }, d.jobs.map(wbLogItem)))),
+      !log.loading && !log.error && !log.jobs.length
+        ? h("p", { class: "muted wb-empty" }, log.q ? `Nothing matches “${log.q}”.` : "No cards made yet.") : null,
+      log.loading && !log.jobs.length ? wbSpinner() : null);
+    log.moreBtn.hidden = !log.hasMore || !!log.error;
+    log.moreBtn.classList.toggle("working", log.loading);
+    if (focused) log.list.querySelector(`[data-job="${focused}"]`)?.focus();
+  }
+
+  function wbLogItem(job) {
+    const log = wb.log;
+    const kind = WB_TYPES[job.type] || WB_TYPES.day_pass;
+    const open = log.open.has(job.id);
+    const write = (job.kind || "write") === "write";
+    const made = job.cards.filter((c) => c.status === "written" || c.status === "cleared").length;
+    // A staff card's state goes on the row when all its cards share one (usually there's one card).
+    const states = wbKeyCard(job)
+      ? [...new Set(job.cards.filter((c) => c.status === "written").map((c) => wbCardState(job, c)))] : [];
+    const state = states.length === 1 ? states[0] : null;
+    const [badge, tone] = job.status === "needs_attention" ? ["Needs attention", "alert"]
+      : WB_ACTIVE.has(job.status) ? [!write ? (job.kind === "revoke" ? "Revoking…" : "Working…") : "Making…", "live"]
+      : !write && !made ? [job.kind === "revoke" ? "Not revoked" : "Not made", "alert"]
+      : made < job.count ? [made ? `${made} of ${job.count} made` : "Not made", "alert"]
+      : states.length ? [state ? WB_STATE_WORDS[state] || "Unknown" : "Mixed", wbStateTone(state)]
+      : [null, null];
+    const sub = [write ? `${kind.title} · ${wbPlural(job.count, kind.noun)}` : wbJobTitle(job),
+      wb.options?.see_all_cards ? job.made_by : null].filter(Boolean).join(" · ");
+    const row = h("button", { type: "button", class: "wb-log-row", "aria-expanded": String(open),
+      "data-job": String(job.id), onclick: () => {
+        if (open) log.open.delete(job.id);
+        else log.open.add(job.id);
+        wbDrawLog();
+      } },
+    h("span", { class: "wb-log-main" }, h("span", { class: "wb-log-name" }, job.name), h("small", null, sub)),
+    h("span", { class: "wb-log-side" }, badge ? h("span", { class: `wb-badge ${tone}` }, badge) : null,
+      h("span", null, wbTime(job.created_at))));
+    if (!open) return h("div", { class: "wb-log-item" }, row);
+    const Noun = cap(kind.noun);
+    if (!write) {
+      return h("div", { class: "wb-log-item open" }, row, h("div", { class: "wb-log-detail" },
+        wbRows([
+          ["Card", job.target_card || null],
+          ["Done by", job.made_by],
+          ["When", wbWhen(job.created_at)],
+          WB_ACTIVE.has(job.status) ? ["Result", "Not finished yet"] : wbOtherResult(job),
+        ], "wb-rows"),
+        WB_ACTIVE.has(job.status)
+          ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
+          : null));
+    }
+    const key = wbKeyCard(job);
+    const cardValue = (c) => {
+      if (c.status !== "written") return WB_CARD_WORDS[c.status] || cap(c.status);
+      const number = c.card_number || "Made";
+      return key ? `${number} · ${WB_STATE_WORDS[wbCardState(job, c)] || "Unknown"}` : number;
+    };
+    const cardAlert = (c) => c.status === "failed" || (key && c.status === "written"
+      && !["active", "expired"].includes(wbCardState(job, c)));
+    // People who may see every card can revoke an active staff card here, with it in hand.
+    const revocable = WB_ACTIVE.has(job.status) ? [] : job.cards.filter((c) => wbCanRevoke(job, c));
+    return h("div", { class: "wb-log-item open" }, row, h("div", { class: "wb-log-detail" },
+      wbRows([
+        ["Opens", job.summary || null],
+        ["Works until", job.expires_label || null],
+        ["Made by", job.made_by],
+        ["Made", wbWhen(job.created_at)],
+        ...job.cards.flatMap((c) => [[`${Noun} ${c.seq}`, cardValue(c), cardAlert(c)],
+          [`${Noun} ${c.seq} replaces lost card`, c.status === "written" && c.cancelled_card || null]]),
+      ], "wb-rows"),
+      WB_ACTIVE.has(job.status)
+        ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
+        : null,
+      revocable.length ? h("div", { class: "wb-log-actions" }, revocable.map((c) =>
+        h("button", { type: "button", class: "btn wb-stop", onclick: (ev) => wbRevoke(c, job.name, ev.currentTarget) },
+          revocable.length > 1 || job.cards.length > 1 ? `Revoke card ${c.card_number}` : "Revoke this card")))
+        : null));
+  }
+
+  // ---- staff cards: their state, and revoking one (card in hand)
+
+  // "Staff card", or what a job that didn't make cards did: revoked a card, or made a lost
+  // card notice for one.
+  function wbJobTitle(job) {
+    if (job.kind === "revoke") return `Revoke card ${job.target_card}`;
+    if (job.kind === "notice") return `Lost card notice for card ${job.target_card}`;
+    return (WB_TYPES[job.type] || WB_TYPES.day_pass).title;
+  }
+
+  // How a finished revoke or lost card notice job went, as a [label, value, alert?] row.
+  function wbOtherResult(job) {
+    const done = job.cards.some((c) => c.status === "written" || c.status === "cleared");
+    if (job.kind === "revoke") return ["Result", done ? "Revoked and cleared" : "Not revoked", !done];
+    return ["Result", done ? "Lost card notice made" : "Not made", !done];
+  }
+
+  // Staff cards made (not a revoke or a lost card notice job, which made no key card).
+  function wbKeyCard(job) {
+    return job.type === "staff" && (job.kind || "write") === "write";
+  }
+
+  // Card numbers as the encoder and the record may spell them (leading zeros aside).
+  function wbSameCard(a, b) {
+    const norm = (n) => String(n ?? "").trim().replace(/^0+(?=\d)/, "");
+    return a != null && b != null && norm(a) !== "" && norm(a) === norm(b);
+  }
+
+  // active, expired (active, past its last day), revoked or lost; null when the record is damaged.
+  function wbCardState(job, card) {
+    const state = card.state ?? "active";
+    if (state === "active") {
+      const ends = Number(job.expires_at);
+      return Number.isFinite(ends) && ends > 0 && ends * 1000 <= Date.now() ? "expired" : "active";
+    }
+    return state === "revoked" || state === "lost" ? state : null;
+  }
+
+  function wbStateTone(state) {
+    return state === "active" ? "ok" : state === "expired" ? "" : "alert";
+  }
+
+  // Only people who may see every card, only an active card (an expired one too: it's still
+  // cleared for reuse), and only one this app can name. The server checks all of it again.
+  function wbCanRevoke(job, card) {
+    if (!wb.options?.see_all_cards || !wbKeyCard(job) || card.status !== "written") return false;
+    const state = wbCardState(job, card);
+    return (state === "active" || state === "expired") && Number.isInteger(card.id) && !!card.card_number;
+  }
+
+  // Revoke a staff card with it in hand: the encoder waits for that exact card, clears it, and
+  // it's marked revoked. The encoding screen shows how it goes.
+  async function wbRevoke(card, name, button) {
+    const who = name ? ` (${name})` : "";
+    return wbStartRevoke(`/api/wristbands/cards/${card.id}/revoke`, button,
+      `Revoke card ${card.card_number}${who}?\n\nYou'll put the card on the encoder next. ` +
+      "It's cleared so it opens nothing, and it can be given out again afterwards.");
+  }
+
+  // Wipe the card just looked up: it's still on the encoder. The server takes the card number
+  // from the look-up, and checks this person may revoke it.
+  async function wbLookupRevoke(number, name, button) {
+    const who = name ? ` (${name})` : "";
+    return wbStartRevoke("/api/wristbands/lookup/revoke", button,
+      `Revoke card ${number}${who}?\n\nLeave it on the encoder. It's wiped so it opens no doors, ` +
+      "and it can be given out again afterwards.");
+  }
+
+  async function wbStartRevoke(path, button, question) {
+    const state = wb;
+    if (!state || state.acting) return;
+    if (!window.confirm(question)) return;
+    state.acting = true;
+    button?.classList.add("working");
+    button?.setAttribute("aria-busy", "true");
+    const res = await api("POST", path);
+    if (wb !== state) return;
+    state.acting = false;
+    button?.classList.remove("working");
+    button?.removeAttribute("aria-busy");
+    if (res.status === 200 && res.data.job) return wbShowJob(res.data.job);
+    if (wbAuthError(res)) return;
+    toast(res.status === 0 ? `Can't reach ${portalName()}. Check this ${word()}'s connection, then try again.`
+      : res.data.error || "That card couldn't be revoked. Try again.", true);
+    if (res.status === 409 && state.screen === "log") wbLoadLog(false);   // its state may have changed
+  }
+
+  // ---- small pieces
+
+  function wbSpinner() {
+    return h("div", { class: "wb-loading" }, h("div", { class: "spinner", "aria-label": "Loading" }));
+  }
+
+  function wbIcon(name, cls = null) {
+    const el = h("span", { class: cls, "aria-hidden": "true" });
+    // Fixed markup from WB_ICONS, never data.
+    el.innerHTML = '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+      `stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${WB_ICONS[name]}</svg>`;
+    return el;
+  }
+
+  function wbNote(tone, text, title = null) {
+    return h("div", { class: tone ? `wb-note ${tone}` : "wb-note", role: tone === "error" ? "alert" : null },
+      title ? h("strong", null, title) : null, text);
+  }
+
+  // Label/value rows, as [label, value, alert?]. Rows whose value is null are left out.
+  function wbRows(rows, cls = "readings") {
+    return h("div", { class: cls }, rows.filter(([, value]) => value != null).map(([label, value, alert]) =>
+      h("div", { class: alert ? "reading-row alert" : "reading-row" },
+        h("span", null, label), h("span", { class: "reading-value" }, value))));
+  }
+
+  function wbPlural(n, noun) {
+    return `${n} ${noun}${n === 1 ? "" : "s"}`;
+  }
+
+  // "8:00 PM" for "20:00", as the server writes times.
+  function wbClock(hhmm) {
+    const [hours, minutes] = String(hhmm || "").split(":").map(Number);
+    if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return String(hhmm || "");
+    return `${hours % 12 || 12}:${String(minutes).padStart(2, "0")} ${hours < 12 ? "AM" : "PM"}`;
+  }
+
+  // Dates are YYYY-MM-DD at the property; noon UTC keeps the arithmetic clear of time zones.
+  function wbAddDays(iso, days) {
+    const when = new Date(`${iso}T12:00:00Z`);
+    if (Number.isNaN(when.getTime())) return iso;
+    when.setUTCDate(when.getUTCDate() + days);
+    return when.toISOString().slice(0, 10);
+  }
+
+  function wbDaysBetween(from, to) {
+    return Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86400000);
+  }
+
+  // "Fri, Oct 17" for a YYYY-MM-DD date, with the year if it isn't this year.
+  function wbDateText(iso) {
+    const when = new Date(`${iso}T12:00:00Z`);
+    if (Number.isNaN(when.getTime())) return iso;
+    const options = { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" };
+    if (iso.slice(0, 4) !== (wb.options?.today || "").slice(0, 4)) options.year = "numeric";
+    return new Intl.DateTimeFormat([], options).format(when);
+  }
+
+  // "11:00 AM tomorrow": when a card made for that date stops working, in the server's words.
+  function wbExpiryLabel(iso, hhmm) {
+    const today = wb.options.today;
+    const day = iso === today ? "today" : iso === wbAddDays(today, 1) ? "tomorrow" : wbDateText(iso);
+    return `${wbClock(hhmm)} ${day}`;
+  }
+
+  // Times as the property's clock shows them (the server says which time zone that is).
+  function wbFormat(ts, options, locale = []) {
+    const when = new Date(Number(ts) * 1000);
+    try {
+      const timeZone = wb?.options?.time_zone || undefined;
+      return new Intl.DateTimeFormat(locale, { ...options, timeZone }).format(when);
+    } catch {
+      return new Intl.DateTimeFormat(locale, options).format(when);   // a time zone this browser doesn't know
+    }
+  }
+
+  const wbTime = (ts) => wbFormat(ts, { hour: "numeric", minute: "2-digit" });
+  const wbWhen = (ts) => wbFormat(ts, { weekday: "short", month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit" });
+
+  // "Today", "Yesterday" or "Fri, Oct 17": the day at the property a job was made on.
+  function wbDayName(ts) {
+    const iso = wbFormat(ts, { year: "numeric", month: "2-digit", day: "2-digit" }, "en-CA");   // YYYY-MM-DD
+    const today = wb.options?.today;
+    if (iso === today) return "Today";
+    if (today && iso === wbAddDays(today, -1)) return "Yesterday";
+    return wbDateText(iso);
+  }
+
   // ---------------------------------------------------------------- control lock
 
   // Controls stay locked until someone holds "Unlock controls", so a phone used to check
@@ -1617,6 +3306,8 @@
   // ---------------------------------------------------------------- wiring
 
   document.getElementById("lock-btn").addEventListener("click", async () => {
+    // Signing out while wristbands are being made stops them first (after asking).
+    if (!(await wbLeave())) return;
     if (me?.shared) await api("POST", "/api/signout");
     session.del(SESSION_KEY);
     askForPin();
@@ -1626,6 +3317,11 @@
   document.addEventListener("keydown", (ev) => {
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (screenKeys) return screenKeys(ev);
+    // Esc steps back on the Wristbands screens (where nothing would be lost), even from a field.
+    if (ev.key === "Escape" && view.tool === "wristbands" && wb && wbEscape(ev)) {
+      ev.preventDefault();
+      return;
+    }
     // Computer shortcuts: 1-9 switch pages, Esc closes a card's panel.
     if (!document.body.classList.contains("desk-shell") || /INPUT|SELECT|TEXTAREA/.test(ev.target.tagName)) return;
     if (ev.key === "Escape" && view.detail) {
@@ -1633,7 +3329,16 @@
       closeDetail();
     } else if (/^[1-9]$/.test(ev.key)) {
       const page = lastData?.layout?.pages?.[Number(ev.key) - 1];
-      if (page && page.id !== view.pageId) openPage(page.id);
+      if (page && (page.id !== view.pageId || view.tool)) openPage(page.id);
+    }
+  });
+
+  // Closing or reloading the page while cards are being made: the browser asks first. (The job
+  // carries on either way, and the page goes back to it after a reload.)
+  window.addEventListener("beforeunload", (ev) => {
+    if (wbHolding()) {
+      ev.preventDefault();
+      ev.returnValue = "";
     }
   });
 

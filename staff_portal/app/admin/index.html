@@ -19,6 +19,7 @@
   <button role="tab" data-tab="phones" aria-selected="true">Phones &amp; computers</button>
   <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
+  <button role="tab" data-tab="wristbands">Wristbands</button>
   <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
@@ -45,13 +46,55 @@
     <div class="section-head">
       <h2>Staff members</h2>
       <div class="head-actions">
+        <button class="btn" id="sync-staff" hidden>Sync staff now</button>
         <button class="btn" id="add-from-connecteam" hidden>Add from Connecteam</button>
         <button class="btn primary" id="add-staff">Add staff member</button>
       </div>
     </div>
     <p class="hint">For shared phones: each person taps their name and enters their own PIN, so
       every action is recorded under their name. What they can control comes from the phone's role.</p>
+    <p class="hint sync-line" id="staff-sync-status" hidden></p>
     <div id="staff-list" class="cards"></div>
+
+    <div id="keycards-section" hidden>
+      <div class="section-head kc-head">
+        <h2>Key cards</h2>
+        <div class="head-actions">
+          <button class="btn" id="kc-refresh">Refresh</button>
+        </div>
+      </div>
+      <p class="hint">Every staff key card made, from the Staff tab or at a front-desk computer, newest
+        first. Revoke a card you have in hand, or report a lost one and lock it out of its doors.</p>
+      <div class="kc-filters">
+        <div class="seg seg-state" role="radiogroup" aria-label="Show key cards" id="kc-filter">
+          <button type="button" role="radio" data-state="active" aria-checked="true">Active</button>
+          <button type="button" role="radio" data-state="expired" aria-checked="false">Expired</button>
+          <button type="button" role="radio" data-state="revoked" aria-checked="false">Revoked</button>
+          <button type="button" role="radio" data-state="lost" aria-checked="false">Lost</button>
+          <button type="button" role="radio" data-state="all" aria-checked="false">All</button>
+        </div>
+        <input type="search" id="kc-search" placeholder="Search by name or card number" maxlength="60"
+          autocomplete="off" aria-label="Search key cards">
+      </div>
+      <div class="table-wrap">
+        <table class="activity kc-table">
+          <thead><tr><th>Holder</th><th>Card</th><th>Opens</th><th>Made</th><th>Works until</th>
+            <th>State</th><th><span class="sr">Actions</span></th></tr></thead>
+          <tbody id="kc-rows"></tbody>
+        </table>
+      </div>
+      <button class="btn more" id="kc-more" hidden>Show older</button>
+    </div>
+
+    <div class="section-head dept-head">
+      <h2>Departments</h2>
+      <div class="head-actions"><button class="btn" id="add-department">Add department</button></div>
+    </div>
+    <p class="hint">A department gives its people a role and the key card made for them with
+      <b>Make key card</b>. With Connecteam's <b>Add everyone from Connecteam</b> on, people join the
+      department whose smart group they're in. Someone in several of these smart groups gets the first
+      one in this list: drag to change the order.</p>
+    <div id="department-list" class="area-list dept-list"></div>
   </section>
 
   <section id="tab-roles" class="tab" hidden>
@@ -70,6 +113,192 @@
         <div class="empty">Pick a role, or create one like “Maintenance” or “Housekeeping.”</div>
       </div>
     </div>
+  </section>
+
+  <section id="tab-wristbands" class="tab" hidden>
+    <div class="section-head"><h2>Wristbands</h2></div>
+    <p class="hint wb-intro">Staff signed in on a front-desk computer make TT Hotel wristbands and key
+      cards on the card encoder plugged into it. Set up your TT Hotel account and the defaults here,
+      set each front-desk computer's card encoder (Automatic is easiest) in <button class="linkish"
+      data-goto="phones">Phones &amp; computers</button> → Edit, and choose who may make which cards on the
+      <button class="linkish" data-goto="roles">Roles</button> tab. Every card is recorded with who made it.</p>
+    <form id="wb-form" class="settings">
+      <fieldset>
+        <legend>TT Hotel account</legend>
+        <label class="check-row"><input type="checkbox" name="wristbands_enabled">
+          <span>Make wristbands and key cards
+          <small>People whose role allows it can make day passes, overnight wristbands and staff cards
+          on a front-desk computer with a card encoder.</small></span></label>
+        <p class="hint">In the TT Hotel program on the front-desk computer, sign in as the hotel's admin
+          and open <b>Settings → Integration</b>. Copy the Client ID, Client Secret, username and
+          password from there. The password there is already scrambled (32 letters and numbers):
+          paste it exactly as TT Hotel shows it, never your real password.</p>
+        <div class="row">
+          <label>Client ID<input name="tthotel_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+          <label>Client Secret<input name="tthotel_client_secret" type="password" maxlength="500"
+            autocomplete="new-password" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label>Username <small>The hotel admin's TT Hotel username.</small>
+            <input name="tthotel_username" maxlength="200" autocomplete="off" spellcheck="false"></label>
+          <label>Password <small>Exactly as exported from TT Hotel → Settings → Integration.</small>
+            <input name="tthotel_password_md5" type="password" maxlength="64" autocomplete="new-password"
+              spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label>Account hosted in<select name="tthotel_region">
+            <option value="global">Outside China (euapi.ttlock.com)</option>
+            <option value="china">China (cnapi.ttlock.com)</option></select></label>
+          <label>Check for new doors every (hours)<input name="tthotel_sync_hours" type="number" min="1" max="48"></label>
+        </div>
+        <p class="hint">TT Hotel's free limit is 30,000 requests a month, counting every request.
+          Staff Access never uses more than a quarter of that (7,500), and its automatic door checks stop
+          at half of its share so making cards always has room. Making cards needs a fresh key for the
+          encoder from TT Hotel: one request covers about 8 minutes of card-making. Door checks cost a
+          request or two each, and only run while Wristbands is on and a computer has a card encoder.</p>
+        <label class="check-row" id="wb-clear-row" hidden><input type="checkbox" name="tthotel_clear_secret">
+          <span>Remove the saved Client Secret and password</span></label>
+        <div class="ct-status">
+          <span id="wb-status" class="hint"></span>
+          <button class="btn" type="button" id="wb-test">Test connection</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Day passes</legend>
+        <div class="row">
+          <label>Day passes stop working at <small>Every day pass works until this time on the day it's made.</small>
+            <input name="wb_daypass_end" type="time" required></label>
+          <label>Most guests on one day pass booking<input name="wb_daypass_max" type="number" min="1" max="50" required></label>
+        </div>
+        <div class="pick-block">
+          <div class="pick-head">Doors every day pass opens <span class="hint" id="wb-daypass-count"></span></div>
+          <div class="pick-box tall" id="wb-daypass-doors"></div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_daypass">
+          <span>Day passes open doors that are deadbolted from inside
+          <small>Leave this off for guests, so no one can open a room someone has bolted from inside.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Overnight guests</legend>
+        <div class="row">
+          <label>Checkout time <small>Overnight wristbands stop working at this time on the checkout date.</small>
+            <input name="wb_checkout_time" type="time" required></label>
+          <label>Most guests on one overnight booking<input name="wb_overnight_max" type="number" min="1" max="50" required></label>
+        </div>
+        <div class="pick-block">
+          <div class="pick-head">Shared doors on every overnight wristband <span class="hint" id="wb-overnight-count"></span></div>
+          <p class="hint">Such as the main entrance or the pool gate. Staff choose the room when they make the wristband.</p>
+          <div class="pick-box tall" id="wb-overnight-doors"></div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_overnight">
+          <span>Overnight wristbands open doors that are deadbolted from inside
+          <small>Leave this off for guests, so no one can open a room someone has bolted from inside.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Staff cards</legend>
+        <div class="row">
+          <label>Staff cards last (days) <small>Where the expiry date starts. Staff can change it, up to their role's limit.</small>
+            <input name="wb_staff_days" type="number" min="1" max="3650" required></label>
+          <label>Most cards at once<input name="wb_staff_max" type="number" min="1" max="20" required></label>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_staff">
+          <span>Staff cards open doors that are deadbolted from inside
+          <small>Usually on, so staff can get into a room in an emergency.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Lost key cards: remote lock-out (experimental)</legend>
+        <p class="hint">A lost staff card keeps opening its doors until it expires. You can always lock
+          it out by tapping a <b>lost card notice</b> or a <b>replacement card</b> on each door (Staff tab,
+          Key cards). Remote lock-out does it through TT Hotel instead, for doors with a gateway, without
+          walking to them.</p>
+        <p class="wb-warn">Experimental: TT Hotel doesn't document this for cards made on an encoder. A card
+          number locked out remotely is retired on that door <b>for good</b>: that card can never open it
+          again, even after it's cleared and made again. Test it on one door before using it.</p>
+        <label class="check-row"><input type="checkbox" name="wb_remote_lockout">
+          <span>Offer remote lock-out for lost cards
+          <small>Uses 2 TT Hotel requests per gateway door, only when you click it. A busy gateway is
+          tried again at most 3 times, minutes apart.</small></span></label>
+        <div class="row">
+          <label>Card number format <small>If the test card still opens the door, the test switches
+            this for you.</small>
+            <select name="wb_remote_lockout_api">
+              <option value="reversed">Reversed (TT Hotel's encoder cards)</option>
+              <option value="plain">As printed</option></select></label>
+        </div>
+        <div class="ct-status">
+          <span id="wb-remote-status" class="hint"></span>
+          <button class="btn" type="button" id="wb-remote-test">Test remote lock-out</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Time zone</legend>
+        <label>Time zone <small>Leave blank to use Home Assistant's. Day passes, checkout and staff
+          cards stop working at these times in this zone.</small>
+          <input name="wb_time_zone" maxlength="64" list="wb-zones" autocomplete="off" spellcheck="false"></label>
+        <datalist id="wb-zones"></datalist>
+        <p class="hint" id="wb-zone-note"></p>
+        <p class="hint">The front-desk computer's Windows time zone must be the same: the encoder works
+          out each door's time from that computer's clock.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Advanced</legend>
+        <p class="hint">Only change these if TT Hotel's own settings were changed, or the wristbands you
+          use need it.</p>
+        <div class="row">
+          <label>Card sectors <small>16 digits, as set in TT Hotel (its default is 0000000000011111).</small>
+            <input name="wb_sectors" maxlength="16" pattern="[01]{16}" required autocomplete="off" spellcheck="false"></label>
+          <label>Wait for each card (seconds) <small>Then staff are asked to try again, skip it or stop.</small>
+            <input name="wb_card_wait" type="number" min="10" max="600" required></label>
+          <label>Most doors on one card <small>A whole floor or building counts as one.</small>
+            <input name="wb_max_records" type="number" min="1" max="64" required></label>
+        </div>
+        <label>Networks to search for encoders <small>For Automatic card encoders. Leave blank to use
+          Home Assistant's (Settings → System → Network). Otherwise up to 4 private networks, each
+          /24 or smaller, such as 192.168.1.0/24.</small>
+          <input name="wb_scan_subnets" maxlength="200" placeholder="From Home Assistant" autocomplete="off"
+            spellcheck="false"></label>
+      </fieldset>
+      <div class="form-actions"><button class="btn primary" type="submit">Save wristband settings</button></div>
+    </form>
+    <div class="settings">
+      <fieldset>
+        <legend>Card encoders</legend>
+        <p class="hint">Each front-desk computer with an encoder runs TT Hotel's free <b>SN Web Socket</b>
+          helper. In Phones &amp; computers → Edit, set its <b>Card encoder</b> to <b>Automatic</b>
+          and Staff Access finds it on the networks in Home Assistant's network setting (or the ones
+          entered under Advanced), even if its address changes. Or enter its address. Staff Access
+          connects to the encoder itself, so it works through your Cloudflare Tunnel too. Between
+          jobs the encoder is free for the TT Hotel program.</p>
+        <div class="ct-status">
+          <span id="wb-discovery" class="hint"></span>
+          <button class="btn" type="button" id="wb-find-encoders">Find encoders</button>
+        </div>
+        <div id="wb-encoders" class="area-list"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Doors</legend>
+        <p class="hint">The doors TT Hotel lists for your property, by building and floor. Rename a door
+          to what staff call it (TT Hotel keeps its own name), or hide it from staff lists. A hidden door
+          can still be one of the day-pass or overnight doors above.</p>
+        <div class="ct-status">
+          <span id="wb-doors-status" class="hint"></span>
+          <button class="btn" type="button" id="wb-sync">Sync from TT Hotel</button>
+        </div>
+        <div id="wb-doors" class="wb-doors"></div>
+      </fieldset>
+    </div>
+    <div class="section-head wb-jobs-head">
+      <h2>Cards made</h2>
+      <button class="btn" id="wb-refresh-jobs">Refresh</button>
+    </div>
+    <p class="hint">Every wristband and card made here, newest first, with who made it. Kept for two years.</p>
+    <div class="table-wrap">
+      <table class="activity">
+        <thead><tr><th>When</th><th>Made by</th><th>For</th><th>Cards</th><th>Works until</th></tr></thead>
+        <tbody id="wb-job-rows"></tbody>
+      </table>
+    </div>
+    <button class="btn more" id="wb-more-jobs" hidden>Show older</button>
   </section>
 
   <section id="tab-layout" class="tab" hidden>
@@ -155,6 +384,16 @@
         <div class="backup-actions">
           <button class="btn" data-export="roles">Export roles</button>
           <button class="btn" data-import="roles">Import roles…</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Departments</legend>
+        <p class="hint">Departments with their Connecteam smart group, role and key card template.
+          Importing adds them; roles are matched by name. You choose what happens to departments with the
+          same name.</p>
+        <div class="backup-actions">
+          <button class="btn" data-export="departments">Export departments</button>
+          <button class="btn" data-import="departments">Import departments…</button>
         </div>
       </fieldset>
       <fieldset>
@@ -273,6 +512,20 @@
           <span id="ct-status" class="hint"></span>
           <button class="btn" type="button" id="ct-test">Test connection</button>
         </div>
+        <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
+          <span>Add everyone from Connecteam
+          <small>Every active Connecteam user becomes a staff member here, in the department whose
+          smart group they're in (Staff tab, Departments), with their kiosk code as their PIN. Checked
+          about once an hour, inside the same request limits. People archived in Connecteam are turned
+          off, never deleted. People you add by hand are never changed.</small></span></label>
+        <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
+          <span>People added this way must be clocked in to sign in
+          <small>You can change this for anyone on their card on the Staff tab; the sync never changes
+          it back.</small></span></label>
+        <div class="ct-status">
+          <span id="ct-sync-status" class="hint"></span>
+          <button class="btn" type="button" id="ct-sync">Sync staff now</button>
+        </div>
       </fieldset>
       <fieldset>
         <legend>Home Assistant logbook</legend>
@@ -284,7 +537,8 @@
       <fieldset>
         <legend>Security</legend>
         <div class="row">
-          <label>Ask for PIN again after (minutes)<input name="pin_timeout_minutes" type="number" min="1" max="1440"></label>
+          <label>Ask for PIN again after (minutes): phones<input name="pin_timeout_minutes" type="number" min="1" max="1440"></label>
+          <label>Ask for PIN again after (minutes): computers<input name="pin_timeout_computer_minutes" type="number" min="1" max="1440"></label>
           <label>Lock phone after wrong PINs<input name="max_pin_attempts" type="number" min="3" max="20"></label>
           <label>Setup QR codes expire after (hours)<input name="enroll_hours" type="number" min="1" max="720"></label>
         </div>
@@ -327,6 +581,44 @@
       <div class="staff-checks" data-staff-list></div>
       <p class="hint" data-no-staff>Add people on the Staff tab first.</p>
     </div>
+    <div class="dialog-group" data-encoder hidden>
+      <label>Card encoder <small>For making wristbands, on the encoder plugged into this computer
+        (TT Hotel's SN Web Socket helper must be running on it).</small>
+        <select name="encoder_mode">
+          <option value="off">Off: no card encoder</option>
+          <option value="auto">Automatic: find it on the network</option>
+          <option value="address">Address: enter this computer's address</option>
+        </select></label>
+      <div data-encoder-auto hidden>
+        <p class="hint" data-encoder-auto-status></p>
+        <label data-encoder-choice hidden>Which encoder <small>More than one computer runs SN Web Socket.
+          Choose the one at this desk. If its address changes, Staff Access looks for it at the same
+          address again, and uses whichever one is found if only one is.</small>
+          <select name="encoder_auto_ip"></select></label>
+        <div class="ct-status">
+          <span class="hint" data-encoder-find-result></span>
+          <button class="btn" type="button" data-encoder-find>Find encoders</button>
+        </div>
+      </div>
+      <label data-encoder-address hidden>Card encoder address <small>This computer's address on your
+        network: just its IP address is enough. Use this for a computer on another network, or to
+        pin a desk to one computer.</small>
+        <input name="encoder_url" maxlength="100" placeholder="ws://192.168.1.50:8102" autocomplete="off"
+          spellcheck="false"></label>
+      <label data-encoder-port>Encoder port <small>Leave on Automatic unless the encoder isn't found; then enter its COM
+        port from Windows Device Manager.</small>
+        <input name="encoder_port" maxlength="40" list="encoder-ports" placeholder="Automatic"
+          autocomplete="off" spellcheck="false"></label>
+      <datalist id="encoder-ports">
+        <option value="COM1"></option><option value="COM2"></option><option value="COM3"></option>
+        <option value="COM4"></option><option value="COM5"></option><option value="COM6"></option>
+      </datalist>
+      <p class="hint" data-encoder-hint></p>
+      <div class="ct-status">
+        <span class="hint" data-encoder-result></span>
+        <button class="btn" type="button" data-encoder-test>Test encoder</button>
+      </div>
+    </div>
     <div class="staff-pick" data-pages-pick hidden>
       <div class="pick-head">Pages on this <span data-word>phone</span></div>
       <label class="check"><input type="checkbox" name="pages_all"> All pages, including ones you add later</label>
@@ -353,6 +645,8 @@
     <h2 data-title>Add staff member</h2>
     <label>Name<input name="name" maxlength="40" placeholder="Bob" required></label>
     <label>Role <small>What they get on role-based devices.</small><select name="role_id"></select></label>
+    <label data-dept-row>Department <small>Their key card comes from it (Make key card).</small>
+      <select name="department_id"></select></label>
     <label data-pin-row>PIN <small data-pin-hint></small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <label class="check"><input type="checkbox" name="active"> Can sign in</label>
@@ -361,6 +655,7 @@
         <button class="btn subtle" type="button" data-ct-unlink>Unlink</button></div>
       <label class="check"><input type="checkbox" name="use_kiosk_code"> <span data-kiosk-label>Use their kiosk code as their PIN</span></label>
       <label class="check"><input type="checkbox" name="require_clock_in"> Only allow sign-in while clocked in</label>
+      <p class="hint" data-ct-note hidden></p>
     </div>
     <div class="order-reset" data-order-reset hidden>
       <span>They've rearranged their phone screens.</span>
@@ -434,6 +729,65 @@
       <button class="btn primary" value="save">Done</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dept-dialog" class="wide">
+  <form method="dialog" id="dept-form">
+    <h2 data-title>Department</h2>
+    <label>Name<input name="name" maxlength="40" placeholder="Housekeeping" required></label>
+    <div class="row dept-row">
+      <label>Connecteam smart group <small data-group-hint></small>
+        <select name="smart_group_id"></select></label>
+      <label>Role <small>Given to people who join it.</small><select name="role_id"></select></label>
+    </div>
+    <div class="pick-block">
+      <div class="pick-head">Key card</div>
+      <label class="check"><input type="checkbox" name="has_card"> Make key cards for this department</label>
+      <div data-card-box class="dept-card">
+        <p class="hint">What a key card made with <b>Make key card</b> opens. A whole building or floor
+          also covers doors added there later.</p>
+        <div data-access></div>
+        <div class="row">
+          <label>Card lasts (days)<input name="card_days" type="number" min="1" max="3650" required></label>
+        </div>
+        <label class="check"><input type="checkbox" name="card_lockout"> Opens doors that are deadbolted from inside</label>
+      </div>
+    </div>
+    <p class="form-error" data-error></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Save department</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="job-dialog" class="job-dialog">
+  <div class="job-eyebrow" data-eyebrow></div>
+  <div class="job-visual" data-visual aria-hidden="true"></div>
+  <div class="job-say" aria-live="polite">
+    <div class="job-step" data-step></div>
+    <h2 class="job-prompt" data-prompt tabindex="-1"></h2>
+  </div>
+  <ol class="job-dots" data-dots aria-label="Progress"></ol>
+  <p class="hint job-meta" data-meta></p>
+  <p class="hint job-conn" data-conn hidden>Can't reach Staff Access right now. Still trying…</p>
+  <div class="dialog-actions job-actions" data-actions></div>
+</dialog>
+
+<dialog id="card-dialog" class="wide">
+  <div class="card-dialog-head">
+    <h2 data-title></h2>
+    <button class="btn" type="button" data-close>Close</button>
+  </div>
+  <div data-body></div>
+</dialog>
+
+<dialog id="remote-dialog" class="wide">
+  <div class="card-dialog-head">
+    <h2>Test remote lock-out</h2>
+    <button class="btn" type="button" data-close>Close</button>
+  </div>
+  <div data-body></div>
 </dialog>
 
 <dialog id="ask-dialog" class="ask">

@@ -5,9 +5,15 @@ Two web servers run in this process:
   * Staff (port 8787) is the phone app; expose it through your Cloudflare Tunnel.
 Staff phones never receive Home Assistant credentials. Every request is checked against the
 phone's role before it is forwarded.
+
+Front-desk computers can also make TT Hotel key cards (Wristbands). The add-on, not the
+browser, talks to TT Hotel and to the card encoder on the desk, so neither the TT Hotel account
+nor the encoder ever has to be reachable from a phone or browser.
 """
 
 import asyncio
+import collections
+import dataclasses
 import hashlib
 import io
 import ipaddress
@@ -16,22 +22,31 @@ import logging
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import time
+from datetime import timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import segno
 from aiohttp import web
 
 from branding import Branding
-from db import Database, check_pin, hash_pin, page_choice
+from db import (KEY_CARD_FILTERS, PRIVATE_SETTINGS, WB_ACTIVE, Database, check_pin, hash_pin,
+                page_choice, pin_length)
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
                     clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
                     visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import transfer
-from connecteam import Connecteam, ConnecteamError
+from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
+import wristbands
+from wristbands import PlanError, clean_permissions, no_access, permission_choice
+from tthotel import TTHotel, TTHotelError
+from encoder import EncoderError, Encoders
+from discovery import Discovery, DiscoveryError, describe, ha_networks, parse_networks
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -105,10 +120,93 @@ def load_connecteam_usage() -> dict:
     return usage if isinstance(usage, dict) and isinstance(usage.get("count"), int) else {}
 
 
+USER_AGENT = f"HomeAssistant-StaffPortal/{VERSION} (+https://github.com/liamdayan/ha-staff-portal)"
 connecteam = Connecteam(
     connecteam_settings, connecteam_wanted,
     (load_connecteam_usage, lambda u: db.update_settings({"connecteam_usage": json.dumps(u)})),
-    f"HomeAssistant-StaffPortal/{VERSION} (+https://github.com/liamdayan/ha-staff-portal)")
+    USER_AGENT)
+
+
+def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
+    s = db.settings()
+    return (s.get("wristbands_enabled") == "1", s.get("tthotel_region", "global"),
+            s.get("tthotel_client_id", ""), s.get("tthotel_client_secret", ""),
+            s.get("tthotel_username", ""), s.get("tthotel_password_md5", ""),
+            db.setting_int("tthotel_sync_hours"))
+
+
+def tthotel_wanted() -> bool:
+    """Whether anything needs TT Hotel's door list: Wristbands is on and some computer has a
+    card encoder, typed in or Automatic (so TT Hotel isn't asked for nothing)."""
+    return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
+        "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_auto = 1) "
+        "AND status != 'revoked' LIMIT 1").fetchone() is not None
+
+
+def load_setting_object(key: str) -> dict:
+    """A JSON object kept in settings (TT Hotel's request count or sign-in); {} if damaged."""
+    try:
+        value = json.loads(db.settings().get(key) or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_tthotel_usage() -> dict:
+    usage = load_setting_object("tthotel_usage")
+    return usage if isinstance(usage.get("count"), int) else {}
+
+
+tthotel = TTHotel(
+    tthotel_settings, tthotel_wanted,
+    (load_tthotel_usage, lambda u: db.update_settings({"tthotel_usage": json.dumps(u)})),
+    (lambda: load_setting_object("tthotel_token"),
+     lambda t: db.update_settings({"tthotel_token": json.dumps(t)})),
+    USER_AGENT, on_doors=lambda locks: db.sync_wb_doors(locks),
+    last_sync=lambda: db.wb_last_sync())
+
+
+# One runner per encoder address; each makes one job's cards at a time. The add-on reaches the
+# encoder through TT Hotel's SN Web Socket helper on the desk computer.
+LINGERING_CARD_SECONDS = 3600   # a card made this recently may still be on the encoder after a
+                                # restart, so it isn't overwritten until it's been taken off
+encoders = Encoders(tthotel.hotel_info, lambda *update: save_job_progress(*update),
+                    hotel_info_expired=tthotel.hotel_info_expired,
+                    last_card=lambda url: db.wb_last_card(url, time.time() - LINGERING_CARD_SECONDS))
+
+# A computer whose card encoder is set to Automatic uses the SN Web Socket helper found on the
+# network (discovery.py) instead of a typed address: the staff app comes through the tunnel, so
+# the desk computer's address can't be learned from its requests.
+NETWORK_UNKNOWN = ("Couldn't read Home Assistant's network setting. Try again, or enter the "
+                   "network to search in Wristbands settings.")
+
+
+async def encoder_networks() -> list:
+    """The networks to look for card encoders on: the ones typed in Wristbands settings, else
+    the ones in Home Assistant's network setting (Settings > System > Network)."""
+    typed = db.settings().get("wb_scan_subnets", "")
+    if typed.strip():
+        try:
+            return parse_networks(typed)
+        except ValueError as err:
+            raise DiscoveryError(str(err)) from None
+    try:
+        answer = await ha.ws_command({"type": "network"})
+    except HomeAssistantError as err:
+        log.info("Couldn't read Home Assistant's network setting: %s", err)
+        raise DiscoveryError(NETWORK_UNKNOWN) from None
+    return ha_networks(answer)
+
+
+def encoder_auto_wanted() -> bool:
+    """Whether encoders may be looked for without an admin asking: Wristbands is on and some
+    computer's card encoder is set to Automatic."""
+    return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
+        "SELECT 1 FROM devices WHERE encoder_auto = 1 AND encoder_url IS NULL "
+        "AND status != 'revoked' LIMIT 1").fetchone() is not None
+
+
+discovery = Discovery(lambda: encoder_networks(), lambda: encoder_auto_wanted())
 
 
 def needs_clock_in(member: dict | None) -> bool:
@@ -273,6 +371,11 @@ async def read_json(request: web.Request) -> dict:
     return data
 
 
+async def read_options(request: web.Request) -> dict:
+    """A JSON object of options for a button's request, or {} when it sent no body."""
+    return await read_json(request) if request.can_read_body else {}
+
+
 def clean_name(value, limit: int = 60) -> str:
     return str(value or "").strip()[:limit]
 
@@ -390,6 +493,25 @@ def role_based(device: dict) -> bool:
     return device["signin_mode"] == "role"
 
 
+def pin_timeout(device: dict) -> int:
+    """Seconds without use before a device asks for a PIN again: phones and computers each have
+    their own setting (a front desk computer is walked away from more often than a phone)."""
+    key = ("pin_timeout_computer_minutes" if device.get("kind") == "computer"
+           else "pin_timeout_minutes")
+    return db.setting_int(key) * 60
+
+
+def device_pin_length(device: dict) -> int | None:
+    """How many digits every PIN that could sign in on this device has, when they all have the
+    same known length, so the PIN pad can sign in as soon as the last digit is typed. Only a
+    length shared by everyone allowed on the device is given out (never one person's own), and
+    None whenever any of them is unknown or they differ. Never the PIN itself."""
+    if not is_shared(device):
+        return pin_length(device["pin_length"]) if device["pin_hash"] else None
+    lengths = set(db.staff_pin_lengths(device))
+    return lengths.pop() if len(lengths) == 1 else None   # {None} gives None too
+
+
 def person_page_choice(member: dict) -> list[str] | None:
     """A person's pages on role-based devices: their own choice, else their role's (None:
     every page)."""
@@ -444,6 +566,34 @@ def role_label(device: dict, member: dict | None) -> str | None:
         return device["role_name"]
     role = db.role(member["role_id"]) if member and member.get("role_id") else None
     return role["name"] if role else None
+
+
+# ---------------------------------------------------------------- wristband permissions
+# Which wristbands and cards someone may make, and for which doors, is worked out the same way
+# as access, again on every request: on a role-based device the person's own permissions (else
+# their role's), on a shared kiosk device the device's role's. Every card needs a named maker,
+# so a device nobody signs in to with their own PIN never makes any.
+
+def person_wristbands(member: dict) -> dict:
+    """A person's wristband permissions on role-based devices: their own, else their role's."""
+    own = permission_choice(member.get("wristbands"))
+    if own is not None:
+        return own
+    role = db.role(member["role_id"]) if member.get("role_id") else None
+    return (role and role["wristbands"]) or no_access()
+
+
+def wristband_permissions(device: dict, member: dict | None) -> dict:
+    """What the person signed in on this device may make now (wristbands.NO_ACCESS: nothing).
+    Nothing unless Wristbands is turned on, the device has a card encoder, and someone signed
+    in with their own PIN on a shared or role-based device."""
+    if (not member or not is_shared(device) or not encoder_address(device)
+            or db.settings().get("wristbands_enabled") != "1"):
+        return no_access()
+    if role_based(device):
+        return person_wristbands(member)
+    role = db.role(device["role_id"]) if device.get("role_id") else None
+    return (role and role["wristbands"]) or no_access()
 
 
 def entity_view(entity_id: str, state: dict | None, layout: AreaLayout,
@@ -603,7 +753,7 @@ def authenticate(request: web.Request, need_unlock: bool = True,
 
     key = request.headers.get("X-Session", "")
     session = pin_sessions.get(key)
-    timeout = db.setting_int("pin_timeout_minutes") * 60
+    timeout = pin_timeout(device)
     if not session or session[0] != device["id"] or time.time() - session[1] > timeout:
         pin_sessions.pop(key, None)
         raise json_error(web.HTTPForbidden, "pin_required")
@@ -727,7 +877,11 @@ async def api_me(request: web.Request):
         "app_name": s["app_name"],
         "accent_color": s["accent_color"],
         "has_logo": branding.has_logo(),
-        "pin_timeout_minutes": db.setting_int("pin_timeout_minutes"),
+        # This device's own: phones and computers each have their own setting.
+        "pin_timeout_minutes": pin_timeout(device) // 60,
+        # So the PIN pad can sign in without OK: only when every PIN that could sign in here has
+        # this many digits (None: it waits for a pause instead).
+        "pin_length": device_pin_length(device),
     })
 
 
@@ -742,6 +896,12 @@ async def api_unlock(request: web.Request):
         return bad_request("Too many sign-in attempts. Wait a minute and try again.", 429)
     async with unlock_locks.setdefault(device["id"], asyncio.Lock()):
         device, _ = authenticate(request, need_unlock=False)   # fresh, now that it's our turn
+        if "length" in data and data["length"] != device_pin_length(device):
+            # The PIN pad signed in by itself at a length that's out of date (someone with a
+            # longer PIN was added since it loaded, say). Nothing is checked or counted: the pad
+            # takes the new length and lets them finish typing.
+            return web.json_response({"error": "pin_length_changed",
+                                      "pin_length": device_pin_length(device)}, status=409)
         if not is_shared(device):
             return await unlock_device(request, device, data)
         if device["pin_only"]:
@@ -908,9 +1068,17 @@ async def unlock_by_pin(request: web.Request, device: dict, data: dict) -> web.R
 
 async def pin_taken(pin: str, except_id: int | None = None) -> bool:
     """Whether another staff member already has this PIN. PINs must be unique, because on
-    PIN-only devices the PIN alone says who someone is."""
-    others = [(sid, stored) for sid, stored in db.staff_pins() if sid != except_id]
-    return await asyncio.to_thread(lambda: any(check_pin(pin, stored) for _, stored in others))
+    PIN-only devices the PIN alone says who someone is. PINs given meanwhile (the Connecteam
+    sync) are checked too, so the caller can save it straight after."""
+    checked: set[tuple[int, str]] = set()
+    for _ in range(STAFF_SYNC_RECHECKS):
+        others = {(sid, stored) for sid, stored in db.staff_pins() if sid != except_id} - checked
+        if not others:
+            return False
+        if await asyncio.to_thread(lambda: any(check_pin(pin, stored) for _, stored in others)):
+            return True
+        checked |= others
+    return True   # PINs kept changing: safer to ask for another one
 
 
 PIN_TAKEN = "Someone else already uses that PIN. Give each person their own PIN."
@@ -921,7 +1089,8 @@ def new_session(device: dict, member: dict | None) -> str:
     now = time.time()
     if len(pin_sessions) >= MAX_SESSIONS:
         # Forget sessions that have timed out; if there are still too many, the oldest go.
-        timeout = db.setting_int("pin_timeout_minutes") * 60
+        timeout = max(db.setting_int("pin_timeout_minutes"),
+                      db.setting_int("pin_timeout_computer_minutes")) * 60
         for key, (_, used, _) in list(pin_sessions.items()):
             if now - used > timeout:
                 del pin_sessions[key]
@@ -969,6 +1138,8 @@ async def api_entities(request: web.Request):
         "control_lock_minutes": db.setting_int("control_lock_minutes"),
         "custom_order": bool(order),
         "order": order or {"pages": [], "items": {}},
+        # Whether to offer Wristbands (the page itself checks again on every request).
+        "wristbands": bool(wristband_permissions(device, member)["types"]),
     })
 
 
@@ -1112,6 +1283,733 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
     return False
 
 
+# ---------------------------------------------------------------- wristbands (staff app)
+# A front-desk computer with a card encoder makes TT Hotel key cards: day passes, overnight
+# wristbands and staff cards. wristbands.py turns a request into a plan (checking it against the
+# person's permissions), it's recorded as a card job, and the encoder's runner (encoder.py)
+# writes the cards through TT Hotel's SN Web Socket helper on the desk computer. Screens that
+# poll (a job's progress, a look-up) only read the database and the runner's own state: they
+# never cost a TT Hotel request or wait for the encoder.
+
+WRISTBAND_REQUESTS_PER_MINUTE = 60   # previews while typing, new jobs, their buttons, look-ups
+WRISTBAND_LOG_PAGE = 50
+HA_ZONE_SECONDS = 6 * 3600           # Home Assistant's time zone is read again after this
+HA_ZONE_RETRY = 60                   # after a failed read, how long before asking again
+NO_WRISTBANDS = "You don't have access to make wristbands on this computer."
+NO_TIME_ZONE = ("Can't tell the property's time zone right now, so wristbands can't be made. "
+                "Try again in a minute, or ask your manager to set it in Wristbands settings.")
+ENCODER_BUSY = ("The card encoder is busy with another job. Wait for it to finish, then try "
+                "again.")
+recent_wristband_requests: dict[int, list[float]] = {}
+ha_zone = {"name": None, "at": float("-inf"), "tried": float("-inf")}
+
+
+def wristbands_too_busy(device_id: int) -> bool:
+    now = time.time()
+    times = [t for t in recent_wristband_requests.get(device_id, []) if now - t < 60]
+    busy = len(times) >= WRISTBAND_REQUESTS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_wristband_requests[device_id] = times
+    return busy
+
+
+async def ha_time_zone() -> str | None:
+    """Home Assistant's own time zone (Settings > System > General). Read now and then; while
+    Home Assistant can't be reached, the last one read is used."""
+    now = time.monotonic()
+    if ha_zone["name"] and now - ha_zone["at"] < HA_ZONE_SECONDS:
+        return ha_zone["name"]
+    if now - ha_zone["tried"] < HA_ZONE_RETRY:
+        return ha_zone["name"]
+    ha_zone["tried"] = now
+    try:
+        name = (await ha.config()).get("time_zone")
+        ZoneInfo(str(name))
+    except (HomeAssistantError, ValueError, ZoneInfoNotFoundError) as err:
+        log.warning("Couldn't read Home Assistant's time zone: %s", err)
+        return ha_zone["name"]
+    ha_zone.update(name=name, at=now)
+    return name
+
+
+async def wristband_zone() -> ZoneInfo | None:
+    """The property's time zone for when cards stop working: the one chosen in Wristbands
+    settings, else Home Assistant's. None if neither is known: a card must never get a guessed
+    time."""
+    name = db.settings().get("wb_time_zone") or await ha_time_zone()
+    try:
+        return ZoneInfo(name) if name else None
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+async def wristband_caller(request: web.Request, change: bool = False,
+                           limit: bool = True) -> tuple[dict, dict, dict]:
+    """(device, signed-in person, their wristband permissions) for a Wristbands request, or
+    raise the error the app should show. `change`: making or stopping cards, which counts as
+    using a control (a clocked-in-only person must be on the clock). `limit`: counted towards the
+    device's requests per minute (polls aren't)."""
+    if change:
+        device, member = authenticate(request, active=True)
+        if member and clock_block(member):
+            await recheck_clock(member["id"])
+        device, member = authenticate(request, active=True, control=True)
+    else:
+        device, member = authenticate(request)
+    perms = wristband_permissions(device, member)
+    address = encoder_address(device, rescan=False)
+    if not perms["types"] or not address:
+        if change:
+            db.log(actor_name(device, member), "Blocked: wristbands", role=role_label(device, member),
+                   ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden, NO_WRISTBANDS)
+    if limit and wristbands_too_busy(device["id"]):
+        raise json_error(web.HTTPTooManyRequests,
+                         "Too many requests at once. Wait a moment and try again.")
+    # From here on the device's encoder_url is the encoder it uses now, typed in or found.
+    return {**device, "encoder_url": address}, member, perms
+
+
+def door_name(door: dict) -> str:
+    return door["name"] or door["alias"] or door["tt_name"] or f"Door {door['lock_id']}"
+
+
+def wristband_doors() -> dict[int, dict]:
+    """Every door TT Hotel has listed, by lock ID, as wristbands.py takes them (it leaves out
+    hidden and no-longer-listed ones where it should)."""
+    return {d["lock_id"]: d for d in db.wb_doors()}
+
+
+def card_noun(card_type: str, count: int = 1) -> str:
+    noun = {"day_pass": "day pass", "overnight": "overnight wristband"}.get(card_type, "staff card")
+    if count == 1:
+        return f"an {noun}" if noun[0] in "aeiou" else f"a {noun}"
+    return f"{count} {noun}es" if noun.endswith("s") else f"{count} {noun}s"
+
+
+def made_for(card_type: str, name: str, room_ids) -> str:
+    """Who or what cards were made for, as the activity log says it: the room for overnight
+    cards, otherwise the name typed."""
+    if card_type == "overnight" and isinstance(room_ids, list):
+        doors = wristband_doors()
+        rooms = [door_name(doors[i]) for i in room_ids[:10] if isinstance(i, int) and i in doors]
+        if rooms:
+            return ", ".join(rooms)
+    return name
+
+
+def finished_message(job: dict) -> str:
+    """What a finished job says, if the encoder runner left no message of its own."""
+    noun = "card" if job["card_type"] == "staff" else "wristband"
+    total = len(job["cards"])
+    written = sum(1 for c in job["cards"] if c["status"] in ("written", "cleared"))
+    if job.get("kind") == "revoke":
+        return (f"Card {job['target_card']} is revoked and cleared" if written
+                else f"Card {job['target_card']} wasn't revoked")
+    if job.get("kind") == "notice":
+        return ("The lost card notice is ready. Tap it on each door the lost card opens"
+                if written else "No lost card notice was made")
+    if job["status"] == "cancelled":
+        return (f"Stopped before any {noun}s were made" if not written
+                else f"Stopped after making {written} of {total} {noun}s")
+    if written == total:
+        return f"The {noun} is ready" if total == 1 else f"All {total} {noun}s are ready"
+    return f"{written} of {total} {noun}s made"
+
+
+def job_view(job: dict, zone: ZoneInfo | None) -> dict:
+    """A card job as the app shows it. While it runs, its progress comes from the encoder's
+    runner (in memory); afterwards from the record."""
+    live = job_progress(job) if job["status"] in WB_ACTIVE else None
+    if live:
+        phase, current, message = live["phase"], live.get("current"), live.get("message") or ""
+    elif job["status"] == "needs_attention":
+        failed = next((c for c in job["cards"] if c["status"] == "failed"), None)
+        phase, current = "needs_attention", failed and failed["seq"]
+        message = (failed and failed["error"]) or job["message"] or "That didn't work. Try again."
+    elif job["status"] in ("done", "cancelled"):
+        phase, current, message = job["status"], None, job["message"] or finished_message(job)
+    else:
+        phase, current, message = "queued", None, "Waiting for the encoder…"
+    return {"id": job["id"], "type": job["card_type"], "name": job["name"], "count": job["count"],
+            "summary": job["summary"], "expires_at": job["expires_at"],
+            "expires_label": (wristbands.format_expiry(job["expires_at"], time.time(), zone)
+                              if zone else ""),
+            "status": job["status"], "phase": phase, "current": current, "message": message,
+            "made_by": job["actor"], "created_at": job["ts"],
+            # 'write', 'revoke' or 'notice'; the card revoked, noticed or replaced.
+            "kind": job.get("kind") or "write", "target_card": job.get("target_card"),
+            "holder_staff_id": job.get("holder_staff_id"), "source": job.get("source"),
+            # A staff card's id and state (active, revoked or lost), for the card log.
+            "cards": [{"id": c.get("id"), "seq": c["seq"], "status": c["status"],
+                       "card_number": c["card_number"], "error": c["error"],
+                       "state": c.get("state", "active"), "state_by": c.get("state_by"),
+                       "cancelled_card": c.get("cancelled_card")} for c in job["cards"]]}
+
+
+def visible_job(request: web.Request, member: dict, perms: dict) -> dict:
+    """A card job this person may see: their own, or anyone's if they may see every card.
+    Anyone else's is "not found", so job numbers can't be probed."""
+    try:
+        job = db.wb_job(int(request.match_info["id"]))
+    except (ValueError, OverflowError):
+        job = None
+    if not job or (job["staff_id"] != member["id"] and not perms["see_all_cards"]):
+        raise json_error(web.HTTPNotFound, "That card job wasn't found.")
+    return job
+
+
+async def wristband_plan(request: web.Request, device: dict, member: dict, perms: dict):
+    """(plan, request body, time zone) for the card request in this request's body, or raise
+    the error to show. Refusals (as opposed to typing mistakes) are logged."""
+    data = await read_json(request)
+    zone = await wristband_zone()
+    if zone is None:
+        raise json_error(web.HTTPServiceUnavailable, NO_TIME_ZONE)
+    try:
+        plan = wristbands.plan(data, perms, wristband_doors(), db.settings(), time.time(), zone)
+    except PlanError as err:
+        if err.status == 403:
+            db.log(actor_name(device, member), "Blocked: wristbands", role=role_label(device, member),
+                   detail=err.message, ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden if err.status == 403 else web.HTTPBadRequest,
+                         err.message, field=err.field) from None
+    return plan, data, zone
+
+
+async def api_wristbands(request: web.Request):
+    """What this person may make here, with the defaults to start from."""
+    device, member, perms = await wristband_caller(request, limit=False)
+    status = encoder_status(device["encoder_url"])
+    zone = await wristband_zone()
+    if zone is None:
+        return web.json_response({"enabled": False, "reason": NO_TIME_ZONE, "encoder": status,
+                                  "types": {}, "doors": [], "see_all_cards": perms["see_all_cards"]})
+    options = wristbands.options(perms, wristband_doors(), db.settings(), time.time(), zone)
+    return web.json_response({**options, "encoder": status})
+
+
+async def api_preview_wristbands(request: web.Request):
+    """The summary and end time of a card request, as it's being filled in."""
+    device, member, perms = await wristband_caller(request)
+    plan, _, _ = await wristband_plan(request, device, member, perms)
+    return web.json_response({"plan": plan.public()})
+
+
+async def api_make_wristbands(request: web.Request):
+    device, member, perms = await wristband_caller(request, change=True)
+    plan, data, zone = await wristband_plan(request, device, member, perms)
+    actor, role, ip = actor_name(device, member), role_label(device, member), client_ip(request)
+    url = device["encoder_url"]
+    # Nothing is awaited from here until the job is handed over, so two requests can't both
+    # find the encoder free.
+    if encoder_busy(url):
+        return bad_request(ENCODER_BUSY, 409)
+    holder = staff_named(plan.name) if plan.type == "staff" else None
+    job_id = db.add_wb_job(
+        card_type=plan.type, name=plan.name, count=plan.count,
+        records=[r.to_dict() for r in plan.records], summary=plan.summary,
+        expires_at=plan.expires_at, allow_lockout=plan.allow_lockout, staff_id=member["id"],
+        device_id=device["id"], actor=actor, role=role, ip=ip, encoder_url=url,
+        holder_staff_id=holder and holder["id"], department_id=holder and holder["department_id"],
+        source="staff_app")
+    try:
+        start_job(db.wb_job(job_id), device)
+    except ValueError as err:   # the runner can't write what was planned: a bug, never staff's
+        log.warning("Card job %s couldn't be started: %s", job_id, err)
+        db.cancel_wb_job(job_id, STOPPED_UNEXPECTEDLY)
+        return bad_request("That card couldn't be started. Try again, or ask your manager to "
+                           "check the doors.", 500)
+    action = (f"Made {card_noun(plan.type, plan.count)} for "
+              f"{made_for(plan.type, plan.name, data.get('room_ids'))}")
+    db.log(actor, action, role=role, detail=f"{plan.summary} · until {plan.expires_label}", ip=ip)
+    if db.settings().get("ha_logbook") == "1":
+        background(ha.logbook("Wristbands", f"{action} by {member['name']} ({device['name']}) "
+                                            "via Staff Portal"), "write logbook entry")
+    return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+
+
+def staff_named(name: str) -> dict | None:
+    """The person a staff card was made for, when the name typed is exactly one person's
+    (ignoring capitals and extra spaces)."""
+    wanted = " ".join(str(name or "").split()).lower()
+    found = [dict(r) for r in db.conn.execute(
+        "SELECT id, name, department_id FROM staff WHERE name = ? COLLATE NOCASE", (wanted,))]
+    return found[0] if len(found) == 1 else None
+
+
+async def api_revoke_card(request: web.Request):
+    """Revoke a staff card (card in hand) on this computer's encoder: only for people who may
+    see every card. Reporting a card lost is done in the dashboard."""
+    device, member, perms = await wristband_caller(request, change=True)
+    try:
+        card = db.key_card(int(request.match_info["id"]))
+    except (ValueError, OverflowError):
+        card = None
+    if not perms["see_all_cards"]:
+        db.log(actor_name(device, member), "Blocked: revoke a key card",
+               role=role_label(device, member), ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden, "You don't have access to revoke cards. Ask a "
+                                            "manager.")
+    if not card:
+        raise json_error(web.HTTPNotFound, "That card wasn't found.")
+    if card["state"] != "active":
+        return bad_request(f"This card is already {card['state']}.", 409)
+    if encoder_busy(device["encoder_url"]):
+        return bad_request(ENCODER_BUSY, 409)
+    actor, role, ip = actor_name(device, member), role_label(device, member), client_ip(request)
+    job_id = start_revoke_job(card, device, actor=actor, staff_id=member["id"], role=role, ip=ip,
+                              source="staff_app")
+    db.log(actor, f"Started revoking key {card_label(card)}", role=role, ip=ip)
+    return web.json_response({"job": job_view(db.wb_job(job_id), await wristband_zone())})
+
+
+async def api_wristband_job(request: web.Request):
+    device, member, perms = await wristband_caller(request, limit=False)
+    return web.json_response({"job": job_view(visible_job(request, member, perms),
+                                              await wristband_zone())})
+
+
+async def api_wristband_job_action(request: web.Request):
+    """Try again, skip this card, or stop: what to do after a card couldn't be made."""
+    action = request.match_info["action"]
+    if action == "cancel":
+        # Anyone signed in may stop their own job, even after clocking out or losing wristband
+        # access: otherwise it would go on writing cards for whoever puts one on the encoder.
+        device, member = authenticate(request, active=True)
+        if not member:
+            raise json_error(web.HTTPForbidden, NO_WRISTBANDS)
+        perms = wristband_permissions(device, member)
+        if wristbands_too_busy(device["id"]):
+            raise json_error(web.HTTPTooManyRequests,
+                             "Too many requests at once. Wait a moment and try again.")
+    else:
+        device, member, perms = await wristband_caller(request, change=True)
+    job = visible_job(request, member, perms)
+    if action != "cancel" and job["status"] != "needs_attention":
+        return bad_request("This job isn't waiting for a decision any more.", 409)
+    if job["status"] in WB_ACTIVE:
+        decide_job(job, action)   # a job that ends short is logged when it ends
+    return web.json_response({"job": job_view(db.wb_job(job["id"]), await wristband_zone())})
+
+
+def parse_before(value) -> float | None:
+    """A ?before= paging time, or None for the newest."""
+    if value in (None, ""):
+        return None
+    before = float(value)
+    if not 0 < before < 1e11:   # also refuses NaN and infinity
+        raise ValueError("before")
+    return before
+
+
+async def api_wristband_log(request: web.Request):
+    """Cards made: this person's own, or everyone's if they may see every card."""
+    device, member, perms = await wristband_caller(request, limit=False)
+    jobs = db.wb_jobs(WRISTBAND_LOG_PAGE, parse_before(request.query.get("before")),
+                      None if perms["see_all_cards"] else member["id"],
+                      request.query.get("q", "")[:60])
+    zone = await wristband_zone()
+    return web.json_response({"jobs": [job_view(job, zone) for job in jobs]})
+
+
+async def api_start_lookup(request: web.Request):
+    """Read the wristband on this computer's encoder: its number and what's written on it."""
+    device, member, perms = await wristband_caller(request, change=True)
+    if encoder_busy(device["encoder_url"], lookup=False):   # a new look-up replaces one waiting
+        return bad_request(ENCODER_BUSY, 409)
+    start_lookup(device, member)
+    return web.json_response({"state": "waiting", "card_number": None, "card": [], "job": None,
+                              "message": "Place the wristband on the encoder"})
+
+
+def card_view(records: list[dict], zone: ZoneInfo | None) -> list[dict]:
+    """What a wristband read off the encoder opens, in words (lock MACs stay here)."""
+    doors = db.wb_doors()
+    by_mac = {d["mac"]: d for d in doors}
+    buildings, floors = {}, {}
+    for d in doors:
+        b, f = d["building_number"], d["floor_number"]
+        if b is not None and (d["building_name"] or b not in buildings):
+            buildings[b] = d["building_name"] or f"Building {b}"
+        if b is not None and f is not None and (d["floor_name"] or (b, f) not in floors):
+            floors[(b, f)] = d["floor_name"] or f"Floor {f}"
+    view = []
+    for record in records:
+        level, b, f = record.get("level"), record.get("building"), record.get("floor")
+        if level == "door":
+            door = by_mac.get(record.get("mac"))
+            label = door_name(door) if door else "A door TT Hotel doesn't list"
+        elif level == "floor":
+            label = f"{buildings.get(b, f'Building {b}')}, {floors.get((b, f), f'Floor {f}')}"
+        elif level == "building":
+            label = buildings.get(b, f"Building {b}")
+        elif level == "all":
+            label = "All doors"
+        else:
+            label = "Something the encoder couldn't read"
+        expires = record.get("expires_at")
+        view.append({"level": level, "label": label, "building": b, "floor": f,
+                     "expires_at": expires,
+                     "expires_label": (wristbands.format_expiry(expires, time.time(), zone)
+                                       if expires and zone else "")})
+    return view
+
+
+def lookup_empty(found: dict) -> bool:
+    """Whether a card read off the encoder has nothing on it: blank (or another hotel's), or read
+    with no doors and no lost card notice, as after it's cleared or cancelled in TT Hotel."""
+    if found.get("state") != "done":
+        return False
+    return bool(found.get("blank")) or bool(found.get("read") and not found.get("card")
+                                            and not found.get("cancellations"))
+
+
+def lookup_card_entry(job: dict | None, number: str) -> dict | None:
+    """Our record of this very card in a job (the job may have made several)."""
+    return next((c for c in (job or {}).get("cards", [])
+                 if c["status"] == "written" and c["card_number"] == number), None)
+
+
+# Who a record says revoked a card that was read back with nothing on it.
+FOUND_CLEARED = "Found cleared on the encoder"
+
+
+def note_cleared_card(found: dict, job: dict | None, device: dict, member: dict) -> bool:
+    """A card our record says is active read back with no doors (cancelled or cleared in TT
+    Hotel's own program, say): it opens nothing now, so the record says so too. Only after the
+    doors were actually read: a card the encoder can't read as this hotel's (a sector setting
+    changed, say) may still open doors, so it's left alone. Returns whether a record changed."""
+    entry = lookup_card_entry(job, found.get("card_number"))
+    if (not entry or entry["state"] != "active" or found.get("blank")
+            or not lookup_empty(found)):
+        return False
+    db.set_card_state(entry["id"], "revoked", FOUND_CLEARED)
+    db.log(actor_name(device, member),
+           f"Card {entry['card_number']} ({job['name']}) found cleared on the encoder",
+           role=role_label(device, member), detail="Marked revoked: it has no doors on it")
+    return True
+
+
+def lookup_wipeable(found: dict) -> bool:
+    """Whether the card just looked up has something on it to wipe (doors, or a lost card
+    notice). A card that couldn't be read isn't offered: clearing it would fail the same way."""
+    return bool(found.get("state") == "done" and found.get("card_number") and found.get("read")
+                and (found.get("card") or found.get("cancellations")))
+
+
+def lookup_may_revoke(found: dict, job: dict | None, member: dict, perms: dict) -> bool:
+    """Whether this person may wipe the card they just looked up: people who may see every card,
+    or whoever made it."""
+    return lookup_wipeable(found) and bool(
+        perms["see_all_cards"] or (job and job["staff_id"] == member["id"]))
+
+
+async def api_lookup(request: web.Request):
+    """The look-up this person started on this computer's encoder: the card's number, what's
+    on it, and our record of it (if they may see it)."""
+    device, member, perms = await wristband_caller(request, limit=False)
+    found = lookup_result(device, member)
+    if found is None:
+        return web.json_response({"state": "error", "card_number": None, "card": [], "job": None,
+                                  "message": "Start the look-up again."})
+    zone = await wristband_zone()
+    job = db.wb_card_job(found["card_number"]) if found.get("card_number") else None
+    if job and note_cleared_card(found, job, device, member):
+        job = db.wb_card_job(found["card_number"])
+    may_revoke = lookup_may_revoke(found, job, member, perms)
+    # A blank card's own message is said by "blank" (the app explains it next to "no doors").
+    message = None if found.get("blank") else found.get("message")
+    if job and job["staff_id"] != member["id"] and not perms["see_all_cards"]:
+        job = None
+        message = message or "Someone else made this wristband, so its details aren't shown."
+    elif found["state"] == "done" and not job:
+        message = message or "There's no record of this wristband being made here."
+    return web.json_response({"state": found["state"], "card_number": found.get("card_number"),
+                              "card": card_view(found.get("card") or [], zone),
+                              # Nothing on the card: blank, or cleared (in TT Hotel, say).
+                              "empty": lookup_empty(found), "blank": bool(found.get("blank")),
+                              # A lost card notice (or replacement) read back: the card numbers
+                              # it cancels [{"card_number", "expires_at"}] (None: not read).
+                              "cancellations": found.get("cancellations"),
+                              "can_revoke": may_revoke,
+                              "job": job and job_view(job, zone), "message": message})
+
+
+async def api_lookup_revoke(request: web.Request):
+    """Wipe the card just looked up, which is still on this computer's encoder: the usual revoke
+    job, for that card number. For people who may see every card, or who made this one. The
+    card number comes from the look-up, never from the request."""
+    device, member, perms = await wristband_caller(request, change=True)
+    found = lookup_result(device, member)
+    if not found or found["state"] != "done" or not found.get("card_number"):
+        return bad_request("Look the card up again first.", 409)
+    number = found["card_number"]
+    job = db.wb_card_job(number)
+    actor, role, ip = actor_name(device, member), role_label(device, member), client_ip(request)
+    if not lookup_wipeable(found):
+        return bad_request("This card has no doors on it, so there's nothing to wipe.", 409)
+    if not lookup_may_revoke(found, job, member, perms):
+        db.log(actor, "Blocked: revoke a card", role=role, detail=f"card {number}", ok=False, ip=ip)
+        raise json_error(web.HTTPForbidden, "You can only revoke cards you made. Ask a manager.")
+    if encoder_busy(device["encoder_url"]):
+        return bad_request(ENCODER_BUSY, 409)
+    entry = lookup_card_entry(job, number)
+    ends = [r["expires_at"] for r in found.get("card") or [] if r.get("expires_at")]
+    card = {"id": entry and entry["id"], "card_number": number, "holder_name": None,
+            "name": job["name"] if job else f"Card {number}",
+            "expires_at": job["expires_at"] if job else max(ends, default=time.time()),
+            "holder_staff_id": job and job.get("holder_staff_id"),
+            "department_id": job and job.get("department_id")}
+    job_id = start_revoke_job(card, device, actor=actor, staff_id=member["id"], role=role, ip=ip,
+                              source="staff_app", card_type=job["card_type"] if job else "staff")
+    db.log(actor, f"Started revoking card {number} ({card['name']})", role=role, ip=ip)
+    return web.json_response({"job": job_view(db.wb_job(job_id), await wristband_zone())})
+
+
+# Which encoder a computer uses: Off, Automatic (found on the network) or a typed address.
+
+def encoder_mode(device: dict) -> str:
+    """"address" (typed in; it always wins), "auto" or "off"."""
+    if device.get("encoder_url"):
+        return "address"
+    return "auto" if device.get("encoder_auto") else "off"
+
+
+def encoder_address(device: dict, rescan: bool = True) -> str | None:
+    """Where this computer's card encoder is now: the address typed in, else (Automatic) the SN
+    Web Socket helper found for it, else None. Spelled as transfer.encoder_url spells a typed
+    one, so one encoder still gets one runner. With `rescan`, an Automatic encoder that wasn't
+    found, or has stopped answering, has the network searched again (at most every 10 minutes,
+    and only while something uses Automatic)."""
+    mode = encoder_mode(device)
+    if mode != "auto":
+        return device.get("encoder_url") if mode == "address" else None
+    helper, why = discovery.resolve(device.get("encoder_auto_ip"))
+    url = transfer.encoder_url(helper["url"]) if helper else None
+    if rescan and why != "choose":
+        runner = encoders.find(url)
+        if url is None or (runner is not None and runner.reachable is False):
+            discovery.scan_soon()
+    return url
+
+
+def encoder_text(device: dict) -> str | None:
+    """How a computer's encoder is set and what it resolves to, for the dashboard: "Automatic:
+    192.168.1.50", "Automatic: 2 found, choose one", ... None when it has none."""
+    mode = encoder_mode(device)
+    if mode != "auto":
+        return device["encoder_url"] if mode == "address" else None
+    helper, why = discovery.resolve(device.get("encoder_auto_ip"))
+    if helper:
+        return f"Automatic: {helper['ip']}"
+    if discovery.scanning:
+        return "Automatic: looking for encoders…"
+    if discovery.error:
+        return f"Automatic: {discovery.error}"
+    if discovery.scanned_at is None:
+        return "Automatic: not looked for yet. Click Find encoders."
+    if why == "choose":
+        return f"Automatic: {len(discovery.helpers)} found, choose one"
+    return f"Automatic: no encoder found on {describe(discovery.networks)}"
+
+
+def wristbands_note(device: dict) -> str | None:
+    """Why Wristbands won't show on this computer, for its card in the dashboard (None if it
+    can, as far as the computer goes: on a role-based one it still depends on each person)."""
+    if device.get("kind") != "computer" or device.get("status") == "revoked":
+        return None
+    mode = encoder_mode(device)
+    if db.settings().get("wristbands_enabled") != "1":
+        return ("Wristbands won't show here: Wristbands is turned off (Wristbands tab)."
+                if mode != "off" else None)
+    if mode == "off":
+        return "Wristbands won't show here: it has no card encoder (Edit → Card encoder)."
+    if not encoder_address(device, rescan=False):
+        return "Wristbands won't show here: its card encoder hasn't been found yet."
+    if not is_shared(device):
+        return ("Wristbands won't show here: in Kiosk mode for one person or team, no one signs "
+                "in. Edit it and choose Role-based, or Shared.")
+    if not role_based(device):
+        role = db.role(device["role_id"]) if device.get("role_id") else None
+        if not role or not (role["wristbands"] or {}).get("types"):
+            return ("Wristbands won't show here: it's Shared, and its role can't make any "
+                    "wristbands (Roles tab).")
+    return None
+
+
+# The encoder runners (encoder.py, one per encoder address) are only used through these.
+
+lookups: dict[str, tuple[int, int]] = {}   # encoder address -> (device, person) looking up there
+STOPPED_UNEXPECTEDLY = "Something went wrong, so this job was stopped. Start it again."
+
+
+def encoder_status(url: str) -> dict:
+    """{"connected", "busy", "error", "checked_at"} for an encoder, from its runner's memory
+    (at most every half minute the runner checks in the background that the desk computer
+    still answers)."""
+    return encoders.status(url)
+
+
+def encoder_job(url: str) -> dict | None:
+    """The unfinished card job on an encoder, if any. One the records say is unfinished but no
+    runner knows about (it can't happen, short of a bug) is closed, so it can't block the
+    encoder until the next restart."""
+    job = db.active_wb_job(url)
+    if job and encoders.live(url, job["id"]) is None:
+        log.warning("Card job %s was unfinished with nothing working on it; closing it", job["id"])
+        db.cancel_wb_job(job["id"], STOPPED_UNEXPECTEDLY)
+        return None
+    return job
+
+
+def encoder_busy(url: str, lookup: bool = True) -> bool:
+    """Whether an encoder already has a card job (or, with `lookup`, a look-up) under way. A new
+    one is refused rather than queued behind it, so a double click or a second computer sharing
+    the encoder can't start cards nobody is standing at the encoder for."""
+    runner = encoders.find(url)
+    state = runner.lookup_state() if runner and lookup else None
+    return encoder_job(url) is not None or bool(state and state["state"] == "waiting")
+
+
+def job_progress(job: dict) -> dict | None:
+    """{"phase", "current", "message", ...} of an unfinished job, from its runner's memory."""
+    return encoders.live(job["encoder_url"], job["id"])
+
+
+def runner_job(job: dict) -> dict:
+    """A wb_jobs row as the encoder runner takes it: a revoke names the card to clear
+    ("card_number"); a lost card notice, or a replacement card, carries the cancellation of
+    "cancel_card", valid until "cancel_until" (the lost card's own expiry)."""
+    extra = {"kind": job.get("kind") or "write"}
+    if extra["kind"] == "revoke":
+        extra["card_number"] = job.get("target_card")
+    elif job.get("target_card"):
+        extra.update(cancel_card=job["target_card"],
+                     cancel_until=int(job.get("cancel_until") or job["expires_at"]))
+    return {**job, **extra}
+
+
+def start_job(job: dict, device: dict) -> None:
+    settings = db.settings()
+    encoders.get(job["encoder_url"]).submit(runner_job(job), port=device["encoder_port"],
+                                            sectors=settings.get("wb_sectors", ""),
+                                            card_wait=db.setting_int("wb_card_wait"))
+
+
+def decide_job(job: dict, action: str) -> None:
+    """Try again, skip or stop. Stopping a job no runner knows about any more just closes it."""
+    runner = encoders.find(job["encoder_url"])
+    if runner and runner.live(job["id"]) is not None:
+        getattr(runner, action)(job["id"])
+    elif action == "cancel":
+        db.cancel_wb_job(job["id"], STOPPED_UNEXPECTEDLY)
+
+
+def start_lookup(device: dict, member: dict) -> None:
+    lookups[device["encoder_url"]] = (device["id"], member["id"])
+    encoders.get(device["encoder_url"]).start_lookup(port=device["encoder_port"],
+                                                     card_wait=db.setting_int("wb_card_wait"))
+
+
+def lookup_result(device: dict, member: dict) -> dict | None:
+    """The look-up on this computer's encoder, if this person started it."""
+    runner = encoders.find(device["encoder_url"])
+    if not runner or lookups.get(device["encoder_url"]) != (device["id"], member["id"]):
+        return None
+    return runner.lookup_state()
+
+
+async def test_encoder(device: dict) -> str:
+    """Connect to a computer's encoder, read its version and let it go (raises EncoderError)."""
+    return await encoders.get(device["encoder_url"]).test(device["encoder_port"])
+
+
+def save_job_progress(job_id: int, job_fields: dict, card_fields: dict | None) -> None:
+    """How a runner records a job's progress (the runners never touch the database themselves).
+    A job that ends with cards missing gets its own activity entry."""
+    if card_fields:
+        fields = dict(card_fields)
+        seq = fields.pop("seq")
+        db.update_wb_card(job_id, seq, **fields)
+        if fields.get("status") in ("written", "cleared"):   # cleared: a revoke's card
+            card_done(job_id, seq)
+    if job_fields:
+        db.update_wb_job(job_id, **job_fields)
+    if job_fields.get("status") not in ("done", "cancelled"):
+        return
+    job = db.wb_job(job_id)
+    written = sum(1 for c in job["cards"] if c["status"] in ("written", "cleared")) if job else 0
+    if job and written < job["count"] and (job.get("kind") or "write") != "write":
+        what = "revoke" if job["kind"] == "revoke" else "make a lost card notice for"
+        db.log(job["actor"], f"Couldn't {what} card {job['target_card']}", role=job["role"],
+               detail=job["message"] or finished_message(job), ok=False, ip=job["ip"])
+    elif job and written < job["count"]:
+        what = card_noun(job["card_type"], job["count"])
+        db.log(job["actor"], f"Made only {written} of {what} for {job['name']}" if written
+               else f"Couldn't make {what} for {job['name']}", role=job["role"],
+               detail=job["message"] or finished_message(job), ok=False, ip=job["ip"])
+
+
+def card_done(job_id: int, seq: int) -> None:
+    """A card in a job was written (or, for a revoke, cleared): keep the key card records right.
+    A card number written again retires its older records; a revoke marks its card revoked; a
+    replacement carries the old card's cancellation (the old card is revoked unless it's lost);
+    a lost card notice lists the doors to tap it on."""
+    job = db.wb_job(job_id)
+    card = next((c for c in job["cards"] if c["seq"] == seq), None) if job else None
+    if not card:
+        return
+    kind = job.get("kind") or "write"
+    target = db.key_card(job["target_card_id"]) if job.get("target_card_id") else None
+    if kind == "revoke":
+        if target and target["state"] == "active":
+            db.set_card_state(target["id"], "revoked", job["actor"])
+            db.log(job["actor"], f"Revoked key {card_label(target)}", role=job["role"],
+                   ip=job["ip"])
+        elif not target:
+            # A wristband (only staff cards are key cards), or a card with no record here.
+            other = db.wb_card(job["target_card_id"]) if job.get("target_card_id") else None
+            if other and other["state"] != "active":
+                return
+            if other:
+                db.set_card_state(other["id"], "revoked", job["actor"])
+            db.log(job["actor"], f"Revoked card {job['target_card']}" + (
+                f" ({other['name']})" if other else ""), role=job["role"], ip=job["ip"])
+        return
+    if card["card_number"]:
+        db.retire_card_number(card["card_number"], card["id"], f"Written over by {job['actor']}")
+    if not target:
+        return
+    doors = [d["lock_id"] for d in card_doors(target["records"])]
+    if kind == "notice":
+        db.add_lockouts(target["id"], doors, "notice")
+        for lock_id in doors:
+            if not any(lo["lock_id"] == lock_id and lo["method"] == "notice" and lo["status"] == "done"
+                       for lo in target["lockouts"]):
+                db.set_lockout(target["id"], lock_id, "notice", "pending",
+                               f"Tap notice card {card['card_number']} on this door")
+        db.log(job["actor"], f"Made a lost card notice for key {card_label(target)}",
+               detail=f"notice card {card['card_number']}, {len(doors)} doors to tap")
+        return
+    db.update_wb_card(job_id, seq, cancelled_card=target["card_number"])
+    db.add_lockouts(target["id"], doors, "replacement")
+    if target["state"] == "active":
+        db.set_card_state(target["id"], "revoked", f"Replaced by card {card['card_number']}")
+
+
+def recover_wristband_jobs() -> None:
+    """Card jobs left unfinished when the add-on stopped can't carry on (nothing is writing them
+    any more), so they're closed, and the person can start them again. So are remote lock-outs."""
+    stopped = db.cancel_unfinished_wb_jobs("Stopped because Staff Portal restarted. Start it again.")
+    if db.stop_remote_lockouts("Stopped because Staff Portal restarted. Lock it out again."):
+        log.info("Stopped remote lock-outs that were running when Staff Portal restarted")
+    if stopped:
+        db.log("Staff Portal", f"Stopped {len(stopped)} unfinished card job(s) after a restart",
+               ok=False)
+
+
 STAFF_SECURITY_HEADERS = {
     "Content-Security-Policy":
         "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
@@ -1170,6 +2068,17 @@ def staff_app() -> web.Application:
     app.router.add_delete("/api/order", api_reset_order)
     app.router.add_get("/api/entities", api_entities)
     app.router.add_post("/api/action", api_action)
+    app.router.add_get("/api/wristbands", api_wristbands)
+    app.router.add_post("/api/wristbands/preview", api_preview_wristbands)
+    app.router.add_post("/api/wristbands/jobs", api_make_wristbands)
+    app.router.add_get(r"/api/wristbands/jobs/{id:\d{1,12}}", api_wristband_job)
+    app.router.add_post(r"/api/wristbands/jobs/{id:\d{1,12}}/{action:retry|skip|cancel}",
+                        api_wristband_job_action)
+    app.router.add_get("/api/wristbands/log", api_wristband_log)
+    app.router.add_post("/api/wristbands/lookup", api_start_lookup)
+    app.router.add_get("/api/wristbands/lookup", api_lookup)
+    app.router.add_post(r"/api/wristbands/cards/{id:\d{1,12}}/revoke", api_revoke_card)
+    app.router.add_post("/api/wristbands/lookup/revoke", api_lookup_revoke)
     return app
 
 
@@ -1206,6 +2115,10 @@ def device_payload() -> list[dict]:
         d["staff_ids"] = db.device_staff_ids(d["id"])
         d["layout_pages"] = device_page_choice(d)
         d["custom_order"] = f"d:{d['id']}" in owners
+        d["encoder_mode"] = encoder_mode(d)
+        d["encoder_address"] = encoder_address(d, rescan=False)   # the one it uses now
+        d["encoder_text"] = encoder_text(d)
+        d["wristbands_note"] = wristbands_note(d)
     return devices
 
 
@@ -1232,17 +2145,30 @@ async def admin_index(request: web.Request):
         "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin"})
 
 
+def departments_view() -> list[dict]:
+    """Departments for the dashboard, with their smart group's name when it's known (from the
+    last smart group list read; this never asks Connecteam)."""
+    names = connecteam.known_group_names()
+    return [{**d, "smart_group_name": names.get(d["smart_group_id"])}
+            for d in db.departments()]
+
+
 async def admin_state(request: web.Request):
     owners = db.phone_order_owners()
+    key_counts = db.active_key_card_counts()
     return web.json_response({
         "settings": public_settings(),
         "connecteam": connecteam_state(),
+        "wristbands": await wristbands_state(),
         "tunnel_sources": tunnel_sources(),
         "roles": db.roles(),
+        "departments": departments_view(),
+        "staff_sync": staff_sync_state(),
         "devices": device_payload(),
         "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
                    "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time(),
-                   "clock": connecteam.status(m["connecteam_user_id"]) if needs_clock_in(m) else None}
+                   "clock": connecteam.status(m["connecteam_user_id"]) if needs_clock_in(m) else None,
+                   "key_cards": key_counts.get(m["id"], 0)}
                   for m in db.staff_list()],
         "areas": db.areas(),
         "layout": db.layout(),
@@ -1251,10 +2177,14 @@ async def admin_state(request: web.Request):
 
 
 def public_settings() -> dict:
-    """Settings as the dashboard may see them: the Connecteam secret is only ever "set or not"."""
+    """Settings as the dashboard may see them: secrets are only ever "set or not", and request
+    counts and TT Hotel's sign-in aren't shown at all."""
     s = db.settings()
-    s["connecteam_secret_set"] = "1" if s.pop("connecteam_client_secret", "") else "0"
-    s.pop("connecteam_usage", None)
+    s["connecteam_secret_set"] = "1" if s.get("connecteam_client_secret") else "0"
+    s["tthotel_client_secret_set"] = "1" if s.get("tthotel_client_secret") else "0"
+    s["tthotel_password_md5_set"] = "1" if s.get("tthotel_password_md5") else "0"
+    for key in PRIVATE_SETTINGS:
+        s.pop(key, None)
     return s
 
 
@@ -1339,6 +2269,411 @@ def parse_connecteam_link(data: dict, staff_id: int | None = None) -> dict:
     return fields
 
 
+# ---------------------------------------------------------------- Connecteam staff sync
+# With "Add everyone from Connecteam" on, every active Connecteam user becomes a person here,
+# in the department whose smart group they're in. It uses Connecteam's cached user list (one
+# request, at most hourly, inside the same budget as the clock checks) and never runs while
+# Connecteam is stopped or paused. People added by hand are never touched, and neither is
+# anything an admin changed by hand (role, clock-in rule, PIN, turned on or off).
+
+STAFF_SYNC_EVERY = 3600     # the regular sync, while it's on
+STAFF_SYNC_GAP = 60         # Save or Sync staff now: at most this often
+NO_KIOSK_CODE = "No usable kiosk code in Connecteam"
+LEFT_CONNECTEAM = "Archived or removed in Connecteam"
+MAX_KIOSK_MEMORY = 10_000   # people whose PIN is known to match their kiosk code
+STAFF_SYNC_RECHECKS = 4     # PINs changed during a sync are checked again this often at most
+staff_sync = {"at": None, "result": None, "error": None, "tried": 0.0, "soon": False}
+staff_sync_wake = asyncio.Event()
+staff_sync_lock = asyncio.Lock()
+# staff ID -> fingerprint of (their PIN hash, kiosk code) last found to match, so the hourly sync
+# doesn't re-check every PIN (each check is deliberately slow). In memory only.
+kiosk_matches: dict[int, str] = {}
+
+
+def staff_sync_enabled() -> bool:
+    s = db.settings()
+    return s.get("connecteam_enabled") == "1" and s.get("connecteam_auto_staff") == "1"
+
+
+def sync_staff_soon() -> None:
+    """Sync within a minute (after Save), at most every STAFF_SYNC_GAP seconds."""
+    staff_sync["soon"] = True
+    staff_sync_wake.set()
+
+
+def staff_sync_state() -> dict:
+    return {"enabled": staff_sync_enabled(), "synced_at": staff_sync["at"],
+            "result": staff_sync["result"], "error": staff_sync["error"]}
+
+
+def kiosk_fingerprint(pin_hash: str, code: str) -> str:
+    return hashlib.sha256(f"{pin_hash}:{code}".encode()).hexdigest()
+
+
+def unique_staff_name(name: str, taken: set[str]) -> str:
+    """name, or "name (2)", "name (3)"... whichever nobody here has (ignoring capitals)."""
+    name = clean_name(name, 40) or "Connecteam user"
+    candidate, n = name, 1
+    while candidate.lower() in taken:
+        n += 1
+        suffix = f" ({n})"
+        candidate = name[:40 - len(suffix)].rstrip() + suffix
+    return candidate
+
+
+def summarize_sync(counts: dict) -> str:
+    parts = [f"{counts['added']} added", f"{counts['updated']} updated",
+             f"{counts['turned_off']} turned off", f"{counts['turned_on']} turned on",
+             f"{counts['no_code']} without a kiosk code"]
+    return ", ".join(p for p in parts if not p.startswith("0 ")) or "No changes"
+
+
+async def sync_connecteam_staff(fresh: bool = False) -> dict:
+    """Bring the people added from Connecteam in line with its active users. Returns counts
+    {"added", "updated", "turned_off", "turned_on", "no_code"}; raises ConnecteamError.
+    fresh: Sync staff now (the user list may be at most a minute old)."""
+    users = await connecteam.users(max_age=STAFF_SYNC_GAP if fresh else USERS_TTL)
+    if not users:
+        # Never take an empty answer to mean everyone left.
+        raise ConnecteamError("Connecteam listed no active users, so no one was changed.")
+    async with staff_sync_lock:
+        return await apply_staff_sync(users)
+
+
+async def apply_staff_sync(users: list[dict]) -> dict:
+    counts = {"added": 0, "updated": 0, "turned_off": 0, "turned_on": 0, "no_code": 0}
+    clock = 1 if db.settings().get("connecteam_auto_clock_in") == "1" else 0
+    departments = {d["id"]: d for d in db.departments()}
+    mapped = [d for d in departments.values() if d["smart_group_id"]]
+    roles = {r["id"] for r in db.roles()}
+
+    def department_for(user):
+        return next((d for d in mapped if d["smart_group_id"] in user["groups"]), None)
+    linked = {r["connecteam_user_id"]: dict(r) for r in db.conn.execute(
+        "SELECT * FROM staff WHERE connecteam_user_id IS NOT NULL")}
+    new = [u for u in users if u["id"] not in linked]
+    ours = [(u, linked[u["id"]]) for u in users
+            if u["id"] in linked and linked[u["id"]]["connecteam_auto"]]
+
+    # Kiosk codes: whose PIN each one already is. Checking PINs is slow, so it runs off the
+    # event loop, and as little as it can: someone already added is only checked when the sync
+    # may still set their PIN (it came from their kiosk code, or they have none yet), against
+    # their own PIN first. Everyone's PINs are checked only for codes that would be new PINs.
+    may_set = [(u, m) for u, m in ours if u["kiosk_code"]
+               and (m["pin_from_connecteam"] or m["connecteam_note"] == NO_KIOSK_CODE)
+               and kiosk_matches.get(m["id"]) != kiosk_fingerprint(m["pin_hash"],
+                                                                   u["kiosk_code"])]
+    theirs = await asyncio.to_thread(
+        lambda: [check_pin(u["kiosk_code"], m["pin_hash"]) for u, m in may_set])
+    changing = []
+    for (u, m), same in zip(may_set, theirs):
+        if same:
+            kiosk_matches[m["id"]] = kiosk_fingerprint(m["pin_hash"], u["kiosk_code"])
+        else:
+            changing.append((u, m))
+    codes = {u["kiosk_code"] for u in new if u["kiosk_code"]} | {u["kiosk_code"]
+                                                                  for u, _ in changing}
+    in_use = collections.Counter(u["kiosk_code"] for u in users if u["kiosk_code"])
+    shared = {c for c, n in in_use.items() if n > 1}   # two Connecteam users, one code
+    pins = set(db.staff_pins())
+    owners: dict[str, set[int]] = {c: set() for c in codes}
+
+    async def find_owners(checking: set) -> None:
+        found = await asyncio.to_thread(
+            lambda: {c: {sid for sid, stored in checking if check_pin(c, stored)} for c in codes})
+        for c, sids in found.items():
+            owners[c] |= sids
+    await find_owners(pins)
+
+    def free(code, staff_id=None) -> bool:
+        return bool(code) and code not in shared and not (owners.get(code, set()) - {staff_id})
+
+    # New people: their kiosk code as PIN if it's theirs alone, else turned off until an admin
+    # gives them one (a random PIN nobody knows keeps the record valid meanwhile).
+    plans = [(u, u["kiosk_code"] if free(u["kiosk_code"]) else None) for u in new]
+    taken_codes: set[str] = set()
+    for i, (u, code) in enumerate(plans):
+        if code in taken_codes:
+            plans[i] = (u, None)
+        elif code:
+            taken_codes.add(code)
+    hashes = await asyncio.to_thread(
+        lambda: [hash_pin(code or f"{secrets.randbelow(10**8):08d}") for _, code in plans])
+    changed_pins = {}
+    for u, m in changing:
+        code = u["kiosk_code"]
+        if free(code, m["id"]) and code not in taken_codes:
+            changed_pins[m["id"]] = code
+            taken_codes.add(code)
+    new_hashes = dict(zip(changed_pins, await asyncio.to_thread(
+        lambda: [hash_pin(c) for c in changed_pins.values()])))
+    if len(kiosk_matches) > MAX_KIOSK_MEMORY:
+        kiosk_matches.clear()
+    # A PIN given meanwhile (by an admin, while this was checking) may be one of these codes:
+    # check the PINs that changed, until none did since the last check.
+    for _ in range(STAFF_SYNC_RECHECKS):
+        changed = set(db.staff_pins()) - pins
+        if not changed:
+            break
+        pins |= changed
+        await find_owners(changed)
+    else:
+        raise ConnecteamError("Staff PINs kept changing while staff were synced, so no one was "
+                              "changed. It will try again.")
+
+    # From here on, nothing is awaited: the database is read fresh and written in one go.
+    taken = {r[0].lower() for r in db.conn.execute("SELECT name FROM staff")}
+    for (u, code), pin_hash in zip(plans, hashes):
+        if db.staff_by_connecteam(u["id"]) or (code and not free(code)):
+            continue   # linked meanwhile, or their code became someone's PIN: next time
+        dept = department_for(u)
+        name = unique_staff_name(u["name"], taken)
+        taken.add(name.lower())
+        staff_id = db.conn.execute(
+            """INSERT INTO staff (name, pin_hash, pin_length, status, created_at,
+               connecteam_user_id, require_clock_in, connecteam_auto, pin_from_connecteam,
+               connecteam_note, department_id, role_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+            (name, pin_hash, len(code) if code else None, "active" if code else "disabled",
+             time.time(), u["id"], clock,
+             1 if code else 0, None if code else NO_KIOSK_CODE, dept and dept["id"],
+             dept["role_id"] if dept and dept["role_id"] in roles else None)).lastrowid
+        if code:
+            kiosk_matches[staff_id] = kiosk_fingerprint(pin_hash, code)
+        counts["added"] += 1
+        counts["no_code"] += 0 if code else 1
+    db.conn.commit()
+
+    signed_out = set()
+    for u, old in ours:
+        m = db.staff(old["id"])
+        if not m or not m["connecteam_auto"] or m["connecteam_user_id"] != u["id"]:
+            continue
+        fields = {}
+        dept = department_for(u)
+        was = departments.get(m["department_id"])
+        if dept and m["department_id"] != dept["id"]:
+            fields["department_id"] = dept["id"]
+        elif not dept and m["department_id"] is not None and (not was or was["smart_group_id"]):
+            # Left the smart group: out of its department (one without a smart group, chosen
+            # by hand, stays).
+            fields["department_id"] = None
+        if (dept and dept["role_id"] in roles and not m["role_set"]
+                and m["role_id"] != dept["role_id"]):
+            fields["role_id"] = dept["role_id"]
+        elif ("department_id" in fields and not m["role_set"] and was and was["role_id"]
+              and m["role_id"] == was["role_id"] and not (dept and dept["role_id"])):
+            fields["role_id"] = None   # the role came with the department they left
+        if not m["clock_in_set"] and m["require_clock_in"] != clock:
+            fields["require_clock_in"] = clock
+        if (m["id"] in new_hashes and m["pin_hash"] == old["pin_hash"]
+                and free(u["kiosk_code"], m["id"])):
+            fields.update(pin_hash=new_hashes[m["id"]], pin_length=len(u["kiosk_code"]),
+                          pin_from_connecteam=1, failed_pins=0)
+            kiosk_matches[m["id"]] = kiosk_fingerprint(new_hashes[m["id"]], u["kiosk_code"])
+            signed_out.add(m["id"])
+        turn_on = m["status"] == "disabled" and (
+            m["connecteam_note"] == LEFT_CONNECTEAM
+            or (m["connecteam_note"] == NO_KIOSK_CODE and "pin_hash" in fields))
+        if turn_on:
+            fields.update(status="active", connecteam_note=None)
+            counts["turned_on"] += 1
+        elif fields:
+            counts["updated"] += 1
+        if fields:
+            db.update_staff(m["id"], **fields)
+
+    # Archived in Connecteam, or no longer listed: turned off, never deleted.
+    active = {u["id"] for u in users}
+    for staff_id, uid in db.conn.execute(
+            "SELECT id, connecteam_user_id FROM staff WHERE connecteam_auto = 1 "
+            "AND status != 'disabled' AND connecteam_user_id IS NOT NULL").fetchall():
+        if uid not in active:
+            db.update_staff(staff_id, status="disabled", connecteam_note=LEFT_CONNECTEAM)
+            signed_out.add(staff_id)
+            counts["turned_off"] += 1
+    for staff_id in signed_out:
+        staff_sessions_end(staff_id)   # a new PIN, or turned off: sign in again
+    return counts
+
+
+async def run_staff_sync(actor: str = "Staff Portal", fresh: bool = False) -> dict:
+    """Sync and record how it went (state for the dashboard, and the activity log). Raises
+    ConnecteamError for the Sync staff now button; the regular sync catches it."""
+    staff_sync["tried"] = time.time()
+    try:
+        counts = await sync_connecteam_staff(fresh)
+    except ConnecteamError as err:
+        if actor != "Staff Portal" or staff_sync["error"] != str(err):
+            db.log(actor, "Synced staff from Connecteam", detail=str(err), ok=False)
+        staff_sync["error"] = str(err)
+        raise
+    staff_sync.update(at=time.time(), result=counts, error=None)
+    # The hourly sync only writes to the log when it changed something.
+    if actor != "Staff Portal" or any(counts.values()):
+        db.log(actor, "Synced staff from Connecteam", detail=summarize_sync(counts))
+    return counts
+
+
+def staff_sync_due() -> bool:
+    """Whether the regular sync should run now: it's on, Connecteam isn't stopped or paused,
+    and the last try was an hour ago (a minute, after Save)."""
+    gap = STAFF_SYNC_GAP if staff_sync["soon"] else STAFF_SYNC_EVERY
+    now = time.time()
+    return (staff_sync_enabled() and not connecteam.halted and now >= connecteam.paused_until
+            and now - staff_sync["tried"] >= gap)
+
+
+async def staff_sync_loop() -> None:
+    """Background loop: the regular sync while it's on (and soon after Save). Never raises."""
+    while True:
+        staff_sync_wake.clear()
+        try:
+            if staff_sync_due():
+                staff_sync["soon"] = False
+                await run_staff_sync()
+        except ConnecteamError:
+            pass   # kept in staff_sync["error"] for the dashboard
+        except Exception as err:  # noqa: BLE001 - the loop must keep running
+            log.warning("Connecteam staff sync failed: %r", err)
+            staff_sync["error"] = "Something went wrong while syncing staff. It will try again."
+        try:
+            await asyncio.wait_for(staff_sync_wake.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def admin_sync_staff(request: web.Request):
+    """Sync staff now (Staff tab)."""
+    if not staff_sync_enabled():
+        return bad_request("Turn on Connecteam and Add everyone from Connecteam, and save the "
+                           "settings first.")
+    if time.time() - staff_sync["tried"] < STAFF_SYNC_GAP:
+        return bad_request("Staff were synced less than a minute ago. Wait a moment and try "
+                           "again.", 429)
+    try:
+        counts = await run_staff_sync(admin_name(request), fresh=True)
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    return web.json_response({**counts, "detail": summarize_sync(counts)})
+
+
+async def admin_smart_groups(request: web.Request):
+    """Connecteam's smart groups, for choosing a department's group (cached for hours)."""
+    if not connecteam_settings()[0]:
+        return bad_request("Turn on Connecteam and save the settings first.")
+    try:
+        groups = await connecteam.smart_groups()
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    return web.json_response({"groups": groups})
+
+
+# ---------------------------------------------------------------- departments
+
+def parse_department(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        dept = db.department(int(value))
+    except (TypeError, ValueError, OverflowError):
+        dept = None
+    if not dept:
+        raise web.HTTPBadRequest(text="unknown department")
+    return dept["id"]
+
+
+def clean_department(data: dict, current: dict | None) -> dict:
+    """A department from the dashboard, checked: name, smart_group_id (Connecteam), role_id,
+    card_access (the key card template, as a staff card's "access"; None = no key card),
+    card_days and card_lockout. Fields left out keep what's saved. Raises ValueError."""
+    fields = {}
+    if "name" in data or current is None:
+        name = clean_name(data.get("name"), 40)
+        if not name:
+            raise ValueError("Give the department a name.")
+        if db.name_taken("departments", name, current and current["id"]):
+            raise ValueError("A department with that name already exists.")
+        fields["name"] = name
+    if "smart_group_id" in data:
+        group = transfer.smart_group_id(data["smart_group_id"])
+        if data["smart_group_id"] not in (None, "") and group is None:
+            raise ValueError("Choose a Connecteam smart group from the list.")
+        other = next((d for d in db.departments() if group and d["smart_group_id"] == group
+                      and (current is None or d["id"] != current["id"])), None)
+        if other:
+            raise ValueError(f"{other['name']} already follows that smart group.")
+        fields["smart_group_id"] = group
+    if "role_id" in data:
+        fields["role_id"] = parse_role(data["role_id"])
+    if "card_access" in data:
+        fields["card_access"] = transfer.clean_card_access(data["card_access"])
+        if fields["card_access"] == []:
+            fields["card_access"] = None   # nothing chosen: no key card
+    if "card_days" in data:
+        value = data["card_days"]
+        if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).strip().isdigit():
+            raise ValueError("Key card days must be a whole number.")
+        fields["card_days"] = transfer.card_days(int(value))
+    if "card_lockout" in data:
+        fields["card_lockout"] = 1 if data["card_lockout"] in (True, 1, "1", "on") else 0
+    return fields
+
+
+async def admin_create_department(request: web.Request):
+    data = await read_json(request)
+    try:
+        fields = clean_department(data, None)
+    except ValueError as err:
+        return bad_request(str(err))
+    try:
+        dept_id = db.create_department(**fields)
+    except sqlite3.IntegrityError:
+        return bad_request("A department with that name already exists.")
+    db.log(admin_name(request), f"Created department {fields['name']}")
+    return web.json_response({"id": dept_id})
+
+
+async def admin_update_department(request: web.Request):
+    dept = db.department(int(request.match_info["id"]))
+    if not dept:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    try:
+        fields = clean_department(data, dept)
+    except ValueError as err:
+        return bad_request(str(err))
+    try:
+        db.update_department(dept["id"], **fields)
+    except sqlite3.IntegrityError:
+        return bad_request("A department with that name already exists.")
+    db.log(admin_name(request), f"Updated department {fields.get('name', dept['name'])}")
+    if "smart_group_id" in fields or "role_id" in fields:
+        if staff_sync_enabled():
+            sync_staff_soon()   # people move in or out (the user list is cached)
+    return web.json_response({"ok": True})
+
+
+async def admin_reorder_departments(request: web.Request):
+    data = await read_json(request)
+    order = data.get("order")
+    if not isinstance(order, list) or len(order) > 1000:
+        return bad_request("order must be a list")
+    known = {d["id"] for d in db.departments()}
+    ids = [int(i) for i in order if re.fullmatch(r"\d{1,9}", str(i))]
+    db.reorder_departments([i for i in dict.fromkeys(ids) if i in known])
+    return web.json_response({"ok": True})
+
+
+async def admin_delete_department(request: web.Request):
+    dept = db.department(int(request.match_info["id"]))
+    if not dept:
+        raise web.HTTPNotFound()
+    db.delete_department(dept["id"])
+    db.log(admin_name(request), f"Deleted department {dept['name']}")
+    return web.json_response({"ok": True})
+
+
 async def admin_entities(request: web.Request):
     try:
         states, layout = await ha.states(max_age=0), await area_layout(max_age=0)
@@ -1398,6 +2733,8 @@ async def admin_update_role(request: web.Request):
     areas = clean_area_levels(data["areas"], ("view", "control")) if isinstance(data.get("areas"), dict) else None
     try:
         pages = clean_phone_pages(data["layout_pages"]) if "layout_pages" in data else KEEP
+        # None: people with this role make no wristbands.
+        wristband_perms = clean_permissions(data["wristbands"]) if "wristbands" in data else KEEP
     except ValueError as err:
         return bad_request(str(err))
     if db.name_taken("roles", name, role_id):
@@ -1408,7 +2745,11 @@ async def admin_update_role(request: web.Request):
         return bad_request("A role with that name already exists.")
     if pages is not KEEP:
         db.set_role_pages(role_id, pages)
+    if wristband_perms is not KEEP:
+        db.set_role_wristbands(role_id, wristband_perms)
     detail = f"{len(cleaned)} devices" + (f", {len(areas)} areas" if areas else "")
+    if wristband_perms is not KEEP and wristband_perms != role["wristbands"]:
+        detail += ", wristband rules changed" if wristband_perms else ", no wristbands"
     db.log(admin_name(request), f"Updated role {name}", role=name, detail=detail)
     return web.json_response({"ok": True})
 
@@ -1555,7 +2896,10 @@ async def admin_preview_me(request: web.Request):
         "shared": False, "pin_only": False, "staff": [], "pin_required": False,
         "property_name": s["property_name"], "app_name": s["app_name"],
         "accent_color": s["accent_color"], "has_logo": branding.has_logo(),
-        "pin_timeout_minutes": db.setting_int("pin_timeout_minutes"),
+        "pin_timeout_minutes": db.setting_int(
+            "pin_timeout_computer_minutes" if request.query.get("view") == "desktop"
+            else "pin_timeout_minutes"),
+        "pin_length": None,
     })
 
 
@@ -1614,6 +2958,7 @@ async def admin_preview_entities(request: web.Request):
         "control_lock_minutes": db.setting_int("control_lock_minutes"),
         "custom_order": False,
         "order": {"pages": [], "items": {}},
+        "wristbands": False,   # the preview never makes cards
     })
 
 
@@ -1696,6 +3041,53 @@ def parse_pin(value) -> str | None:
     return pin or None
 
 
+SN_WEB_SOCKET_PORT = 8102   # where TT Hotel's SN Web Socket helper listens on the desk computer
+
+
+ENCODER_MODES = ("off", "auto", "address")
+
+
+def clean_encoder_fields(data: dict) -> dict:
+    """The card encoder from a device form, checked: encoder_mode ("off", "auto" or "address";
+    left out, a typed encoder_url alone decides, as before Automatic), encoder_url,
+    encoder_auto_ip (Automatic: the helper chosen when several were found; blank = the only
+    one) and encoder_port. The address may be typed as just the desk computer's IP address;
+    blank means no encoder. A blank or "auto" port lets the helper find the encoder itself."""
+    fields = {}
+    mode = data.get("encoder_mode")
+    if mode is not None and mode not in ENCODER_MODES:
+        raise ValueError("Choose Off, Automatic or Address for the card encoder.")
+    if mode is not None:
+        fields.update(encoder_url=None, encoder_auto=1 if mode == "auto" else 0)
+        if mode != "auto":
+            fields["encoder_auto_ip"] = None
+    if "encoder_auto_ip" in data and mode in (None, "auto"):
+        raw = str(data["encoder_auto_ip"] or "").strip()
+        if raw and not transfer.encoder_ip(raw):
+            raise ValueError("Choose one of the encoders found, or leave it on the only one.")
+        fields["encoder_auto_ip"] = transfer.encoder_ip(raw)
+    if mode == "address" and not str(data.get("encoder_url") or "").strip():
+        raise ValueError("Enter the encoder's address, or choose Automatic.")
+    if "encoder_url" in data and mode in (None, "address"):
+        url = str(data["encoder_url"] or "").strip().rstrip("/")
+        if url and "://" not in url:
+            url = "ws://" + url
+        if url and not re.search(r":\d+$", url.split("://", 1)[1]):
+            url += f":{SN_WEB_SOCKET_PORT}"
+        if url and not transfer.encoder_url(url):
+            raise ValueError("The encoder address must look like ws://192.168.1.50:8102, using "
+                             "the address of the computer the encoder is plugged into.")
+        fields["encoder_url"] = transfer.encoder_url(url) if url else None
+    if "encoder_port" in data:
+        port = str(data["encoder_port"] or "").strip()
+        port = port.upper() if port.upper().startswith("COM") else port
+        if port and port.lower() != "auto" and not transfer.encoder_port_ok(port):
+            raise ValueError("The encoder port must be Automatic, a COM port like COM3, or a "
+                             "/dev/ path.")
+        fields["encoder_port"] = None if not port or port.lower() == "auto" else port
+    return fields
+
+
 async def admin_create_device(request: web.Request):
     data = await read_json(request)
     name = clean_name(data.get("name"))
@@ -1708,14 +3100,25 @@ async def admin_create_device(request: web.Request):
     role_id = parse_role(data.get("role_id"))
     pin = None if shared else parse_pin(data.get("pin"))
     pages = clean_phone_pages(data.get("layout_pages"))
+    try:
+        encoder = clean_encoder_fields(data)
+    except ValueError as err:
+        return bad_request(str(err))
     device_id = db.create_device(name, role_id, pin)
     if kind != "phone":
         db.update_device(device_id, kind=kind)
+    if encoder:
+        db.update_device(device_id, **encoder)
+        if encoder.get("encoder_auto"):
+            discovery.scan_soon()   # only while Wristbands is on
     if pages is not None:
         db.update_device(device_id, layout_pages=json.dumps(pages))
     if shared:
+        # A new shared computer hides names unless asked not to: a front desk screen is seen by
+        # guests too. Phones show names unless asked to hide them.
+        pin_only = data["pin_only"] if "pin_only" in data else kind == "computer"
         db.update_device(device_id, signin_mode=mode, staff_all=1 if data.get("staff_all", True) else 0,
-                         pin_only=1 if data.get("pin_only") else 0)
+                         pin_only=1 if pin_only else 0)
         if isinstance(data.get("staff_ids"), list):
             known = {m["id"] for m in db.staff_list()}
             db.set_device_staff(device_id, [int(i) for i in data["staff_ids"] if int(i) in known])
@@ -1737,6 +3140,7 @@ async def admin_update_device(request: web.Request):
     if "pin" in data:
         pin = parse_pin(data["pin"])
         fields["pin_hash"] = hash_pin(pin) if pin else None
+        fields["pin_length"] = len(pin) if pin else None
         end_sessions = True
     if data.get("kind") in ("phone", "computer"):
         fields["kind"] = data["kind"]
@@ -1751,6 +3155,10 @@ async def admin_update_device(request: web.Request):
     if "layout_pages" in data:
         pages = clean_phone_pages(data["layout_pages"])
         fields["layout_pages"] = None if pages is None else json.dumps(pages)
+    try:
+        fields.update(clean_encoder_fields(data))
+    except ValueError as err:
+        return bad_request(str(err))
     if isinstance(data.get("staff_ids"), list):
         known = {m["id"] for m in db.staff_list()}
         db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known])
@@ -1759,6 +3167,8 @@ async def admin_update_device(request: web.Request):
             if dev_id == device["id"]:
                 pin_sessions.pop(token, None)
     db.update_device(device["id"], **fields)
+    if fields.get("encoder_auto"):
+        discovery.scan_soon()   # not looked for yet, say (at most every 10 minutes)
     db.log(admin_name(request), f"Updated phone {fields.get('name', device['name'])}")
     return web.json_response({"ok": True})
 
@@ -1879,6 +3289,7 @@ async def admin_create_staff(request: web.Request):
     if link.get("connecteam_user_id") and "require_clock_in" not in link:
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
     role_id = parse_role(data.get("role_id"))
+    department_id = parse_department(data.get("department_id"))
     pin = (await kiosk_pin(link.get("connecteam_user_id")) if data.get("use_kiosk_code")
            else data.get("pin"))
     if await pin_taken(require_pin(pin)):
@@ -1887,8 +3298,9 @@ async def admin_create_staff(request: web.Request):
         staff_id = db.create_staff(name, require_pin(pin))
     except sqlite3.IntegrityError:
         return bad_request("Someone with that name already exists.")
-    if link or role_id:
-        db.update_staff(staff_id, role_id=role_id, **link)
+    if link or role_id or department_id:
+        db.update_staff(staff_id, role_id=role_id, department_id=department_id,
+                        pin_from_connecteam=1 if data.get("use_kiosk_code") else 0, **link)
     db.log(admin_name(request), f"Added staff member {name}" +
            (" from Connecteam" if link.get("connecteam_user_id") else ""))
     return web.json_response({"id": staff_id})
@@ -1903,25 +3315,55 @@ async def admin_update_staff(request: web.Request):
     if "name" in data and clean_name(data["name"], 40):
         fields["name"] = clean_name(data["name"], 40)
     link = parse_connecteam_link(data, member["id"])
+    if member["connecteam_auto"] and link.get("connecteam_user_id",
+                                              member["connecteam_user_id"]) != member[
+                                                  "connecteam_user_id"]:
+        if staff_sync_enabled():
+            # The sync would only add them again, as a second person.
+            return bad_request(f"{member['name']} was added from Connecteam, so they stay "
+                               "linked while Add everyone from Connecteam is on. Archive them in "
+                               "Connecteam to turn them off here.")
+        fields["connecteam_auto"] = 0   # from now on, a person added by hand
     pin = (await kiosk_pin(link.get("connecteam_user_id", member["connecteam_user_id"]))
            if data.get("use_kiosk_code") else data.get("pin"))
     if pin:
         if await pin_taken(require_pin(pin), member["id"]):
             return bad_request(PIN_TAKEN)
         fields["pin_hash"] = hash_pin(require_pin(pin))
+        fields["pin_length"] = len(require_pin(pin))
         fields["failed_pins"] = 0
+        # A typed PIN is the admin's: the Connecteam sync never changes it.
+        fields["pin_from_connecteam"] = 1 if data.get("use_kiosk_code") else 0
     if "active" in data:
         if not data["active"]:
             fields["status"] = "disabled"
         elif member["status"] == "disabled":
+            if member["connecteam_note"] == NO_KIOSK_CODE and not pin:
+                return bad_request(f"Give {member['name']} a PIN first: Connecteam has no kiosk "
+                                   "code of 4 to 8 digits for them.")
             fields["status"] = "active"
+    if fields.get("status", member["status"]) != member["status"] or (
+            "pin_hash" in fields and member["connecteam_note"] == NO_KIOSK_CODE):
+        # Turned on or off by hand, or given a PIN: the sync leaves it so. Saving the Edit
+        # dialog unchanged keeps the note, so the sync can still turn them back on.
+        fields["connecteam_note"] = None
     fields.update(link)
+    # A change made here by hand stays: the Connecteam sync leaves it alone from then on.
+    if "require_clock_in" in link and link["require_clock_in"] != member["require_clock_in"]:
+        fields["clock_in_set"] = 1
     if "role_id" in data:
         fields["role_id"] = parse_role(data["role_id"])
+        if fields["role_id"] != member["role_id"]:
+            fields["role_set"] = 1
+    if "department_id" in data:
+        fields["department_id"] = parse_department(data["department_id"])
     try:
         if "layout_pages" in data:
             pages = clean_phone_pages(data["layout_pages"])   # None: their role's pages
             fields["layout_pages"] = None if pages is None else json.dumps(pages)
+        if "wristbands" in data:
+            perms = clean_permissions(data["wristbands"])     # None: the same as their role
+            fields["wristbands"] = None if perms is None else json.dumps(perms)
         overrides = staff_overrides_from(data, member["id"])
     except ValueError as err:
         return bad_request(str(err))
@@ -1935,7 +3377,12 @@ async def admin_update_staff(request: web.Request):
         db.set_staff_overrides(member["id"], *overrides)
     if "pin_hash" in fields or fields.get("status") == "disabled":
         staff_sessions_end(member["id"])
-    db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}")
+    detail = None
+    if "clock_in_set" in fields:   # the per-person clock-in override changed
+        detail = ("must be clocked in to sign in" if link["require_clock_in"]
+                  else "may sign in without clocking in")
+    db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}",
+           detail=detail)
     return web.json_response({"ok": True})
 
 
@@ -1998,10 +3445,68 @@ async def admin_activity(request: web.Request):
 
 
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
-                 "control_lock", "connecteam_enabled")
-NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("max_pin_attempts", 3, 20),
+                 "control_lock", "connecteam_enabled", "wristbands_enabled", "wb_lockout_daypass",
+                 "wb_lockout_overnight", "wb_lockout_staff", "connecteam_auto_staff",
+                 "connecteam_auto_clock_in", "wb_remote_lockout")
+REMOTE_LOCKOUT_APIS = ("reversed", "plain")   # TT Hotel's two calls for enrolling a card number
+NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minutes", 1, 1440),
+                   ("max_pin_attempts", 3, 20),
                    ("enroll_hours", 1, 720), ("control_lock_minutes", 1, 120),
-                   ("connecteam_poll_minutes", 30, 240))
+                   ("connecteam_poll_minutes", 30, 240), ("tthotel_sync_hours", 1, 48),
+                   ("wb_daypass_max", 1, 50), ("wb_overnight_max", 1, 50),
+                   ("wb_staff_days", 1, 3650), ("wb_staff_max", 1, 20), ("wb_card_wait", 10, 600),
+                   ("wb_max_records", 1, 64))
+# Times of day for wristbands: when day passes stop working, and checkout time.
+TIME_SETTINGS = {"wb_daypass_end": "The time day passes stop working",
+                 "wb_checkout_time": "The checkout time"}
+DOOR_SETTINGS = ("wb_daypass_doors", "wb_overnight_doors")
+MAX_SETTING_DOORS = 200   # doors on a day pass or every overnight card (a card holds far fewer)
+
+
+def wristband_setting(key: str) -> bool:
+    return key == "wristbands_enabled" or key.startswith(("tthotel_", "wb_"))
+
+
+def clean_time_of_day(value, what: str) -> str:
+    """"20:00" from the dashboard's time picker ("8:00" and "20:00:00" will do too)."""
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)(:00)?", str(value or "").strip())
+    if not match or int(match[1]) > 23:
+        raise ValueError(f"{what} must be a time like 20:00 (24-hour clock).")
+    return f"{int(match[1]):02d}:{match[2]}"
+
+
+def clean_time_zone(value) -> str:
+    """A time zone name like America/Denver, or "" for Home Assistant's own."""
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    try:
+        if len(name) > 64 or not re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*", name):
+            raise ValueError
+        ZoneInfo(name)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise ValueError("Enter a time zone like America/Denver, or leave it blank to use Home "
+                         "Assistant's.") from None
+    return name
+
+
+def clean_lock_ids(raw) -> list[int]:
+    """TT Hotel lock IDs chosen in the dashboard (a list, or JSON text of one)."""
+    try:
+        ids = json.loads(raw or "[]") if isinstance(raw, str) else raw
+    except ValueError:
+        ids = None
+    if not isinstance(ids, list) or len(ids) > MAX_SETTING_DOORS:
+        raise ValueError("Pick the doors from the list.")
+    cleaned = []
+    for lock_id in ids:
+        if isinstance(lock_id, str) and re.fullmatch(r"\d{1,16}", lock_id):
+            lock_id = int(lock_id)
+        if isinstance(lock_id, bool) or not isinstance(lock_id, int) or not 0 < lock_id <= 2**53:
+            raise ValueError("Pick the doors from the list.")
+        if lock_id not in cleaned:
+            cleaned.append(lock_id)
+    return cleaned
 
 
 def clean_settings(data: dict, current: dict) -> dict:
@@ -2043,12 +3548,69 @@ def clean_settings(data: dict, current: dict) -> dict:
         values["connecteam_client_secret"] = secret
     if data.get("connecteam_clear_secret") in (True, "1", "true", "on"):
         values["connecteam_client_secret"] = ""
+    values.update(clean_wristband_settings(data))
     for key, lo, hi in NUMBER_SETTINGS:
         if key in data:
             try:
                 values[key] = max(lo, min(hi, int(data[key])))
             except (TypeError, ValueError):
                 raise ValueError(f"{key} must be a number.") from None
+    return values
+
+
+def clean_wristband_settings(data: dict) -> dict:
+    """The Wristbands part of clean_settings (TT Hotel account, times, doors, card details)."""
+    values = {}
+    if "tthotel_region" in data:
+        if data["tthotel_region"] not in ("global", "china"):
+            raise ValueError("Choose where your TT Hotel account is hosted.")
+        values["tthotel_region"] = data["tthotel_region"]
+    if "tthotel_client_id" in data:
+        client_id = str(data["tthotel_client_id"] or "").strip()
+        if len(client_id) > 200 or not re.fullmatch(r"[\x21-\x7e]*", client_id):
+            raise ValueError("The TT Hotel Client ID doesn't look right.")
+        values["tthotel_client_id"] = client_id
+    if "tthotel_username" in data:
+        username = str(data["tthotel_username"] or "").strip()
+        if len(username) > 200 or not username.isprintable():
+            raise ValueError("The TT Hotel username doesn't look right.")
+        values["tthotel_username"] = username
+    # The secret and the password are write-only: blank keeps the saved ones, "clear" removes both.
+    secret = str(data.get("tthotel_client_secret") or "").strip()
+    if secret:
+        if len(secret) > 500 or not re.fullmatch(r"[\x21-\x7e]+", secret):
+            raise ValueError("The TT Hotel Client Secret doesn't look right.")
+        values["tthotel_client_secret"] = secret
+    password = str(data.get("tthotel_password_md5") or "").strip()
+    if password:
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", password):
+            raise ValueError("Enter the password exactly as TT Hotel shows it under Settings > "
+                             "Integration: 32 letters and numbers, not your real password.")
+        values["tthotel_password_md5"] = password.lower()
+    if data.get("tthotel_clear_secret") in (True, "1", "true", "on"):
+        values["tthotel_client_secret"] = values["tthotel_password_md5"] = ""
+    if "wb_time_zone" in data:
+        values["wb_time_zone"] = clean_time_zone(data["wb_time_zone"])
+    for key, what in TIME_SETTINGS.items():
+        if key in data:
+            values[key] = clean_time_of_day(data[key], what)
+    for key in DOOR_SETTINGS:
+        if key in data:
+            values[key] = json.dumps(clean_lock_ids(data[key]))
+    if "wb_sectors" in data:
+        sectors = str(data["wb_sectors"] or "").strip()
+        if not re.fullmatch(r"[01]{16}", sectors) or "1" not in sectors:
+            raise ValueError("Sectors must be 16 digits, each 0 or 1, as set in TT Hotel "
+                             "(its default is 0000000000011111).")
+        values["wb_sectors"] = sectors
+    if "wb_scan_subnets" in data:
+        values["wb_scan_subnets"] = describe(parse_networks(data["wb_scan_subnets"]))
+    if "wb_remote_lockout_api" in data:
+        if data["wb_remote_lockout_api"] not in REMOTE_LOCKOUT_APIS:
+            raise ValueError("Choose how card numbers are sent to TT Hotel for remote lock-out.")
+        values["wb_remote_lockout_api"] = data["wb_remote_lockout_api"]
+    # wb_remote_lockout_tested is never taken from a form or a backup: only the test helper sets
+    # it, after the owner saw a locked-out card refused at a door.
     return values
 
 
@@ -2074,13 +3636,756 @@ async def admin_update_settings(request: web.Request):
                     "browser), then try again.")
             return bad_request("Staff Access hasn't seen any traffic from your tunnel yet, so "
                                "turning this on would block every phone." + hint)
-    ct_before = connecteam_settings()
+    ct_before, tt_before = connecteam_settings(), tthotel_settings()
+    if values.get("wb_remote_lockout_api", current.get("wb_remote_lockout_api")) != current.get(
+            "wb_remote_lockout_api"):
+        values["wb_remote_lockout_tested"] = ""   # the other format hasn't been tried at a door
+    sync_before = staff_sync_enabled()
     db.update_settings(values)
     branding.invalidate()
     if connecteam_settings() != ct_before:
         connecteam.forget()   # also wakes the clock check, which runs only if someone needs it
-    db.log(admin_name(request), "Updated settings")
+    if staff_sync_enabled() and (not sync_before or connecteam_settings() != ct_before
+                                 or "connecteam_auto_clock_in" in values):
+        sync_staff_soon()     # at most once a minute
+    if tthotel_settings() != tt_before:
+        tthotel.forget()      # another account (or Wristbands turned on): a fresh start with it
+    wristbands_only = bool(values) and all(wristband_setting(k) for k in values)
+    db.log(admin_name(request),
+           "Updated wristband settings" if wristbands_only else "Updated settings")
     return web.json_response({"ok": True})
+
+
+# ---------------------------------------------------------------- wristbands (dashboard)
+
+WRISTBAND_TEST_GAP = 10    # seconds between TT Hotel or encoder tests
+DOOR_SYNC_GAP = 60         # seconds between door syncs started from the dashboard
+wristbands_tested = [0.0]
+doors_synced = [0.0]
+encoders_tested: dict[int, float] = {}
+
+
+async def wristbands_state() -> dict:
+    """TT Hotel's connection and request counts, each encoder's status (all from memory), and
+    Home Assistant's time zone, so the dashboard can say which zone cards use (read at most every
+    few hours, and only while Wristbands is on)."""
+    urls = sorted({encoder_address(d, rescan=False) for d in db.devices()} - {None})
+    zone = await ha_time_zone() if tthotel_settings()[0] else ha_zone["name"]
+    return {**tthotel.state(), "encoders": {url: encoder_status(url) for url in urls},
+            "discovery": discovery.state(), "ha_time_zone": zone}
+
+
+def door_view(door: dict) -> dict:
+    return {"id": door["lock_id"], "tt_name": door["tt_name"], "alias": door["alias"],
+            "name": door["name"], "mac_last4": door["mac"][-4:],
+            "building": door["building_number"], "building_name": door["building_name"],
+            "floor": door["floor_number"], "floor_name": door["floor_name"],
+            "battery": door["battery"], "has_gateway": bool(door["has_gateway"]),
+            "hidden": bool(door["hidden"]), "active": bool(door["active"])}
+
+
+async def admin_wristband_doors(request: web.Request):
+    return web.json_response({"doors": [door_view(d) for d in db.wb_doors()]})
+
+
+async def admin_update_door(request: web.Request):
+    """A door's name for staff ('' = TT Hotel's), and whether staff see it in door lists."""
+    door = db.wb_door(int(request.match_info["id"]))
+    if not door:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    fields = {}
+    if "name" in data:
+        fields["name"] = clean_name(data["name"])
+    if "hidden" in data:
+        fields["hidden"] = 1 if data["hidden"] in (True, 1, "1") else 0
+    db.set_wb_door(door["lock_id"], **fields)
+    db.log(admin_name(request), f"Updated door {fields.get('name') or door_name(door)}",
+           detail="hidden from staff" if fields.get("hidden") else None)
+    return web.json_response({"ok": True})
+
+
+async def admin_wristbands_test(request: web.Request):
+    """Sign in to TT Hotel, read its door list, and get the key the encoder needs."""
+    if not tthotel_settings()[0]:
+        return bad_request("Turn on Wristbands and save the settings first.")
+    if time.time() - wristbands_tested[0] < WRISTBAND_TEST_GAP:
+        return bad_request("Wait a few seconds before testing again.", 429)
+    wristbands_tested[0] = time.time()
+    try:
+        result = await tthotel.sync(admin=True)   # also lifts a stop after rejected details
+        await tthotel.hotel_info(fresh=True)
+    except TTHotelError as err:
+        db.log(admin_name(request), "Tested the TT Hotel connection", detail=str(err), ok=False)
+        return bad_request(str(err), 502)
+    db.log(admin_name(request), "Tested the TT Hotel connection",
+           detail=f"{result['total']} doors in {result['buildings']} buildings")
+    return web.json_response({"doors": result["total"], "buildings": result["buildings"]})
+
+
+async def admin_sync_doors(request: web.Request):
+    if not tthotel_settings()[0]:
+        return bad_request("Turn on Wristbands and save the settings first.")
+    if time.time() - doors_synced[0] < DOOR_SYNC_GAP:
+        return bad_request("The doors were synced less than a minute ago. Wait a moment and try "
+                           "again.", 429)
+    doors_synced[0] = time.time()
+    try:
+        result = await tthotel.sync(admin=True)
+    except TTHotelError as err:
+        db.log(admin_name(request), "Synced doors from TT Hotel", detail=str(err), ok=False)
+        return bad_request(str(err), 502)
+    db.log(admin_name(request), "Synced doors from TT Hotel",
+           detail=f"{result['added']} added, {result['updated']} updated, "
+                  f"{result['removed']} removed, {result['total']} in all")
+    return web.json_response({k: result[k] for k in ("added", "updated", "removed", "total")})
+
+
+async def admin_encoder_test(request: web.Request):
+    """Connect to a computer's card encoder, read its version, and let it go again."""
+    device = db.device(int(request.match_info["id"]))
+    if not device:
+        raise web.HTTPNotFound()
+    url = encoder_address(device, rescan=False)
+    if not url:
+        return bad_request(
+            f"No encoder has been found for this computer ({encoder_text(device)}). Click Find "
+            "encoders, or enter its address." if encoder_mode(device) == "auto" else
+            "Choose this computer's card encoder (Automatic or its address) and save it first.")
+    device = {**device, "encoder_url": url}
+    now = time.time()
+    if now - encoders_tested.get(device["id"], 0) < WRISTBAND_TEST_GAP:
+        return bad_request("Wait a few seconds before testing again.", 429)
+    if len(encoders_tested) > 1000:
+        encoders_tested.clear()
+    encoders_tested[device["id"]] = now
+    if encoder_busy(url):
+        return bad_request("The encoder is making cards right now. Test it when it's done.", 409)
+    try:
+        version = await test_encoder(device)
+    except EncoderError as err:
+        db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=err.message,
+               ok=False)
+        return bad_request(err.message, 502)
+    db.log(admin_name(request), f"Tested the encoder on {device['name']}", detail=str(version)[:200])
+    return web.json_response({"version": version})
+
+
+async def admin_find_encoders(request: web.Request):
+    """Find encoders: look for SN Web Socket helpers on the network now, and say what was found.
+    Works whether or not anything uses Automatic yet."""
+    wait = discovery.admin_wait()
+    if wait > 0:
+        return bad_request(f"Encoders were looked for a moment ago. Try again in {int(wait) + 1} "
+                           "seconds.", 429)
+    found = await discovery.find()
+    detail = (f"{len(found['helpers'])} found on {describe(found['networks'])}"
+              if not found["error"] else found["error"])
+    db.log(admin_name(request), "Looked for card encoders", detail=detail[:200],
+           ok=not found["error"])
+    return web.json_response({"discovery": found, "devices": device_payload()})
+
+
+async def admin_wristband_jobs(request: web.Request):
+    """Every card job, newest first."""
+    jobs = db.wb_jobs(WRISTBAND_LOG_PAGE, parse_before(request.query.get("before")))
+    zone = await wristband_zone()
+    return web.json_response({"jobs": [job_view(job, zone) for job in jobs]})
+
+
+# ---------------------------------------------------------------- staff key cards (dashboard)
+# Every staff card made (from the staff app or the Staff tab) is listed on the Staff tab, and
+# can be revoked (cleared on an encoder, card in hand), reported lost, and then locked out of
+# its doors: with a lost card notice tapped on each door, a replacement card that carries the
+# old card's cancellation, or (experimental, gateway doors only) a remote lock-out through TT
+# Hotel. Key cards made from the Staff tab use the person's department's template.
+
+KEY_CARD_PAGE = 100
+DASHBOARD_CARD_PERMS = {"types": ["staff"], "staff_levels": list(wristbands.LEVELS),
+                        "doors": {"all": True}, "edit_doors": True, "max_nights": 0,
+                        "max_staff_days": 0, "see_all_cards": True}
+REMOTE_TRIES = 3              # a door whose gateway is busy is tried this often at most...
+REMOTE_RETRY_SECONDS = 300    # ...this far apart, so a busy gateway never gets a storm of calls
+REMOTE_PACE_SECONDS = 6       # doors one at a time, at most ~10 a minute: 20 of TT Hotel's 30
+                              # calls a minute, leaving room for wristbands and key cards
+REMOTE_MINUTE_WAIT = 60       # held back by our own per-minute cap: wait this long and go on...
+REMOTE_MAX_WAITS = 5          # ...this often per door at most (not counted as tries)
+REMOTE_TEST_NAME = "Remote lock-out test"
+NO_ENCODER = ("No computer has a card encoder set up. Edit a computer and choose its card "
+              "encoder first.")
+remote_running: set[int] = set()   # cards being locked out remotely right now
+# The Test remote lock-out helper's progress. locked_out: the number format the test card was
+# locked out with; only then can the admin say it was refused at the door.
+remote_test = {"job_id": None, "lock_id": None, "door": {}, "locked_out": None}
+
+
+def dashboard_encoders() -> list[dict]:
+    """The card encoders computers use now, one per address: [{"device_id", "name", "url",
+    "status"}] (a computer's own address, typed in or found automatically)."""
+    found: dict[str, dict] = {}
+    for d in db.devices():
+        if d["status"] == "revoked":
+            continue
+        url = encoder_address(d, rescan=False)
+        if not url:
+            continue
+        if url in found:
+            found[url]["name"] = f"{found[url]['name']}, {d['name']}"[:120]
+            continue
+        found[url] = {"device_id": d["id"], "name": d["name"], "url": url,
+                      "port": d["encoder_port"]}
+    return [{**e, "status": encoder_status(e["url"])} for e in found.values()]
+
+
+def chosen_encoder(data: dict) -> dict:
+    """The encoder a dashboard card job uses: the computer chosen ("device_id"), or the only
+    one there is. Returned like a device row (id, name, encoder_url, encoder_port)."""
+    encoders = dashboard_encoders()
+    if not encoders:
+        raise json_error(web.HTTPBadRequest, NO_ENCODER)
+    wanted = data.get("device_id")
+    if wanted in (None, "") and len(encoders) == 1:
+        pick = encoders[0]
+    else:
+        try:
+            device = db.device(int(wanted))
+        except (TypeError, ValueError, OverflowError):
+            device = None
+        url = encoder_address(device, rescan=False) if device else None
+        pick = next((e for e in encoders if e["url"] == url), None)
+        if pick is None:
+            raise json_error(web.HTTPBadRequest, "Choose which card encoder to use.",
+                             encoders=[{"device_id": e["device_id"], "name": e["name"]}
+                                       for e in encoders])
+    if encoder_busy(pick["url"]):
+        raise json_error(web.HTTPConflict, ENCODER_BUSY)
+    return {"id": pick["device_id"], "name": pick["name"], "encoder_url": pick["url"],
+            "encoder_port": pick["port"]}
+
+
+def card_doors(records: list, doors: list[dict] | None = None) -> list[dict]:
+    """The doors a card opens (wb_doors rows): building, floor and all-door records expanded to
+    the doors TT Hotel lists there now. doors: db.wb_doors(), when already read."""
+    doors = db.wb_doors() if doors is None else doors
+    found: dict[int, dict] = {}
+    for r in records if isinstance(records, list) else []:
+        if not isinstance(r, dict):
+            continue
+        level = r.get("level")
+        for d in doors:
+            if level == "door":
+                hit = d["lock_id"] == r.get("door") or (r.get("door") is None and
+                                                       d["mac"] == r.get("mac"))
+            elif not d["active"]:
+                hit = False
+            elif level == "floor":
+                hit = d["building_number"] == r.get("building") and d["floor_number"] == r.get("floor")
+            elif level == "building":
+                hit = d["building_number"] == r.get("building")
+            else:
+                hit = level == "all"
+            if hit:
+                found[d["lock_id"]] = d
+    return list(found.values())
+
+
+def key_card_view(card: dict, zone: ZoneInfo | None, doors: bool = False,
+                  door_rows: list[dict] | None = None) -> dict:
+    """A staff card as the Key cards list shows it. "state" is active, expired, revoked or lost.
+    doors: also every door it opens (for a lost card, the doors to lock it out of). door_rows:
+    db.wb_doors(), when already read."""
+    now = time.time()
+    state = "expired" if card["state"] == "active" and card["expires_at"] <= now else card["state"]
+    door_rows = db.wb_doors() if door_rows is None else door_rows
+    names = {d["lock_id"]: d for d in door_rows}
+    view = {"id": card["id"], "job_id": card["job_id"], "card_number": card["card_number"],
+            "holder": card["holder_name"] or card["name"], "name": card["name"],
+            "holder_staff_id": card["holder_staff_id"], "department": card["department_name"],
+            "summary": card["summary"], "made_by": card["actor"],
+            "made_at": card["written_at"] or card["made_at"], "source": card["source"] or "staff_app",
+            "expires_at": card["expires_at"],
+            "expires_label": (wristbands.format_expiry(card["expires_at"], now, zone)
+                              if zone else ""),
+            "state": state, "state_at": card["state_at"], "state_by": card["state_by"],
+            "cancelled_card": card["cancelled_card"], "allow_lockout": bool(card["allow_lockout"]),
+            "remote_running": card["id"] in remote_running,
+            "lockouts": [{"lock_id": lo["lock_id"],
+                          "door": door_name(names[lo["lock_id"]]) if lo["lock_id"] in names
+                          else f"Door {lo['lock_id']}",
+                          "method": lo["method"], "status": lo["status"], "detail": lo["detail"],
+                          "tries": lo["tries"], "at": lo["at"]} for lo in card["lockouts"]]}
+    if doors:
+        view["doors"] = [{"id": d["lock_id"], "name": door_name(d),
+                          "has_gateway": bool(d["has_gateway"])}
+                         for d in card_doors(card["records"], door_rows)]
+    return view
+
+
+def remote_state() -> dict:
+    """Remote lock-out's settings, and why it can't be used yet (None when it can)."""
+    s = db.settings()
+    enabled, tested = s.get("wb_remote_lockout") == "1", s.get("wb_remote_lockout_tested", "")
+    why = None
+    if not enabled:
+        why = "Remote lock-out is turned off (Wristbands settings). It's experimental."
+    elif not tested:
+        why = ("Test remote lock-out on one door first: until it's been seen to work at a door, "
+               "it can't be used on lost cards.")
+    return {"enabled": enabled, "api": s.get("wb_remote_lockout_api", "reversed"),
+            "tested_at": float(tested) if re.fullmatch(r"\d{1,11}(\.\d+)?", tested) else None,
+            "ready": why is None, "why": why}
+
+
+def key_card_or_404(request: web.Request) -> dict:
+    try:
+        card = db.key_card(int(request.match_info["id"]))
+    except (ValueError, OverflowError):
+        card = None
+    if not card:
+        raise json_error(web.HTTPNotFound, "That key card wasn't found.")
+    return card
+
+
+def card_label(card: dict) -> str:
+    return f"card {card['card_number']} ({card['holder_name'] or card['name']})"
+
+
+async def admin_key_cards(request: web.Request):
+    """The Key cards list: filter by state, search by name or number, newest first."""
+    state = request.query.get("state", "active")
+    if state not in KEY_CARD_FILTERS:
+        return bad_request("Choose Active, Expired, Revoked, Lost or All.")
+    before = request.query.get("before", "")
+    if before and not re.fullmatch(r"\d{1,12}", before):
+        return bad_request("invalid value")
+    cards = db.key_cards(state, request.query.get("q", "")[:60], KEY_CARD_PAGE,
+                         int(before) if before else None)
+    zone = await wristband_zone()
+    door_rows = db.wb_doors()
+    return web.json_response({"cards": [key_card_view(c, zone, c["state"] == "lost", door_rows)
+                                        for c in cards],
+                              "more": len(cards) == KEY_CARD_PAGE,
+                              "encoders": [{k: e[k] for k in ("device_id", "name", "status")}
+                                           for e in dashboard_encoders()],
+                              "remote": remote_state()})
+
+
+async def admin_key_card(request: web.Request):
+    card = key_card_or_404(request)
+    return web.json_response({"card": key_card_view(card, await wristband_zone(), doors=True)})
+
+
+async def dashboard_plan(name: str, access: list, days: int, lockout: bool, field_name: str):
+    """A staff card plan for the dashboard (every door is in scope, as for an admin), or raise
+    the error to show."""
+    zone = await wristband_zone()
+    if zone is None:
+        raise json_error(web.HTTPServiceUnavailable, NO_TIME_ZONE)
+    expires_on = (wristbands.local_today(time.time(), zone) + timedelta(days=days)).isoformat()
+    request = {"type": "staff", "name": name, "count": 1, "access": access,
+               "expires_on": expires_on}
+    try:
+        plan = wristbands.plan(request, DASHBOARD_CARD_PERMS, wristband_doors(), db.settings(),
+                               time.time(), zone)
+    except PlanError as err:
+        raise json_error(web.HTTPBadRequest, f"{field_name}: {err.message}"
+                         if field_name else err.message) from None
+    return dataclasses.replace(plan, allow_lockout=bool(lockout)), zone
+
+
+def start_dashboard_job(request: web.Request, device: dict, **job) -> int:
+    """Record a card job from the dashboard and hand it to the encoder. Returns its ID."""
+    job_id = db.add_wb_job(staff_id=None, device_id=device["id"], actor=admin_name(request),
+                           role=None, ip=request.remote, encoder_url=device["encoder_url"],
+                           source="dashboard", **job)
+    try:
+        start_job(db.wb_job(job_id), device)
+    except ValueError as err:   # the runner can't write what was planned: a bug
+        log.warning("Card job %s couldn't be started: %s", job_id, err)
+        db.cancel_wb_job(job_id, STOPPED_UNEXPECTEDLY)
+        raise json_error(web.HTTPInternalServerError,
+                         "That card job couldn't be started. Try again.") from None
+    return job_id
+
+
+def access_from_records(records: list) -> list[dict]:
+    """A card's records as a staff card request's "access" (to make its replacement)."""
+    access = []
+    for r in records if isinstance(records, list) else []:
+        level = r.get("level") if isinstance(r, dict) else None
+        if level == "all":
+            access.append({"level": "all"})
+        elif level == "building":
+            access.append({"level": "building", "building": r.get("building")})
+        elif level == "floor":
+            access.append({"level": "floor", "building": r.get("building"), "floor": r.get("floor")})
+        elif level == "door" and r.get("door") is not None:
+            access.append({"level": "door", "door": r.get("door")})
+    return access
+
+
+async def admin_make_key_card(request: web.Request):
+    """Make key card (Staff tab): a staff card for this person from their department's template.
+    mode: "replace" (their current card is revoked, and the new one carries its cancellation)
+    or "add"; asked for when they already have an active key card."""
+    member = db.staff(int(request.match_info["id"]))
+    if not member:
+        raise web.HTTPNotFound()
+    data = await read_options(request)
+    if db.settings().get("wristbands_enabled") != "1":
+        return bad_request(wristbands.TURNED_OFF)
+    if member["status"] == "disabled":
+        return bad_request(f"{member['name']} is turned off. Turn them on first.")
+    dept = db.department(member["department_id"]) if member["department_id"] else None
+    if not dept or dept["card_access"] is None:
+        return bad_request(f"Give {member['name']} a department with a key card template first "
+                           "(Staff tab, Departments).")
+    if not dept["card_access"]:
+        return bad_request(f"The {dept['name']} key card template is damaged. Choose its doors "
+                           "again.")
+    mode = data.get("mode")
+    current = db.key_cards("active", holder_staff_id=member["id"], limit=10)
+    zone = await wristband_zone()
+    if current and mode not in ("replace", "add"):
+        return bad_request(f"{member['name']} already has a key card. Replace it, or add "
+                           "another card?", 409, needs_choice=True,
+                           current=[key_card_view(c, zone) for c in current])
+    old = current[0] if current and mode == "replace" else None
+    plan, zone = await dashboard_plan(member["name"], dept["card_access"], dept["card_days"],
+                                      dept["card_lockout"], f"{dept['name']} key card")
+    device = chosen_encoder(data)
+    job_id = start_dashboard_job(
+        request, device, card_type="staff", name=plan.name, count=1,
+        records=[r.to_dict() for r in plan.records], summary=plan.summary,
+        expires_at=plan.expires_at, allow_lockout=plan.allow_lockout,
+        holder_staff_id=member["id"], department_id=dept["id"],
+        target_card_id=old and old["id"], target_card=old and old["card_number"],
+        cancel_until=old and old["expires_at"])
+    db.log(admin_name(request), f"Made a key card for {member['name']}",
+           detail=f"{plan.summary} · until {plan.expires_label}"
+                  + (f" · replaces card {old['card_number']}" if old else ""))
+    return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+
+
+async def admin_key_card_action(request: web.Request):
+    """revoke (card in hand, on an encoder), lost (report it lost), notice (write a lost card
+    notice), replace (a replacement card carrying its cancellation) or lockout (remote)."""
+    card = key_card_or_404(request)
+    action = request.match_info["action"]
+    data = await read_options(request)
+    who = admin_name(request)
+    zone = await wristband_zone()
+    expired = card["expires_at"] <= time.time()
+    if action == "lost":
+        if card["state"] != "active":
+            return bad_request(f"This card is already {card['state']}.", 409)
+        db.set_card_state(card["id"], "lost", who)
+        db.log(who, f"Reported key {card_label(card)} lost")
+        return web.json_response({"card": key_card_view(db.key_card(card["id"]), zone, doors=True)})
+    if action == "lockout":
+        return await remote_lockout_request(request, card, who, zone)
+    if db.settings().get("wristbands_enabled") != "1":
+        return bad_request(wristbands.TURNED_OFF)
+    if action == "revoke":
+        if card["state"] != "active":
+            return bad_request(f"This card is already {card['state']}.", 409)
+        device = chosen_encoder(data)
+        job_id = start_revoke_job(card, device, actor=who, staff_id=None, role=None,
+                                  ip=request.remote, source="dashboard")
+        db.log(who, f"Started revoking key {card_label(card)}",
+               detail="Place the card on the encoder to clear it")
+        return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+    if card["state"] != "lost":
+        return bad_request("Report the card lost first.", 409)
+    if action == "notice":
+        if expired:
+            return bad_request("This card has already expired, so it can't open any door.", 409)
+        device = chosen_encoder(data)
+        job_id = start_dashboard_job(
+            request, device, card_type="staff", name=card["holder_name"] or card["name"],
+            count=1, records=[], summary=f"Lost card notice for card {card['card_number']}",
+            expires_at=card["expires_at"], allow_lockout=False,
+            holder_staff_id=card["holder_staff_id"], department_id=card["department_id"],
+            kind="notice", target_card_id=card["id"], target_card=card["card_number"],
+            cancel_until=card["expires_at"])
+        db.log(who, f"Started a lost card notice for {card_label(card)}")
+        return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+    # replace: the holder's department template if there is one, else what the old card opened.
+    member = db.staff(card["holder_staff_id"]) if card["holder_staff_id"] else None
+    dept = db.department(member["department_id"]) if member and member["department_id"] else None
+    if dept and dept["card_access"]:
+        access, days, lockout = dept["card_access"], dept["card_days"], dept["card_lockout"]
+    else:
+        access, lockout = access_from_records(card["records"]), card["allow_lockout"]
+        days = max(1, int((card["expires_at"] - time.time()) // 86400)) if not expired else 30
+    plan, zone = await dashboard_plan(card["holder_name"] or card["name"], access, days,
+                                      lockout, "Replacement card")
+    device = chosen_encoder(data)
+    job_id = start_dashboard_job(
+        request, device, card_type="staff", name=plan.name, count=1,
+        records=[r.to_dict() for r in plan.records], summary=plan.summary,
+        expires_at=plan.expires_at, allow_lockout=plan.allow_lockout,
+        holder_staff_id=card["holder_staff_id"], department_id=dept and dept["id"],
+        target_card_id=card["id"], target_card=card["card_number"],
+        cancel_until=card["expires_at"])
+    db.log(who, f"Made a replacement for lost key {card_label(card)}",
+           detail=f"{plan.summary} · until {plan.expires_label}")
+    return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+
+
+def start_revoke_job(card: dict, device: dict, *, actor: str, staff_id: int | None,
+                     role: str | None, ip: str | None, source: str,
+                     card_type: str = "staff") -> int:
+    """Clear one card on an encoder: the runner waits for that card number, clears it, and the
+    card (if it's one made here) is marked revoked when it's done."""
+    job_id = db.add_wb_job(
+        card_type=card_type, name=card["holder_name"] or card["name"], count=1, records=[],
+        summary=f"Revoke card {card['card_number']}", expires_at=card["expires_at"],
+        allow_lockout=False, staff_id=staff_id, device_id=device["id"], actor=actor, role=role,
+        ip=ip, encoder_url=device["encoder_url"], holder_staff_id=card["holder_staff_id"],
+        department_id=card["department_id"], source=source, kind="revoke",
+        target_card_id=card["id"], target_card=card["card_number"])
+    try:
+        start_job(db.wb_job(job_id), device)
+    except ValueError as err:
+        log.warning("Revoke job %s couldn't be started: %s", job_id, err)
+        db.cancel_wb_job(job_id, STOPPED_UNEXPECTEDLY)
+        raise json_error(web.HTTPInternalServerError,
+                         "That card couldn't be revoked. Try again.") from None
+    return job_id
+
+
+async def admin_key_card_lockout(request: web.Request):
+    """Tick a door off (a lost card notice or replacement card was tapped on it), or undo it."""
+    card = key_card_or_404(request)
+    data = await read_json(request)
+    try:
+        lock_id = int(request.match_info["lock_id"])
+    except (ValueError, OverflowError):
+        raise web.HTTPNotFound() from None
+    method = data.get("method", "notice")
+    row = next((lo for lo in card["lockouts"] if lo["lock_id"] == lock_id
+                and lo["method"] == method), None)
+    if row is None or method not in ("notice", "replacement"):
+        return bad_request("That door isn't on this card's lock-out list.", 404)
+    done = data.get("done") in (True, 1, "1")
+    db.set_lockout(card["id"], lock_id, method, "done" if done else "pending",
+                   f"Ticked off by {admin_name(request)}" if done else None)
+    door = db.wb_door(lock_id)
+    db.log(admin_name(request), f"{'Locked' if done else 'Unmarked'} key {card_label(card)} "
+                                f"{'out of' if done else 'at'} {door_name(door) if door else lock_id}",
+           detail=f"{method} card" if done else None)
+    return web.json_response({"card": key_card_view(db.key_card(card["id"]),
+                                                    await wristband_zone(), doors=True)})
+
+
+# ---- remote lock-out (experimental)
+
+async def lock_out_try(card_id: int, card_number: str, lock_id: int, api: str, attempt: int,
+                       last_try: bool, door: dict, may_wait: bool = False) -> str:
+    """One try at locking a card number out of one gateway door (tthotel.lock_out_card: two
+    calls through its caps). door carries what earlier tries learned: "enrolled" (the card TT
+    Hotel added, so only its delete is sent next) and "unsure" (an add may have happened
+    unseen, so look for it first). Records progress in wb_lockouts and returns "done", "retry"
+    (later may work: try again in REMOTE_RETRY_SECONDS) or "failed"; door["why"] says why not.
+    may_wait: when our own per-minute cap held the try back (TT Hotel wasn't asked), return
+    "wait" instead, without counting it as a try."""
+    db.set_lockout(card_id, lock_id, "remote", "pending", "Asking TT Hotel…", tries=attempt)
+    result = await tthotel.lock_out_card(lock_id, card_number, api=api,
+                                         card_id=door.get("enrolled"),
+                                         find_first=bool(door.get("unsure")))
+    result = result if isinstance(result, dict) else {}
+    door["enrolled"] = result.get("card_id") or door.get("enrolled")
+    door["unsure"] = bool(result.get("unsure")) and door["enrolled"] is None
+    if may_wait and result.get("wait") and result.get("status") == "retry":
+        db.set_lockout(card_id, lock_id, "remote", "pending",
+                       "Waiting a minute: Staff Access has made enough TT Hotel requests for "
+                       "this minute.", tries=attempt if door["enrolled"] else attempt - 1)
+        return "wait"
+    if result.get("status") == "done":
+        db.set_lockout(card_id, lock_id, "remote", "done",
+                       "Locked out: this card number is retired on this door for good.",
+                       tries=attempt)
+        return "done"
+    door["why"] = str(result.get("message") or "TT Hotel couldn't lock the card out.")
+    door["later"] = result.get("status") == "retry"   # trying again later may work
+    if door["later"] and not last_try:
+        db.set_lockout(card_id, lock_id, "remote", "pending",
+                       f"{door['why']} Trying again in {max(1, REMOTE_RETRY_SECONDS // 60)} min.",
+                       tries=attempt)
+        return "retry"
+    db.set_lockout(card_id, lock_id, "remote", "failed", door["why"], tries=attempt)
+    return "failed"
+
+
+async def remote_lockout_run(card: dict, lock_ids: list[int], actor: str) -> None:
+    """Lock a lost card out of its gateway doors (background; never raises). Doors go one at a
+    time; a door whose gateway is busy is tried again after the others, in another round
+    REMOTE_RETRY_SECONDS later, at most REMOTE_TRIES times, so one busy gateway neither holds
+    up the rest nor gets a storm of calls."""
+    api = db.settings().get("wb_remote_lockout_api", "reversed")
+    # A door tried before (a run that failed or was cut short by a restart) may already have the
+    # card on it, unseen: look for it there first (one more call) rather than adding it twice.
+    tried = {lo["lock_id"] for lo in card.get("lockouts") or []
+             if lo["method"] == "remote" and lo["status"] != "done" and (lo.get("tries") or 0) > 0}
+    doors = {lock_id: {"unsure": lock_id in tried} for lock_id in lock_ids}
+    failed = 0
+    try:
+        todo = list(lock_ids)
+        for attempt in range(1, REMOTE_TRIES + 1):
+            again = []
+            for i, lock_id in enumerate(todo):
+                if i:
+                    await asyncio.sleep(REMOTE_PACE_SECONDS)
+                for waits in range(REMOTE_MAX_WAITS + 1):
+                    outcome = await lock_out_try(card["id"], card["card_number"], lock_id, api,
+                                                 attempt, attempt == REMOTE_TRIES,
+                                                 doors[lock_id], waits < REMOTE_MAX_WAITS)
+                    if outcome != "wait":
+                        break
+                    await asyncio.sleep(REMOTE_MINUTE_WAIT)
+                if outcome == "retry":
+                    again.append(lock_id)
+                elif outcome == "failed":
+                    failed += 1
+            if not again:
+                break
+            await asyncio.sleep(REMOTE_RETRY_SECONDS)
+            todo = again
+    except Exception as err:  # noqa: BLE001 - a background task never raises
+        log.warning("Remote lock-out of card %s stopped: %r", card["card_number"], err)
+        failed = len(lock_ids)
+    finally:
+        remote_running.discard(card["id"])
+    db.log(actor, f"Locked key {card_label(card)} out remotely",
+           detail=f"{len(lock_ids) - failed} of {len(lock_ids)} gateway doors", ok=not failed)
+
+
+async def remote_lockout_request(request: web.Request, card: dict, who: str, zone) -> web.Response:
+    state = remote_state()
+    if not state["ready"]:
+        return bad_request(state["why"], 409)
+    if card["state"] != "lost":
+        return bad_request("Report the card lost first.", 409)
+    if card["expires_at"] <= time.time():
+        return bad_request("This card has already expired, so it can't open any door.", 409)
+    if card["id"] in remote_running:
+        return bad_request("This card is being locked out already.", 409)
+    done = {lo["lock_id"] for lo in card["lockouts"]
+            if lo["method"] == "remote" and lo["status"] == "done"}
+    doors = [d["lock_id"] for d in card_doors(card["records"])
+             if d["has_gateway"] and d["active"] and d["lock_id"] not in done]
+    if not doors:
+        return bad_request("None of this card's doors has a gateway still to lock it out of. "
+                           "Use a lost card notice or a replacement card instead.")
+    db.add_lockouts(card["id"], doors, "remote")
+    remote_running.add(card["id"])
+    background(remote_lockout_run(card, doors, who), "lock a card out remotely")
+    db.log(who, f"Started remote lock-out of key {card_label(card)}",
+           detail=f"{len(doors)} gateway doors; the number is retired on them for good")
+    return web.json_response({"card": key_card_view(db.key_card(card["id"]), zone, doors=True)})
+
+
+async def admin_remote_test(request: web.Request):
+    """The Test remote lock-out helper: start (make a test card for one gateway door), lockout
+    (lock that card out remotely), passed (it was refused at the door: remote lock-out may be
+    used) or failed (it still opened: switch the number format, then try again)."""
+    action = request.match_info["action"]
+    data = await read_options(request)
+    who = admin_name(request)
+    s = db.settings()
+    if s.get("wb_remote_lockout") != "1":
+        return bad_request("Turn on remote lock-out in Wristbands settings first.")
+    if action == "start":
+        door = None
+        try:
+            door = db.wb_door(int(data.get("door_id")))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        if not door or not door["active"] or not door["has_gateway"]:
+            return bad_request("Choose a door that has a gateway.")
+        plan, zone = await dashboard_plan(REMOTE_TEST_NAME, [{"level": "door",
+                                                              "door": door["lock_id"]}],
+                                          1, False, "")
+        device = chosen_encoder(data)
+        job_id = start_dashboard_job(
+            request, device, card_type="staff", name=REMOTE_TEST_NAME, count=1,
+            records=[r.to_dict() for r in plan.records], summary=plan.summary,
+            expires_at=plan.expires_at, allow_lockout=False)
+        remote_test.update(job_id=job_id, lock_id=door["lock_id"], door={}, locked_out=None)
+        db.log(who, "Started a remote lock-out test", detail=door_name(door))
+        return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
+    if action == "lockout":
+        job = db.wb_job(remote_test["job_id"]) if remote_test["job_id"] else None
+        made = next((c for c in (job or {}).get("cards", []) if c["status"] == "written"), None)
+        if not made:
+            return bad_request("Make the test card first, and check that it opens the door.", 409)
+        card = db.key_card(made["id"])
+        if card is None or card["id"] in remote_running:
+            return bad_request("Make the test card again.", 409)
+        db.add_lockouts(card["id"], [remote_test["lock_id"]], "remote")
+        remote_running.add(card["id"])
+        # One try while the admin waits; a busy gateway means clicking again a bit later (what
+        # the try learned is kept, so a card already added is only deleted next time).
+        door = remote_test.setdefault("door", {})
+        api = s.get("wb_remote_lockout_api", "reversed")
+        try:
+            outcome = await lock_out_try(card["id"], card["card_number"], remote_test["lock_id"],
+                                         api, 1, True, door)
+        finally:
+            remote_running.discard(card["id"])
+        problem = None if outcome == "done" else door.get("why")
+        db.log(who, "Remote lock-out test: locked the test card out", detail=problem,
+               ok=problem is None)
+        if problem:
+            return bad_request(problem + (" Wait a few minutes, then click it again."
+                                          if door.get("later") else ""), 502)
+        db.set_card_state(card["id"], "revoked", who)   # its holder says it was the test
+        remote_test["locked_out"] = api
+        return web.json_response({"ok": True, "card_number": card["card_number"]})
+    if action == "passed":
+        if remote_test.get("locked_out") != s.get("wb_remote_lockout_api", "reversed"):
+            return bad_request("Lock the test card out first, then check that the door refuses "
+                               "it.", 409)
+        remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
+        db.update_settings({"wb_remote_lockout_tested": str(int(time.time()))})
+        db.log(who, "Remote lock-out tested: the card was refused at the door",
+               detail=f"number format: {s.get('wb_remote_lockout_api', 'reversed')}")
+        return web.json_response({"remote": remote_state()})
+    # failed: the card still opened the door, so try the other way of sending the number.
+    api = "plain" if s.get("wb_remote_lockout_api") == "reversed" else "reversed"
+    db.update_settings({"wb_remote_lockout_api": api, "wb_remote_lockout_tested": ""})
+    remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
+    db.log(who, "Remote lock-out test: the card still opened the door",
+           detail=f"switched the number format to {api}; make a new test card", ok=False)
+    return web.json_response({"remote": remote_state()})
+
+
+async def admin_key_card_job(request: web.Request):
+    """A card job's live progress, for the dashboard's Make key card, Revoke and notice dialogs."""
+    try:
+        job = db.wb_job(int(request.match_info["id"]))
+    except (ValueError, OverflowError):
+        job = None
+    if not job:
+        raise json_error(web.HTTPNotFound, "That card job wasn't found.")
+    return web.json_response({"job": job_view(job, await wristband_zone())})
+
+
+async def admin_key_card_job_action(request: web.Request):
+    """Try again, skip this card, or stop (any card job: admins may stop anything)."""
+    try:
+        job = db.wb_job(int(request.match_info["id"]))
+    except (ValueError, OverflowError):
+        job = None
+    if not job:
+        raise json_error(web.HTTPNotFound, "That card job wasn't found.")
+    action = request.match_info["action"]
+    if action != "cancel" and job["status"] != "needs_attention":
+        return bad_request("This job isn't waiting for a decision any more.", 409)
+    if job["status"] in WB_ACTIVE:
+        decide_job(job, action)
+    return web.json_response({"job": job_view(db.wb_job(job["id"]), await wristband_zone())})
 
 
 # ---------------------------------------------------------------- export, import, backup
@@ -2094,7 +4399,7 @@ def download(data: dict, kind: str) -> web.Response:
 async def admin_export(request: web.Request):
     kind = request.match_info["kind"]
     maker = {"layout": transfer.export_layout, "roles": transfer.export_roles,
-             "staff": transfer.export_staff}[kind]
+             "staff": transfer.export_staff, "departments": transfer.export_departments}[kind]
     db.log(admin_name(request), f"Exported {kind}")
     return download(maker(db, VERSION), kind)
 
@@ -2102,7 +4407,8 @@ async def admin_export(request: web.Request):
 async def admin_import(request: web.Request):
     kind = request.match_info["kind"]
     data = await read_json(request)
-    importer = {"roles": transfer.import_roles, "staff": transfer.import_staff}[kind]
+    importer = {"roles": transfer.import_roles, "staff": transfer.import_staff,
+                "departments": transfer.import_departments}[kind]
     try:
         result = importer(db, data.get("file"), str(data.get("mode") or ""))
     except ValueError as err:
@@ -2111,6 +4417,8 @@ async def admin_import(request: web.Request):
         staff_sessions_end(staff_id)   # their PIN changed, or they're turned off
     db.log(admin_name(request), f"Imported {kind}",
            detail=f"{result['added']} added, {result['replaced']} replaced, {result['skipped']} skipped")
+    if kind == "departments" and staff_sync_enabled():
+        sync_staff_soon()
     return web.json_response(result)
 
 
@@ -2142,7 +4450,12 @@ async def admin_restore(request: web.Request):
         return bad_request(str(err))
     # Keep what's being replaced, so a restore can be undone by restoring this copy.
     safety = transfer.save_safety_backup(DATA_DIR, transfer.make_backup(db, branding, VERSION))
+    api = db.settings().get("wb_remote_lockout_api", "reversed")
     dropped_links = db.replace_everything(snap)
+    if db.settings().get("wb_remote_lockout_api", "reversed") != api:
+        # Remote lock-out was tested with the other number format, not this one.
+        db.update_settings({"wb_remote_lockout_tested": ""})
+    remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
     for token in dropped_links:
         # A link that didn't survive the restore would otherwise stay valid in Home Assistant.
         try:
@@ -2158,6 +4471,7 @@ async def admin_restore(request: web.Request):
         branding.remove_logo()
     pin_sessions.clear()  # everyone with a PIN signs in again
     connecteam.forget()   # the restored settings may point somewhere else
+    tthotel.forget()
     made = time.strftime("%b %d, %Y", time.localtime(snap["exported_at"]))
     db.log(admin_name(request), "Restored a backup",
            detail=f"Backup from {made}. What it replaced was saved as {safety}." +
@@ -2253,11 +4567,36 @@ def admin_app() -> web.Application:
     app.router.add_get("/logo.png", logo)
     app.router.add_get(r"/icon-{size:\d+}.png", staff_icon)
     app.router.add_get("/api/state", admin_state)
-    app.router.add_get(r"/api/export/{kind:layout|roles|staff}", admin_export)
-    app.router.add_post(r"/api/import/{kind:roles|staff}", admin_import)
+    app.router.add_get(r"/api/export/{kind:layout|roles|staff|departments}", admin_export)
+    app.router.add_post(r"/api/import/{kind:roles|staff|departments}", admin_import)
     app.router.add_get("/api/backup", admin_backup)
     app.router.add_get("/api/connecteam/users", admin_connecteam_users)
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
+    app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)
+    app.router.add_post("/api/connecteam/sync-staff", admin_sync_staff)
+    app.router.add_post("/api/departments", admin_create_department)
+    app.router.add_put("/api/departments/order", admin_reorder_departments)
+    app.router.add_put(r"/api/departments/{id:\d{1,12}}", admin_update_department)
+    app.router.add_delete(r"/api/departments/{id:\d{1,12}}", admin_delete_department)
+    app.router.add_get("/api/keycards", admin_key_cards)
+    app.router.add_get(r"/api/keycards/{id:\d{1,12}}", admin_key_card)
+    app.router.add_post(r"/api/keycards/{id:\d{1,12}}/{action:revoke|lost|notice|replace|lockout}",
+                        admin_key_card_action)
+    app.router.add_patch(r"/api/keycards/{id:\d{1,12}}/lockouts/{lock_id:\d{1,16}}",
+                         admin_key_card_lockout)
+    app.router.add_get(r"/api/keycards/jobs/{id:\d{1,12}}", admin_key_card_job)
+    app.router.add_post(r"/api/keycards/jobs/{id:\d{1,12}}/{action:retry|skip|cancel}",
+                        admin_key_card_job_action)
+    app.router.add_post(r"/api/keycards/remote-test/{action:start|lockout|passed|failed}",
+                        admin_remote_test)
+    app.router.add_post(r"/api/staff/{id:\d{1,12}}/keycard", admin_make_key_card)
+    app.router.add_post("/api/wristbands/test", admin_wristbands_test)
+    app.router.add_post("/api/wristbands/doors/sync", admin_sync_doors)
+    app.router.add_get("/api/wristbands/doors", admin_wristband_doors)
+    app.router.add_patch(r"/api/wristbands/doors/{id:\d{1,16}}", admin_update_door)
+    app.router.add_get("/api/wristbands/jobs", admin_wristband_jobs)
+    app.router.add_post(r"/api/devices/{id:\d{1,12}}/encoder-test", admin_encoder_test)
+    app.router.add_post("/api/wristbands/encoders/find", admin_find_encoders)
     app.router.add_post("/api/restore/preview", admin_restore_preview)
     app.router.add_post("/api/restore", admin_restore)
     app.router.add_get("/api/safety-backups", admin_safety_backups)
@@ -2310,7 +4649,12 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     await ha.start()
     await connecteam.start()
+    await tthotel.start()
+    recover_wristband_jobs()
+    discovery.scan_soon()   # only while Wristbands is on and a computer's encoder is Automatic
     clock_task = asyncio.create_task(connecteam.run())
+    sync_task = asyncio.create_task(staff_sync_loop())   # only while Add everyone is on
+    doors_task = asyncio.create_task(tthotel.run())
     raise_file_limit()
     runners = []
     for app, port in ((admin_app(), ADMIN_PORT), (staff_app(), STAFF_PORT)):
@@ -2320,12 +4664,24 @@ async def main():
         runners.append(runner)
     log.info("Staff Portal %s: admin on :%s (ingress), staff app on :%s",
              VERSION, ADMIN_PORT, STAFF_PORT)
+    # Home Assistant stops the add-on with SIGTERM (on update, restart or shutdown): treat it as a
+    # normal exit so the cleanup below runs, which also lets go of every card encoder.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
     try:
-        await asyncio.Event().wait()
+        await stop.wait()
+        log.info("Stopping Staff Portal")
     finally:
         clock_task.cancel()
+        sync_task.cancel()
+        doors_task.cancel()
         for runner in runners:
             await runner.cleanup()
+        await discovery.close()
+        await encoders.close_all()   # lets go of every encoder
+        await tthotel.close()
         await connecteam.close()
         await ha.close()
 
