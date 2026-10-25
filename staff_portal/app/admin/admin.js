@@ -2115,7 +2115,7 @@
   const WB_LEVELS = [["door", "Single doors"], ["floor", "Whole floors"], ["building", "Whole buildings"],
     ["all", "Every door (a master card)"]];
   const WB_NONE = { types: [], staff_levels: [], doors: { buildings: [], floors: [], doors: [] },
-    edit_doors: false, max_nights: 0, max_staff_days: 0, see_all_cards: false };
+    edit_doors: false, edit_end_time: false, max_nights: 0, max_staff_days: 0, see_all_cards: false };
   const WB_MAX_LIMIT = 3650; // the add-on's most nights or staff-card days (ten years)
   const WB_JOB_PAGE = 50;    // card jobs per page, as the add-on sends them
   const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
@@ -2258,7 +2258,8 @@
     const start = { ...clone(WB_NONE), ...clone(value ?? inherited ?? WB_NONE) };
     const types = new Set(start.types || []);
     const levels = new Set(start.staff_levels || []);
-    const flags = { edit_doors: start.edit_doors === true, see_all_cards: start.see_all_cards === true };
+    const flags = { edit_doors: start.edit_doors === true, edit_end_time: start.edit_end_time === true,
+      see_all_cards: start.see_all_cards === true };
     const limits = { max_nights: start.max_nights || 0, max_staff_days: start.max_staff_days || 0 };
     // Sets, so unticking a building brings back the floors and doors that were ticked inside it.
     const doors = start.doors || {};
@@ -2322,6 +2323,10 @@
     const editDoors = checkRow(flags.edit_doors, "Change the doors when making a day pass or overnight wristband",
       "Otherwise they get the doors set on the Wristbands tab. They can only add doors they have access to.",
       (ev) => { flags.edit_doors = ev.target.checked; emit(); });
+    const editEnd = checkRow(flags.edit_end_time, "May change when day passes stop working",
+      "Any time later than now, up to 11:59 PM that day, even after the usual time. Otherwise day passes " +
+      "stop at the time set on the Wristbands tab.",
+      (ev) => { flags.edit_end_time = ev.target.checked; emit(); });
     const nights = limit("max_nights", "Longest overnight stay (nights)");
     const days = limit("max_staff_days", "Longest a staff card lasts (days)");
     const seeAll = checkRow(flags.see_all_cards, "See everyone's cards",
@@ -2330,7 +2335,7 @@
     const rest = h("div", { class: "wb-body" },
       h("div", { class: "wb-sub" }, "Doors they may put on cards"),
       h("label", { class: "check" }, allBox, "All doors, including ones added later"),
-      treeBox, warn, editDoors, nights, days, seeAll);
+      treeBox, warn, editDoors, editEnd, nights, days, seeAll);
     const body = h("div", { class: "wb-body" }, h("div", { class: "wb-sub" }, "Cards they may make"),
       typeBoxes, levelBox, rest);
 
@@ -2365,6 +2370,7 @@
       levelBox.hidden = !types.has("staff");
       rest.hidden = !types.size;
       editDoors.hidden = !types.has("day_pass") && !types.has("overnight");
+      editEnd.hidden = !types.has("day_pass");
       nights.hidden = !types.has("overnight");
       days.hidden = !types.has("staff");
       const notes = warnings();
@@ -2510,25 +2516,44 @@
       : `In effect: ${saved || haText}.`;
   }
 
-  // The day-pass and overnight door lists: every door, grouped by building and floor.
+  // The day-pass and overnight door lists: the public doors (and doors not marked yet), grouped
+  // by building and floor.
   function renderDefaultDoors() {
-    drawDoorChecks($("#wb-daypass-doors"), $("#wb-daypass-count"), wbPicks.wb_daypass_doors);
-    drawDoorChecks($("#wb-overnight-doors"), $("#wb-overnight-count"), wbPicks.wb_overnight_doors);
+    drawDoorChecks($("#wb-daypass-doors"), $("#wb-daypass-count"), wbPicks.wb_daypass_doors,
+      $("#wb-daypass-rooms"), "day passes open");
+    drawDoorChecks($("#wb-overnight-doors"), $("#wb-overnight-count"), wbPicks.wb_overnight_doors,
+      $("#wb-overnight-rooms"), "every overnight wristband opens");
   }
 
-  function drawDoorChecks(box, countEl, picked) {
-    const showCount = () => { countEl.textContent = `(${picked.size} chosen)`; };
+  // Guest rooms ticked as shared doors (marked after they were chosen) still go on the cards,
+  // so say so.
+  function sharedRoomsWarning(warnEl, picked, opens) {
+    const rooms = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "room").map(doorName);
+    const one = rooms.length === 1;
+    warnEl.textContent = rooms.length ? `${listNames(rooms)} ${one ? "is marked as a guest room" : "are marked as guest rooms"}` +
+      `, but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. Untick ${one ? "it" : "them"}, ` +
+      `or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.` : "";
+    warnEl.hidden = !rooms.length;
+  }
+
+  function drawDoorChecks(box, countEl, picked, warnEl, opens) {
+    const showCount = () => {
+      countEl.textContent = `(${picked.size} chosen)`;
+      sharedRoomsWarning(warnEl, picked, opens);
+    };
     showCount();
     if (!wbDoors) {
       box.replaceChildren(doorsPending());
       return;
     }
-    // A door TT Hotel no longer lists stays here while it's ticked, so it can be unticked.
-    const doors = wbDoors.filter((d) => d.active || picked.has(d.id));
+    // Shared doors are public doors, or ones not marked yet. A guest room or a door TT Hotel no
+    // longer lists stays here while it's ticked, so it can be unticked.
+    const doors = wbDoors.filter((d) => (d.active && d.kind !== "room") || picked.has(d.id));
     const unknown = [...picked].filter((id) => !wbDoors.some((d) => d.id === id));
     if (!doors.length && !unknown.length) {
-      box.replaceChildren(h("p", { class: "hint" },
-        "No doors yet. Save your TT Hotel details, then click Test connection or Sync from TT Hotel."));
+      box.replaceChildren(h("p", { class: "hint" }, wbDoors.some((d) => d.active)
+        ? "Every door is marked as a guest room. Mark the shared doors as public doors under Doors below."
+        : "No doors yet. Save your TT Hotel details, then click Test connection or Sync from TT Hotel."));
       return;
     }
     const row = (id, label, note) => h("label", { class: "check pick-row" },
@@ -2544,7 +2569,7 @@
         rows.push(h("div", { class: "wb-door-group" }, `${b.name} · ${f.name}`));
         for (const d of f.doors) {
           rows.push(row(d.id, doorName(d), !d.active ? " · no longer in TT Hotel"
-            : d.hidden ? " · hidden from staff" : ""));
+            : d.kind === "room" ? " · guest room" : d.hidden ? " · hidden from staff" : ""));
         }
       }
     }
@@ -2929,14 +2954,111 @@
     const rows = [];
     for (const b of doorGroups(wbDoors)) {
       for (const f of b.floors) {
-        rows.push(h("tr", { class: "wb-group" }, h("th", { colspan: "5" }, `${b.name} · ${f.name}`)));
+        rows.push(h("tr", { class: "wb-group" }, h("th", { colspan: "6" }, `${b.name} · ${f.name}`)));
         rows.push(...f.doors.map(doorRow));
       }
     }
-    box.replaceChildren(h("div", { class: "table-wrap wb-door-wrap" }, h("table", { class: "activity wb-door-table" },
-      h("thead", null, h("tr", null, h("th", null, "Door"), h("th", null, "Battery"), h("th", null, "Gateway"),
-        h("th", null, "Status"), h("th", null, "Staff see it"))),
-      h("tbody", null, rows))));
+    box.replaceChildren(h("p", { id: "wb-kinds-status" }), markDoorsTool(),
+      h("div", { class: "table-wrap wb-door-wrap" }, h("table", { class: "activity wb-door-table" },
+        h("thead", null, h("tr", null, h("th", null, "Door"), h("th", null, "Kind"), h("th", null, "Battery"),
+          h("th", null, "Gateway"), h("th", null, "Status"), h("th", null, "Staff see it"))),
+        h("tbody", null, rows))));
+    renderKindStatus();
+  }
+
+  // ------------------------------------------------ door kinds: public doors and guest rooms
+
+  const DOOR_KINDS = [["", "Not marked"], ["public", "Public door"], ["room", "Guest room"]];
+  const KIND_PLURALS = { public: "public doors", room: "guest rooms" };
+  let markChoice = { where: "", kind: "room" };   // the floor or building and kind last marked
+
+  // How many doors aren't marked yet (they show as both rooms and shared doors until they are).
+  function renderKindStatus() {
+    const status = $("#wb-kinds-status");
+    if (!status || !wbDoors) return;
+    const active = wbDoors.filter((d) => d.active);
+    const open = active.filter((d) => !d.kind).length;
+    const counted = (kind) => plural(active.filter((d) => d.kind === kind).length, kind === "room" ? "guest room" : "public door");
+    status.className = open ? "wb-warn" : "hint";
+    status.textContent = !active.length ? ""
+      : open ? `${plural(open, "door")} ${open === 1 ? "isn't" : "aren't"} marked yet. Until ${open === 1 ? "it is" : "they are"}, ` +
+        `staff see ${open === 1 ? "it" : "them"} both as a guest room and as a shared door.`
+      : `Every door is marked: ${counted("public")} and ${counted("room")}.`;
+  }
+
+  // Marks a whole floor or building at once.
+  function markDoorsTool() {
+    const targets = new Map();
+    const where = h("select", { "aria-label": "Floor or building" });
+    for (const b of doorGroups(wbDoors)) {
+      const options = [];
+      const all = b.floors.flatMap((f) => f.doors);
+      if (b.number != null && b.floors.length > 1) {
+        targets.set(`b${b.number}`, { label: b.name, doors: all });
+        options.push(h("option", { value: `b${b.number}` }, `Whole building (${plural(all.length, "door")})`));
+      }
+      b.floors.forEach((f, i) => {
+        const key = `f${b.number ?? "-"}:${f.number ?? "-"}:${i}`;
+        const whole = b.number != null && b.floors.length === 1;   // a building with one floor
+        targets.set(key, { label: whole ? b.name : `${b.name} · ${f.name}`, doors: f.doors });
+        options.push(h("option", { value: key }, `${whole ? "Whole building" : f.name} (${plural(f.doors.length, "door")})`));
+      });
+      where.append(h("optgroup", { label: b.name }, options));
+    }
+    if (targets.has(markChoice.where)) where.value = markChoice.where;
+    const kind = h("select", { "aria-label": "Mark them as" },
+      DOOR_KINDS.map(([value, label]) => h("option", { value }, value ? `${label}s` : label)));
+    kind.value = markChoice.kind;
+    const go = h("button", { type: "button", class: "btn" }, "Mark");
+    go.addEventListener("click", () => run(async () => {
+      const target = targets.get(where.value);
+      if (!target) return;
+      const value = kind.value || null;
+      markChoice = { where: where.value, kind: kind.value };
+      // Doors already marked the other way are only changed once the owner says so.
+      const other = target.doors.filter((d) => d.kind && d.kind !== value);
+      const doors = plural(target.doors.length, "door");
+      const question = value
+        ? `${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked the other ` +
+          `way now. Mark all ${doors} as ${KIND_PLURALS[value]}?`
+        : `Unmark all ${doors} on ${target.label}? Staff then see them both as guest rooms and as shared doors.`;
+      if (other.length && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
+      await api("POST", "api/wristbands/doors/kind", { door_ids: target.doors.map((d) => d.id), kind: value });
+      for (const d of target.doors) d.kind = value;
+      renderDoors();
+      renderDefaultDoors();
+      $("#wb-doors .wb-mark button")?.focus();
+      toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` : `${target.label}: ${doors} unmarked.`);
+    }));
+    return h("div", { class: "wb-mark" }, h("span", null, "Mark a whole floor or building:"), where,
+      h("span", null, "as"), kind, go);
+  }
+
+  // A door's kind, saved as soon as it's changed.
+  function doorKindPicker(d) {
+    const label = doorName(d);
+    const pick = h("select", { "aria-label": `Kind of door for ${label}`, class: d.kind ? null : "wb-unmarked" },
+      DOOR_KINDS.map(([value, text]) => h("option", { value }, text)));
+    pick.value = d.kind || "";
+    pick.addEventListener("change", () => run(async () => {
+      const value = pick.value || null;
+      try {
+        await api("PATCH", `api/wristbands/doors/${d.id}`, { kind: value });
+      } catch (err) {
+        pick.value = d.kind || "";
+        throw err;
+      }
+      d.kind = value;
+      pick.classList.toggle("wb-unmarked", !value);
+      renderKindStatus();
+      renderDefaultDoors();
+      const shared = ["wb_daypass_doors", "wb_overnight_doors"].some((key) => wbPicks[key].has(d.id));
+      toast(value === "room" && shared ? `${doorName(d)} is a guest room now, but it's still one of the shared ` +
+        "doors above: untick it there."
+        : value ? `${doorName(d)} is a ${value === "room" ? "guest room" : "public door"} now.`
+        : `${doorName(d)} isn't marked: staff see it both as a room and as a shared door.`);
+    }));
+    return pick;
   }
 
   // One door: its name for staff (blank: TT Hotel's) and whether staff see it. Each change is
@@ -2961,6 +3083,7 @@
       h("td", null, name, h("div", { class: "sub" },
         `TT Hotel: ${d.tt_name || "no name"}${d.alias && d.alias !== d.tt_name ? ` (${d.alias})` : ""}` +
         ` · ID ${d.id}${d.mac_last4 ? ` · MAC …${d.mac_last4}` : ""}`)),
+      h("td", null, doorKindPicker(d)),
       h("td", { class: d.battery != null && d.battery <= 20 ? "nowrap wb-low" : "nowrap" },
         d.battery == null ? "—" : `${d.battery}%`),
       h("td", null, d.has_gateway ? "Yes" : "No"),

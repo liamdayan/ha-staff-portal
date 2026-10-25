@@ -9,7 +9,7 @@ import sqlite3
 import time
 import urllib.parse
 
-from wristbands import permission_choice
+from wristbands import door_kind, permission_choice
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -291,6 +291,11 @@ MIGRATIONS = {
         # How many digits their PIN has, as for devices (NULL = not known).
         "pin_length": "INTEGER",
     },
+    "wb_doors": {
+        # 'public' (a shared door, such as the pool gate) or 'room' (a guest room); NULL = not
+        # marked yet, offered as both. TT Hotel's door sync never changes it.
+        "kind": "TEXT",
+    },
     "wb_jobs": {
         # Who a staff card is for (made from the Staff tab, or matched by name), their department
         # and where it was made ('staff_app' or 'dashboard'). No foreign keys.
@@ -450,7 +455,7 @@ LockoutRow = collections.namedtuple("LockoutRow", "card_id lock_id method status
 # What a migration brings besides a backup's contents (see migrate.py): every column of a door.
 DOOR_COLUMNS = ("lock_id", "tt_name", "alias", "mac", "lock_type", "building_number",
                 "building_name", "floor_number", "floor_name", "battery", "has_gateway", "name",
-                "hidden", "active", "synced_at")
+                "hidden", "active", "synced_at", "kind")
 # What makes an install "set up", for Migrate (which only restores onto a fresh install): a
 # fresh one has none of these, only default settings and perhaps a few activity log lines.
 SET_UP_TABLES = ("staff", "devices", "roles", "areas", "departments", "wb_jobs")
@@ -1145,9 +1150,13 @@ class Database:
             c.executemany("UPDATE wb_jobs SET holder_staff_id = NULL WHERE holder_staff_id = ?",
                           [(r[0],) for r in holders.fetchall() if r[0] not in same])
             # Door names and hiding chosen here, for doors this system already knows (the door
-            # list itself comes from TT Hotel, and isn't replaced).
+            # list itself comes from TT Hotel, and isn't replaced). Kinds too, from backups that
+            # have them (older ones leave them as they are).
             c.executemany("UPDATE wb_doors SET name = ?, hidden = ? WHERE lock_id = ?",
                           [(d["name"], d["hidden"], d["lock_id"]) for d in snap["wristband_doors"]])
+            c.executemany("UPDATE wb_doors SET kind = ? WHERE lock_id = ?",
+                          [(d["kind"], d["lock_id"]) for d in snap["wristband_doors"]
+                           if "kind" in d])
             for key, value in snap["settings"].items():
                 if key in DEFAULT_SETTINGS:
                     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
@@ -1355,13 +1364,24 @@ class Database:
         return dict(row) if row else None
 
     def set_wb_door(self, lock_id: int, **fields) -> None:
-        """The name staff see for a door ('' = TT Hotel's), and whether it's hidden from them."""
-        sets = {k: v for k, v in fields.items() if k in ("name", "hidden")}
+        """The name staff see for a door ('' = TT Hotel's), whether it's hidden from them, and
+        its kind ('public', 'room' or None)."""
+        sets = {k: v for k, v in fields.items() if k in ("name", "hidden", "kind")}
+        if "kind" in sets:
+            sets["kind"] = door_kind(sets["kind"])
         if not sets:
             return
         cols = ", ".join(f"{k} = ?" for k in sets)
         self.conn.execute(f"UPDATE wb_doors SET {cols} WHERE lock_id = ?", (*sets.values(), lock_id))
         self.conn.commit()
+
+    def set_wb_door_kinds(self, lock_ids: list[int], kind: str | None) -> int:
+        """Mark many doors at once (a whole floor or building) as 'public', 'room' or None.
+        Returns how many doors there were."""
+        rows = [(door_kind(kind), lock_id) for lock_id in lock_ids]
+        changed = self.conn.executemany("UPDATE wb_doors SET kind = ? WHERE lock_id = ?", rows)
+        self.conn.commit()
+        return changed.rowcount
 
     def wb_last_sync(self) -> tuple[float | None, int]:
         """(when TT Hotel's door list was last synced, how many doors it listed then)."""

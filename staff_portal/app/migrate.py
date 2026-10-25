@@ -37,7 +37,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
-from wristbands import MAC_RE
+from wristbands import MAC_RE, door_kind
 
 FORMAT = transfer.MIGRATE_FORMAT
 VERSION = 1                 # the file's own layout; the add-on's version is in the header too
@@ -314,7 +314,8 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
                 "name": str(row.get("name") or "").strip()[:60],   # as in a backup
                 "hidden": 1 if row.get("hidden") in (1, True) else 0,
                 "active": 0 if row.get("active") in (0, False) else 1,
-                "synced_at": _when(row.get("synced_at"), now)})
+                "synced_at": _when(row.get("synced_at"), now),
+                "kind": door_kind(row.get("kind"))})
 
     # Home Assistant links: for people, and for devices that are still the same signed-in device.
     links = {"devices": {}, "staff": {}}

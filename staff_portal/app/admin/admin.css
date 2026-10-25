@@ -607,6 +607,13 @@ dialog input.code-input {
 .wb-door-table tr.wb-hidden input:not([type="checkbox"]) { color: var(--muted); }
 .wb-door-table tr.wb-gone td { color: var(--muted); }
 .wb-low { color: var(--danger); font-weight: 650; }
+/* Door kinds: a whole floor or building at once, and doors not marked yet. */
+.wb-mark { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 10px; font-size: 14px; }
+.wb-mark select { min-width: 0; max-width: 100%; }
+#wb-kinds-status { margin: 0 0 4px; }
+.wb-door-table select { min-width: 128px; }
+.wb-door-table select.wb-unmarked { color: var(--warn); }
+.wb-door-table select.wb-unmarked option { color: var(--text); }
 .wb-jobs-head { margin-top: 28px; }
 .wb-job-note { color: var(--warn); }
 .meta.wb-note { color: var(--warn); }

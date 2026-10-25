@@ -46,10 +46,12 @@ ADMIN_HEADERS = {"X-Requested-With": "staff-portal"}
 DAY_DOORS = [900, 901]          # Pool Gate, Spa Door
 OVERNIGHT_DOORS = [900]
 FRONT_DESK = {"types": ["day_pass", "overnight"], "staff_levels": [], "doors": {"all": True},
-              "edit_doors": False, "max_nights": 3, "max_staff_days": 0, "see_all_cards": False}
+              "edit_doors": False, "edit_end_time": False, "max_nights": 3, "max_staff_days": 0,
+              "see_all_cards": False}
 MANAGER = {"types": ["day_pass", "overnight", "staff"],
            "staff_levels": ["door", "floor", "building", "all"], "doors": {"all": True},
-           "edit_doors": True, "max_nights": 0, "max_staff_days": 30, "see_all_cards": True}
+           "edit_doors": True, "edit_end_time": False, "max_nights": 0, "max_staff_days": 30,
+           "see_all_cards": True}
 DOORS = [
     {"lock_id": 101, "name": "Room 101", "alias": "", "mac": "C540E09C8C01", "building_number": 1,
      "building_name": "Lodge", "floor_number": 1, "floor_name": "First", "battery": 90,
@@ -522,7 +524,8 @@ def test_backup_round_trip_and_old_backups(tmp_path):
         async with p:
             status, backup = await p.admin_call("GET", "/api/backup")
             assert status == 200 and backup["schema"] == 4
-            assert {"lock_id": 900, "name": "Pool", "hidden": 1} in backup["wristband_doors"]
+            assert {"lock_id": 900, "name": "Pool", "hidden": 1,
+                    "kind": None} in backup["wristband_doors"]
             # Change everything, then restore.
             p.db.set_role_wristbands(p.front_desk, None)
             p.db.update_staff(p.dee, wristbands=None)

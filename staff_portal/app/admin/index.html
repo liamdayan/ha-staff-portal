@@ -183,6 +183,7 @@
         <div class="pick-block">
           <div class="pick-head">Doors every day pass opens <span class="hint" id="wb-daypass-count"></span></div>
           <div class="pick-box tall" id="wb-daypass-doors"></div>
+          <p class="wb-warn" id="wb-daypass-rooms" hidden></p>
         </div>
         <label class="check-row"><input type="checkbox" name="wb_lockout_daypass">
           <span>Day passes open doors that are deadbolted from inside
@@ -199,6 +200,7 @@
           <div class="pick-head">Shared doors on every overnight wristband <span class="hint" id="wb-overnight-count"></span></div>
           <p class="hint">Such as the main entrance or the pool gate. Staff choose the room when they make the wristband.</p>
           <div class="pick-box tall" id="wb-overnight-doors"></div>
+          <p class="wb-warn" id="wb-overnight-rooms" hidden></p>
         </div>
         <label class="check-row"><input type="checkbox" name="wb_lockout_overnight">
           <span>Overnight wristbands open doors that are deadbolted from inside
@@ -292,6 +294,9 @@
         <p class="hint">The doors TT Hotel lists for your property, by building and floor. Rename a door
           to what staff call it (TT Hotel keeps its own name), or hide it from staff lists. A hidden door
           can still be one of the day-pass or overnight doors above.</p>
+        <p class="hint">Mark each door as a <b>public door</b> (such as the pool gate or the main entrance)
+          or a <b>guest room</b>. Staff pick overnight guests' rooms from the guest rooms, and shared doors
+          from the public doors. A door not marked yet shows in both.</p>
         <div class="ct-status">
           <span id="wb-doors-status" class="hint"></span>
           <button class="btn" type="button" id="wb-sync">Sync from TT Hotel</button>
