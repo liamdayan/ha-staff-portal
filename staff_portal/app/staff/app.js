@@ -3605,6 +3605,7 @@
         ["State", mine ? WB_STATE_WORDS[state] || "Unknown" : null, !!mine && state !== "active"],
         ["Revoked", mine && state === "revoked" && mine.state_by || null],
         ["Replaces lost card", mine?.cancelled_card || null],
+        ["Last used", mine ? wbUsed(mine) : null, mine ? wbUsedAlert(mine) : false],
       ]), done && mine && !look.empty ? wbStateNote(state, doors.length > 0) : null,
       done && state === "active" ? h("p", { class: "muted wb-sub wb-record-note" },
         "Reported lost in the TT Hotel app? Staff Portal can't see that \u2014 use Report lost in Staff " +
@@ -3789,7 +3790,8 @@
         ["Made by", job.made_by],
         ["Made", wbWhen(job.created_at)],
         ...job.cards.flatMap((c) => [[`${Noun} ${c.seq}`, cardValue(c), cardAlert(c)],
-          [`${Noun} ${c.seq} replaces lost card`, c.status === "written" && c.cancelled_card || null]]),
+          [`${Noun} ${c.seq} replaces lost card`, c.status === "written" && c.cancelled_card || null],
+          [job.cards.length > 1 ? `${Noun} ${c.seq} last used` : "Last used", wbUsed(c), wbUsedAlert(c)]]),
         ["What happened", wbWhy(job)],
       ], "wb-rows"),
       WB_ACTIVE.has(job.status)
@@ -3831,6 +3833,16 @@
   function wbKeyCard(job) {
     return job.type === "staff" && (job.kind || "write") === "write";
   }
+
+  // Where and when a card was last used at a door, as TT Hotel reported it ("Pool Gate, today
+  // 3:12 PM"), or null when it hasn't been seen. The server writes it in the property's time.
+  function wbUsed(card) {
+    const used = card?.last_used;
+    if (!used) return null;
+    return used.label || `${used.door}, ${wbWhen(used.at)}${used.ok ? "" : ", refused"}`;
+  }
+
+  const wbUsedAlert = (card) => !!card?.last_used && !card.last_used.ok;
 
   // Card numbers as the encoder and the record may spell them (leading zeros aside).
   function wbSameCard(a, b) {

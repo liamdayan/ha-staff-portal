@@ -10,7 +10,9 @@ What files never contain:
 - Home Assistant sign-in tokens for linked users. After restoring onto the same system, links
   are kept for phones and staff that still match; otherwise they need relinking.
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
-- The Connecteam and TT Hotel secrets (and TT Hotel's sign-in). A restore keeps the ones saved.
+- The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), and the secret in the Door
+  activity address. A restore keeps the ones saved.
+- Door activity (TT Hotel's lock records): TT Hotel keeps its own six months of them.
 - The door list (it comes from TT Hotel). Only the door names and hiding chosen here travel, and
   land on doors the system already has.
 (A migration file, migrate.py, carries all of these, encrypted.)

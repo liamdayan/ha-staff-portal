@@ -9,6 +9,7 @@ import sqlite3
 import time
 import urllib.parse
 
+import doorlog
 from wristbands import door_kind, permission_choice
 
 SCHEMA = """
@@ -192,6 +193,30 @@ CREATE TABLE IF NOT EXISTS wb_lockouts (
     UNIQUE (card_id, lock_id, method)
 );
 CREATE INDEX IF NOT EXISTS wb_lockouts_card ON wb_lockouts (card_id);
+-- Door activity: lock records TT Hotel pushes for doors on a gateway (doorlog.py). No foreign
+-- keys either; card_id is the wb_cards row the card number matched, when it did.
+CREATE TABLE IF NOT EXISTS wb_lock_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lock_id INTEGER NOT NULL,
+    record_type INTEGER NOT NULL,        -- TT Hotel's record type (doorlog.HOW)
+    success INTEGER NOT NULL,            -- 1 = opened, 0 = refused
+    card_number TEXT NOT NULL DEFAULT '',  -- card records only ('' otherwise: no passcodes)
+    username TEXT NOT NULL DEFAULT '',   -- TT Hotel's name for it: the card's, the app user's...
+    lock_date REAL,                      -- by the lock's clock
+    server_date REAL,                    -- when TT Hotel got it
+    at REAL NOT NULL,                    -- when it happened, as listed
+    battery INTEGER,
+    card_id INTEGER,
+    alert TEXT,                          -- lost|revoked|deleted: a card that shouldn't be used
+    problem INTEGER NOT NULL DEFAULT 0,  -- refused, an alarm, or an alert ("Problems only")
+    received_at REAL NOT NULL,
+    UNIQUE (lock_id, at, record_type, success, card_number, username)   -- TT Hotel sending again
+);
+CREATE INDEX IF NOT EXISTS wb_lock_records_at ON wb_lock_records (at);
+CREATE INDEX IF NOT EXISTS wb_lock_records_card ON wb_lock_records (card_id, at);
+CREATE INDEX IF NOT EXISTS wb_lock_records_problems ON wb_lock_records (at) WHERE problem = 1;
+-- Card numbers without leading zeros, as a lock record's number is matched to a card made here.
+CREATE INDEX IF NOT EXISTS wb_cards_number_digits ON wb_cards (ltrim(card_number, '0'));
 
 -- Departments: which Connecteam smart group people come from, the role they get, and the key
 -- card made for them from the Staff tab. No foreign keys, like the wristband tables: people and
@@ -395,19 +420,27 @@ DEFAULT_SETTINGS = {
     "wb_remote_lockout": "0",
     "wb_remote_lockout_api": "reversed",
     "wb_remote_lockout_tested": "",  # set only by the test helper, never from a form or backup
+    # Door activity: the secret part of the address TT Hotel sends lock records to (made when the
+    # dashboard first shows it), and whether a lost or revoked card tried at a door is also a
+    # Home Assistant notification (it's always in the activity log).
+    "tthotel_callback_token": "",
+    "wb_lost_card_alert": "1",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
 # not put in backups, and not taken from one. Only a migration file carries them, encrypted
 # (migrate.py), to another install of the add-on.
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
-                    "tthotel_password_md5", "tthotel_token", "tthotel_usage")
+                    "tthotel_password_md5", "tthotel_token", "tthotel_usage",
+                    "tthotel_callback_token")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180
 ACTIVITY_MAX_ROWS = 50_000
 WB_JOBS_KEEP_DAYS = 2 * 365    # card records outlive the activity log: wristbands can be asked
 WB_JOBS_MAX_ROWS = 100_000     # about long after they were made
+LOCK_RECORDS_KEEP_DAYS = 180   # door activity, like the activity log (TT Hotel keeps six months)
+LOCK_RECORDS_MAX_ROWS = 50_000
 WB_ACTIVE = ("queued", "running", "needs_attention")   # card jobs that haven't finished
 # The same as SQL, spelled out: SQLite only uses the partial index below for a query that spells
 # out the same statuses (not one that passes them as parameters).
@@ -1759,3 +1792,113 @@ class Database:
                WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
                AND c.state = 'active' AND j.expires_at > ? AND j.holder_staff_id IS NOT NULL
                GROUP BY j.holder_staff_id""", (time.time(),)).fetchall())
+
+    # Door activity: lock records TT Hotel pushes for doors on a gateway (doorlog.py)
+
+    def match_card(self, number: str, at: float) -> dict | None:
+        """The card made here that a lock record's card number is, or None: compared without
+        leading zeros, as written, then with its bytes reversed (doorlog.card_keys). A number
+        written again after its card was cleared is the card it was at the time: the last one
+        written by then (a few minutes either way, for the lock's clock)."""
+        for key in doorlog.card_keys(number):
+            row = self.conn.execute(
+                """SELECT c.id, c.card_number, c.state, c.state_at, j.name FROM wb_cards c
+                   JOIN wb_jobs j ON j.id = c.job_id
+                   WHERE ltrim(c.card_number, '0') = ? AND c.status = 'written' AND j.kind = 'write'
+                   ORDER BY COALESCE(c.written_at, j.ts) <= ? DESC, COALESCE(c.written_at, j.ts) DESC,
+                   c.id DESC LIMIT 1""", (key, at + 300)).fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    def add_lock_records(self, lock_id: int, records: list[dict], now: float) -> list[dict]:
+        """Store records for one door (doorlog.read_record), each card number matched to a card
+        made here. Records already stored (TT Hotel sending them again) are skipped. The door's
+        battery follows the newest record. Then the usual limits apply (LOCK_RECORDS_KEEP_DAYS,
+        LOCK_RECORDS_MAX_ROWS). Returns the records added, each with its "id", "card" (the
+        matched card or None) and "alert" (doorlog.alert_for)."""
+        c = self.conn
+        added = []
+        try:
+            newest = c.execute("SELECT MAX(at) FROM wb_lock_records WHERE lock_id = ?",
+                               (lock_id,)).fetchone()[0]
+            for record in records:
+                card = self.match_card(record["card_number"], record["at"]) if record[
+                    "card_number"] else None
+                alert = doorlog.alert_for(record, card)
+                problem = (not record["success"] or alert is not None
+                           or record["record_type"] in doorlog.ALARM_TYPES)
+                cur = c.execute(
+                    """INSERT OR IGNORE INTO wb_lock_records (lock_id, record_type, success,
+                       card_number, username, lock_date, server_date, at, battery, card_id, alert,
+                       problem, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (lock_id, record["record_type"], record["success"], record["card_number"],
+                     record["username"], record["lock_date"], record["server_date"], record["at"],
+                     record["battery"], card and card["id"], alert, int(problem), now))
+                if cur.rowcount:
+                    added.append({**record, "id": cur.lastrowid, "card": card, "alert": alert})
+            levels = [r for r in added if r["battery"] is not None]
+            latest = max(levels, key=lambda r: r["at"], default=None)
+            if latest and (newest is None or latest["at"] >= newest):
+                c.execute("UPDATE wb_doors SET battery = ? WHERE lock_id = ?",
+                          (latest["battery"], lock_id))
+            c.execute("DELETE FROM wb_lock_records WHERE at < ? OR id <= "
+                      "(SELECT MAX(id) FROM wb_lock_records) - ?",
+                      (now - LOCK_RECORDS_KEEP_DAYS * 86400, LOCK_RECORDS_MAX_ROWS))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        return added
+
+    def lock_records(self, limit: int = 50, before: int | None = None, lock_id: int | None = None,
+                     problems: bool = False) -> list[dict]:
+        """Door activity, newest first (by when it happened): every door's or one door's, all of
+        it or only problems. Each row has the matched card's name and number ("card_name",
+        "card_card_number") and the door's names ("door_name", "door_alias", "door_tt_name").
+        before: a record ID, for the next page (the records listed after it)."""
+        where, params = [], []
+        if lock_id is not None:
+            where.append("r.lock_id = ?")
+            params.append(lock_id)
+        if problems:
+            where.append("r.problem = 1")
+        if before is not None:
+            row = self.conn.execute("SELECT at FROM wb_lock_records WHERE id = ?",
+                                    (before,)).fetchone()
+            if row:
+                where.append("(r.at < ? OR (r.at = ? AND r.id < ?))")
+                params += [row[0], row[0], before]
+            else:   # trimmed since: go on by ID
+                where.append("r.id < ?")
+                params.append(before)
+        return [dict(r) for r in self.conn.execute(
+            f"""SELECT r.*, c.card_number AS card_card_number, j.name AS card_name,
+                d.name AS door_name, d.alias AS door_alias, d.tt_name AS door_tt_name
+                FROM wb_lock_records r LEFT JOIN wb_cards c ON c.id = r.card_id
+                LEFT JOIN wb_jobs j ON j.id = c.job_id
+                LEFT JOIN wb_doors d ON d.lock_id = r.lock_id
+                WHERE {' AND '.join(where or ['1'])} ORDER BY r.at DESC, r.id DESC LIMIT ?""",
+            (*params, max(1, min(limit, 500))))]
+
+    def last_lock_record(self) -> float | None:
+        """When the last record was stored (the newest row, not the newest event)."""
+        row = self.conn.execute(
+            "SELECT received_at FROM wb_lock_records ORDER BY id DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
+    def cards_last_used(self, card_ids) -> dict[int, dict]:
+        """{card ID: its newest lock record ("at", "success", "lock_id" and the door's names)},
+        for the cards that have one."""
+        ids = sorted({i for i in card_ids if isinstance(i, int) and not isinstance(i, bool)})
+        found = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            for r in self.conn.execute(
+                    f"""SELECT r.card_id, MAX(r.at) AS at, r.success, r.lock_id,
+                        d.name AS door_name, d.alias AS door_alias, d.tt_name AS door_tt_name
+                        FROM wb_lock_records r LEFT JOIN wb_doors d ON d.lock_id = r.lock_id
+                        WHERE r.card_id IN ({', '.join('?' * len(chunk))}) GROUP BY r.card_id""",
+                    chunk):
+                found[r["card_id"]] = dict(r)
+        return found

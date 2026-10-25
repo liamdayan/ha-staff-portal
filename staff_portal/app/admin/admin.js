@@ -2614,6 +2614,7 @@
     renderEncoderList();
     loadDoors();
     loadWristbandJobs(true);
+    openDoorActivity();
   }
 
   const isWristbandSetting = (key) => key === "wristbands_enabled" || key.startsWith("tthotel_") || key.startsWith("wb_");
@@ -3315,6 +3316,140 @@
 
   $("#wb-refresh-jobs").addEventListener("click", () => loadWristbandJobs(true));
   $("#wb-more-jobs").addEventListener("click", () => loadWristbandJobs(false));
+
+  // ------------------------------------------------ door activity
+
+  // TT Hotel sends lock records for doors on a gateway to the address shown here (its Callback
+  // URL). Each key card's Last used comes from them, and a lost or revoked card tried at a door
+  // is marked.
+
+  const DA_ALERTS = { lost: "Lost card", revoked: "Revoked card", deleted: "Deleted card" };
+  const da = { door: "", problems: false, oldest: null, seq: 0, data: null };
+
+  // A key card's Last used: the door, then when (and "refused" if it didn't open); "—" when it
+  // hasn't been seen at a door.
+  function lastUsed(used) {
+    if (!used) return h("span", { class: "sub" }, "—");
+    return [h("span", { class: used.ok ? null : "da-refused" }, used.door),
+      h("div", { class: "sub" }, `${when(used.at)}${used.ok ? "" : " · refused"}`)];
+  }
+
+  function openDoorActivity() {
+    loadDoors().then(renderDoorFilter);
+    loadDoorActivity(true);
+  }
+
+  function renderDoorFilter() {
+    const select = $("#da-door");
+    const doors = (wbDoors || []).filter((d) => d.active || String(d.id) === da.door)
+      .sort((a, b) => doorName(a).localeCompare(doorName(b), undefined, { numeric: true }));
+    select.replaceChildren(h("option", { value: "" }, "All doors"),
+      ...doors.map((d) => h("option", { value: String(d.id) }, doorName(d))));
+    select.value = da.door;
+  }
+
+  async function loadDoorActivity(reset) {
+    const rows = $("#da-rows");
+    const seq = ++da.seq;
+    const params = new URLSearchParams();
+    if (da.door) params.set("door", da.door);
+    if (da.problems) params.set("problems", "1");
+    if (!reset && da.oldest) params.set("before", String(da.oldest));
+    let data;
+    try {
+      data = await api("GET", `api/door-activity?${params}`);
+    } catch (err) {
+      if (seq !== da.seq) return;
+      if (reset) rows.replaceChildren(h("tr", null, h("td", { colspan: "5", class: "empty" }, err.message)));
+      else toast(err.message, true);
+      return;
+    }
+    if (seq !== da.seq) return;   // a newer filter was chosen meanwhile
+    da.data = data;
+    renderDoorConnection();
+    const records = data.records || [];
+    if (reset) {
+      da.oldest = null;
+      rows.replaceChildren();
+      if (!records.length) {
+        rows.append(h("tr", null, h("td", { colspan: "5", class: "empty" },
+          da.door || da.problems ? "Nothing matches." : "No door activity yet.")));
+      }
+    }
+    rows.append(...records.map(doorRecordRow));
+    if (records.length) da.oldest = records[records.length - 1].id;
+    $("#da-more").hidden = !data.more;
+  }
+
+  // The address to paste into TT Hotel, and how deliveries have gone.
+  function renderDoorConnection() {
+    const data = da.data;
+    $("#da-address-row").hidden = !data.address;
+    $("#da-address").value = data.address || "";
+    $("#da-alert-ha").checked = !!data.alert_ha;
+    const lines = [];
+    if (!data.address) lines.push("Set the staff app address in Settings first: TT Hotel needs it to reach Staff Access.");
+    lines.push(data.last_record ? `Last record arrived ${ago(data.last_record).toLowerCase()}.`
+      : "No records yet. Once TT Hotel has the address, unlocks at doors with a gateway show up here as they happen.");
+    const got = data.delivery || {};
+    if (got.at && !got.known) {
+      lines.push(`TT Hotel's last records were for a door Staff Access doesn't know (lock ${got.lock_id}): ` +
+        "click Sync from TT Hotel above.");
+    } else if (got.at && got.dropped) {
+      lines.push(`${plural(got.dropped, "record")} in TT Hotel's last delivery couldn't be read and ${got.dropped === 1 ? "was" : "were"} left out.`);
+    }
+    $("#da-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
+  }
+
+  function doorRecordRow(r) {
+    const who = r.who || (r.card_number ? `Card ${r.card_number}` : "—");
+    const result = r.alarm ? ["Alarm", "pending"] : r.ok ? ["Opened", "active"] : ["Refused", "revoked"];
+    return h("tr", { class: r.alert ? "da-alert" : null },
+      h("td", { class: "nowrap" }, when(r.at)),
+      h("td", null, r.door),
+      h("td", null, who,
+        r.card_number && r.who ? h("div", { class: "sub" }, `Card ${r.card_number}`) : null,
+        r.alert ? h("div", { class: "sub da-alert-note" }, DA_ALERTS[r.alert] || "Card not in use") : null),
+      h("td", null, r.how),
+      h("td", null, h("span", { class: `badge ${result[1]}` }, result[0])));
+  }
+
+  $("#da-refresh").addEventListener("click", () => loadDoorActivity(true));
+  $("#da-more").addEventListener("click", () => loadDoorActivity(false));
+  $("#da-door").addEventListener("change", (e) => {
+    da.door = e.target.value;
+    loadDoorActivity(true);
+  });
+  $("#da-problems").addEventListener("change", (e) => {
+    da.problems = e.target.checked;
+    loadDoorActivity(true);
+  });
+  $("#da-address").addEventListener("focus", (e) => e.target.select());
+  $("#da-copy").addEventListener("click", async () => {
+    const field = $("#da-address");
+    field.select();
+    // The clipboard API can be blocked inside Home Assistant's frame; fall back to the old way.
+    try { await navigator.clipboard.writeText(field.value); } catch { document.execCommand("copy"); }
+    toast("Address copied. Paste it into TT Hotel's Callback URL.");
+  });
+  $("#da-alert-ha").addEventListener("change", (e) => run(async () => {
+    const on = e.target.checked;
+    try {
+      await api("PUT", "api/settings", { wb_lost_card_alert: on ? "1" : "0" });
+    } catch (err) {
+      e.target.checked = !on;
+      throw err;
+    }
+    state.settings.wb_lost_card_alert = on ? "1" : "0";
+    toast(on ? "Home Assistant will be told when a lost or revoked card is tried."
+      : "Lost or revoked cards tried at a door are only noted in Activity now.");
+  }));
+  $("#da-new").addEventListener("click", () => run(async () => {
+    if (!await askConfirm("Make a new address? The old one stops working at once: paste the new one " +
+      "into TT Hotel's Callback URL straight away, or no door activity arrives.", "Make new address")) return false;
+    await api("POST", "api/door-activity/address", {});
+    await loadDoorActivity(true);
+  }, "New address made. Paste it into TT Hotel's Callback URL."));
 
   // ---------------------------------------------------------------- staff tab: departments
 
@@ -4620,7 +4755,7 @@
       data = await api("GET", `api/keycards?${params}`);
     } catch (err) {
       if (seq !== kc.seq) return;
-      if (reset) rows.replaceChildren(h("tr", null, h("td", { colspan: "7", class: "empty" }, err.message)));
+      if (reset) rows.replaceChildren(h("tr", null, h("td", { colspan: "8", class: "empty" }, err.message)));
       else toast(err.message, true);
       return;
     }
@@ -4632,7 +4767,7 @@
       if (!cards.length) {
         const what = { active: "No active key cards", expired: "No expired key cards", revoked: "No revoked key cards",
           lost: "No lost key cards", all: "No key cards made yet" }[kc.state];
-        rows.append(h("tr", null, h("td", { colspan: "7", class: "empty" }, kc.q ? `${what} match.` : `${what}.`)));
+        rows.append(h("tr", null, h("td", { colspan: "8", class: "empty" }, kc.q ? `${what} match.` : `${what}.`)));
       }
     }
     rows.append(...cards.map(keyCardRow));
@@ -4686,6 +4821,7 @@
       h("td", null, h("span", { class: `badge ${cls}`.trim() }, label),
         stateBy ? h("div", { class: "sub" }, stateBy) : null,
         progress ? h("div", { class: `sub ${card.state === "lost" ? "kc-progress" : ""}` }, progress) : null),
+      h("td", null, lastUsed(card.last_used)),
       h("td", { class: "kc-actions" }, actions));
   }
 
