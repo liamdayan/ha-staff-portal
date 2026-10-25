@@ -25,7 +25,7 @@ NOW = utc(2025, 10, 14, 12)   # 5:00 AM Tuesday in Los Angeles
 def perm(types=("day_pass", "overnight"), levels=(), doors=None, **changes):
     value = {"types": list(types), "staff_levels": list(levels),
              "doors": doors if doors is not None else {"all": True}, "edit_doors": False,
-             "max_nights": 0, "max_staff_days": 0, "see_all_cards": False}
+             "edit_end_time": False, "max_nights": 0, "max_staff_days": 0, "see_all_cards": False}
     value.update(changes)
     return value
 
@@ -100,8 +100,8 @@ def test_clean_permissions_tidies_and_fills_in():
                                "edit_doors": True, "max_nights": 3, "unknown": "dropped"})
     assert clean == {"types": ["day_pass", "staff"], "staff_levels": ["door", "all"],
                      "doors": {"buildings": [1, 2], "floors": [[3, 1]], "doors": [5, 7]},
-                     "edit_doors": True, "max_nights": 3, "max_staff_days": 0,
-                     "see_all_cards": False}
+                     "edit_doors": True, "edit_end_time": False, "max_nights": 3,
+                     "max_staff_days": 0, "see_all_cards": False}
     assert clean_permissions({"doors": {"all": True, "buildings": [1]}})["doors"] == {"all": True}
     assert clean_permissions({}) == NO_ACCESS
 
@@ -586,7 +586,9 @@ def test_options_shape():
         "types": {
             "day_pass": {"allowed": True, "reason": None, "expires_at": utc(2025, 10, 15, 3),
                          "expires_label": "8:00 PM today", "door_ids": [1, 2],
-                         "can_edit_doors": False, "max": 20, "permitted": True},
+                         "can_edit_doors": False, "max": 20, "permitted": True,
+                         "end_time": "20:00", "end_time_passed": False,
+                         "can_edit_end_time": False},
             "overnight": {"allowed": True, "reason": None, "checkout_time": "11:00",
                           "default_checkout": "2025-10-15", "door_ids": [2],
                           "can_edit_doors": False, "max_nights": 0, "max": 20,
@@ -600,7 +602,7 @@ def test_options_shape():
     # Active, offered doors only, by building and floor; hidden and unlisted ones left out.
     assert [d["id"] for d in doors] == [2, 6, 1, 201, 202, 203, 301, 7, 2101, 2201, 5]
     assert doors[0] == {"id": 2, "name": "Gym", "building": 1, "building_name": "Main",
-                        "floor": 1, "floor_name": "Lobby"}
+                        "floor": 1, "floor_name": "Lobby", "kind": None}
     assert doors[3]["building_name"] == "Building 1" and doors[3]["floor_name"] == "Floor 2"
     assert (doors[7]["floor"], doors[7]["floor_name"]) == (None, "")
 

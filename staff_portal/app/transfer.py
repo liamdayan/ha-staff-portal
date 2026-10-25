@@ -40,7 +40,7 @@ from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, c
                     clean_phone_pages)
 from permissions import controllable, offered
 from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean_permissions,
-                        permission_choice)
+                        door_kind, permission_choice)
 
 FORMAT = "staff-portal"
 MIGRATE_FORMAT = "staff-portal-migrate"   # a migration file's header (migrate.py)
@@ -708,7 +708,7 @@ def make_backup(db, branding, version: str) -> dict:
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
-        wristband_doors=rows("SELECT lock_id, name, hidden FROM wb_doors"),
+        wristband_doors=rows("SELECT lock_id, name, hidden, kind FROM wb_doors"),
         **log_sections(db),
     )
 
@@ -939,7 +939,8 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             continue
         phone_orders[row["owner"]] = json.dumps(order)
 
-    # Names and hiding chosen for TT Hotel's doors (by TT Hotel's lock ID).
+    # Names, hiding and kinds chosen for TT Hotel's doors (by TT Hotel's lock ID). A backup
+    # from before door kinds has no "kind", and leaves them as they are.
     wristband_doors, lock_ids = [], set()
     for row in _rows(data, "wristband_doors"):
         lock_id = row.get("lock_id")
@@ -947,8 +948,11 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             continue
         if lock_id not in lock_ids:
             lock_ids.add(lock_id)
-            wristband_doors.append({"lock_id": lock_id, "name": _name(row.get("name")),
-                                    "hidden": 1 if row.get("hidden") in (1, True) else 0})
+            door = {"lock_id": lock_id, "name": _name(row.get("name")),
+                    "hidden": 1 if row.get("hidden") in (1, True) else 0}
+            if "kind" in row:
+                door["kind"] = door_kind(row["kind"])
+            wristband_doors.append(door)
 
     return {"settings": settings, "layout": layout, "logo": logo, "areas": areas,
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),

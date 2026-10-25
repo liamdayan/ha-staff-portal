@@ -4095,7 +4095,8 @@ def door_view(door: dict) -> dict:
             "building": door["building_number"], "building_name": door["building_name"],
             "floor": door["floor_number"], "floor_name": door["floor_name"],
             "battery": door["battery"], "has_gateway": bool(door["has_gateway"]),
-            "hidden": bool(door["hidden"]), "active": bool(door["active"])}
+            "hidden": bool(door["hidden"]), "active": bool(door["active"]),
+            "kind": wristbands.door_kind(door.get("kind"))}
 
 
 async def admin_wristband_doors(request: web.Request):
@@ -4103,7 +4104,8 @@ async def admin_wristband_doors(request: web.Request):
 
 
 async def admin_update_door(request: web.Request):
-    """A door's name for staff ('' = TT Hotel's), and whether staff see it in door lists."""
+    """A door's name for staff ('' = TT Hotel's), whether staff see it in door lists, and its
+    kind (a public door, a guest room, or not marked)."""
     door = db.wb_door(int(request.match_info["id"]))
     if not door:
         raise web.HTTPNotFound()
@@ -4113,10 +4115,56 @@ async def admin_update_door(request: web.Request):
         fields["name"] = clean_name(data["name"])
     if "hidden" in data:
         fields["hidden"] = 1 if data["hidden"] in (True, 1, "1") else 0
+    if "kind" in data:
+        try:
+            fields["kind"] = clean_door_kind(data["kind"])
+        except ValueError as err:
+            return bad_request(str(err))
     db.set_wb_door(door["lock_id"], **fields)
+    detail = "hidden from staff" if fields.get("hidden") else None
+    if "kind" in fields:
+        detail = f"marked as {DOOR_KIND_WORDS[fields['kind']]}" if fields["kind"] else "not marked"
     db.log(admin_name(request), f"Updated door {fields.get('name') or door_name(door)}",
-           detail="hidden from staff" if fields.get("hidden") else None)
+           detail=detail)
     return web.json_response({"ok": True})
+
+
+# ---------------------------------------------------------------- door kinds
+# Each door is a public door (shared doors on day passes and overnight wristbands) or a guest
+# room (rooms on overnight wristbands). One not marked yet is offered as both, so nothing
+# disappears from staff's lists until the owner has marked it.
+
+DOOR_KIND_WORDS = {"public": "a public door", "room": "a guest room"}
+DOOR_KIND_PLURALS = {"public": "public doors", "room": "guest rooms"}
+MAX_DOOR_BATCH = 5000   # doors marked at once (a whole building)
+
+
+def clean_door_kind(value) -> str | None:
+    """'public', 'room', or None (not marked) from the dashboard."""
+    if value is None or value == "":
+        return None
+    if value not in wristbands.DOOR_KINDS:
+        raise ValueError("Choose Public door, Guest room or Not marked.")
+    return value
+
+
+async def admin_mark_doors(request: web.Request):
+    """Mark many doors at once (a whole floor or building): {"door_ids": [...], "kind": ...}."""
+    data = await read_json(request)
+    ids = data.get("door_ids")
+    if (not isinstance(ids, list) or not ids or len(ids) > MAX_DOOR_BATCH
+            or not all(isinstance(i, int) and not isinstance(i, bool) and 0 < i <= 2**53
+                       for i in ids)):
+        return bad_request("Pick the doors to mark.")
+    try:
+        kind = clean_door_kind(data.get("kind"))
+    except ValueError as err:
+        return bad_request(str(err))
+    changed = db.set_wb_door_kinds(list(dict.fromkeys(ids)), kind)
+    noun = f"{changed} door{'' if changed == 1 else 's'}"
+    words = DOOR_KIND_WORDS if changed == 1 else DOOR_KIND_PLURALS
+    db.log(admin_name(request), f"Marked {noun} as {words[kind]}" if kind else f"Unmarked {noun}")
+    return web.json_response({"changed": changed})
 
 
 async def admin_wristbands_test(request: web.Request):
@@ -5212,6 +5260,7 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/wristbands/doors/sync", admin_sync_doors)
     app.router.add_get("/api/wristbands/doors", admin_wristband_doors)
     app.router.add_patch(r"/api/wristbands/doors/{id:\d{1,16}}", admin_update_door)
+    app.router.add_post("/api/wristbands/doors/kind", admin_mark_doors)
     app.router.add_get("/api/wristbands/jobs", admin_wristband_jobs)
     app.router.add_post(r"/api/devices/{id:\d{1,12}}/encoder-test", admin_encoder_test)
     app.router.add_post("/api/wristbands/encoders/find", admin_find_encoders)

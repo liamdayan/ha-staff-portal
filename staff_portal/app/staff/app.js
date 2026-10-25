@@ -2746,7 +2746,7 @@
     const make = kinds.map((type) => {
       const t = o.types[type];
       const sub = !t.allowed ? t.reason || "Can't be made right now."
-        : type === "day_pass" ? `Works until ${t.expires_label}`
+        : type === "day_pass" ? (t.end_time_passed ? "Pick when they stop working" : `Works until ${t.expires_label}`)
         : type === "overnight" ? `Room wristbands until checkout at ${wbClock(t.checkout_time)}`
         : "Key cards for staff";
       return wbChoice(type, WB_TYPES[type].title, sub, WB_TYPES[type].icon,
@@ -2799,6 +2799,9 @@
       type, t, name: "", count: 1, touched: new Set(), submitted: false, busy: false,
       doors: new Set(t.door_ids || []), rooms: new Set(),
       checkout: t.default_checkout || "", expiresOn: t.default_expires_on || "",
+      // A day pass's end time for people who may change it; none to start with once the usual
+      // time has passed, so they pick one.
+      endTime: type === "day_pass" && t.can_edit_end_time ? (t.end_time_passed ? "" : t.end_time || "") : null,
       access: { all: false, buildings: new Set(), floors: new Set(), doors: new Set() },
       doorById: new Map((o.doors || []).map((d) => [d.id, d])),
       plan: null, planOk: false, note: "", noteShown: false, ask: 0, timer: null, fields: {}, els: {},
@@ -2830,11 +2833,12 @@
     ];
     const sections = [h("section", { class: "wb-card" }, people)];
     if (type === "day_pass") {
-      sections.push(h("section", { class: "wb-card" },
+      sections.push(h("section", { class: "wb-card" }, f.endTime !== null ? wbEndTimeField(f) : null,
         wbDoorsField(f, "Doors", "Every day pass opens these doors.")));
     } else if (type === "overnight") {
       const shared = new Set(t.door_ids || []);
-      const rooms = (o.doors || []).filter((d) => !shared.has(d.id));
+      // Guest rooms, and doors not marked yet (a manager marks each door on the dashboard).
+      const rooms = (o.doors || []).filter((d) => !shared.has(d.id) && d.kind !== "public");
       const checkout = h("input", { class: "field", type: "date", value: f.checkout, min: o.today,
         max: t.max_nights ? wbAddDays(o.today, t.max_nights) : null });
       f.els.checkoutHint = h("p", { class: "wb-hint", "aria-live": "polite" });
@@ -2960,9 +2964,11 @@
   }
 
   // The doors every card of this kind opens, chosen by a manager. Someone allowed to change
-  // them can, for this card only. Doors hidden from the lists stay on it either way.
+  // them can, for this card only, from the public doors (and doors not marked yet). Doors
+  // hidden from the lists, or marked as rooms since, stay on it either way.
   function wbDoorsField(f, label, hint) {
     const listed = f.doorById;
+    const usual = new Set(f.t.door_ids || []);
     const unlisted = [...f.doors].filter((id) => !listed.has(id)).length;
     const text = h("p", { class: "wb-doors-text" });
     const draw = () => {
@@ -2978,7 +2984,8 @@
       const toggle = h("button", { type: "button", class: "btn wb-change", "aria-expanded": "false" }, "Change");
       toggle.addEventListener("click", () => {
         if (!picker) {
-          picker = wbDoorPicker(f.doors, "doors", [...listed.values()], () => {
+          const shared = [...listed.values()].filter((d) => d.kind !== "room" || usual.has(d.id));
+          picker = wbDoorPicker(f.doors, "doors", shared, () => {
             draw();
             wbChanged(f, "door_ids");
           });
@@ -2992,6 +2999,19 @@
       line.append(toggle);
     }
     return wbField(f, "door_ids", label, box, h("p", { class: "wb-hint" }, hint));
+  }
+
+  // When a day pass stops working, for people who may change it: any time later than now,
+  // today (up to 11:59 PM). It starts at the usual time, or empty once that has passed.
+  function wbEndTimeField(f) {
+    const input = h("input", { class: "field", type: "time", step: "60", value: f.endTime });
+    f.els.endHint = h("p", { class: "wb-hint", "aria-live": "polite" });
+    input.addEventListener("input", () => {
+      f.endTime = input.value.slice(0, 5);
+      wbDrawDates(f);
+      wbChanged(f, "end_time");
+    });
+    return wbField(f, "end_time", "Works until", input, f.els.endHint);
   }
 
   // Doors grouped as building > floor, in the server's order (building, floor, then name).
@@ -3210,6 +3230,11 @@
         : !(nights >= 0) ? "That date has already passed."
         : `Wristbands stop working at ${wbExpiryLabel(f.checkout, t.checkout_time)} · ` +
           (nights ? wbPlural(nights, "night") : "checking out today");
+    } else if (f.type === "day_pass" && f.endTime !== null) {
+      const usual = wbClock(t.end_time);
+      f.els.endHint.textContent = !f.endTime && t.end_time_passed
+        ? `It's past ${usual}, when day passes usually stop working. Pick a later time, up to 11:59 PM.`
+        : `Usually ${usual}. Any time later than now, up to 11:59 PM tonight.`;
     } else if (f.type === "staff") {
       f.els.expiresHint.textContent = (f.expiresOn
         ? `Cards stop working at ${wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL)}.` : "Pick the last day it works.") +
@@ -3227,6 +3252,7 @@
       body.door_ids = [...f.doors];
     }
     if (f.type === "overnight") Object.assign(body, { room_ids: [...f.rooms], checkout: f.checkout });
+    if (f.type === "day_pass" && f.endTime) body.end_time = f.endTime;
     if (f.type === "staff") {
       Object.assign(body, { access: wbAccessEntries(f.access, f.doorById), expires_on: f.expiresOn });
     }
@@ -3271,6 +3297,7 @@
   function wbDrawSummary(f) {
     const { type, t } = f;
     const until = f.planOk ? f.plan.expires_label
+      : type === "day_pass" && f.endTime !== null ? (f.endTime ? wbExpiryLabel(wb.options.today, f.endTime) : "—")
       : type === "day_pass" ? t.expires_label
       : type === "overnight" ? (f.checkout ? wbExpiryLabel(f.checkout, t.checkout_time) : "—")
       : f.expiresOn ? wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL) : "—";
@@ -3292,6 +3319,7 @@
     const staff = f.type === "staff";
     // Quick checks first: they save a trip and point at the field. The server checks it all.
     const missing = !f.name.trim() ? ["name", staff ? "Enter the staff member's name." : "Enter the guest's name."]
+      : f.type === "day_pass" && f.endTime === "" ? ["end_time", "Pick when these wristbands stop working."]
       : f.type === "overnight" && !f.rooms.size ? ["room_ids", "Pick at least one room."]
       : f.type === "overnight" && !f.checkout ? ["checkout", "Pick a checkout date."]
       : staff && !wbAccessEntries(f.access, f.doorById).length ? ["access", "Choose what this card opens."]
