@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.7
+
+**Card encoders**
+
+- **Fixed: an encoder that types card numbers like a keyboard.** Some encoders also type each
+  card's number, often with Enter after it, when a card is put on them. That could fill in the
+  PIN pad (and count as a wrong PIN), add the number to a guest's name, or press whichever
+  button was highlighted, such as **Try again** or a dashboard dialog's **OK**. Nobody types
+  that fast, so the staff app and the dashboard now recognise it and ignore it: what it typed is
+  taken back and its Enter does nothing. On the PIN pad it says "That was a card on the
+  encoder."
+- The card log says **What happened** when a card wasn't made: the encoder's last problem with
+  it, or how the job ended (such as "Cancelled before any wristbands were made").
+
 ## 0.8.6
 
 **Migrate to another install**

@@ -621,6 +621,9 @@ built to use a small share and never get the account blocked:
 
 ### Troubleshooting
 
+- **The encoder types card numbers** (into the PIN pad, a name or the address bar) when a card is
+  put on it: some encoders do, as a keyboard would. Staff Access ignores it on its own pages
+  (nobody types that fast, so it can tell); elsewhere it's typed as usual.
 - **"Open Wristbands on Front Desk PC to connect the encoder."** (This computer (USB)) Sign in
   on that computer and open **Wristbands**: a job waiting for it carries on by itself, and one
   that needs attention goes on with **Try again**.

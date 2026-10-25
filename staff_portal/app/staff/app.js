@@ -27,6 +27,62 @@
   for (const type of ["pointerdown", "keydown"]) {
     document.addEventListener(type, () => { lastTouch = Date.now(); }, { capture: true, passive: true });
   }
+
+  // Some card encoders also type each card's number, as a keyboard would, when a card is put on
+  // them, often with Enter after it. Nobody types that fast: once enough keys have come that
+  // close together, they and the Enter or Tab after them are kept from the page, and what the
+  // first few typed into a box is taken back, so a card can't fill in the PIN pad or a name,
+  // or press a button.
+  const TYPED_GAP_MS = 50;     // keys this close together...
+  const TYPED_KEYS = 5;        // ...this many in a row are the encoder (a card number has 8 or more)
+  const TYPED_END_MS = 200;    // its Enter or Tab comes within this of its last key
+  const typing = { last: -Infinity, count: 0, card: false, field: null, value: "", from: 0, to: 0 };
+  let onCardTyped = null;      // what the screen on show does about one (the PIN pad forgets it)
+  window.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) return;
+    const gap = ev.timeStamp - typing.last;
+    if (ev.key.length === 1 && !ev.repeat) {   // a held-down key repeats quickly too: a person
+      if (gap > TYPED_GAP_MS) {
+        // Perhaps a card number starting: remember the box as it was before it.
+        const field = /^(INPUT|TEXTAREA)$/.test(ev.target.tagName) ? ev.target : null;
+        Object.assign(typing, { count: 0, card: false, field, value: field?.value ?? "",
+          from: field?.selectionStart ?? 0, to: field?.selectionEnd ?? 0 });
+      }
+      typing.last = ev.timeStamp;
+      typing.count += 1;
+      if (typing.count < TYPED_KEYS) return;
+      if (!typing.card) {
+        typing.card = true;
+        cardTyped();
+      }
+    } else if ((ev.key === "Enter" || ev.key === "Tab") && typing.card && gap <= TYPED_END_MS) {
+      typing.card = false;
+      typing.count = 0;
+    } else {
+      typing.card = false;
+      typing.count = 0;
+      return;
+    }
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+  }, { capture: true });
+
+  // Whether the key just pressed came too soon after the one before for a person: perhaps a
+  // card number on its way.
+  const typingFast = () => typing.count > 1;
+
+  // A card number was typed: undo what its first keys did.
+  function cardTyped() {
+    const field = typing.field;
+    if (field?.isConnected && field.value !== typing.value) {
+      field.value = typing.value;
+      try {
+        field.setSelectionRange(typing.from, typing.to);
+      } catch { /* a box without a cursor */ }
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    onCardTyped?.();
+  }
   // True while the phone is showing its devices (or an empty-state message about them) and
   // should keep checking for updates, including after the screen has been locked.
   let live = false;
@@ -67,6 +123,7 @@
   function show(node) {
     stopPolling();
     screenKeys = null; // a screen that wants key presses sets this after showing
+    onCardTyped = null;
     tiles = new Map();
     // Keep pop-up messages above the bottom tab bar when there is one.
     document.body.classList.toggle("with-tabs", !!node.querySelector?.(".tabbar"));
@@ -426,7 +483,11 @@
       clearTimeout(pause);
       if (busy || pin.length < 4) return;
       if (length) {
-        if (pin.length === length) submit(true);
+        if (pin.length !== length) return;
+        // Typed faster than a person can: wait a moment, in case it's a card number on the
+        // encoder (which clears the digits instead).
+        if (typingFast()) pause = setTimeout(() => { if (pad.isConnected) submit(true); }, TYPED_END_MS);
+        else submit(true);
         return;
       }
       if (pin.length >= 8) return submit();
@@ -453,6 +514,13 @@
     draw();
     document.getElementById("bar").hidden = true;
     show(node);
+    onCardTyped = () => {
+      if (busy) return;
+      clearTimeout(pause);
+      pin = "";
+      draw();
+      error.textContent = "That was a card on the encoder. Type your PIN.";
+    };
     // On a computer, type the PIN: digits, Backspace, Enter.
     screenKeys = (ev) => {
       if (/^[0-9]$/.test(ev.key)) press(ev.key);
@@ -3642,6 +3710,7 @@
           ["Done by", job.made_by],
           ["When", wbWhen(job.created_at)],
           WB_ACTIVE.has(job.status) ? ["Result", "Not finished yet"] : wbOtherResult(job),
+          ["What happened", wbWhy(job)],
         ], "wb-rows"),
         WB_ACTIVE.has(job.status)
           ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
@@ -3665,6 +3734,7 @@
         ["Made", wbWhen(job.created_at)],
         ...job.cards.flatMap((c) => [[`${Noun} ${c.seq}`, cardValue(c), cardAlert(c)],
           [`${Noun} ${c.seq} replaces lost card`, c.status === "written" && c.cancelled_card || null]]),
+        ["What happened", wbWhy(job)],
       ], "wb-rows"),
       WB_ACTIVE.has(job.status)
         ? h("button", { type: "button", class: "btn primary", onclick: () => wbShowJob(job) }, "Show progress")
@@ -3683,6 +3753,15 @@
     if (job.kind === "revoke") return `Revoke card ${job.target_card}`;
     if (job.kind === "notice") return `Lost card notice for card ${job.target_card}`;
     return (WB_TYPES[job.type] || WB_TYPES.day_pass).title;
+  }
+
+  // Why a finished job didn't do all it was asked: the encoder's last problem with a card, else
+  // how the job ended ("Cancelled before any wristbands were made", say). Null when it did.
+  function wbWhy(job) {
+    if (WB_ACTIVE.has(job.status)) return null;
+    const missed = job.cards.filter((c) => c.status !== "written" && c.status !== "cleared");
+    if (!missed.length) return null;
+    return [...missed].reverse().find((c) => c.error)?.error || job.message || null;
   }
 
   // How a finished revoke or lost card notice job went, as a [label, value, alert?] row.

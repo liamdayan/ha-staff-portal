@@ -233,6 +233,46 @@
     });
   }
 
+  // Some card encoders also type each card's number, as a keyboard would, when a card is put on
+  // them, often with Enter after it (Make key card has one in use). Nobody types that fast: once
+  // enough keys have come that close together, they and the Enter or Tab after them are kept
+  // from the page, and what the first few typed into a box is taken back, so a card can't fill
+  // in a box, save a dialog or press a button. As the staff app does.
+  const TYPED_GAP_MS = 50;     // keys this close together...
+  const TYPED_KEYS = 5;        // ...this many in a row are the encoder (a card number has 8 or more)
+  const TYPED_END_MS = 200;    // its Enter or Tab comes within this of its last key
+  const typing = { last: -Infinity, count: 0, card: false, field: null, value: "" };
+  window.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) return;
+    const gap = ev.timeStamp - typing.last;
+    if (ev.key.length === 1 && !ev.repeat) {   // a held-down key repeats quickly too: a person
+      if (gap > TYPED_GAP_MS) {
+        const field = /^(INPUT|TEXTAREA)$/.test(ev.target.tagName) ? ev.target : null;
+        Object.assign(typing, { count: 0, card: false, field, value: field?.value ?? "" });
+      }
+      typing.last = ev.timeStamp;
+      typing.count += 1;
+      if (typing.count < TYPED_KEYS) return;
+      if (!typing.card) {
+        typing.card = true;
+        const field = typing.field;
+        if (field?.isConnected && field.value !== typing.value) {
+          field.value = typing.value;
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+    } else if ((ev.key === "Enter" || ev.key === "Tab") && typing.card && gap <= TYPED_END_MS) {
+      typing.card = false;
+      typing.count = 0;
+    } else {
+      typing.card = false;
+      typing.count = 0;
+      return;
+    }
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+  }, { capture: true });
+
   // In a dialog, Enter in a text box means Save (the highlighted button). Left alone, the
   // browser would "click" the form's first button, Cancel, and quietly throw the entry away.
   // Dialogs that handle Enter themselves (preventDefault) are left as they are.
