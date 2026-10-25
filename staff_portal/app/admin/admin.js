@@ -1999,17 +1999,119 @@
       else if (field) field.value = v;
     }
     renderTunnelSources();
-    renderConnecteam();
+    fillConnections();
     refreshIcon();
   }
 
+  // ------------------------------------------------ connections (in Settings)
+
+  // TT Hotel and Connecteam, each folded to one line: whether it works, and its requests so far
+  // against Staff Access's own limit. Opened, each has its own form and Save button, which sends
+  // only that connection's settings.
+  const connDirty = { tt: false, ct: false };   // changed but not saved yet
+  // FormData leaves unticked boxes out, so each form's checkboxes are listed here.
+  const CONN_CHECKBOXES = { tt: ["tthotel_clear_secret"], ct: ["connecteam_enabled",
+    "connecteam_clear_secret", "connecteam_auto_staff", "connecteam_auto_clock_in"] };
+
+  // Fills each connection's form with what's saved, unless it has unsaved changes. The secrets
+  // are write-only: the dashboard only learns whether they're saved.
+  function fillConnections() {
+    if (!connDirty.tt) {
+      fillFields($("#tt-form"), "tthotel_");
+      renderWristbandSecrets();
+    }
+    if (!connDirty.ct) {
+      const form = $("#ct-form");
+      fillFields(form, "connecteam_");
+      const saved = state.settings.connecteam_secret_set === "1";
+      const secret = form.elements["connecteam_client_secret"];
+      secret.value = "";
+      secret.placeholder = saved ? "Saved — leave blank to keep" : "";
+      form.elements["connecteam_clear_secret"].checked = false;
+      $("#ct-clear-row").hidden = !saved;
+    }
+    renderConnections();
+  }
+
+  function fillFields(form, prefix) {
+    for (const [k, v] of Object.entries(state.settings)) {
+      const field = k.startsWith(prefix) ? form.elements[k] : null;
+      if (field?.type === "checkbox") field.checked = v === "1";
+      else if (field) field.value = v;
+    }
+  }
+
+  // The closed lines, the TT Hotel line on the Wristbands tab, and each one's status when opened.
+  function renderConnections() {
+    const wb = state.wristbands || {};
+    const ct = state.connecteam || {};
+    const tt = ttState();
+    showConnection($("#conn-tthotel"), tt, requestsText(wb.used_month, "this month", wb.monthly_cap));
+    showConnection($("#conn-connecteam"), ctState(), requestsText(ct.used_today, "today", ct.daily_cap));
+    // On the Wristbands tab, under its own on/off switch, an account that's ready just says so.
+    showState($("#wb-tt-state"), !wb.enabled && ttSetUp() ? ["Details saved", ""] : tt);
+    $("#wb-off-note").hidden = !!wb.enabled;
+    renderTTStatus();
+    renderConnecteam();
+  }
+
+  function showConnection(box, connState, requests) {
+    showState($("[data-conn-state]", box), connState);
+    $("[data-conn-use]", box).textContent = requests;
+  }
+
+  function showState(badge, [text, kind]) {
+    badge.textContent = text;
+    badge.className = `badge ${kind}`.trim();
+  }
+
+  const requestsText = (n, when, cap) =>
+    `${count(n)} request${n === 1 ? "" : "s"} ${when} (limit ${count(cap)})`;
+
+  const ttSetUp = () => {
+    const s = state.settings;
+    return !!(s.tthotel_client_id && s.tthotel_client_secret_set === "1" && s.tthotel_username &&
+      s.tthotel_password_md5_set === "1");
+  };
+
+  // Whether TT Hotel works, in a few words, with its badge color.
+  function ttState() {
+    const wb = state.wristbands || {};
+    if (!ttSetUp()) return ["Not set up", ""];
+    if (!wb.enabled) return ["Wristbands off", ""];
+    return problemState(wb.halted, wb.paused && wb.paused_until, wb.last_error) ||
+      (wb.synced_at ? ["Connected", "active"] : ["Not checked yet", "pending"]);
+  }
+
+  // The same for Connecteam. It counts as connected once a time clock check or a staff sync worked.
+  function ctState() {
+    const s = state.settings;
+    const ct = state.connecteam || {};
+    const sync = state.staffSync || {};
+    if (!s.connecteam_client_id || s.connecteam_secret_set !== "1") return ["Not set up", ""];
+    if (!ct.enabled) return ["Turned off", ""];
+    return problemState(ct.halted, ct.paused && ct.paused_until, ct.last_error || (sync.enabled && sync.error)) ||
+      (ct.checked_at || (sync.enabled && sync.synced_at) ? ["Connected", "active"] : ["Not checked yet", "pending"]);
+  }
+
+  // Stopped (details or access refused: it waits for the owner), paused (its own limits or the
+  // service's), or the last request failed. Opened, the status says why.
+  function problemState(halted, pausedUntil, error) {
+    if (halted) return ["Stopped: access refused", "locked"];
+    if (pausedUntil) return [`Paused until ${untilText(pausedUntil)}`, "pending"];
+    if (error) return ["Last try failed", "locked"];
+    return null;
+  }
+
+  // A time today, else a date.
+  function untilText(ts) {
+    const d = new Date(ts * 1000);
+    return d.toDateString() === new Date().toDateString()
+      ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+      : d.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
   function renderConnecteam() {
-    const form = $("#settings-form");
-    const saved = state.settings.connecteam_secret_set === "1";
-    const secret = form.elements["connecteam_client_secret"];
-    secret.value = "";
-    secret.placeholder = saved ? "Saved — leave blank to keep" : "";
-    $("#ct-clear-row").hidden = !saved;
     const ct = state.connecteam || {};
     const lines = [];
     if (!ct.enabled) lines.push("Turned off.");
@@ -2029,15 +2131,42 @@
     renderStaffSync();
   }
 
-  // Tests the saved keys, so Save settings first.
+  for (const [key, form] of [["tt", $("#tt-form")], ["ct", $("#ct-form")]]) {
+    form.addEventListener("input", () => { connDirty[key] = true; });
+    form.addEventListener("change", () => { connDirty[key] = true; });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(form).entries());
+      for (const name of CONN_CHECKBOXES[key]) body[name] = form.elements[name].checked ? "1" : "0";
+      run(async () => {
+        await api("PUT", "api/settings", body);
+        connDirty[key] = false;
+        await load();
+        fillConnections();
+      }, key === "tt" ? "TT Hotel settings saved." : "Connecteam settings saved.");
+    });
+  }
+
+  window.addEventListener("beforeunload", (e) => {
+    if (connDirty.tt || connDirty.ct) e.preventDefault();
+  });
+
+  // "Settings → Connections" links elsewhere open that connection (data-goto shows the tab).
+  document.querySelectorAll("[data-open-conn]").forEach((b) => b.addEventListener("click", () => {
+    const box = document.getElementById(b.dataset.openConn);
+    box.open = true;
+    $("summary", box).focus();
+  }));
+
+  // Tests the saved keys, so Save first.
   $("#ct-test").addEventListener("click", () => run(async () => {
+    if (connDirty.ct) throw new Error("Click Save Connecteam settings first: the test uses what's saved.");
     try {
       const r = await api("POST", "api/connecteam/test");
       toast(`Connected: ${r.users} users, ${r.time_clocks} time clock${r.time_clocks === 1 ? "" : "s"}, ` +
         `${r.clocked_in} clocked in now.`);
     } finally {
       await load();
-      renderConnecteam();
     }
   }));
 
@@ -2067,8 +2196,7 @@
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
     body.ha_logbook = e.target.elements["ha_logbook"].checked ? "1" : "0";
-    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock",
-      "connecteam_enabled", "connecteam_clear_secret", "connecteam_auto_staff", "connecteam_auto_clock_in"]) {
+    for (const name of ["allow_phone_reorder", "require_pin", "phones_via_tunnel_only", "control_lock"]) {
       body[name] = e.target.elements[name].checked ? "1" : "0";
     }
     run(async () => {
@@ -2120,7 +2248,7 @@
   const WB_JOB_PAGE = 50;    // card jobs per page, as the add-on sends them
   const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
   // FormData leaves unticked boxes out, so every checkbox in the form is listed here.
-  const WB_CHECKBOXES = ["wristbands_enabled", "tthotel_clear_secret", "wb_lockout_daypass",
+  const WB_CHECKBOXES = ["wristbands_enabled", "wb_lockout_daypass",
     "wb_lockout_overnight", "wb_lockout_staff", "wb_remote_lockout"];
   const WB_STATUS = { queued: "Waiting for the encoder", running: "Being made", needs_attention: "Needs attention",
     done: "Done", cancelled: "Stopped" };
@@ -2456,7 +2584,6 @@
     }
     for (const key of Object.keys(wbPicks)) wbPicks[key] = new Set(lockIds(state.settings[key]));
     wbDirty = false;
-    renderWristbandSecrets();
     renderWristbandStatus();
     renderRemoteStatus();
     renderZoneNote();
@@ -2465,7 +2592,7 @@
 
   // The Client Secret and password are write-only: the dashboard only learns whether they're saved.
   function renderWristbandSecrets() {
-    const form = $("#wb-form");
+    const form = $("#tt-form");
     const saved = { tthotel_client_secret: state.settings.tthotel_client_secret_set === "1",
       tthotel_password_md5: state.settings.tthotel_password_md5_set === "1" };
     for (const [name, isSaved] of Object.entries(saved)) {
@@ -2476,7 +2603,13 @@
     $("#wb-clear-row").hidden = !saved.tthotel_client_secret && !saved.tthotel_password_md5;
   }
 
+  // TT Hotel's status (Settings → Connections, and its line on this tab) and the door count.
   function renderWristbandStatus() {
+    renderConnections();
+    renderDoorStatus();
+  }
+
+  function renderTTStatus() {
     const wb = state.wristbands || {};
     const lines = [];
     if (!wb.enabled) lines.push("Turned off.");
@@ -2494,7 +2627,6 @@
         `(TT Hotel's free limit is ${count(wb.quota || 30000)}).`);
     }
     $("#wb-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
-    renderDoorStatus();
   }
 
   // Which time zone cards use: the one typed here, else Home Assistant's.
@@ -2574,7 +2706,10 @@
 
   // Tests the saved details, so Save first.
   $("#wb-test").addEventListener("click", () => run(async () => {
-    if (wbDirty) throw new Error("Click Save wristband settings first: the test uses what's saved.");
+    if (connDirty.tt) throw new Error("Click Save TT Hotel settings first: the test uses what's saved.");
+    if (!state.wristbands?.enabled) {
+      throw new Error("Wristbands is off: tick Make wristbands and key cards on the Wristbands tab and save first.");
+    }
     try {
       const r = await api("POST", "api/wristbands/test");
       toast(`Connected: ${plural(r.doors, "door")} in ${plural(r.buildings, "building")}.`);
@@ -5115,6 +5250,7 @@
     editing = null;
     layoutDraft = null;
     wbDirty = false;
+    connDirty.tt = connDirty.ct = false;
     wbDoors = null; // door names and hidden doors come back from the file too
     await load();
     renderRoleEditor();

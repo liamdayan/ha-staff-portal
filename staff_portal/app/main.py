@@ -2560,6 +2560,7 @@ def connecteam_state() -> dict:
             "last_error": connecteam.last_error, "clocked_in": len(connecteam.clocked_in),
             "halted": connecteam.halted, "needed": connecteam_wanted(),
             "paused": connecteam.pause_reason if connecteam.paused_until > now else None,
+            "paused_until": connecteam.paused_until if connecteam.paused_until > now else None,
             "interval": connecteam.interval(), "used_today": connecteam.usage()["count"],
             "daily_cap": connecteam.daily_cap(),
             "account_left": connecteam.limits.get("day_left"),
@@ -4064,10 +4065,20 @@ async def admin_update_settings(request: web.Request):
         sync_staff_soon()     # at most once a minute
     if tthotel_settings() != tt_before:
         tthotel.forget()      # another account (or Wristbands turned on): a fresh start with it
-    wristbands_only = bool(values) and all(wristband_setting(k) for k in values)
-    db.log(admin_name(request),
-           "Updated wristband settings" if wristbands_only else "Updated settings")
+    db.log(admin_name(request), settings_log_text(values))
     return web.json_response({"ok": True})
+
+
+def settings_log_text(values: dict) -> str:
+    """The Activity line for a settings save. TT Hotel and Connecteam are each saved on their own
+    (Settings > Connections), and so are the Wristbands tab's settings."""
+    for prefix, text in (("tthotel_", "Updated TT Hotel settings"),
+                         ("connecteam_", "Updated Connecteam settings")):
+        if values and all(k.startswith(prefix) for k in values):
+            return text
+    if values and all(wristband_setting(k) for k in values):
+        return "Updated wristband settings"
+    return "Updated settings"
 
 
 # ---------------------------------------------------------------- wristbands (dashboard)
