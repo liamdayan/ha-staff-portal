@@ -151,7 +151,8 @@ ERROR_MESSAGES = {
     -3: "This version of SN Web Socket doesn't know that request; update SN Web Socket",
     -9: "SN Web Socket ran into an error",
     -12: "The encoder is busy",
-    1003: "No card encoder found on that computer (check the USB cable and driver)",
+    1003: ("No card encoder found on that computer (check the USB cable and the Silicon Labs CP210x "
+           "driver)"),
     1004: "Couldn't open the card encoder (another program, such as TT Hotel, may be using it)",
     11000: "SN Web Socket couldn't load the card encoder driver; reinstall SN Web Socket",
     UNREACHABLE: "Can't reach SN Web Socket on the encoder's computer",
@@ -243,7 +244,9 @@ def failure_message(code: int, card_type: str) -> str:
         return ("Open Wristbands on the card encoder's computer to connect the encoder, then try "
                 "again.")
     if code in (1003, 16):
-        return "The card encoder isn't plugged in. Check the USB cable, then try again."
+        # Found by its USB serial chip: unplugged, or plugged in without the chip's driver.
+        return ("The card encoder wasn't found. Check its USB cable, and that its driver "
+                "(Silicon Labs CP210x) is installed on that computer, then try again.")
     if code in (1, 1004, 26, 28):
         return ("Couldn't connect to the card encoder. Close TT Hotel on that computer if it's "
                 "open, check the USB cable, then try again.")

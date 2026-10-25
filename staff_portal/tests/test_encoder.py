@@ -405,8 +405,9 @@ def test_unplugged_encoder_needs_attention_then_recovers():
         h.sim.unplug()
         job_id = h.submit()
         live = await h.live(job_id, "needs_attention", 1)
-        assert live["message"] == ("The card encoder isn't plugged in. Check the USB cable, then "
-                                   "try again.")
+        assert live["message"] == ("The card encoder wasn't found. Check its USB cable, and that "
+                                   "its driver (Silicon Labs CP210x) is installed on that computer, "
+                                   "then try again.")
         assert h.runner.status()["connected"] is False
         h.sim.plug_in()
         h.sim.place_card(initialized=True)

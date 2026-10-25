@@ -621,9 +621,21 @@ built to use a small share and never get the account blocked:
 
 ### Troubleshooting
 
-- **The encoder types card numbers** (into the PIN pad, a name or the address bar) when a card is
-  put on it: some encoders do, as a keyboard would. Staff Access ignores it on its own pages
-  (nobody types that fast, so it can tell); elsewhere it's typed as usual.
+- **"The card encoder wasn't found"**, or **the encoder types card numbers like a keyboard**
+  (into the PIN pad, a name or the address bar) and no card gets made: SN Web Socket can't reach
+  the encoder on that computer, which then acts as a plain card reader. SN Web Socket looks for it
+  as a COM port with a Silicon Labs CP210x chip:
+  1. Open **Device Manager** on that computer (right-click **Start**) with the encoder plugged in,
+     and look under **Ports (COM & LPT)** for **Silicon Labs CP210x USB to UART Bridge (COM…)**.
+  2. If it isn't there (or shows under **Other devices** with a warning sign), install the CP210x
+     driver: it comes with SN Web Socket (`CP210xVCPInstaller_x64.exe` in the `resources\driver`
+     folder where SN Web Socket is installed), or download **CP210x Universal Windows Driver**
+     from Silicon Labs. Then unplug the encoder and plug it back in.
+  3. Close TT Hotel on that computer, restart SN Web Socket, and click **Test encoder** in
+     **Phones & computers**.
+
+  Staff Access ignores the typed card numbers on its own pages either way (nobody types that
+  fast, so it can tell); elsewhere they're typed as usual.
 - **"Open Wristbands on Front Desk PC to connect the encoder."** (This computer (USB)) Sign in
   on that computer and open **Wristbands**: a job waiting for it carries on by itself, and one
   that needs attention goes on with **Try again**.

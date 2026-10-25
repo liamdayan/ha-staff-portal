@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.8
+
+- **Clearer: "The card encoder wasn't found."** When SN Web Socket can't find the encoder, staff
+  were told it wasn't plugged in. It's just as often plugged in without its driver (Silicon Labs
+  CP210x), and then it acts as a plain card reader that types card numbers like a keyboard. The
+  message now says to check both, and the documentation's Troubleshooting walks through
+  checking and installing the driver.
+
 ## 0.8.7
 
 **Card encoders**
