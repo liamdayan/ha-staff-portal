@@ -8,6 +8,9 @@ What files never contain:
 - Home Assistant sign-in tokens for linked users. After restoring onto the same system, links
   are kept for phones and staff that still match; otherwise they need relinking.
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
+- The Connecteam and TT Hotel secrets (and TT Hotel's sign-in). A restore keeps the ones saved.
+- The door list (it comes from TT Hotel) and the record of wristbands made. Only the door names
+  and hiding chosen here travel, and land on doors the system already has.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry.
 """
 
@@ -18,14 +21,16 @@ import os
 import re
 import time
 
-from db import page_choice
+from db import PRIVATE_SETTINGS, page_choice
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
+from wristbands import NO_ACCESS, clean_permissions, permission_choice
 
 FORMAT = "staff-portal"
-BACKUP_SCHEMA = 2          # 2: role pages, people's roles, pages and own changes (0.7.0)
-READABLE_SCHEMAS = (1, 2)
+BACKUP_SCHEMA = 3          # 3: wristbands (0.8.0)
+                           # 2: role pages, people's roles, pages and own changes (0.7.0)
+READABLE_SCHEMAS = (1, 2, 3)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members", "backup": "a full backup"}
 PIN_HASH_RE = re.compile(r"^[0-9a-f]{32}\$[0-9a-f]{128}$")
 TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -42,6 +47,11 @@ MAX_LINK_ROWS = 200_000
 MAX_LOGO_BYTES = 6 * 1024 * 1024
 KEEP_SAFETY_BACKUPS = 5
 SAFETY_NAME_RE = re.compile(r"^before-restore-\d{8}-\d{6}\.json$")
+# A computer's card encoder: the address of TT Hotel's SN Web Socket helper on the desk PC, and
+# the USB port it's on (Windows COM ports, or a Mac/Linux device path).
+ENCODER_URL_RE = re.compile(r"^wss?://[A-Za-z0-9.-]+(:\d{1,5})?/?$")
+ENCODER_PORT_RE = re.compile(r"^(COM(25[0-6]|2[0-4]\d|1\d\d|[1-9]\d?)"
+                             r"|/dev/[A-Za-z0-9_][A-Za-z0-9._/-]{0,59})$")
 
 
 # ---------------------------------------------------------------- helpers
@@ -103,6 +113,39 @@ def _unique(name: str, taken: set[str], limit: int) -> str:
 def _connecteam_id(value) -> str | None:
     value = str(value).strip() if value not in (None, "") else ""
     return value if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value) else None
+
+
+def encoder_url_ok(url: str) -> bool:
+    match = ENCODER_URL_RE.match(url)
+    return bool(match) and (not match[1] or 0 < int(match[1][1:]) <= 65535)
+
+
+def encoder_url(url: str) -> str | None:
+    """An encoder address spelled one way (lower case, no trailing slash or leading zeros in the
+    port), or None if it isn't one. Each address gets its own runner, so two computers sharing
+    an encoder must spell it the same to take turns."""
+    url = url.strip().rstrip("/").lower()
+    if not encoder_url_ok(url):
+        return None
+    base, _, port = url.rpartition(":")
+    return f"{base}:{int(port)}" if base.count(":") == 1 and port.isdigit() else url
+
+
+def encoder_port_ok(port: str) -> bool:
+    return bool(ENCODER_PORT_RE.match(port)) and ".." not in port
+
+
+def _stored_wristbands(raw) -> str | None:
+    """Wristband permissions from a file (stored JSON text, or already an object) as they're
+    stored here. None means none of their own: no wristbands for a role, the same as their role
+    for a person. Damaged means no wristbands, never more."""
+    if raw is None or raw == "":
+        return None
+    try:
+        cleaned = clean_permissions(json.loads(raw) if isinstance(raw, str) else raw)
+    except (TypeError, ValueError, RecursionError):
+        cleaned = NO_ACCESS
+    return None if cleaned is None else json.dumps(cleaned)
 
 
 def _page_names(layout: dict, choice: list[str] | None) -> list[dict] | None:
@@ -228,7 +271,9 @@ def export_roles(db, version: str) -> dict:
     return _envelope("roles", version, roles=[
         {"name": r["name"], "entities": r["entities"],
          "areas": {area_names[a]: lvl for a, lvl in r["areas"].items() if a in area_names},
-         "pages": _page_names(layout, r["layout_pages"])}
+         "pages": _page_names(layout, r["layout_pages"]),
+         # Door IDs are TT Hotel's own, the same on any system using the same TT Hotel account.
+         "wristbands": r["wristbands"]}
         for r in db.roles()])
 
 
@@ -252,9 +297,10 @@ def export_staff(db, version: str) -> dict:
          "phones": sorted(allowed.get(r["id"], [])),
          "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"]),
          "role": roles.get(r["role_id"]), "pages": _page_names(layout, page_choice(r["layout_pages"])),
-         "overrides": overrides(r["id"])}
+         "overrides": overrides(r["id"]), "wristbands": permission_choice(r["wristbands"])}
         for r in db.conn.execute("""SELECT id, name, pin_hash, status, connecteam_user_id,
-                                    require_clock_in, role_id, layout_pages FROM staff ORDER BY name""")])
+                                    require_clock_in, role_id, layout_pages, wristbands
+                                    FROM staff ORDER BY name""")])
 
 
 # ---------------------------------------------------------------- imports (merge into what's here)
@@ -291,17 +337,20 @@ def _import_roles(db, rows: list, mode: str) -> dict:
         if match and mode == "skip":
             result["skipped"] += 1
             continue
-        # Files from before roles had pages leave a replaced role's pages as they are.
+        # Files from before roles had pages (or wristbands) leave a replaced role's as they are.
         pages = _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP
+        wristbands = _stored_wristbands(raw["wristbands"]) if "wristbands" in raw else _KEEP
         if match and mode == "replace":
             _write_role(db, match["id"], match["name"], entities, areas)
             _write_pages(db, "roles", match["id"], pages)
+            _write_wristbands(db, "roles", match["id"], wristbands)
             result["replaced"] += 1
             continue
         if match:
             name = _unique(name, set(existing), 60)
         role_id = _write_role(db, None, name, entities, areas)
         _write_pages(db, "roles", role_id, pages)
+        _write_wristbands(db, "roles", role_id, wristbands)
         existing[name.lower()] = {"id": role_id, "name": name}
         result["added"] += 1
     result["missing_areas"] = sorted(result["missing_areas"])
@@ -318,6 +367,14 @@ def _write_pages(db, table: str, row_id: int, pages) -> None:
     if pages is not _KEEP:
         db.conn.execute(f"UPDATE {table} SET layout_pages = ? WHERE id = ?",
                         (None if pages is None else json.dumps(pages), row_id))
+
+
+def _write_wristbands(db, table: str, row_id: int, stored) -> None:
+    """Set a role's or person's wristband permissions (as _stored_wristbands gives them),
+    without committing (_KEEP: leave them)."""
+    assert table in ("roles", "staff")
+    if stored is not _KEEP:
+        db.conn.execute(f"UPDATE {table} SET wristbands = ? WHERE id = ?", (stored, row_id))
 
 
 def import_staff(db, data, mode: str) -> dict:
@@ -402,6 +459,8 @@ def _import_staff(db, rows: list, mode: str) -> dict:
                      _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP)
         if "overrides" in raw:
             _write_overrides(db, staff_id, *_override_levels(raw["overrides"], area_ids, result["missing_areas"]))
+        _write_wristbands(db, "staff", staff_id,
+                          _stored_wristbands(raw["wristbands"]) if "wristbands" in raw else _KEEP)
     for key in ("missing_phones", "missing_roles", "missing_pages", "missing_areas"):
         result[key] = sorted(result[key])
     return result
@@ -424,27 +483,27 @@ def make_backup(db, branding, version: str) -> dict:
     logo = branding.logo_png()
     return _envelope(
         "backup", version, schema=BACKUP_SCHEMA,
-        # The Connecteam secret is a credential: it never goes into a file (a restore keeps the
-        # one already saved).
-        settings={k: v for k, v in db.settings().items()
-                  if k not in ("connecteam_client_secret", "connecteam_usage")},
+        # Secrets are credentials: they never go into a file (a restore keeps the ones already
+        # saved). Neither do request counts or TT Hotel's sign-in.
+        settings={k: v for k, v in db.settings().items() if k not in PRIVATE_SETTINGS},
         layout=db.layout(),
         logo=base64.b64encode(logo).decode() if logo else None,
         areas=rows("SELECT id, name, sort_order, created_at FROM areas"),
         area_entities=rows("SELECT area_id, entity_id FROM area_entities"),
         area_ha_areas=rows("SELECT area_id, ha_area_id FROM area_ha_areas"),
-        roles=rows("SELECT id, name, created_at, layout_pages FROM roles"),
+        roles=rows("SELECT id, name, created_at, layout_pages, wristbands FROM roles"),
         role_entities=rows("SELECT role_id, entity_id, level FROM role_entities"),
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
-                        staff_all, pin_only, layout_pages, created_at, last_seen
-                        FROM devices WHERE status != 'deleted'"""),
+                        staff_all, pin_only, layout_pages, created_at, last_seen, encoder_url,
+                        encoder_port FROM devices WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
-                      require_clock_in, role_id, layout_pages FROM staff"""),
+                      require_clock_in, role_id, layout_pages, wristbands FROM staff"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
+        wristband_doors=rows("SELECT lock_id, name, hidden FROM wb_doors"),
     )
 
 
@@ -468,9 +527,10 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         raise ValueError("That backup was made by a newer version of Staff Portal. Update the add-on first.")
 
     settings_in = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-    # The Connecteam secret is write-only and never in a backup: a file can't set or clear it.
+    # Secrets are write-only and never in a backup: a file can't set or clear them, nor touch
+    # the request counts or TT Hotel's sign-in.
     settings_in = {k: v for k, v in settings_in.items()
-                   if k not in ("connecteam_client_secret", "connecteam_clear_secret", "connecteam_usage")}
+                   if k not in (*PRIVATE_SETTINGS, "connecteam_clear_secret", "tthotel_clear_secret")}
     settings = clean_settings(settings_in, current_settings)
     layout = clean_layout(data.get("layout") or {"pages": []})
 
@@ -506,8 +566,10 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         if not name or name in names or any(r["id"] == role_id for r in roles):
             raise ValueError("The backup has a damaged or repeated role.")
         names.add(name)
+        # Backups from before wristbands have none: roles make none, people follow their role.
         roles.append({"id": role_id, "name": name, "created_at": _time(row.get("created_at"), time.time()),
-                      "layout_pages": _stored_pages(row.get("layout_pages"))})
+                      "layout_pages": _stored_pages(row.get("layout_pages")),
+                      "wristbands": _stored_wristbands(row.get("wristbands"))})
     role_ids = {r["id"] for r in roles}
     role_entities = {(r["role_id"], r["entity_id"]): _level(r["entity_id"], r["level"])
                      for r in _rows(data, "role_entities", MAX_LINK_ROWS)
@@ -536,7 +598,8 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "connecteam_user_id": link,
                       "require_clock_in": 1 if link and row.get("require_clock_in") in (1, True) else 0,
                       "role_id": row.get("role_id") if row.get("role_id") in role_ids else None,
-                      "layout_pages": _stored_pages(row.get("layout_pages"))})
+                      "layout_pages": _stored_pages(row.get("layout_pages")),
+                      "wristbands": _stored_wristbands(row.get("wristbands"))})
     staff_ids = {m["id"] for m in staff}
     staff_entities = {(r["staff_id"], r["entity_id"]): ("view" if r["level"] == "control" and not controllable(r["entity_id"])
                                                          else r["level"])
@@ -565,6 +628,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         if status in ("pending", "revoked"):
             token_hash = None
         role_id = row.get("role_id") if row.get("role_id") in role_ids else None
+        url, port = str(row.get("encoder_url") or ""), str(row.get("encoder_port") or "")
         devices.append({"id": device_id, "name": name, "role_id": role_id, "status": status,
                         "kind": "computer" if row.get("kind") == "computer" else "phone",
                         "token_hash": token_hash, "pin_hash": pin_hash,
@@ -573,7 +637,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                         "pin_only": 1 if row.get("pin_only") in (1, True) else 0,
                         "layout_pages": _stored_pages(row.get("layout_pages")),
                         "created_at": _time(row.get("created_at"), time.time()),
-                        "last_seen": _time(row.get("last_seen"))})
+                        "last_seen": _time(row.get("last_seen")),
+                        "encoder_url": encoder_url(url),
+                        "encoder_port": port if encoder_port_ok(port) else None})
     device_ids = {d["id"] for d in devices}
     staff_devices = {(r["staff_id"], r["device_id"]) for r in _rows(data, "staff_devices", MAX_LINK_ROWS)
                      if r.get("staff_id") in staff_ids and r.get("device_id") in device_ids}
@@ -590,12 +656,24 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             continue
         phone_orders[row["owner"]] = json.dumps(order)
 
+    # Names and hiding chosen for TT Hotel's doors (by TT Hotel's lock ID).
+    wristband_doors, lock_ids = [], set()
+    for row in _rows(data, "wristband_doors"):
+        lock_id = row.get("lock_id")
+        if isinstance(lock_id, bool) or not isinstance(lock_id, int) or not 0 < lock_id <= 2**53:
+            continue
+        if lock_id not in lock_ids:
+            lock_ids.add(lock_id)
+            wristband_doors.append({"lock_id": lock_id, "name": _name(row.get("name")),
+                                    "hidden": 1 if row.get("hidden") in (1, True) else 0})
+
     return {"settings": settings, "layout": layout, "logo": logo, "areas": areas,
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
             "roles": roles, "role_entities": role_entities, "role_areas": role_areas,
             "staff": staff, "devices": devices, "staff_devices": sorted(staff_devices),
             "staff_entities": staff_entities, "staff_areas": staff_areas,
-            "phone_orders": phone_orders, "needs_setup": needs_setup,
+            "phone_orders": phone_orders, "wristband_doors": wristband_doors,
+            "needs_setup": needs_setup,
             "exported_at": _time(data.get("exported_at"), time.time())}
 
 

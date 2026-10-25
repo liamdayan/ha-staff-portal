@@ -19,6 +19,7 @@
   <button role="tab" data-tab="phones" aria-selected="true">Phones &amp; computers</button>
   <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
+  <button role="tab" data-tab="wristbands">Wristbands</button>
   <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
@@ -70,6 +71,156 @@
         <div class="empty">Pick a role, or create one like “Maintenance” or “Housekeeping.”</div>
       </div>
     </div>
+  </section>
+
+  <section id="tab-wristbands" class="tab" hidden>
+    <div class="section-head"><h2>Wristbands</h2></div>
+    <p class="hint wb-intro">Staff signed in on a front-desk computer make TT Hotel wristbands and key
+      cards on the card encoder plugged into it. Set up your TT Hotel account and the defaults here,
+      enter each front-desk computer's encoder address in <button class="linkish" data-goto="phones">Phones
+      &amp; computers</button> → Edit, and choose who may make which cards on the
+      <button class="linkish" data-goto="roles">Roles</button> tab. Every card is recorded with who made it.</p>
+    <form id="wb-form" class="settings">
+      <fieldset>
+        <legend>TT Hotel account</legend>
+        <label class="check-row"><input type="checkbox" name="wristbands_enabled">
+          <span>Make wristbands and key cards
+          <small>People whose role allows it can make day passes, overnight wristbands and staff cards
+          on a front-desk computer with a card encoder.</small></span></label>
+        <p class="hint">In the TT Hotel program on the front-desk computer, sign in as the hotel's admin
+          and open <b>Settings → Integration</b>. Copy the Client ID, Client Secret, username and
+          password from there. The password there is already scrambled (32 letters and numbers):
+          paste it exactly as TT Hotel shows it, never your real password.</p>
+        <div class="row">
+          <label>Client ID<input name="tthotel_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+          <label>Client Secret<input name="tthotel_client_secret" type="password" maxlength="500"
+            autocomplete="new-password" spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label>Username <small>The hotel admin's TT Hotel username.</small>
+            <input name="tthotel_username" maxlength="200" autocomplete="off" spellcheck="false"></label>
+          <label>Password <small>Exactly as exported from TT Hotel → Settings → Integration.</small>
+            <input name="tthotel_password_md5" type="password" maxlength="64" autocomplete="new-password"
+              spellcheck="false"></label>
+        </div>
+        <div class="row">
+          <label>Account hosted in<select name="tthotel_region">
+            <option value="global">Outside China (euapi.ttlock.com)</option>
+            <option value="china">China (cnapi.ttlock.com)</option></select></label>
+          <label>Check for new doors every (hours)<input name="tthotel_sync_hours" type="number" min="1" max="48"></label>
+        </div>
+        <p class="hint">TT Hotel's free limit is 30,000 requests a month, counting every request.
+          Staff Access never uses more than a quarter of that (7,500), and its automatic door checks stop
+          at half of its share so making cards always has room. Making cards needs a fresh key for the
+          encoder from TT Hotel: one request covers about 8 minutes of card-making. Door checks cost a
+          request or two each, and only run while Wristbands is on and a computer has a card encoder.</p>
+        <label class="check-row" id="wb-clear-row" hidden><input type="checkbox" name="tthotel_clear_secret">
+          <span>Remove the saved Client Secret and password</span></label>
+        <div class="ct-status">
+          <span id="wb-status" class="hint"></span>
+          <button class="btn" type="button" id="wb-test">Test connection</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Day passes</legend>
+        <div class="row">
+          <label>Day passes stop working at <small>Every day pass works until this time on the day it's made.</small>
+            <input name="wb_daypass_end" type="time" required></label>
+          <label>Most guests on one day pass booking<input name="wb_daypass_max" type="number" min="1" max="50" required></label>
+        </div>
+        <div class="pick-block">
+          <div class="pick-head">Doors every day pass opens <span class="hint" id="wb-daypass-count"></span></div>
+          <div class="pick-box tall" id="wb-daypass-doors"></div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_daypass">
+          <span>Day passes open doors that are deadbolted from inside
+          <small>Leave this off for guests, so no one can open a room someone has bolted from inside.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Overnight guests</legend>
+        <div class="row">
+          <label>Checkout time <small>Overnight wristbands stop working at this time on the checkout date.</small>
+            <input name="wb_checkout_time" type="time" required></label>
+          <label>Most guests on one overnight booking<input name="wb_overnight_max" type="number" min="1" max="50" required></label>
+        </div>
+        <div class="pick-block">
+          <div class="pick-head">Shared doors on every overnight wristband <span class="hint" id="wb-overnight-count"></span></div>
+          <p class="hint">Such as the main entrance or the pool gate. Staff choose the room when they make the wristband.</p>
+          <div class="pick-box tall" id="wb-overnight-doors"></div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_overnight">
+          <span>Overnight wristbands open doors that are deadbolted from inside
+          <small>Leave this off for guests, so no one can open a room someone has bolted from inside.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Staff cards</legend>
+        <div class="row">
+          <label>Staff cards last (days) <small>Where the expiry date starts. Staff can change it, up to their role's limit.</small>
+            <input name="wb_staff_days" type="number" min="1" max="3650" required></label>
+          <label>Most cards at once<input name="wb_staff_max" type="number" min="1" max="20" required></label>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_staff">
+          <span>Staff cards open doors that are deadbolted from inside
+          <small>Usually on, so staff can get into a room in an emergency.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Time zone</legend>
+        <label>Time zone <small>Leave blank to use Home Assistant's. Day passes, checkout and staff
+          cards stop working at these times in this zone.</small>
+          <input name="wb_time_zone" maxlength="64" list="wb-zones" autocomplete="off" spellcheck="false"></label>
+        <datalist id="wb-zones"></datalist>
+        <p class="hint" id="wb-zone-note"></p>
+        <p class="hint">The front-desk computer's Windows time zone must be the same: the encoder works
+          out each door's time from that computer's clock.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Advanced</legend>
+        <p class="hint">Only change these if TT Hotel's own settings were changed, or the wristbands you
+          use need it.</p>
+        <div class="row">
+          <label>Card sectors <small>16 digits, as set in TT Hotel (its default is 0000000000011111).</small>
+            <input name="wb_sectors" maxlength="16" pattern="[01]{16}" required autocomplete="off" spellcheck="false"></label>
+          <label>Wait for each card (seconds) <small>Then staff are asked to try again, skip it or stop.</small>
+            <input name="wb_card_wait" type="number" min="10" max="600" required></label>
+          <label>Most doors on one card <small>A whole floor or building counts as one.</small>
+            <input name="wb_max_records" type="number" min="1" max="64" required></label>
+        </div>
+      </fieldset>
+      <div class="form-actions"><button class="btn primary" type="submit">Save wristband settings</button></div>
+    </form>
+    <div class="settings">
+      <fieldset>
+        <legend>Card encoders</legend>
+        <p class="hint">Each front-desk computer with an encoder runs TT Hotel's free <b>SN Web Socket</b>
+          helper. Give that computer a fixed address on your network, then enter it in Phones &amp;
+          computers → Edit. Staff Access connects to the encoder itself, so it works through your
+          Cloudflare Tunnel too. Between jobs the encoder is free for the TT Hotel program.</p>
+        <div id="wb-encoders" class="area-list"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Doors</legend>
+        <p class="hint">The doors TT Hotel lists for your property, by building and floor. Rename a door
+          to what staff call it (TT Hotel keeps its own name), or hide it from staff lists. A hidden door
+          can still be one of the day-pass or overnight doors above.</p>
+        <div class="ct-status">
+          <span id="wb-doors-status" class="hint"></span>
+          <button class="btn" type="button" id="wb-sync">Sync from TT Hotel</button>
+        </div>
+        <div id="wb-doors" class="wb-doors"></div>
+      </fieldset>
+    </div>
+    <div class="section-head wb-jobs-head">
+      <h2>Cards made</h2>
+      <button class="btn" id="wb-refresh-jobs">Refresh</button>
+    </div>
+    <p class="hint">Every wristband and card made here, newest first, with who made it. Kept for two years.</p>
+    <div class="table-wrap">
+      <table class="activity">
+        <thead><tr><th>When</th><th>Made by</th><th>For</th><th>Cards</th><th>Works until</th></tr></thead>
+        <tbody id="wb-job-rows"></tbody>
+      </table>
+    </div>
+    <button class="btn more" id="wb-more-jobs" hidden>Show older</button>
   </section>
 
   <section id="tab-layout" class="tab" hidden>
@@ -326,6 +477,25 @@
       <label class="check"><input type="checkbox" name="staff_all"> Everyone on the Staff tab</label>
       <div class="staff-checks" data-staff-list></div>
       <p class="hint" data-no-staff>Add people on the Staff tab first.</p>
+    </div>
+    <div class="dialog-group" data-encoder hidden>
+      <label>Card encoder address <small>For making wristbands: this computer's address on your network,
+        where TT Hotel's SN Web Socket helper runs. Leave blank if it has no encoder.</small>
+        <input name="encoder_url" maxlength="100" placeholder="ws://192.168.1.50:8102" autocomplete="off"
+          spellcheck="false"></label>
+      <label>Encoder port <small>Leave on Automatic unless the encoder isn't found; then enter its COM
+        port from Windows Device Manager.</small>
+        <input name="encoder_port" maxlength="40" list="encoder-ports" placeholder="Automatic"
+          autocomplete="off" spellcheck="false"></label>
+      <datalist id="encoder-ports">
+        <option value="COM1"></option><option value="COM2"></option><option value="COM3"></option>
+        <option value="COM4"></option><option value="COM5"></option><option value="COM6"></option>
+      </datalist>
+      <p class="hint" data-encoder-hint></p>
+      <div class="ct-status">
+        <span class="hint" data-encoder-result></span>
+        <button class="btn" type="button" data-encoder-test>Test encoder</button>
+      </div>
     </div>
     <div class="staff-pick" data-pages-pick hidden>
       <div class="pick-head">Pages on this <span data-word>phone</span></div>

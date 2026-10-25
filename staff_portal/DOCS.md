@@ -419,6 +419,143 @@ Good to know:
   in, wrong-PIN locks, signing out after the idle time, and Connecteam's clocked-in check.
 - **Preview** on the Layout tab can show a role or a person: pick them under **As**.
 
+## Wristbands (TT Hotel key cards)
+
+If your doors use **TT Hotel** (TTLock) locks, staff signed in on a front-desk computer can make
+RFID wristbands and key cards from the staff app, on the card encoder plugged into that computer:
+
+- **Day passes:** a guest name and party size. Every wristband opens the doors you chose for day
+  passes (such as the pool gate and locker rooms) until the day-pass end time today (8:00 PM
+  unless you change it).
+- **Overnight guests:** a guest name, party size, their room or rooms and a checkout date. Each
+  wristband opens the rooms plus the shared doors you chose (such as the main entrance) until
+  checkout time on the checkout date (11:00 AM unless you change it).
+- **Staff cards:** a staff member's name, how many cards, what they open (every door, whole
+  buildings, whole floors or single doors) and the last day they work (until 11:59 PM that day).
+- **Look up a wristband:** put it on the encoder to see its card number, who it was made for and
+  by whom, when it stops working and which doors it opens.
+- **Card log:** every wristband and card made, with who made it, when and the card numbers.
+
+Every card has a named maker: it's recorded under the person signed in, so wristbands are only
+offered on shared or role-based computers where each person signs in with their own PIN.
+
+### Setting up the front-desk computer
+
+1. On the computer the card encoder is plugged into, install TT Hotel's free **SN Web Socket**
+   from [tthotelpro.net/download](https://www.tthotelpro.net/download) and leave it running
+   whenever staff make wristbands. It lets Staff Access reach the encoder over your network.
+   Plug the encoder in and let Windows install its driver.
+2. Give that computer a **fixed IP address** on your network (a DHCP reservation in your router),
+   so the address you enter below keeps working.
+3. In TT Hotel on that computer, sign in as the hotel's admin and open **Settings → Integration
+   credentials**. You'll copy four things from there: the Client ID, Client Secret, username and
+   password. The password there is already scrambled (32 letters and numbers); use it exactly as
+   shown, never your real password.
+
+### Turning it on in Staff Access
+
+1. Open the **Wristbands** tab, tick **Make wristbands and key cards**, paste the four TT Hotel
+   details and click **Save wristband settings**, then **Test connection**. It reports how many
+   doors and buildings TT Hotel has. **Sync from TT Hotel** fetches the door list again (it's also
+   checked every 6 hours on its own).
+2. Under **Day passes**, tick the doors every day pass opens and set **Day passes stop working
+   at**. Under **Overnight guests**, tick the shared doors and set the **Checkout time**. Both
+   times can be changed at any time; cards already made keep the time they were made with.
+3. Under **Doors**, rename doors to what staff call them (TT Hotel keeps its own names) and hide
+   any staff should never pick. A hidden door can still be one of the day-pass or overnight
+   doors.
+4. In **Phones & computers**, click **Edit** on the front-desk computer and enter its **Card
+   encoder address**: just the computer's IP address (such as `192.168.1.50`) is enough, or
+   `ws://192.168.1.50:8102`. Leave **Encoder port** on Automatic unless the encoder isn't found.
+   **Test encoder** checks that Staff Access can reach it. The computer must be **Shared** or
+   **Role-based**. If two computers share one encoder, enter the same address on both (the same
+   IP address, not an IP on one and a name on the other), so they take turns with it.
+5. On the **Roles** tab, under **Wristbands**, choose what each role may make: day passes,
+   overnight wristbands, staff cards (and whether those may open single doors, floors, buildings
+   or every door), which doors they may put on cards (all doors, or chosen buildings, floors and
+   doors), the longest overnight stay and staff card, whether they may change the doors on a
+   day pass or overnight wristband, and whether they see everyone's cards in the card log and
+   look-ups. A role is warned if its doors don't cover the day-pass or overnight doors, because
+   those cards would then be refused. On a role-based computer, a person can have their own
+   wristband rules (click them under their role); otherwise they get their role's.
+
+Staff then see **Wristbands** in the sidebar under **Tools** (or as a tab on a narrow window).
+Each kind they may make is listed; one they may make but can't right now (a day pass after the
+end time, say) is greyed out and says why. They fill in the form, check the summary, click
+**Make**, and the screen walks them through each wristband: place it on the encoder, wait for the
+beep, take it off. If one doesn't work they can **Try again**, **Skip this one** or **Stop**.
+Wristbands already made keep working.
+
+The add-on checks every request against the person's permissions again, so a role that can only
+make day passes for the Bathhouse can't make anything else, even by sending requests by hand.
+Refusals show up in **Activity** as **Blocked: wristbands**.
+
+**Time zone.** Cards stop working at these times in Home Assistant's time zone (**Settings →
+System → General** in Home Assistant), or the zone you enter under **Time zone** on the
+Wristbands tab. The front-desk computer's Windows time zone must be the same: the encoder works
+out each door's time from that computer's clock.
+
+### TT Hotel requests
+
+TT Hotel's free plan allows 30,000 requests a month, counting every request. Staff Access is
+built to use a small share and never get the account blocked:
+
+- Making cards or looking one up needs a short-lived key for the encoder from TT Hotel (valid 10
+  minutes). Staff Access fetches one when it's needed and reuses it for about 8 minutes, so a
+  busy desk uses at most about one request every 8 minutes, however many wristbands it makes.
+  The card log costs nothing.
+- If TT Hotel can't be reached, day passes and overnight wristbands can still be made with the
+  last key; blank wristbands (never used before) and staff cards for whole floors, buildings or
+  every door need a fresh one, so they need the internet.
+- The door list is synced every 6 hours (change it under **Check for new doors every**), only
+  while Wristbands is on and a computer has a card encoder. A sync is one or two requests, plus
+  signing in about once every 90 days.
+- Its own hard limits: 7,500 requests a month (a quarter of the free plan), counted across
+  add-on restarts, and 30 a minute. Automatic door syncs stop at half of that, keeping the rest
+  for making cards.
+- If TT Hotel says the account has reached its limit, Staff Access stops asking until the limit
+  resets and never retries straight away. If it rejects the Client ID, secret, username or
+  password, it stops all automatic requests until you save the Wristbands settings again or
+  click **Test connection**. Both last through add-on restarts, and a restart doesn't sync the
+  doors again before they're due.
+- The **Wristbands** tab shows how many requests Staff Access made this month, when the doors
+  were last synced and, while stopped or paused, why.
+- Wristbands makes **no Connecteam requests**: it uses the same sign-in and clock-in checks as
+  the rest of the app.
+
+### Troubleshooting
+
+- **"Can't reach the card encoder's computer."** Check that the computer is on, SN Web Socket is
+  running, the address in **Phones & computers → Edit** is right, and nothing (such as Windows
+  Firewall) blocks port 8102 from Home Assistant.
+- **"The card encoder isn't plugged in"** or **"Couldn't connect to the card encoder."** Check
+  the USB cable. The classic TT Hotel program and SN Web Socket can't hold the encoder at the
+  same time: Staff Access lets go of it after each batch, so close the TT Hotel program's card
+  screen while staff make wristbands. If the encoder still isn't found, enter its COM port
+  (from Windows Device Manager) under **Encoder port**.
+- **"Center it on the encoder"** (codes 101, 102): the card wasn't read; put it flat in the
+  middle of the encoder.
+- **"There isn't room on the card for that many doors"** (code 104): use floor or building access
+  for staff cards, or fewer doors. **Most doors on one card** (Advanced) limits this up front.
+- **"Belongs to another hotel or can't be set up"** (105, 106, 109): the wristband was set up for
+  another property, or the **Card sectors** (Advanced) don't match TT Hotel's sector setting. Use
+  the same 16 digits as TT Hotel (its default is `0000000000011111`).
+- **"The authorization from TT Hotel expired"** (13): click **Try again**; Staff Access fetches a
+  new key.
+- **The card is made but the door says it's expired.** Lock clocks drift, especially after the
+  batteries run out. Sync the lock's time in the TT Hotel app. Also check that the front-desk
+  computer's time zone matches the property's.
+- **Cards always start now.** TT Hotel cards have no start time, so there's no "valid from
+  tomorrow": make them when the guest arrives.
+- A job left needing attention for 15 minutes is stopped, and a restart of the add-on stops any
+  unfinished job (the card log shows how many were made).
+
+**Security.** SN Web Socket accepts commands from anything on your network, with no password.
+Keep the front-desk computer on the staff network (not guest Wi-Fi). The TT Hotel details and the
+encoder's key never reach a browser or phone: the add-on talks to TT Hotel and to the encoder
+itself. The Client Secret and password are never shown again after saving (leave the boxes blank
+to keep them) and are never in backups.
+
 ## Connecteam: add staff and require clocking in (optional)
 
 If you use [Connecteam](https://connecteam.com) for time tracking, Staff Access can add staff from
@@ -619,7 +756,9 @@ that back:
   one added to the file by someone else. The restore warning lists them first. So an old backup
   can't bring back a lost phone you revoked, and an edited file can't add a working phone.
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
-- The Connecteam Client Secret is never in a backup and a restore never changes it.
+- The Connecteam Client Secret and the TT Hotel Client Secret and password are never in a backup,
+  and a restore never changes them. Wristband settings, door names and roles' wristband rules are
+  included; the card log stays as it is.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - The activity log stays as it is.

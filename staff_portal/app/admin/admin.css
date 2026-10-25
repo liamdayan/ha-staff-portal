@@ -158,8 +158,9 @@ main { max-width: 1200px; margin: 0 auto; padding: 22px 24px 72px; }
 
 /* Form fields */
 .inline-select select, .filters select, .filters input[type="search"], .settings input:not([type="color"]):not([type="file"]):not([type="checkbox"]),
-dialog input:not([type="checkbox"]), dialog select, .role-name-field input,
-.item-fields input:not([type="checkbox"]), .item-fields select, .pick-block input[type="search"] {
+.settings select, dialog input:not([type="checkbox"]), dialog select, .role-name-field input,
+.item-fields input:not([type="checkbox"]), .item-fields select, .pick-block input[type="search"],
+.wb-pick input[type="number"] {
   border: 1px solid transparent;
   background: var(--card-2);
   border-radius: var(--radius-sm);
@@ -167,8 +168,8 @@ dialog input:not([type="checkbox"]), dialog select, .role-name-field input,
   min-height: 38px;
   transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
-:is(.inline-select select, .filters select, .filters input, .settings input, dialog input, dialog select,
-  .role-name-field input, .item-fields input, .item-fields select, .pick-block input):focus {
+:is(.inline-select select, .filters select, .filters input, .settings input, .settings select, dialog input, dialog select,
+  .role-name-field input, .item-fields input, .item-fields select, .pick-block input, .wb-pick input):focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -283,6 +284,7 @@ legend { float: left; width: 100%; padding: 0; font-size: 17px; font-weight: 750
 .settings label { display: grid; gap: 5px; font-weight: 600; font-size: 14px; }
 .settings label small, dialog label small { font-weight: 400; color: var(--muted); }
 .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.row > label, .row > label > :is(input, select) { min-width: 0; }  /* long fields shrink to their column */
 input[type="color"] { width: 64px; height: 38px; border: 0; border-radius: var(--radius-sm); padding: 3px; background: var(--card-2); }
 .logo-row { display: flex; gap: 16px; align-items: center; }
 .icon-preview { width: 84px; height: 84px; border-radius: 19px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16); flex: none; }
@@ -531,3 +533,45 @@ body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -
 .person-name { font-size: 18px; font-weight: 700; color: var(--text); }
 .person-role { margin: 14px 0 2px; }
 .page-pick { margin-top: 6px; }
+
+/* Wristbands tab */
+.wb-intro { margin: 0 0 14px; max-width: 720px; }
+/* Hints of different lengths: the boxes in a row still line up along the bottom. */
+#wb-form .row > label { grid-template-rows: auto 1fr auto; }
+#wb-form .row > label > :is(input, select) { align-self: end; }
+.wb-intro .linkish { padding: 0; }
+/* Checkboxes in a list sit beside their words, not under them as other settings fields do. */
+.settings label.check { display: inline-flex; gap: 6px; font-weight: 400; }
+.wb-door-group { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.04em; margin: 10px 0 2px; }
+.wb-door-group:first-child { margin-top: 2px; }
+/* min-width: 0 lets the door table scroll sideways on a phone instead of widening the page. */
+.wb-doors { min-width: 0; }
+.wb-door-wrap { background: none; box-shadow: none; border-radius: 0; margin: 0 -8px; }
+.wb-door-table th, .wb-door-table td { padding: 8px; vertical-align: middle; }
+.wb-door-table tr.wb-group th { background: var(--card-2); color: var(--text); font-size: 13px; font-weight: 700; }
+.wb-door-table tbody tr.wb-group:hover th { background: var(--card-2); }
+.wb-door-table input:not([type="checkbox"]) { width: 100%; min-width: 150px; }
+.wb-door-table tr.wb-hidden input:not([type="checkbox"]) { color: var(--muted); }
+.wb-door-table tr.wb-gone td { color: var(--muted); }
+.wb-low { color: var(--danger); font-weight: 650; }
+.wb-jobs-head { margin-top: 28px; }
+.wb-job-note { color: var(--warn); }
+.meta.wb-note { color: var(--warn); }
+.dialog-group { display: grid; gap: 12px; }
+.dialog-group[hidden] { display: none; }
+
+/* Wristband permissions in the role and person editors */
+.wb-pick { margin-top: 6px; }
+.wb-pick small { color: var(--muted); font-weight: 400; }
+.wb-body { display: grid; gap: 8px; }
+.wb-sub { font-weight: 700; font-size: 14px; margin-top: 4px; }
+.wb-indent { display: grid; gap: 6px; padding-left: 24px; }
+.wb-count { color: var(--muted); font-size: 12px; font-weight: 400; }
+.wb-tree-box { background: var(--card); border-radius: 12px; padding: 8px 12px; max-height: 340px; overflow: auto; }
+.wb-tree { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.wb-tree .wb-tree { margin: 5px 0 2px 7px; padding-left: 14px; border-left: 2px solid var(--line); }
+.wb-tree-head { font-size: 14px; font-weight: 600; color: var(--muted); }
+.wb-number { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
+.wb-number input[type="number"] { width: 90px; background: var(--card); }
+.wb-warn { color: var(--warn); font-size: 13px; margin: 0; }

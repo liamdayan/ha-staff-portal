@@ -2,11 +2,13 @@
   "use strict";
 
   // All URLs are relative: Home Assistant serves this page under an ingress path.
-  const state = { settings: {}, roles: [], devices: [], staff: [], areas: [], hasLogo: false };
+  const state = { settings: {}, roles: [], devices: [], staff: [], areas: [], hasLogo: false, wristbands: {} };
   let entities = null;
   let haAreas = [];
-  let editing = null; // Roles tab: { kind: "role"|"person", id, name, entities, areas, pages, dirty, ... }
+  let editing = null; // Roles tab: { kind: "role"|"person", id, name, entities, areas, pages, wristbands, dirty, ... }
   let oldestActivity = null;
+  let wbDoors = null;   // TT Hotel's doors as last synced (api/wristbands/doors), loaded when needed
+  let wbDirty = false;  // Wristbands tab: settings changed but not saved yet
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
@@ -302,6 +304,7 @@
     state.hasLogo = data.has_logo;
     state.tunnelSources = data.tunnel_sources;
     state.connecteam = data.connecteam;
+    state.wristbands = data.wristbands || {};
     $("#add-from-connecteam").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
@@ -309,6 +312,8 @@
     renderAreaSettings();
     renderRoleList();
     refreshEditing();
+    renderWristbandStatus();
+    renderEncoderList();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -321,6 +326,8 @@
       if (name === "activity") loadActivity(true);
       if (name === "settings") fillSettings();
       if ((name === "roles" || name === "layout") && !entities) loadEntities();
+      if (name === "roles" && wristbandsOn() && !wbDoors) loadDoors();
+      if (name === "wristbands") openWristbands();
       if (name === "layout") renderLayoutEditor();
       if (name === "backup") loadSafetyBackups();
     } catch (err) {
@@ -340,6 +347,10 @@
         editing = null;
         renderRoleEditor();
         renderRoleList();
+      }
+      if (wbDirty && b.dataset.tab !== "wristbands") {
+        if (!await askConfirm("Discard unsaved wristband settings?", "Discard")) return;
+        wbDirty = false; // the form is filled again from what's saved when the tab next opens
       }
       selectTab(b.dataset.tab);
     }));
@@ -420,6 +431,7 @@
             h("div", { class: "meta" },
               h("span", { class: `badge ${cls}` }, label),
               d.kind === "computer" ? h("span", { class: "badge computer" }, "Computer") : null,
+              d.kind === "computer" && d.encoder_url ? encoderBadge(d) : null,
               d.signin_mode === "role"
                 ? h("span", { class: "badge shared" }, d.pin_only ? "Role-based \u00b7 PIN only" : "Role-based")
                 : d.signin_mode === "staff"
@@ -432,7 +444,10 @@
               h("span", null, `Last used ${ago(d.last_seen).toLowerCase()}`)),
             d.status !== "revoked" && d.signin_mode !== "role" && phonePagesText(d)
               ? h("div", { class: "meta" }, `Pages: ${phonePagesText(d)}`,
-                d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null),
+                d.custom_order ? ` \u00b7 rearranged on the ${word}` : "") : null,
+            d.encoder_url && d.signin_mode === "phone" && d.status !== "revoked"
+              ? h("div", { class: "meta wb-note" }, "Has a card encoder, but no one signs in here, so it " +
+                "can't make wristbands. Edit it and choose Role-based, or Shared.") : null),
           d.signin_mode === "role"
             ? h("span", { class: "inline-select" }, "Each person\u2019s own role and pages")
             : h("label", { class: "inline-select" }, "Role", roleSelect)),
@@ -519,10 +534,13 @@
     $("[data-title]", dialog).textContent = d ? `Edit ${d.name}` : `Add ${newKind}`;
     const kindSelect = form.elements["kind"];
     kindSelect.value = d?.kind || newKind;
+    const encoderBox = $("[data-encoder]", dialog);
     const syncKind = () => {
       const word = kindSelect.value === "computer" ? "computer" : "phone";
       dialog.querySelectorAll("[data-word]").forEach((el) => { el.textContent = word; });
       form.elements["name"].placeholder = word === "computer" ? "Front desk computer" : "Maintenance phone";
+      // A card encoder plugs into a computer. Offered once Wristbands is on (or one is already set).
+      encoderBox.hidden = word !== "computer" || !(wristbandsOn() || d?.encoder_url);
     };
     kindSelect.onchange = syncKind;
     syncKind();
@@ -546,6 +564,39 @@
       m.status === "disabled" ? `${m.name} (inactive)` : m.name)));
     $("[data-no-staff]", dialog).hidden = state.staff.length > 0;
     orderResetRow(dialog, d, "devices");
+    form.elements["encoder_url"].value = d?.encoder_url || "";
+    form.elements["encoder_port"].value = d?.encoder_port || "";
+    const encoderPort = () => {
+      const port = form.elements["encoder_port"].value.trim();
+      return !port || /^auto(matic)?$/i.test(port) ? "auto" : port;
+    };
+    // Tests what's saved: the add-on connects to the encoder, reads its version and lets it go.
+    const encoderResult = $("[data-encoder-result]", dialog);
+    const showResult = (text, isError) => {
+      encoderResult.textContent = text;
+      encoderResult.classList.toggle("form-error", !!isError);
+    };
+    showResult("");
+    const testButton = $("[data-encoder-test]", dialog);
+    testButton.hidden = !d;
+    testButton.onclick = async () => {
+      const typed = form.elements["encoder_url"].value.trim().replace(/\/+$/, "");
+      if (!d.encoder_url || typed !== d.encoder_url || encoderPort() !== (d.encoder_port || "auto")) {
+        showResult("Save first: Test encoder uses the saved address and port.", true);
+        return;
+      }
+      testButton.disabled = true;
+      showResult("Testing…");
+      try {
+        const r = await api("POST", `api/devices/${d.id}/encoder-test`);
+        showResult(`The encoder answered${r.version ? ` (version ${String(r.version).slice(0, 60)})` : ""}.`);
+      } catch (err) {
+        showResult(err.message, true);
+      } finally {
+        testButton.disabled = false;
+        load().catch(() => { /* the next reload shows the encoder's status */ });
+      }
+    };
     const pageOptions = layoutPageOptions();
     const chosenPages = d?.layout_pages ?? null;
     form.elements["pages_all"].checked = chosenPages === null;
@@ -565,6 +616,11 @@
       $("[data-pages-pick]", dialog).hidden = roleBased || !pageOptions.length;
       $("[data-pages-none]", dialog).hidden = roleBased || pageOptions.length > 0;
       pagesList.hidden = form.elements["pages_all"].checked;
+      // Every card needs a named maker, so only computers people sign in to make wristbands.
+      $("[data-encoder-hint]", dialog).textContent = shared
+        ? "People who sign in here can make the wristbands their role allows (Roles tab). Each card is " +
+          "recorded under their name."
+        : "To make wristbands, people must sign in here: set Mode to Role-based, or Who uses it to Shared.";
     };
     accessMode.onchange = syncMode;
     mode.onchange = syncMode;
@@ -600,6 +656,12 @@
           body.layout_pages = all ? null
             : [...ticked, ...(chosenPages || []).filter((id) => !offered.has(id) && known.has(id))];
         }
+      }
+      if (!encoderBox.hidden) {
+        body.encoder_url = form.elements["encoder_url"].value.trim() || null;
+        body.encoder_port = encoderPort();
+      } else if (d?.encoder_url && kindSelect.value !== "computer") {
+        body.encoder_url = null; // a phone has no card encoder
       }
       if (shared) {
         body.staff_all = form.elements["staff_all"].checked;
@@ -704,6 +766,7 @@
     if (areas) parts.push(`${areas} area${areas === 1 ? "" : "s"}`);
     if (devices) parts.push(`${devices} device${devices === 1 ? "" : "s"}`);
     if (m.layout_pages) parts.push("own pages");
+    if (m.wristbands != null && wristbandsOn()) parts.push("own wristband rules");
     return parts.join(", ");
   }
 
@@ -914,6 +977,7 @@
     const areaCount = Object.keys(r.areas).length;
     const access = [`${count} device${count === 1 ? "" : "s"}`];
     if (areaCount) access.push(`${areaCount} area${areaCount === 1 ? "" : "s"}`);
+    if (wristbandsOn() && r.wristbands?.types?.length) access.push("wristbands");
     const users = [];
     if (r.device_count) users.push(`${r.device_count} kiosk device${r.device_count === 1 ? "" : "s"}`);
     if (r.staff_count) users.push(`${r.staff_count} ${r.staff_count === 1 ? "person" : "people"}`);
@@ -964,14 +1028,18 @@
 
   function roleEditing(id) {
     const role = state.roles.find((r) => r.id === id);
+    // wristbands is a nested object, so it's copied in full; undefined (an older add-on) is
+    // never sent, which leaves the saved value as it is.
     return role && { kind: "role", id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
-      pages: role.layout_pages ?? null, dirty: false, filter: "", area: "", onlySelected: false };
+      pages: role.layout_pages ?? null, wristbands: clone(role.wristbands), dirty: false, filter: "", area: "",
+      onlySelected: false };
   }
 
   function personEditing(id) {
     const m = state.staff.find((x) => x.id === id);
     return m && { kind: "person", id, name: m.name, role_id: m.role_id ?? null, entities: { ...m.entities },
-      areas: { ...m.areas }, pages: m.layout_pages ?? null, dirty: false, filter: "", area: "", onlySelected: false };
+      areas: { ...m.areas }, pages: m.layout_pages ?? null, wristbands: clone(m.wristbands), dirty: false,
+      filter: "", area: "", onlySelected: false };
   }
 
   // Switching to something else in the editor: unsaved changes need a yes first.
@@ -1286,7 +1354,7 @@
     });
     const { filters, listBox, drawList } = deviceListSection();
     const body = () => ({ name: editing.name, entities: editing.entities, areas: editing.areas,
-      layout_pages: editing.pages });
+      layout_pages: editing.pages, wristbands: editing.wristbands });
 
     const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save role");
     save.addEventListener("click", () => run(async () => {
@@ -1339,6 +1407,7 @@
         editing.pages = pages;
         markEditing();
       }),
+      ...wristbandSection(),
       areaSection(drawList),
       h("h3", { class: "editor-sub" }, "Individual devices"),
       filters,
@@ -1367,7 +1436,7 @@
     const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save");
     save.addEventListener("click", () => run(async () => {
       await api("PATCH", `api/staff/${editing.id}`, { role_id: editing.role_id, layout_pages: editing.pages,
-        entities: editing.entities, areas: editing.areas });
+        entities: editing.entities, areas: editing.areas, wristbands: editing.wristbands });
       editing.dirty = false;
       await load();
     }, `Saved. ${m.name}'s access on role-based devices changes within a few seconds.`));
@@ -1376,6 +1445,7 @@
       editing.entities = {};
       editing.areas = {};
       editing.pages = null;
+      if (editing.wristbands !== undefined) editing.wristbands = null;
       markEditing();
       renderPersonEditor();
     });
@@ -1395,6 +1465,7 @@
         editing.pages = pages;
         markEditing();
       }),
+      ...wristbandSection(),
       areaSection(drawList),
       h("h3", { class: "editor-sub" }, "Individual devices"),
       filters,
@@ -1418,7 +1489,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (editing?.dirty || layoutDraft?.dirty) e.preventDefault();
+    if (editing?.dirty || layoutDraft?.dirty || wbDirty) e.preventDefault();
   });
 
   // ---------------------------------------------------------------- activity
@@ -1658,6 +1729,675 @@
     await load();
     refreshIcon();
   }, "Logo removed."));
+
+  // ---------------------------------------------------------------- wristbands
+
+  // TT Hotel wristbands and key cards, made on the card encoder at a front-desk computer. The
+  // add-on itself talks to TT Hotel and to the encoder; this tab sets up the account, the defaults
+  // and the door names, and the Roles tab says who may make which cards (wristbandPicker).
+
+  const WB_TYPES = [["day_pass", "Day passes"], ["overnight", "Overnight wristbands"], ["staff", "Staff cards"]];
+  const WB_TYPE_NAMES = { day_pass: "Day pass", overnight: "Overnight", staff: "Staff card" };
+  const WB_LEVELS = [["door", "Single doors"], ["floor", "Whole floors"], ["building", "Whole buildings"],
+    ["all", "Every door (a master card)"]];
+  const WB_NONE = { types: [], staff_levels: [], doors: { buildings: [], floors: [], doors: [] },
+    edit_doors: false, max_nights: 0, max_staff_days: 0, see_all_cards: false };
+  const WB_MAX_LIMIT = 3650; // the add-on's most nights or staff-card days (ten years)
+  const WB_JOB_PAGE = 50;    // card jobs per page, as the add-on sends them
+  const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
+  // FormData leaves unticked boxes out, so every checkbox in the form is listed here.
+  const WB_CHECKBOXES = ["wristbands_enabled", "tthotel_clear_secret", "wb_lockout_daypass",
+    "wb_lockout_overnight", "wb_lockout_staff"];
+  const WB_STATUS = { queued: "Waiting for the encoder", running: "Being made", needs_attention: "Needs attention",
+    done: "Done", cancelled: "Stopped" };
+  // The day-pass and overnight door lists, ticked but maybe not saved yet. Kept apart from the
+  // door list so loading the doors again never loses a tick.
+  const wbPicks = { wb_daypass_doors: new Set(), wb_overnight_doors: new Set() };
+  let doorsLoading = null;
+  let doorsError = null;
+  let oldestJob = null;
+
+  const clone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
+  const wristbandsOn = () => state.settings.wristbands_enabled === "1";
+  const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
+  const count = (n) => Number(n || 0).toLocaleString();
+  const listNames = (names) => (names.length <= 4 ? names.join(", ")
+    : `${names.slice(0, 4).join(", ")} and ${names.length - 4} more`);
+
+  // What staff see a door called: its name here, else its TT Hotel alias, else TT Hotel's name.
+  const doorName = (d) => d.name || d.alias || d.tt_name || `Door ${d.id}`;
+  const buildingName = (d) => (d.building == null ? "No building number" : d.building_name || `Building ${d.building}`);
+  const floorName = (d) => (d.floor == null ? "No floor number" : d.floor_name || `Floor ${d.floor}`);
+
+  // A door list setting (JSON text of TT Hotel lock IDs); anything damaged reads as none.
+  function lockIds(text) {
+    try {
+      const ids = JSON.parse(text || "[]");
+      return Array.isArray(ids) ? ids.filter((id) => Number.isSafeInteger(id) && id > 0) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // Doors by building, then floor, in TT Hotel's numbering (doors without a number last).
+  function doorGroups(doors) {
+    const byNumber = (a, b) => (a.number == null) - (b.number == null) || (a.number ?? 0) - (b.number ?? 0);
+    const byName = (a, b) => doorName(a).localeCompare(doorName(b), undefined, { numeric: true });
+    const buildings = new Map();
+    for (const d of doors) {
+      if (!buildings.has(d.building)) {
+        buildings.set(d.building, { number: d.building, name: buildingName(d), floors: new Map(), count: 0 });
+      }
+      const b = buildings.get(d.building);
+      if (d.building_name && d.building != null && b.name === `Building ${d.building}`) b.name = d.building_name;
+      if (!b.floors.has(d.floor)) b.floors.set(d.floor, { number: d.floor, name: floorName(d), doors: [] });
+      const f = b.floors.get(d.floor);
+      if (d.floor_name && d.floor != null && f.name === `Floor ${d.floor}`) f.name = d.floor_name;
+      f.doors.push(d);
+      b.count += 1;
+    }
+    return [...buildings.values()].sort(byNumber).map((b) => ({ ...b,
+      floors: [...b.floors.values()].sort(byNumber).map((f) => ({ ...f, doors: f.doors.sort(byName) })) }));
+  }
+
+  // Whether a permission's doors include this one, as the add-on decides it: every door, its
+  // building, its building and floor, or the door itself.
+  function scopeHas(doors, d) {
+    if (!doors) return false;
+    if (doors.all === true || (doors.doors || []).includes(d.id)) return true;
+    if (d.building == null) return false;
+    return (doors.buildings || []).includes(d.building) || (d.floor != null &&
+      (doors.floors || []).some(([b, f]) => b === d.building && f === d.floor));
+  }
+
+  // A permission in a few words: "day passes, staff cards; all doors" ("no wristbands" if none).
+  function wbSummary(perm) {
+    const types = WB_TYPES.filter(([t]) => perm?.types?.includes(t)).map(([, label]) => label.toLowerCase());
+    if (!types.length) return "no wristbands";
+    const d = perm.doors || {};
+    const doors = d.all === true ? ["all doors"] : [
+      d.buildings?.length && plural(d.buildings.length, "building"),
+      d.floors?.length && plural(d.floors.length, "floor"),
+      d.doors?.length && plural(d.doors.length, "door")].filter(Boolean);
+    return `${types.join(", ")}; ${doors.length ? doors.join(", ") : "no doors"}`;
+  }
+
+  // TT Hotel's doors as last synced. Whatever shows them is drawn again once they arrive.
+  function loadDoors() {
+    if (doorsLoading) return doorsLoading;
+    doorsLoading = (async () => {
+      try {
+        wbDoors = (await api("GET", "api/wristbands/doors")).doors || [];
+        doorsError = null;
+      } catch (err) {
+        doorsError = err.message;
+      }
+      doorsLoading = null;
+      renderDoors();
+      renderDefaultDoors();
+      if (editing && !$("#tab-roles").hidden) renderRoleEditor();
+    })();
+    return doorsLoading;
+  }
+
+  // "Loading doors…", or why they couldn't be loaded, while there's no door list yet.
+  function doorsPending() {
+    if (!doorsError) return h("p", { class: "hint" }, "Loading doors…");
+    return h("p", { class: "hint" }, `Couldn't load the doors: ${doorsError} `,
+      h("button", { type: "button", class: "linkish", onclick: () => { doorsError = null; loadDoors(); } }, "Try again"));
+  }
+
+  // ------------------------------------------------ who may make which cards (Roles tab)
+
+  // The Wristbands part of the role and person editors.
+  function wristbandSection() {
+    if (editing.wristbands === undefined) return []; // an add-on without wristbands
+    const head = h("h3", { class: "editor-sub" }, "Wristbands");
+    if (!wristbandsOn()) {
+      return [head, h("p", { class: "hint" }, "Turn on wristbands on the ",
+        h("button", { type: "button", class: "linkish", onclick: () => selectTab("wristbands") }, "Wristbands"),
+        " tab to let people make TT Hotel wristbands and key cards at the front desk.")];
+    }
+    const person = editing.kind === "person";
+    const role = person ? state.roles.find((r) => r.id === editing.role_id) : null;
+    return [head,
+      h("p", { class: "hint" }, person
+        ? `What ${editing.name} may make when they sign in on a role-based front-desk computer with a card ` +
+          "encoder. On a shared computer, that computer's role decides."
+        : "What people with this role may make when they sign in on a front-desk computer with a card " +
+          "encoder: a role-based one, or a shared one with this role. Each card is recorded under the " +
+          "name of the person who made it."),
+      wristbandPicker(editing.wristbands, person ? `Same as their role (${wbSummary(role?.wristbands)})` : null,
+        (value) => {
+          editing.wristbands = value;
+          markEditing();
+        }, person ? role?.wristbands ?? null : null)];
+  }
+
+  // Wristband permissions for a role (null: makes none) or a person (null: the same as their
+  // role; inheritLabel names that choice and `inherited` is their role's, to start from). Works
+  // on its own deep copy and calls onChange with a fresh value after every change.
+  function wristbandPicker(value, inheritLabel, onChange, inherited = null) {
+    const person = inheritLabel != null;
+    const start = { ...clone(WB_NONE), ...clone(value ?? inherited ?? WB_NONE) };
+    const types = new Set(start.types || []);
+    const levels = new Set(start.staff_levels || []);
+    const flags = { edit_doors: start.edit_doors === true, see_all_cards: start.see_all_cards === true };
+    const limits = { max_nights: start.max_nights || 0, max_staff_days: start.max_staff_days || 0 };
+    // Sets, so unticking a building brings back the floors and doors that were ticked inside it.
+    const doors = start.doors || {};
+    const scope = { all: doors.all === true, buildings: new Set(doors.buildings || []),
+      floors: new Set((doors.floors || []).map(([b, f]) => `${b}:${f}`)), doors: new Set(doors.doors || []) };
+    const toggle = (set, key, on) => (on ? set.add(key) : set.delete(key));
+
+    // A ticked building or floor stands for everything in it, so what's inside isn't stored too.
+    const scopeValue = () => {
+      if (scope.all) return { all: true };
+      const floors = [...scope.floors].map((k) => k.split(":").map(Number)).filter(([b]) => !scope.buildings.has(b));
+      const open = new Set(floors.map(([b, f]) => `${b}:${f}`));
+      const known = new Map((wbDoors || []).map((d) => [d.id, d]));
+      const ids = [...scope.doors].filter((id) => {
+        const d = known.get(id);
+        return !d || d.building == null ||
+          !(scope.buildings.has(d.building) || (d.floor != null && open.has(`${d.building}:${d.floor}`)));
+      });
+      return { buildings: [...scope.buildings].sort((a, b) => a - b), floors, doors: ids };
+    };
+    const current = () => ({
+      types: WB_TYPES.map(([t]) => t).filter((t) => types.has(t)),
+      staff_levels: WB_LEVELS.map(([l]) => l).filter((l) => levels.has(l)),
+      doors: scopeValue(), ...flags, ...limits });
+
+    const same = person ? h("input", { type: "checkbox", checked: value === null }) : null;
+    const check = (checked, label, onchange, note) => h("label", { class: "check" },
+      h("input", { type: "checkbox", checked, onchange }),
+      note ? h("span", null, label, h("small", { class: "wb-count" }, note)) : label);
+    const checkRow = (checked, label, note, onchange) => h("label", { class: "check-row" },
+      h("input", { type: "checkbox", checked, onchange }), h("span", null, label, h("small", null, note)));
+    const limit = (key, label) => {
+      const input = h("input", { type: "number", min: "0", max: String(WB_MAX_LIMIT), step: "1",
+        value: String(limits[key]) });
+      input.addEventListener("input", () => {
+        const n = Math.floor(Number(input.value));
+        limits[key] = Number.isFinite(n) ? Math.max(0, Math.min(WB_MAX_LIMIT, n)) : 0;
+        emit();
+      });
+      return h("label", { class: "wb-number" }, label, input, h("small", null, "0 means no limit"));
+    };
+
+    const typeBoxes = WB_TYPES.map(([t, label]) => check(types.has(t), label, (ev) => {
+      toggle(types, t, ev.target.checked);
+      emit();
+    }));
+    const levelBox = h("div", { class: "wb-indent" },
+      h("div", { class: "wb-count" }, "Staff cards they make may open:"),
+      WB_LEVELS.map(([l, label]) => check(levels.has(l), label, (ev) => {
+        toggle(levels, l, ev.target.checked);
+        emit();
+      })));
+    const treeBox = h("div", { class: "wb-tree-box" });
+    const allBox = h("input", { type: "checkbox", checked: scope.all, onchange: () => {
+      scope.all = allBox.checked;
+      treeBox.hidden = scope.all;
+      emit();
+    } });
+    treeBox.hidden = scope.all;
+    const warn = h("p", { class: "wb-warn" });
+    const editDoors = checkRow(flags.edit_doors, "Change the doors when making a day pass or overnight wristband",
+      "Otherwise they get the doors set on the Wristbands tab. They can only add doors they have access to.",
+      (ev) => { flags.edit_doors = ev.target.checked; emit(); });
+    const nights = limit("max_nights", "Longest overnight stay (nights)");
+    const days = limit("max_staff_days", "Longest a staff card lasts (days)");
+    const seeAll = checkRow(flags.see_all_cards, "See everyone's cards",
+      "In the card log and when looking up a wristband. Otherwise only the ones they made.",
+      (ev) => { flags.see_all_cards = ev.target.checked; emit(); });
+    const rest = h("div", { class: "wb-body" },
+      h("div", { class: "wb-sub" }, "Doors they may put on cards"),
+      h("label", { class: "check" }, allBox, "All doors, including ones added later"),
+      treeBox, warn, editDoors, nights, days, seeAll);
+    const body = h("div", { class: "wb-body" }, h("div", { class: "wb-sub" }, "Cards they may make"),
+      typeBoxes, levelBox, rest);
+
+    // Default doors outside what's ticked would make every one of those cards fail, so say so.
+    const warnings = () => {
+      const out = [];
+      const v = scopeValue();
+      const outside = (key) => lockIds(state.settings[key]).map((id) => wbDoors?.find((d) => d.id === id))
+        .filter((d) => d && d.active && !scopeHas(v, d)).map(doorName);
+      if (types.has("day_pass")) {
+        const missing = outside("wb_daypass_doors");
+        if (!lockIds(state.settings.wb_daypass_doors).length) {
+          out.push("No day-pass doors are chosen on the Wristbands tab yet, so no one can make day passes.");
+        } else if (missing.length) {
+          out.push(`Day passes open ${listNames(missing)}, which ${missing.length === 1 ? "isn't" : "aren't"} ` +
+            "ticked here, so they can't make day passes. Tick those doors, or All doors.");
+        }
+      }
+      const shared = types.has("overnight") ? outside("wb_overnight_doors") : [];
+      if (shared.length) {
+        out.push(`Every overnight wristband opens ${listNames(shared)}, which ${shared.length === 1 ? "isn't" : "aren't"} ` +
+          "ticked here, so they can't make overnight wristbands. Tick those doors, or All doors.");
+      }
+      if (types.has("staff") && levels.has("all") && !scope.all) {
+        out.push("A master card also needs All doors ticked.");
+      }
+      if (types.has("staff") && !levels.size) out.push("Choose what the staff cards they make may open.");
+      return out;
+    };
+    const sync = () => {
+      body.hidden = !!same?.checked;
+      levelBox.hidden = !types.has("staff");
+      rest.hidden = !types.size;
+      editDoors.hidden = !types.has("day_pass") && !types.has("overnight");
+      nights.hidden = !types.has("overnight");
+      days.hidden = !types.has("staff");
+      const notes = warnings();
+      warn.replaceChildren(...notes.flatMap((t, i) => (i ? [h("br"), t] : [t])));
+      warn.hidden = !notes.length;
+    };
+    function emit() {
+      if (same?.checked) onChange(null);
+      else {
+        const v = current();
+        // A role that makes no cards is stored as none at all.
+        onChange(!person && !v.types.length ? null : v);
+      }
+      sync();
+    }
+
+    const treeRow = (picked, label, note, onPick) => {
+      const box = h("input", { type: "checkbox", checked: picked });
+      const small = h("small", { class: "wb-count" });
+      const describe = () => { small.textContent = note(box.checked); };
+      box.addEventListener("change", () => { describe(); onPick(box.checked); emit(); });
+      describe();
+      return h("label", { class: "check" }, box, h("span", null, label, small));
+    };
+    const drawTree = () => {
+      if (!wbDoors) {
+        treeBox.replaceChildren(doorsPending());
+        if (!doorsError) loadDoors(); // draws the editor again when they arrive
+        return;
+      }
+      const active = wbDoors.filter((d) => d.active);
+      if (!active.length) {
+        treeBox.replaceChildren(h("p", { class: "hint" }, "No doors yet. Sync them from TT Hotel on the ",
+          h("button", { type: "button", class: "linkish", onclick: () => selectTab("wristbands") }, "Wristbands"), " tab."));
+        return;
+      }
+      const doorItem = (d) => h("li", null, check(scope.doors.has(d.id), doorName(d), (ev) => {
+        toggle(scope.doors, d.id, ev.target.checked);
+        emit();
+      }, d.hidden ? " · hidden from staff" : null));
+      const howMany = (n) => (on) => (on ? ` · all ${plural(n, "door")}, and ones added later` : ` · ${plural(n, "door")}`);
+      treeBox.replaceChildren(h("ul", { class: "wb-tree" }, doorGroups(active).map((b) => {
+        const floors = h("ul", { class: "wb-tree" }, b.floors.map((f) => {
+          const inside = h("ul", { class: "wb-tree" }, f.doors.map(doorItem));
+          // Doors without a building or floor number can only be chosen one by one.
+          if (b.number == null || f.number == null) return h("li", null, h("div", { class: "wb-tree-head" }, f.name), inside);
+          const key = `${b.number}:${f.number}`;
+          inside.hidden = scope.floors.has(key);
+          return h("li", null, treeRow(scope.floors.has(key), f.name, howMany(f.doors.length), (on) => {
+            toggle(scope.floors, key, on);
+            inside.hidden = on;
+          }), inside);
+        }));
+        if (b.number == null) return h("li", null, h("div", { class: "wb-tree-head" }, b.name), floors);
+        floors.hidden = scope.buildings.has(b.number);
+        return h("li", null, treeRow(scope.buildings.has(b.number), b.name, howMany(b.count), (on) => {
+          toggle(scope.buildings, b.number, on);
+          floors.hidden = on;
+        }), floors);
+      })));
+    };
+
+    same?.addEventListener("change", emit);
+    drawTree();
+    sync();
+    return h("div", { class: "staff-pick wb-pick" }, same ? h("label", { class: "check" }, same, inheritLabel) : null, body);
+  }
+
+  // ------------------------------------------------ the Wristbands tab
+
+  function openWristbands() {
+    // Unsaved changes stay on screen; otherwise show what's saved now.
+    if (wbDirty) renderWristbandStatus();
+    else fillWristbands();
+    renderEncoderList();
+    loadDoors();
+    loadWristbandJobs(true);
+  }
+
+  const isWristbandSetting = (key) => key === "wristbands_enabled" || key.startsWith("tthotel_") || key.startsWith("wb_");
+
+  function fillWristbands() {
+    const form = $("#wb-form");
+    for (const [k, v] of Object.entries(state.settings)) {
+      if (!isWristbandSetting(k)) continue;
+      const field = form.elements[k];
+      if (field?.type === "checkbox") field.checked = v === "1";
+      else if (field) field.value = v;
+    }
+    for (const key of Object.keys(wbPicks)) wbPicks[key] = new Set(lockIds(state.settings[key]));
+    wbDirty = false;
+    renderWristbandSecrets();
+    renderWristbandStatus();
+    renderZoneNote();
+    renderDefaultDoors();
+  }
+
+  // The Client Secret and password are write-only: the dashboard only learns whether they're saved.
+  function renderWristbandSecrets() {
+    const form = $("#wb-form");
+    const saved = { tthotel_client_secret: state.settings.tthotel_client_secret_set === "1",
+      tthotel_password_md5: state.settings.tthotel_password_md5_set === "1" };
+    for (const [name, isSaved] of Object.entries(saved)) {
+      form.elements[name].value = "";
+      form.elements[name].placeholder = isSaved ? "Saved — leave blank to keep" : "";
+    }
+    form.elements["tthotel_clear_secret"].checked = false;
+    $("#wb-clear-row").hidden = !saved.tthotel_client_secret && !saved.tthotel_password_md5;
+  }
+
+  function renderWristbandStatus() {
+    const wb = state.wristbands || {};
+    const lines = [];
+    if (!wb.enabled) lines.push("Turned off.");
+    else {
+      lines.push(wb.halted ? `Stopped: ${wb.halted} Fix it, then save the settings or click Test connection.`
+        : wb.paused ? `Paused: ${wb.pause_reason || "TT Hotel asked Staff Access to wait."}`
+        : wb.last_error ? `Problem: ${wb.last_error}`
+        : wb.synced_at ? "Connected."
+        : "Not connected yet. Save the settings, then click Test connection.");
+      if (wb.synced_at) lines.push(`Doors last synced ${ago(wb.synced_at).toLowerCase()}: ${plural(wb.doors || 0, "door")}.`);
+      lines.push(wb.needed
+        ? `Checking for new doors about every ${plural(Number(state.settings.tthotel_sync_hours) || 6, "hour")}.`
+        : "No computer has a card encoder yet, so TT Hotel isn't checked for new doors.");
+      lines.push(`Calls this month: ${count(wb.used_month)} of ${count(wb.monthly_cap)} ` +
+        `(TT Hotel's free limit is ${count(wb.quota || 30000)}).`);
+    }
+    $("#wb-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
+    renderDoorStatus();
+  }
+
+  // Which time zone cards use: the one typed here, else Home Assistant's.
+  function renderZoneNote() {
+    const field = $("#wb-form").elements["wb_time_zone"];
+    const typed = field.value.trim();
+    const saved = state.settings.wb_time_zone || "";
+    const ha = state.wristbands?.ha_time_zone;
+    const haText = ha ? `Home Assistant's, ${ha}` : "Home Assistant's";
+    field.placeholder = ha ? `${ha} (Home Assistant's)` : "Home Assistant's time zone";
+    $("#wb-zone-note").textContent = typed !== saved
+      ? `${typed || haText} takes effect when you save.`
+      : `In effect: ${saved || haText}.`;
+  }
+
+  // The day-pass and overnight door lists: every door, grouped by building and floor.
+  function renderDefaultDoors() {
+    drawDoorChecks($("#wb-daypass-doors"), $("#wb-daypass-count"), wbPicks.wb_daypass_doors);
+    drawDoorChecks($("#wb-overnight-doors"), $("#wb-overnight-count"), wbPicks.wb_overnight_doors);
+  }
+
+  function drawDoorChecks(box, countEl, picked) {
+    const showCount = () => { countEl.textContent = `(${picked.size} chosen)`; };
+    showCount();
+    if (!wbDoors) {
+      box.replaceChildren(doorsPending());
+      return;
+    }
+    // A door TT Hotel no longer lists stays here while it's ticked, so it can be unticked.
+    const doors = wbDoors.filter((d) => d.active || picked.has(d.id));
+    const unknown = [...picked].filter((id) => !wbDoors.some((d) => d.id === id));
+    if (!doors.length && !unknown.length) {
+      box.replaceChildren(h("p", { class: "hint" },
+        "No doors yet. Save your TT Hotel details, then click Test connection or Sync from TT Hotel."));
+      return;
+    }
+    const row = (id, label, note) => h("label", { class: "check pick-row" },
+      h("input", { type: "checkbox", checked: picked.has(id), onchange: (ev) => {
+        if (ev.target.checked) picked.add(id);
+        else picked.delete(id);
+        showCount();
+      } }),
+      h("span", null, label, note ? h("small", null, note) : null));
+    const rows = [];
+    for (const b of doorGroups(doors)) {
+      for (const f of b.floors) {
+        rows.push(h("div", { class: "wb-door-group" }, `${b.name} · ${f.name}`));
+        for (const d of f.doors) {
+          rows.push(row(d.id, doorName(d), !d.active ? " · no longer in TT Hotel"
+            : d.hidden ? " · hidden from staff" : ""));
+        }
+      }
+    }
+    for (const id of unknown) rows.push(row(id, `Door ${id}`, " · not in TT Hotel's list"));
+    box.replaceChildren(...rows);
+  }
+
+  $("#wb-form").addEventListener("input", (e) => {
+    wbDirty = true;
+    if (e.target.name === "wb_time_zone") renderZoneNote();
+  });
+  $("#wb-form").addEventListener("change", () => { wbDirty = true; });
+
+  // Sends only the Wristbands settings; the add-on leaves every other setting as it is.
+  $("#wb-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const body = Object.fromEntries(new FormData(form).entries());
+    for (const name of WB_CHECKBOXES) body[name] = form.elements[name].checked ? "1" : "0";
+    for (const [key, picked] of Object.entries(wbPicks)) body[key] = [...picked];
+    run(async () => {
+      await api("PUT", "api/settings", body);
+      await load();
+      fillWristbands();
+    }, "Wristband settings saved.");
+  });
+
+  // Tests the saved details, so Save first.
+  $("#wb-test").addEventListener("click", () => run(async () => {
+    if (wbDirty) throw new Error("Click Save wristband settings first: the test uses what's saved.");
+    try {
+      const r = await api("POST", "api/wristbands/test");
+      toast(`Connected: ${plural(r.doors, "door")} in ${plural(r.buildings, "building")}.`);
+    } finally {
+      await load();
+      await loadDoors();
+    }
+  }));
+
+  $("#wb-sync").addEventListener("click", () => run(async () => {
+    try {
+      const r = await api("POST", "api/wristbands/doors/sync");
+      toast(`Doors synced: ${r.added} added, ${r.updated} updated, ${r.removed} removed, ${r.total} in all.`);
+    } finally {
+      await load();
+      await loadDoors();
+    }
+  }));
+
+  try {
+    $("#wb-zones").replaceChildren(...Intl.supportedValuesOf("timeZone").map((z) => h("option", { value: z })));
+  } catch { /* an older browser: the time zone can still be typed */ }
+
+  // ------------------------------------------------ card encoders
+
+  // A computer's card encoder on its card in Phones & computers.
+  function encoderBadge(d) {
+    const s = state.wristbands?.encoders?.[d.encoder_url] || {};
+    const [text, cls] = s.error ? ["Card encoder: problem", "locked"]
+      : s.busy ? ["Card encoder: making cards", "active"]
+      : s.connected ? ["Card encoder", "active"] : ["Card encoder", ""];
+    return h("span", { class: `badge ${cls}`.trim(), title: s.error || d.encoder_url }, text);
+  }
+
+  // Why no one can use a computer's encoder, or how it was when last used.
+  function encoderNote(d) {
+    if (d.signin_mode === "phone") {
+      return h("div", { class: "via access-note" }, "No one signs in on this computer, so it can't make " +
+        "wristbands. Edit it and choose Role-based, or Shared.");
+    }
+    const s = state.wristbands?.encoders?.[d.encoder_url];
+    if (s?.busy) return h("div", { class: "via" }, "Making cards now.");
+    if (s?.error) return h("div", { class: "via access-note" }, `Problem: ${s.error}`);
+    if (s?.connected) {
+      return h("div", { class: "via" }, `Working${s.checked_at ? `, last checked ${ago(s.checked_at).toLowerCase()}` : ""}.`);
+    }
+    return h("div", { class: "entity-id" }, "Not used since the add-on started. Click Test encoder to check it.");
+  }
+
+  function renderEncoderList() {
+    const box = $("#wb-encoders");
+    const computers = state.devices.filter((d) => d.encoder_url && d.status !== "revoked");
+    if (!computers.length) {
+      box.replaceChildren(h("p", { class: "hint" }, "No computer has a card encoder yet. On the front-desk " +
+        "computer's card in Phones & computers, click Edit and enter the encoder's address."));
+      return;
+    }
+    box.replaceChildren(...computers.map((d) => h("div", { class: "area-row" },
+      h("div", { class: "entity-text" },
+        h("div", { class: "entity-name" }, d.name),
+        h("div", { class: "entity-id", title: d.encoder_url },
+          `${d.encoder_url} · port: ${d.encoder_port || "Automatic"}`),
+        encoderNote(d)),
+      h("div", { class: "area-actions" },
+        h("button", { type: "button", class: "btn", onclick: () => testEncoder(d) }, "Test encoder"),
+        h("button", { type: "button", class: "btn", onclick: () => editPhone(d) }, "Edit")))));
+  }
+
+  function testEncoder(d) {
+    return run(async () => {
+      try {
+        const r = await api("POST", `api/devices/${d.id}/encoder-test`);
+        toast(`The encoder on ${d.name} answered${r.version ? ` (version ${String(r.version).slice(0, 60)})` : ""}.`);
+      } finally {
+        await load();
+      }
+    });
+  }
+
+  // ------------------------------------------------ doors
+
+  function renderDoorStatus() {
+    const status = $("#wb-doors-status");
+    if (!wbDoors) {
+      status.textContent = "";
+      return;
+    }
+    const active = wbDoors.filter((d) => d.active);
+    const hidden = active.filter((d) => d.hidden).length;
+    const synced = state.wristbands?.synced_at;
+    status.textContent = !wbDoors.length ? "No doors yet."
+      : `${plural(active.length, "door")}${hidden ? `, ${hidden} hidden from staff` : ""}.` +
+        (synced ? ` Synced ${ago(synced).toLowerCase()}.` : "");
+  }
+
+  function renderDoors() {
+    const box = $("#wb-doors");
+    renderDoorStatus();
+    if (!wbDoors) {
+      box.replaceChildren(doorsPending());
+      return;
+    }
+    if (!wbDoors.length) {
+      box.replaceChildren(h("p", { class: "hint" }, "Turn on wristbands and save your TT Hotel details " +
+        "above, then click Sync from TT Hotel."));
+      return;
+    }
+    const rows = [];
+    for (const b of doorGroups(wbDoors)) {
+      for (const f of b.floors) {
+        rows.push(h("tr", { class: "wb-group" }, h("th", { colspan: "5" }, `${b.name} · ${f.name}`)));
+        rows.push(...f.doors.map(doorRow));
+      }
+    }
+    box.replaceChildren(h("div", { class: "table-wrap wb-door-wrap" }, h("table", { class: "activity wb-door-table" },
+      h("thead", null, h("tr", null, h("th", null, "Door"), h("th", null, "Battery"), h("th", null, "Gateway"),
+        h("th", null, "Status"), h("th", null, "Staff see it"))),
+      h("tbody", null, rows))));
+  }
+
+  // One door: its name for staff (blank: TT Hotel's) and whether staff see it. Each change is
+  // saved straight away.
+  function doorRow(d) {
+    const ttName = d.alias || d.tt_name || `Door ${d.id}`;
+    const name = h("input", { value: d.name, placeholder: ttName, maxlength: "60", "aria-label": `Name for ${ttName}` });
+    name.addEventListener("change", () => run(async () => {
+      const value = name.value.trim();
+      try {
+        await api("PATCH", `api/wristbands/doors/${d.id}`, { name: value });
+      } catch (err) {
+        name.value = d.name;
+        throw err;
+      }
+      d.name = value;
+      renderDefaultDoors();
+      toast(value ? `Staff now see it as ${value}.` : `Staff now see TT Hotel's name, ${ttName}.`);
+    }));
+    const shown = h("input", { type: "checkbox", checked: !d.hidden });
+    const row = h("tr", { class: [d.active ? "" : "wb-gone", d.hidden ? "wb-hidden" : ""].join(" ").trim() || null },
+      h("td", null, name, h("div", { class: "sub" },
+        `TT Hotel: ${d.tt_name || "no name"}${d.alias && d.alias !== d.tt_name ? ` (${d.alias})` : ""}` +
+        ` · ID ${d.id}${d.mac_last4 ? ` · MAC …${d.mac_last4}` : ""}`)),
+      h("td", { class: d.battery != null && d.battery <= 20 ? "nowrap wb-low" : "nowrap" },
+        d.battery == null ? "—" : `${d.battery}%`),
+      h("td", null, d.has_gateway ? "Yes" : "No"),
+      h("td", null, d.active ? "Active" : "Removed from TT Hotel"),
+      h("td", null, h("label", { class: "check" }, shown, "Show")));
+    shown.addEventListener("change", () => run(async () => {
+      try {
+        await api("PATCH", `api/wristbands/doors/${d.id}`, { hidden: !shown.checked });
+      } catch (err) {
+        shown.checked = !d.hidden;
+        throw err;
+      }
+      d.hidden = !shown.checked;
+      row.classList.toggle("wb-hidden", d.hidden);
+      renderDoorStatus();
+      renderDefaultDoors();
+      toast(d.hidden ? `${doorName(d)} is hidden from staff.` : `Staff see ${doorName(d)} again.`);
+    }));
+    return row;
+  }
+
+  // ------------------------------------------------ cards made
+
+  async function loadWristbandJobs(reset) {
+    const rows = $("#wb-job-rows");
+    if (reset) { oldestJob = null; rows.replaceChildren(); }
+    await run(async () => {
+      const q = oldestJob ? `?before=${oldestJob}` : "";
+      const { jobs } = await api("GET", `api/wristbands/jobs${q}`);
+      if (reset && !jobs.length) {
+        rows.replaceChildren(h("tr", null, h("td", { colspan: "5", class: "empty" }, "No cards made yet.")));
+      }
+      rows.append(...jobs.map(jobRow));
+      if (jobs.length) oldestJob = jobs[jobs.length - 1].created_at;
+      $("#wb-more-jobs").hidden = jobs.length < WB_JOB_PAGE;
+    });
+  }
+
+  function jobRow(j) {
+    const made = (j.cards || []).filter((c) => c.status === "written");
+    const numbers = made.map((c) => c.card_number).filter(Boolean);
+    const shown = numbers.slice(0, WB_SHOWN_NUMBERS).join(", ") +
+      (numbers.length > WB_SHOWN_NUMBERS ? ` +${numbers.length - WB_SHOWN_NUMBERS} more` : "");
+    const noun = j.type === "staff" ? "card" : "wristband";
+    const unfinished = j.status === "needs_attention" || (j.status === "cancelled" && made.length < j.count);
+    return h("tr", null,
+      h("td", { class: "nowrap" }, when(j.created_at)),
+      h("td", null, j.made_by),
+      h("td", null, j.name, h("div", { class: "sub" }, `${WB_TYPE_NAMES[j.type] || j.type} · ${j.summary}`)),
+      h("td", null, `${made.length} of ${plural(j.count, noun)}`,
+        h("div", { class: "sub" }, [WB_STATUS[j.status] || j.status, numbers.length ? `No. ${shown}` : ""]
+          .filter(Boolean).join(" · ")),
+        unfinished && j.message ? h("div", { class: "sub wb-job-note" }, j.message) : null),
+      h("td", { class: "nowrap" }, j.expires_label || when(j.expires_at)));
+  }
+
+  $("#wb-refresh-jobs").addEventListener("click", () => loadWristbandJobs(true));
+  $("#wb-more-jobs").addEventListener("click", () => loadWristbandJobs(false));
 
   // ---------------------------------------------------------------- layout
 
@@ -2648,6 +3388,8 @@
     await api("POST", "api/restore", { backup: file });
     editing = null;
     layoutDraft = null;
+    wbDirty = false;
+    wbDoors = null; // door names and hidden doors come back from the backup too
     await load();
     renderRoleEditor();
     loadSafetyBackups();

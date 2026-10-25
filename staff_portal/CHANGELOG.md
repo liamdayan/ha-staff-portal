@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.0
+
+**Wristbands (TT Hotel key cards)**
+
+- **New: make TT Hotel wristbands and key cards at the front desk.** Staff signed in on a
+  front-desk computer with a card encoder open **Wristbands** and make **day passes** (a party's
+  wristbands for the day-pass doors, until 8:00 PM), **overnight** wristbands (their rooms plus
+  shared doors, until checkout at 11:00 AM) and **staff cards** (single doors, floors, buildings
+  or every door, until a chosen day). The screen walks them through each wristband on the
+  encoder, with **Try again**, **Skip this one** and **Stop** if one doesn't work.
+- **New: adjustable times.** Set when day passes stop working and the checkout time on the new
+  **Wristbands** tab. After the end time, the day pass is greyed out and says why.
+- **New: Look up a wristband** shows its card number, who it was made for and by whom, when it
+  stops working and which doors it opens. The **Card log** lists every card made, with its
+  numbers; the **Wristbands** tab's **Cards made** shows everyone's.
+- **New: Wristbands tab** for the TT Hotel account (**Test connection**), the day-pass and
+  overnight doors, staff-card defaults, the time zone, the card encoders and the door list
+  (**Sync from TT Hotel**, rename or hide doors).
+- **New: who may make what.** On the **Roles** tab, each role (and on role-based computers, each
+  person) gets card types, which doors, the longest stay and staff card, and whether they see
+  everyone's cards. The add-on checks every request again, and refusals are logged.
+- **New: Card encoder address** on a computer in **Phones & computers → Edit**, with
+  **Test encoder**. The add-on talks to the encoder through TT Hotel's free SN Web Socket on that
+  computer, and lets go of it after each batch so the TT Hotel program can use it too.
+- TT Hotel requests are kept to a small share of the free 30,000 a month: at most about one
+  every 8 minutes while cards are being made (the encoder's key is reused), a door sync every 6
+  hours, and a hard cap of 7,500 a month. When TT Hotel says stop, Staff Access stays stopped
+  across restarts. Wristbands makes no Connecteam requests.
+
+**Backups**
+
+- Backups include wristband settings, door names and roles' and people's wristband rules, never
+  the TT Hotel Client Secret or password. Older backups still restore (with no wristbands). An
+  older version of the add-on refuses a 0.8.0 backup.
+
 ## 0.7.1
 
 - **Controls lock when the screen turns off.** As soon as the phone's screen goes off or the app
