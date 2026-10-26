@@ -780,7 +780,9 @@
 
   function checkText(r) {
     if (!r) return "Not checked yet.";
-    return r.ok ? `Last checked ${when(r.checked_at)}: ${r.lines} lines, no changes found.`
+    if (r.ok) return `Last checked ${when(r.checked_at)}: ${r.lines} lines, no changes found.`;
+    return r.missing_end
+      ? `Last checked ${when(r.checked_at)}: lines are missing from the end. Someone may have removed them; tell the owner.`
       : `Last checked ${when(r.checked_at)}: line ${r.first_bad} doesn't match. Someone may have changed the log; tell the owner.`;
   }
 

@@ -293,3 +293,156 @@ def test_hr_admins_end_access_and_reset_sign_in(tmp_path):
             assert {"Ended HR access now", "Allowed HR sign-in again", "Made a setup link",
                     "Reset HR sign-in"} <= set(actions(hr))
     run(scenario())
+
+
+# ---------------------------------------------------------------- review fixes (0.10.0)
+
+async def own_phone(hr: HR, cookie: str, pin: str) -> str:
+    """Add an authenticator in My account with only the PIN; returns its secret."""
+    status, r, _ = await hr.call("POST", "/api/account/authenticator", {"pin": pin}, cookie)
+    assert status == 200, r
+    secret = r["secret"].replace(" ", "")
+    status, r, _ = await hr.call("POST", "/api/account/authenticator/finish",
+                                 {"token": r["token"],
+                                  "code": totp.code_at(secret, int(time.time() // 30))}, cookie)
+    assert status == 200, r
+    return secret
+
+
+def test_a_phone_added_with_only_a_kiosk_code_never_reaches_a_staff_role(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, BO, MAX, HANA)
+            hr.give("104", "hr_admin")
+            hsecret = hr.enrol("104")
+            admin = await hr.sign_in("104", code=next_code(hr, "104", hsecret))
+            # Someone who knows only Bo's kiosk code adds their own phone while he's an employee.
+            bo = await hr.sign_in("102")
+            secret = await own_phone(hr, bo, "7302")
+            assert hr.hdb.person("102")["totp_source"] == "self"
+            # HR makes Bo a manager: that phone is removed and his open session ends.
+            await hr.confirm(admin, "104", hsecret)
+            status, data, _ = await hr.call("PUT", "/api/settings/role",
+                                            {"person_id": "102", "role": "manager"}, admin)
+            assert status == 200, data
+            assert not hr.hdb.person("102")["totp_on"]
+            assert (await hr.call("GET", "/api/me", cookie=bo))[0] == 401
+            status, _, _ = await hr.call("POST", "/api/signin", {
+                "mobile": "5415550102", "pin": "7302",
+                "code": totp.code_at(secret, int(time.time() // 30) + 1)})
+            assert status == 401
+            assert "Needs a setup code from HR" in actions(hr)
+            # Even if one were left behind, the sign-in needs one from a setup code.
+            signin.enable_totp(hr.hdb, "102", secret, 0, "self")
+            status, _, _ = await hr.call("POST", "/api/signin", {
+                "mobile": "5415550102", "pin": "7302",
+                "code": totp.code_at(secret, int(time.time() // 30) + 2)})
+            assert status == 401
+            # HR's setup code makes it count; a new phone later keeps that.
+            status, data, _ = await hr.call("POST", "/api/people/102/setup-code", {"kind": "qr"}, admin)
+            token = data["url"].rsplit("/", 1)[1]
+            status, data, _ = await hr.call("POST", f"/api/setup/{token}/pin", {"pin": "7302"})
+            secret = data["secret"].replace(" ", "")
+            status, _, _ = await hr.call("POST", f"/api/setup/{token}/finish",
+                                         {"code": totp.code_at(secret, int(time.time() // 30))})
+            assert status == 200 and hr.hdb.person("102")["totp_source"] == "hr"
+            bo = await hr.sign_in("102", code=next_code(hr, "102", secret))   # fresh: confirmed
+            await own_phone(hr, bo, "7302")
+            assert hr.hdb.person("102")["totp_source"] == "hr"
+            # A setup code someone made for themselves in My account isn't for the public page.
+            status, r, _ = await hr.call("POST", "/api/account/authenticator", {}, bo)
+            assert (await hr.call("GET", f"/api/setup/{r['token']}"))[0] == 404
+
+            # The owner making someone an HR admin does the same.
+            ana = await hr.sign_in("101")
+            await own_phone(hr, ana, "4821")
+            status, _ = await hr.admin_call("PUT", "/api/hr/admins", {"person_ids": ["104", "101"]})
+            assert status == 200
+            assert not hr.hdb.person("101")["totp_on"]
+            assert (await hr.call("GET", "/api/me", cookie=ana))[0] == 401
+
+            # So does HR changing who must use one: Max (an employee) loses his own phone when
+            # it becomes everyone. HR's own, from a setup code, stays.
+            mx = await hr.sign_in("103")
+            await own_phone(hr, mx, "99001")
+            await hr.confirm(admin, "104", hsecret)
+            status, _, _ = await hr.call("PUT", "/api/settings/general",
+                                         {"totp_policy": "everyone"}, admin)
+            assert status == 200
+            assert not hr.hdb.person("103")["totp_on"]
+            assert (await hr.call("GET", "/api/me", cookie=mx))[0] == 401
+            assert hr.hdb.person("104")["totp_on"]
+            assert (await hr.call("GET", "/api/me", cookie=admin))[0] == 200
+    run(scenario())
+
+
+def test_ending_access_stops_setup_codes_made_before(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(BO, HANA)
+            hr.give("104", "hr_admin")
+            hsecret = hr.enrol("104")
+            admin = await hr.sign_in("104", code=next_code(hr, "104", hsecret))
+            await hr.confirm(admin, "104", hsecret)
+            status, data, _ = await hr.call("POST", "/api/people/102/setup-code", {"kind": "link"}, admin)
+            link = data["url"].rsplit("/", 1)[1]
+            # Bo also started one himself in My account (15 minutes).
+            bo = await hr.sign_in("102")
+            mine, _ = signin.new_setup_token(hr.hdb, "102", "qr", "102")
+            assert (await hr.call("POST", "/api/people/102/end-access", {}, admin))[0] == 200
+            for token in (link, mine):
+                assert (await hr.call("GET", f"/api/setup/{token}"))[0] == 404
+                assert (await hr.call("POST", f"/api/setup/{token}/pin", {"pin": "7302"}))[0] == 404
+            assert hr.hdb.person("102")["access_ended"] == 1
+            assert (await hr.call("GET", "/api/me", cookie=bo))[0] == 401
+            # A setup code HR makes afterwards is HR allowing them back.
+            status, data, _ = await hr.call("POST", "/api/people/102/setup-code", {"kind": "qr"}, admin)
+            assert status == 200 and hr.hdb.person("102")["access_ended"] == 0
+    run(scenario())
+
+
+def test_a_wrong_authenticator_code_takes_as_long_as_a_pin_check(tmp_path, monkeypatch):
+    dummies = []
+    real = signin.dummy_check
+    monkeypatch.setattr(signin, "dummy_check", lambda code: dummies.append(code) or real(code))
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(MAX)
+            hr.give("103", "manager", {"501": True})
+            hr.enrol("103")
+            status, _, _ = await hr.call("POST", "/api/signin",
+                                         {"mobile": "5415550103", "pin": "0000", "code": "000000"})
+            assert status == 401 and len(dummies) == 1
+    run(scenario())
+
+
+def test_hrs_reasons_for_changing_points_and_end_dates_stay_with_hr(tmp_path, monkeypatch):
+    import point_system
+    from test_hr_discipline import day, issued, setup
+    from hr import discipline
+    pol, _ = point_system.install(monkeypatch)
+    pol.publish()
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            wid = await issued(hr, s)
+            assert (await hr.call("POST", f"/api/writeups/{wid}/send", {}, s["max"]))[0] == 200
+            iid = discipline.get_writeup(hr.hdb, wid)["incident_id"]
+            status, r, _ = await hr.call("POST", f"/api/incidents/{iid}/adjust",
+                                         {"points": 1, "reason": "HRSECRET-ADJ medical"}, s["hale"])
+            assert status == 200, r
+            status, r, _ = await hr.call("POST", f"/api/writeups/{wid}/ends",
+                                         {"ends_on": day(hr, 5), "reason": "HRSECRET-ENDS"}, s["hale"])
+            assert status == 200, r
+            for who in ("max", "dee", "hana"):
+                _, inc, _ = await hr.call("GET", f"/api/incidents/{iid}", cookie=s[who])
+                _, w, _ = await hr.call("GET", f"/api/writeups/{wid}", cookie=s[who])
+                notes = [h["note"] for h in inc["history"] + w["history"]]
+                whats = " ".join(h["what"] for h in inc["history"] + w["history"])
+                assert "Points changed by HR to 1" in whats and "stops counting" in whats
+                hr_sees = who == "hana"
+                assert ("HRSECRET-ADJ medical" in notes) is hr_sees, (who, notes)
+                assert ("HRSECRET-ENDS" in notes) is hr_sees, (who, notes)
+    run(scenario())

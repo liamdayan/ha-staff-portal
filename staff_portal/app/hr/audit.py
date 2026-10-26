@@ -5,7 +5,8 @@ or what records say.
 
 Rows can't be changed or deleted (hrdb.append_only), and each row's hash covers the row before
 it, keyed with the HR key: changing, adding or removing a line in the middle shows up when HR
-presses Check audit log (check()). Security events (sign-ins, locks, resets, settings) are
+presses Check audit log (check()). The last line's hash is also kept, keyed again, in audit_tip,
+so lines removed from the end show up too. Security events (sign-ins, locks, resets, settings) are
 marked, and only those are shown to the owner on the Home Assistant dashboard.
 """
 
@@ -27,6 +28,12 @@ def _digest(prev: str, row: tuple) -> str:
                       "audit")
 
 
+def _tip(last: str) -> str:
+    """What audit_tip holds for this last line. Without the HR key, nobody can make the tip for
+    an earlier line, so cutting lines off the end can't be covered up."""
+    return crypto.mac("tip\n" + last, "audit")
+
+
 def record(db, action: str, *, actor_id=None, actor: str = "HR portal", target_id=None,
            target: str | None = None, detail: str | None = None, ip: str | None = None,
            security: bool = False) -> None:
@@ -36,10 +43,11 @@ def record(db, action: str, *, actor_id=None, actor: str = "HR portal", target_i
     row = (time.time(), _cap(actor_id, 64), _cap(actor, 120) or "HR portal", _cap(action, 120),
            _cap(target_id, 64), _cap(target, 120), _cap(detail, MAX_TEXT), _cap(ip, 64),
            1 if security else 0)
+    digest = _digest(prev[0] if prev else START, row)
     db.conn.execute(
         "INSERT INTO audit (ts, actor_id, actor, action, target_id, target, detail, ip, security, "
-        "hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (*row, _digest(prev[0] if prev else START, row)))
+        "hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*row, digest))
+    db.conn.execute("INSERT OR REPLACE INTO audit_tip (id, tip) VALUES (1, ?)", (_tip(digest),))
     db.conn.commit()
 
 
@@ -64,13 +72,26 @@ def lines(db, limit: int = 100, before: int | None = None, security: bool = Fals
 
 def check(conn) -> dict:
     """Recompute the chain: {"ok", "lines", "first_bad" (the first line that doesn't match, or
-    None), "checked_at"}. Reads the whole log: pass a connection of its own (HRDatabase.reader)
-    and run it in a worker thread."""
-    prev, count = START, 0
-    for r in conn.execute(f"SELECT {COLUMNS}, hash FROM audit ORDER BY id"):
-        row = (r["ts"], r["actor_id"], r["actor"], r["action"], r["target_id"], r["target"],
-               r["detail"], r["ip"], r["security"])
-        if _digest(prev, row) != r["hash"]:
-            return {"ok": False, "lines": count, "first_bad": r["id"], "checked_at": time.time()}
-        prev, count = r["hash"], count + 1
-    return {"ok": True, "lines": count, "first_bad": None, "checked_at": time.time()}
+    None), "missing_end" (lines were cut off the end), "checked_at"}. Reads the whole log: pass
+    a connection of its own (HRDatabase.reader) and run it in a worker thread."""
+    began = not conn.in_transaction
+    if began:
+        conn.execute("BEGIN")   # the lines and the tip as they were together
+    try:
+        prev, count, last_id = START, 0, 0
+        for r in conn.execute(f"SELECT {COLUMNS}, hash FROM audit ORDER BY id"):
+            row = (r["ts"], r["actor_id"], r["actor"], r["action"], r["target_id"], r["target"],
+                   r["detail"], r["ip"], r["security"])
+            if _digest(prev, row) != r["hash"]:
+                return {"ok": False, "lines": count, "first_bad": r["id"], "missing_end": False,
+                        "checked_at": time.time()}
+            prev, count, last_id = r["hash"], count + 1, r["id"]
+        tip = conn.execute("SELECT tip FROM audit_tip WHERE id = 1").fetchone()
+    finally:
+        if began:
+            conn.rollback()
+    if (tip[0] if tip else None) != (_tip(prev) if count else None):
+        return {"ok": False, "lines": count, "first_bad": last_id + 1, "missing_end": True,
+                "checked_at": time.time()}
+    return {"ok": True, "lines": count, "first_bad": None, "missing_end": False,
+            "checked_at": time.time()}

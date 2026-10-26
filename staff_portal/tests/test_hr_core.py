@@ -356,6 +356,25 @@ def test_audit_log_is_chained_and_rows_never_change(tmp_path, db):
     assert not result["ok"] and result["first_bad"] == 3
 
 
+def test_audit_lines_cut_off_the_end_show_up(tmp_path, db):
+    for i in range(5):
+        audit.record(db, f"Action {i}", actor_id="1", actor="Ana")
+    reader = db.reader()
+    assert audit.check(reader)["ok"]
+    # Someone with the file drops the guard and removes the last two lines ("Opened a
+    # restricted document", say): the chain alone would still add up.
+    db.conn.execute("DROP TRIGGER audit_no_delete")
+    db.conn.execute("DELETE FROM audit WHERE id > 3")
+    db.conn.commit()
+    result = audit.check(reader)
+    assert not result["ok"] and result["missing_end"] and result["lines"] == 3
+    # Pointing the tip at the new last line needs the HR key; removing it shows up too.
+    db.conn.execute("DELETE FROM audit_tip")
+    db.conn.commit()
+    assert not audit.check(reader)["ok"]
+    reader.close()
+
+
 # ---------------------------------------------------------------- notifications
 
 @pytest.fixture

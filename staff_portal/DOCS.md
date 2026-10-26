@@ -1767,7 +1767,10 @@ Connecteam chat). Setup takes about two minutes:
 5. Save the 8 **recovery codes**. Each works once instead of a 6-digit code, if the phone is
    lost.
 
-**Everyone else** can turn one on in **My account → Turn on**, re-typing their PIN.
+**Everyone else** can turn one on in **My account → Turn on**, re-typing their PIN. That one
+stops counting once they must use one (HR makes them a manager or director, you make them an HR
+admin, or HR's setting comes to cover them): it's removed, they're signed out, and they need a
+setup code like everyone else who must use one.
 
 **New phone.** In **My account**, **Set up a new phone** (after a fresh code from the old one).
 The old phone stops working. Someone who lost their phone signs in with a recovery code: it's
@@ -1822,7 +1825,7 @@ Kiosk codes, birthdays and other profile fields are never stored.
 
 **When someone leaves.** Archived in Connecteam (or gone from its list), their HR access ends
 within the hour, and their records stay. For same-day departures, HR has **End HR access now**
-on their page. Coming back isn't automatic: if someone is restored in Connecteam, HR clicks
+on their page; any setup code or link made for them before stops working too. Coming back isn't automatic: if someone is restored in Connecteam, HR clicks
 **Allow sign-in again** (or makes them a new setup code).
 
 **Safety catch.** If Connecteam suddenly lists far fewer people (nobody, or more than a quarter
