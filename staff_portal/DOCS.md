@@ -1833,6 +1833,155 @@ have room. Normal use is a few requests a day. If Connecteam refuses an HR reque
 permission or plan feature), only that HR task stops, and if it says "too many requests", only
 the HR portal waits: Staff Access's own time clock checks keep running.
 
+### Discipline and probation
+
+The HR portal runs your points-based discipline system: incidents, write-ups that stop counting
+after a while, appeals, and probation. The point system itself (offences, points, steps and when
+points expire) is set up by HR in the portal. **Until HR publishes a point system, nobody can
+record an incident**, and the Discipline sections say so. Probation works from the start.
+
+The portal recommends; people decide. Reaching a step makes a task for a person, never a warning
+by itself, and a termination is always HR's decision.
+
+#### Recording an incident
+
+Managers (and directors and HR) open the person's page and click **Record an incident**. The one
+form asks:
+
+- **the offence** and **the day it happened** (within the last year);
+- **what happened**, in plain facts (their managers and HR see this);
+- for attendance offences, **"Was this protected leave?"**: Oregon sick time, Paid Leave Oregon,
+  OFLA/FMLA, jury duty, military leave, domestic violence leave, work injury or other. Any answer
+  but **No** records it with 0 points, and it never leads to a step. Ask your employment lawyer
+  to confirm the list;
+- **points**: the offence's default, or other points within the range the point system allows for
+  it, with a reason.
+
+As you fill it in, a preview says what it means, for example "Maria: 4 → 6 points. Reaches Written
+warning. A write-up is needed." When it reaches a step, the same form takes the write-up: the
+expected improvement, what happens if it happens again, support offered, a follow-up date and a
+note for managers and HR (the employee never sees that note). The policy broken is quoted
+automatically. You can ask for a lower step than the point system calls for, with a reason; HR
+decides, and it's recorded as a downgrade. When the step is one HR handles alone (a suspension or
+a termination review), the preview only says HR decides.
+
+**HR approves every incident before it counts** or the employee sees anything (the point system
+can relax this for minor offences later). Points count from HR's approval, and expire counting
+from the day it happened.
+
+#### What HR does
+
+HR admins find everything waiting under **Discipline**: incidents and write-ups to approve,
+appeals, tasks, probation decisions, write-ups not signed yet, and signed write-ups that couldn't
+be filed.
+
+- **Approve** an incident, or set other points with a reason, or **return it** to the manager with
+  a note; they change it and send it again. Nobody approves their own work, and an HR admin's own
+  file is handled by another HR admin.
+- **A step is due.** When an approved incident takes someone to a higher step, their managers and
+  HR get a task with a write-up already filled in. **Suspensions and termination reviews go to HR
+  only**: the manager and the employee see nothing of them until HR acts.
+- **A termination review is never automatic.** HR chooses **terminate** (recorded here; then
+  archive them in Connecteam by hand, which becomes a to-do), **a last-chance agreement** (you may
+  also place them on disciplinary probation) or **no action**, each with a reason.
+- **Adjusting**, each with a reason and a fresh 6-digit code (or PIN), and all logged: add or take
+  away points for someone (from a date, optionally until a date), change one incident's points
+  (an adjustment line, so the original stays visible), void an incident or a write-up, and change
+  the day a write-up stops counting. **As of a date** on someone's page shows their points and
+  records as they were on any past day.
+- After any void or reduction, later write-ups are checked again. Where a later step would now be
+  lower, HR gets a "check this" task. Nothing is undone by itself.
+
+#### Write-ups
+
+A write-up goes **Draft → With HR → Approved → Delivered → Active → Expired**. HR can send a
+draft back with a note, and a write-up can be voided or be under appeal. Once approved, its words
+are never changed.
+
+Delivering it, once HR has approved it:
+
+- **In person.** Click **Deliver in person** and hand your phone or computer to the employee. It
+  shows only what they may see. They can add a comment, type their name and confirm with their
+  PIN (their Connecteam kiosk code), plus the 6-digit code if they use an authenticator. Wrong
+  tries count towards locking their HR sign-in, as at sign-in.
+- **Through the portal.** Click **Send to sign in the portal**: they're told something is waiting,
+  and sign it there.
+- **On paper.** On the same in-person page, **Print** it (the printout has signature lines), have
+  it signed, then **Add the photo** of the signed page.
+- **Refused to sign.** Record it with a witness: another HR portal user confirming with their
+  mobile number and PIN, or the witness's name typed in. It still counts.
+
+The signing page says plainly that signing confirms they received it, not that they agree. If a
+write-up sent through the portal isn't signed within 3 days (a setting), the manager is reminded,
+then every 3 days; it counts either way. The signed PDF goes to the employee's **Discipline**
+folder in Google Drive (only what the employee sees is in it); while Google Drive isn't connected
+it waits and is tried again.
+
+#### Appeals
+
+An employee can appeal a write-up within **7 days** of receiving it (a setting), once. HR decides,
+with a note the employee and their manager both see: **upheld** (no change), **amended** (other
+points, through an adjustment line, or a lower step) or **voided** (the write-up and its incident
+stop counting). The HR admin who wrote or approved the write-up doesn't decide its appeal.
+
+#### Who sees what
+
+| | Employee | Their managers and directors | HR admins |
+|---|---|---|---|
+| Their write-ups | Once delivered, without managers' or HR's notes | Yes, without HR's notes | All |
+| Incidents | No (their write-ups say what happened) | Yes, not voided ones | All |
+| Point total and history | If the point system's switches allow | Yes | Yes |
+| Expired write-ups and points | If the switches allow | Yes | Yes |
+| Suspensions and termination reviews | Nothing until HR acts | Nothing until HR acts | Yes |
+| Voided write-ups | "Withdrawn on [date]" if it was delivered | The same | Everything |
+
+Each manager's **My team** lists everyone whose file they see, with points, current step,
+probation, and what needs doing (steps due, drafts, write-ups to deliver or not signed yet).
+
+#### Probation
+
+- **Introductory period (new hires).** It starts on the start date from Connecteam and lasts 90
+  days, or the length the published point system sets for their department (the longest, if
+  they're in several). It's made by itself for new hires only: people whose period was already
+  over when the HR portal met them never get one. If HR confirms a different start date, it moves
+  with it. A rehire gets a new one; a transfer doesn't.
+- **Disciplinary probation.** HR places someone on it from their page, with an end date and a
+  reason, for example as part of a last-chance agreement.
+- **Extending** is HR's, with a reason and a new end date: one extension of up to 30 days, and 120
+  days in all (the point system can set other limits). A leave of absence is an extension marked
+  as leave, which doesn't count against those limits. HR can also move the end earlier. The
+  employee is told and asked to **acknowledge** it.
+- **The end-of-probation review** is due 14 days before the end; the manager and HR are told. The
+  manager recommends **pass**, **extend** (with a date) or **end employment**, from the review or
+  on the person's page. HR decides (or waives it). **End employment** becomes a to-do: archive them
+  in Connecteam by hand, then mark it done.
+- **If the end date passes with no decision**, it stays open and the manager and HR are reminded
+  daily (or, if the point system says so, it passes by itself).
+- An incident that happened during probation uses the probation rules, even if HR approves it
+  later.
+
+Screens say **"introductory period"** for new hires (or "probation", a setting), and employees see
+their end date (a setting). Probation doesn't change Oregon at-will employment; have your
+employment lawyer check the wording.
+
+#### Who is told
+
+Through the portal inbox, and Connecteam chat when it's on (never with details):
+
+- an incident or write-up sent to HR: HR; returned: the manager;
+- a step is due: the manager and HR, straight away; a termination review: HR only;
+- a write-up ready to deliver: the manager; waiting for a signature: the employee; not signed in
+  time: the manager;
+- an appeal: HR; decided: the employee and the manager;
+- probation review due or overdue: the manager and HR; extended or passed: the employee, the
+  manager and HR.
+
+#### Settings
+
+In **HR settings → Write-ups and probation**: days to appeal (7), days before the manager is
+reminded of an unsigned write-up (3), whether screens say "introductory period" or "probation",
+and whether employees see their probation end date.
+
 ### Notifications
 
 - **The portal's inbox** always works, for everyone, and the home page lists to-dos.

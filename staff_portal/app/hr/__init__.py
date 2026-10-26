@@ -25,6 +25,8 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   docroutes.py  the Documents section, opening and adding files, Needs attention, kinds settings
   pdfdoc.py     plain, escaped HTML that Google Drive turns into PDFs (write-ups, reviews)
   certificates.py  certificate types, cards and their dates, statuses, boards, reminders
+  probation.py  introductory and disciplinary probation: dates, extensions, the decision
+  discipline.py incidents, write-ups, signatures, appeals, voids, adjustments, step tasks
 
 Nothing here imports main.py: main.py hands the service what it needs.
 """
