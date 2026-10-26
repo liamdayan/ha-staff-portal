@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS wb_lock_records (
     at REAL NOT NULL,                    -- when it happened, as listed
     battery INTEGER,
     card_id INTEGER,
-    alert TEXT,                          -- lost|revoked|deleted: a card that shouldn't be used
+    alert TEXT,                          -- lost|revoked|deleted|archived: not to be used
     problem INTEGER NOT NULL DEFAULT 0,  -- refused, an alarm, or an alert ("Problems only")
     received_at REAL NOT NULL,
     UNIQUE (lock_id, at, record_type, success, card_number, username)   -- TT Hotel sending again
@@ -315,6 +315,11 @@ MIGRATIONS = {
         "connecteam_note": "TEXT",
         # How many digits their PIN has, as for devices (NULL = not known).
         "pin_length": "INTEGER",
+        # Archived (status 'archived'): when, by whom, and the status Restore puts back
+        # ('active' or 'disabled'). Their rows, cards and activity are all kept.
+        "archived_at": "REAL",
+        "archived_by": "TEXT",
+        "archived_from": "TEXT",
     },
     "wb_doors": {
         # 'public' (a shared door, such as the pool gate) or 'room' (a guest room); NULL = not
@@ -478,7 +483,12 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
                 "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
                 "require_clock_in", "role_id", "layout_pages", "wristbands", "department_id",
                 "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
-                "connecteam_note", "pin_length"}
+                "connecteam_note", "pin_length", "archived_at", "archived_by", "archived_from"}
+# A person's status: 'active', 'disabled' (turned off, by an admin or by the Connecteam sync) or
+# 'archived' (gone for good, but kept with everything they did). Turned off and archived people
+# have no access anywhere: every way in asks staff_off(), or uses STAFF_ON in SQL.
+STAFF_OFF = ("disabled", "archived")
+STAFF_ON = "status NOT IN ('disabled', 'archived')"
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
                      "card_lockout", "clock_in"}
 
@@ -526,6 +536,12 @@ def pin_length(value) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or not 4 <= value <= 8:
         return None
     return value
+
+
+def staff_off(member) -> bool:
+    """Whether this person may not sign in, make cards or be offered anywhere: there's no such
+    person, or they're turned off or archived."""
+    return not member or member["status"] in STAFF_OFF
 
 
 def card_access_choice(raw) -> list[dict] | None:
@@ -684,7 +700,7 @@ class Database:
                 (role["id"],),
             ).fetchone()[0]
             role["staff_count"] = self.conn.execute(
-                "SELECT COUNT(*) FROM staff WHERE role_id = ? AND status != 'disabled'", (role["id"],),
+                f"SELECT COUNT(*) FROM staff WHERE role_id = ? AND {STAFF_ON}", (role["id"],),
             ).fetchone()[0]
         return roles
 
@@ -814,7 +830,7 @@ class Database:
             "SELECT * FROM departments ORDER BY sort_order, id")]
         counts = dict(self.conn.execute(
             "SELECT department_id, COUNT(*) FROM staff WHERE department_id IS NOT NULL "
-            "GROUP BY department_id").fetchall())
+            "AND status != 'archived' GROUP BY department_id").fetchall())
         for dept in found:
             dept["card_access"] = card_access_choice(dept["card_access"])
             dept["staff_count"] = counts.get(dept["id"], 0)
@@ -981,16 +997,18 @@ class Database:
                 "s.department_id")
         if device["staff_all"]:
             rows = self.conn.execute(
-                f"SELECT {cols} FROM staff s WHERE status != 'disabled' ORDER BY name COLLATE NOCASE")
+                f"SELECT {cols} FROM staff s WHERE {STAFF_ON} ORDER BY name COLLATE NOCASE")
         else:
             rows = self.conn.execute(
                 f"""SELECT {cols} FROM staff s JOIN staff_devices sd ON sd.staff_id = s.id
-                   WHERE sd.device_id = ? AND s.status != 'disabled'
+                   WHERE sd.device_id = ? AND s.{STAFF_ON}
                    ORDER BY s.name COLLATE NOCASE""", (device["id"],))
         return [dict(r) for r in rows]
 
     def staff_pins(self, device: dict | None = None) -> list[tuple[int, str]]:
-        """(id, pin_hash) of the active staff allowed on a shared device (or of everyone)."""
+        """(id, pin_hash) of the active staff allowed on a shared device (or of everyone,
+        archived people too: their PINs stay taken, so Restore gives them back a PIN of their
+        own)."""
         ids = {m["id"] for m in self.staff_for_device(device)} if device else None
         return [(r["id"], r["pin_hash"]) for r in self.conn.execute("SELECT id, pin_hash FROM staff")
                 if ids is None or r["id"] in ids]
@@ -1024,6 +1042,28 @@ class Database:
         cols = ", ".join(f"{k} = ?" for k in sets)
         self.conn.execute(f"UPDATE staff SET {cols} WHERE id = ?", (*sets.values(), staff_id))
         self.conn.commit()
+
+    def archive_staff(self, staff_id: int, by: str) -> None:
+        """Archive a person: no access anywhere from now on (staff_off). Nothing of theirs is
+        deleted, and the status they had ('active' or 'disabled') is kept for Restore."""
+        self.conn.execute(
+            """UPDATE staff SET status = 'archived', archived_at = ?, archived_by = ?,
+               archived_from = CASE WHEN status = 'disabled' THEN 'disabled' ELSE 'active' END
+               WHERE id = ? AND status != 'archived'""", (time.time(), str(by)[:120], staff_id))
+        self.conn.commit()
+
+    def restore_staff(self, staff_id: int) -> None:
+        """Back to how they were before they were archived (signing in with their PIN again,
+        unless they'd been turned off), with any wrong-PIN lock cleared."""
+        self.conn.execute(
+            """UPDATE staff SET status = CASE WHEN archived_from = 'disabled' THEN 'disabled'
+               ELSE 'active' END, archived_at = NULL, archived_by = NULL, archived_from = NULL,
+               failed_pins = 0, locked_until = NULL WHERE id = ? AND status = 'archived'""",
+            (staff_id,))
+        self.conn.commit()
+
+    def archived_staff_ids(self) -> set[int]:
+        return {r[0] for r in self.conn.execute("SELECT id FROM staff WHERE status = 'archived'")}
 
     def delete_staff(self, staff_id: int) -> None:
         self.conn.execute("DELETE FROM phone_orders WHERE owner = ?", (f"s:{staff_id}",))
@@ -1161,13 +1201,14 @@ class Database:
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
                    connecteam_user_id, require_clock_in, role_id, layout_pages, wristbands,
                    department_id, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                   connecteam_note, pin_length)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   connecteam_note, pin_length, archived_at, archived_by, archived_from)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
                   m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"],
                   m["wristbands"], m.get("department_id"), m.get("connecteam_auto", 0),
                   m.get("clock_in_set", 0), m.get("role_set", 0), m.get("pin_from_connecteam", 0),
-                  m.get("connecteam_note"), m.get("pin_length")) for m in snap["staff"]])
+                  m.get("connecteam_note"), m.get("pin_length"), m.get("archived_at"),
+                  m.get("archived_by"), m.get("archived_from")) for m in snap["staff"]])
             c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
                       "(SELECT id FROM departments)")
             c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
@@ -1629,6 +1670,11 @@ class Database:
             (since - 86400, encoder_url, since)).fetchone()
         return row[0] if row else None
 
+    def unfinished_wb_job_ids(self, staff_id: int) -> list[int]:
+        """The card jobs this person started that haven't finished."""
+        return [r[0] for r in self.conn.execute(
+            f"SELECT id FROM wb_jobs WHERE staff_id = ? AND {UNFINISHED}", (staff_id,))]
+
     def update_wb_job(self, job_id: int, **fields) -> None:
         sets = {k: v for k, v in fields.items() if k in WB_JOB_FIELDS}
         if sets:
@@ -1669,7 +1715,7 @@ class Database:
                 c.state_by, c.cancelled_card, j.name, j.summary, j.records, j.expires_at,
                 j.allow_lockout, j.actor, j.ts AS made_at, j.source, j.holder_staff_id,
                 j.department_id, j.staff_id, j.encoder_url, s.name AS holder_name,
-                dp.name AS department_name
+                s.status AS holder_status, dp.name AS department_name
                 FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
                 LEFT JOIN staff s ON s.id = j.holder_staff_id
                 LEFT JOIN departments dp ON dp.id = j.department_id
@@ -1807,6 +1853,16 @@ class Database:
         self.conn.commit()
         return cur.rowcount
 
+    def key_card_totals(self) -> dict[str, int]:
+        """How many staff key cards still open doors (not expired): {"active", "lost"}, for the
+        Key cards section's closed line."""
+        row = self.conn.execute(
+            """SELECT SUM(c.state = 'active'), SUM(c.state = 'lost')
+               FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+               WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
+               AND c.card_number IS NOT NULL AND j.expires_at > ?""", (time.time(),)).fetchone()
+        return {"active": row[0] or 0, "lost": row[1] or 0}
+
     def active_key_card_counts(self) -> dict[int, int]:
         """{person: how many active, unexpired key cards are theirs}, for the Staff tab."""
         return dict(self.conn.execute(
@@ -1827,8 +1883,10 @@ class Database:
         slack = doorlog.CLOCK_SLACK
         for key in doorlog.card_keys(number):
             row = self.conn.execute(
-                """SELECT c.id, c.card_number, c.state, c.state_at, c.cleared_at, j.name
+                """SELECT c.id, c.card_number, c.state, c.state_at, c.cleared_at, j.name,
+                   j.expires_at, s.status AS holder_status, s.archived_at AS holder_archived_at
                    FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
+                   LEFT JOIN staff s ON s.id = j.holder_staff_id
                    WHERE ltrim(c.card_number, '0') = ? AND c.status = 'written' AND j.kind = 'write'
                    AND (c.cleared_at IS NULL OR ? <= c.cleared_at + ?)
                    ORDER BY COALESCE(c.written_at, j.ts) <= ? DESC, COALESCE(c.written_at, j.ts) DESC,

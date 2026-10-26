@@ -65,16 +65,19 @@
       <span class="count" id="staff-count"></span>
     </div>
     <div id="staff-list" class="staff-list"></div>
+    <div id="staff-archived" class="staff-list staff-archived"></div>
 
-    <div id="keycards-section" hidden>
-      <div class="section-head kc-head">
+    <details id="keycards-section" class="fold-section" hidden>
+      <summary class="kc-head">
+        <span class="chev" aria-hidden="true"></span>
         <h2>Key cards</h2>
-        <div class="head-actions">
-          <button class="btn" id="kc-refresh">Refresh</button>
-        </div>
+        <span class="fold-count" id="kc-totals"></span>
+      </summary>
+      <div class="kc-intro">
+        <p class="hint">Every staff key card made, from the Staff tab or at a front-desk computer, newest
+          first. Revoke a card you have in hand, or report a lost one and lock it out of its doors.</p>
+        <button class="btn" id="kc-refresh">Refresh</button>
       </div>
-      <p class="hint">Every staff key card made, from the Staff tab or at a front-desk computer, newest
-        first. Revoke a card you have in hand, or report a lost one and lock it out of its doors.</p>
       <div class="kc-filters">
         <div class="seg seg-state" role="radiogroup" aria-label="Show key cards" id="kc-filter">
           <button type="button" role="radio" data-state="active" aria-checked="true">Active</button>
@@ -94,7 +97,7 @@
         </table>
       </div>
       <button class="btn more" id="kc-more" hidden>Show older</button>
-    </div>
+    </details>
 
     <div class="section-head dept-head">
       <h2>Departments</h2>
@@ -963,6 +966,17 @@
     <div class="dialog-actions">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
       <button class="btn primary" value="ok">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="archive-dialog" class="ask">
+  <form method="dialog">
+    <h2 data-title></h2>
+    <div class="archive-body" data-body></div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary danger-fill" value="archive">Archive</button>
     </div>
   </form>
 </dialog>

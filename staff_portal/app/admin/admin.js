@@ -350,7 +350,10 @@
       document.documentElement.style.setProperty("--accent", state.settings.accent_color);
     }
     state.roles = data.roles;
-    state.staff = data.staff;
+    // Archived people are only on the Staff tab's archived list: never offered anywhere else.
+    state.staff = data.staff.filter((m) => m.status !== "archived");
+    state.archived = data.staff.filter((m) => m.status === "archived");
+    state.keyCardTotals = data.key_card_totals || null;
     state.areas = data.areas;
     state.layout = data.layout;
     state.devices = data.devices;
@@ -373,6 +376,7 @@
     renderWristbandStatus();
     renderEncoderList();
     $("#keycards-section").hidden = !wristbandsOn();
+    renderKeyCardTotals();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -947,7 +951,7 @@
   // departments are remembered in this browser; who's opened and the search aren't.
   const STAFF_VIEW_KEY = "staff-portal.staff-view";
   const STAFF_SORTS = ["department", "name", "role"];
-  const staffView = { q: "", sort: "department", folded: new Set(), open: new Set() };
+  const staffView = { q: "", sort: "department", folded: new Set(), open: new Set(), archived: false };
   try {
     const saved = JSON.parse(localStorage.getItem(STAFF_VIEW_KEY) || "null");
     if (STAFF_SORTS.includes(saved?.sort)) staffView.sort = saved.sort;
@@ -966,6 +970,11 @@
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
   function renderStaff() {
+    renderStaffList();
+    renderArchived();
+  }
+
+  function renderStaffList() {
     const list = $("#staff-list");
     $("#staff-tools").hidden = !state.staff.length;
     if (!state.staff.length) {
@@ -1091,11 +1100,7 @@
     } else {
       actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
     }
-    actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
-      if (!await askConfirm(`Delete ${m.name}? Their past activity stays in the log.`, "Delete")) return false;
-      await api("DELETE", `api/staff/${m.id}`);
-      await load();
-    }, "Deleted.") }, "Delete"));
+    actions.push(h("button", { class: "btn danger", onclick: () => run(() => archiveStaff(m)) }, "Archive"));
     return [
       h("div", { class: "phone-head" },
         h("div", null,
@@ -1136,6 +1141,118 @@
     renderStaff();
   });
   $("#staff-search").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+
+  // ---- archived people
+
+  // Archived people are kept, with everything they did, but have no access anywhere. They're
+  // left out of the list above and folded away under it (Show archived), each with Restore and
+  // Delete for good. A search shows the archived people it matches, folded or not.
+  function renderArchived() {
+    const box = $("#staff-archived");
+    const q = staffView.q.trim().toLowerCase();
+    const people = state.archived.filter((m) => !q || [m.name, roleName(m), departmentOf(m)?.name, m.ha_user]
+      .some((text) => text && text.toLowerCase().includes(q))).sort(byName);
+    if (!people.length) {
+      box.replaceChildren();
+      return;
+    }
+    const open = staffView.archived || !!q;
+    const head = h("button", { type: "button", class: "staff-group-head", "aria-expanded": String(open),
+      onclick: () => {
+        staffView.archived = !staffView.archived;
+        renderArchived();
+        $("#staff-archived .staff-group-head")?.focus({ preventScroll: true });
+      } },
+    h("span", { class: "chev", "aria-hidden": "true" }),
+    h("span", { class: "staff-group-name" }, `${open ? "Archived" : "Show archived"} (${people.length})`));
+    box.replaceChildren(h("section", { class: "staff-group" }, head,
+      open ? h("div", { class: "staff-group-body" }, people.map(archivedRow)) : null));
+  }
+
+  function archivedRow(m) {
+    const cards = m.key_cards || 0;
+    const sub = [roleName(m), departmentOf(m)?.name, m.archived_at
+      ? `Archived ${when(m.archived_at)}${m.archived_by ? ` by ${m.archived_by}` : ""}` : "Archived"];
+    return h("article", { class: "staff-row archived" },
+      h("div", { class: "staff-archived-row" },
+        h("span", { class: "staff-row-main" }, h("span", { class: "staff-row-name" }, m.name),
+          h("span", { class: "staff-row-sub" }, sub.filter(Boolean).join(" \u00b7 "))),
+        cards && wristbandsOn() ? h("button", { type: "button", class: "linkish kc-warn",
+          onclick: () => showKeyCardsFor(m) },
+        `${plural(cards, "key card")} still open${cards === 1 ? "s" : ""} doors`) : null,
+        h("span", { class: "card-actions" },
+          h("button", { class: "btn", onclick: () => run(() => restoreStaff(m)) }, "Restore"),
+          h("button", { class: "btn danger", onclick: () => run(() => deleteForGood(m)) }, "Delete for good"))));
+  }
+
+  // Archive: their access ends everywhere at once, and nothing is deleted. Their key cards keep
+  // opening doors (locks check cards on their own), so the dialog lists the ones still valid and
+  // says what to do; afterwards the Key cards list opens on them.
+  async function archiveStaff(m) {
+    const cards = wristbandsOn() || m.key_cards
+      ? (await api("GET", `api/keycards?state=active&holder=${m.id}`)).cards || [] : [];
+    const dialog = $("#archive-dialog");
+    const phones = phonesFor(m);
+    const remote = remoteInfo();
+    $("[data-title]", dialog).textContent = `Archive ${m.name}?`;
+    fill($("[data-body]", dialog),
+      h("p", null, "Their access ends everywhere, straight away:"),
+      h("ul", null, [
+        `They're signed out, and their PIN stops working${phones.length ? ` (${phones.join(", ")})` : ""}.`,
+        "They can't make wristbands or key cards, and no key card can be made for them.",
+        m.ha_user ? `Their Home Assistant user (${m.ha_user}) isn't used.` : null,
+        m.connecteam_user_id ? "The Connecteam sync leaves them archived, even while they're active there." : null,
+      ].filter(Boolean).map((text) => h("li", null, text))),
+      h("p", { class: "hint" }, "Nothing is deleted: their activity and the cards they made stay. Restore them " +
+        "any time from Show archived, under the list."),
+      cards.length ? h("div", { class: "archive-cards" },
+        h("p", { class: "wb-warn" }, (cards.length === 1 ? "Their key card still opens doors until it expires"
+          : `Their ${cards.length} key cards still open doors until they expire`) +
+          ": locks check cards on their own, so archiving can't switch them off."),
+        h("ul", null, cards.map((c) => h("li", null,
+          `No. ${c.card_number} \u00b7 ${c.summary} \u00b7 until ${c.expires_label || when(c.expires_at)}`))),
+        h("p", { class: "hint" }, "Next, in the Key cards list: if you have the card, Revoke it. If not, " +
+          "Report lost, then write a lost card notice and tap it on each door" +
+          `${remote.enabled ? " (or lock it out remotely, on doors with a gateway)" : ""}. ` +
+          "Until then, Door activity flags the card at any door.")) : null);
+    const ok = await new Promise((resolve) => {
+      dialog.returnValue = "";
+      dialog.onclose = () => resolve(dialog.returnValue === "archive");
+      dialog.showModal();
+      $("button[value=cancel]", dialog).focus();
+    });
+    if (!ok) return false;
+    const result = await api("POST", `api/staff/${m.id}/archive`);
+    staffView.open.delete(m.id);
+    await load();
+    const left = result.cards?.length || 0;
+    toast(left ? `${m.name} is archived. ${plural(left, "key card")} still open${left === 1 ? "s" : ""} doors: ` +
+      "revoke or report lost below."
+      : `${m.name} is archived.`);
+    if (left && wristbandsOn()) showKeyCardsFor(m);
+    return false;
+  }
+
+  async function restoreStaff(m) {
+    if (!await askConfirm(`Restore ${m.name}? They're back as they were: their PIN, role, department, devices ` +
+      "and own settings.", "Restore")) return false;
+    const { status } = await api("POST", `api/staff/${m.id}/restore`);
+    await load();
+    toast(status === "disabled" ? `${m.name} is restored, still turned off as before. Turn them on with Edit.`
+      : `${m.name} is restored and can sign in with their PIN again.`);
+    return false;
+  }
+
+  async function deleteForGood(m) {
+    const again = m.connecteam_auto && state.staffSync?.enabled
+      ? " Add everyone from Connecteam adds them again if they're still active in Connecteam." : "";
+    if (!await askConfirm(`Delete ${m.name} for good? They're removed from Staff Access and can't be restored. ` +
+      `Their past activity and the cards made stay in the logs.${again}`, "Delete for good")) return false;
+    await api("DELETE", `api/staff/${m.id}`);
+    await load();
+    toast(`${m.name} is deleted.`);
+    return false;
+  }
 
   // Connecteam link and, for clocked-in-only people, whether they're on the clock right now.
   function clockBadge(m) {
@@ -1363,7 +1480,8 @@
         type: "button", class: "ct-user", disabled: !!u.linked_to,
         onclick: () => { dialog.close(); editStaff(null, u); },
       }, h("span", null, u.name),
-        h("small", null, u.linked_to ? `Already added as ${u.linked_to}`
+        h("small", null, u.linked_archived ? `Archived as ${u.linked_to}: restore them on the Staff tab`
+          : u.linked_to ? `Already added as ${u.linked_to}`
           : u.has_kiosk_code ? "Add" : "Add (no kiosk code)"))));
       if (!shown.length) list.replaceChildren(h("p", { class: "hint" }, users.length ? "No one matches." : "No active users in Connecteam."));
     };
@@ -3324,7 +3442,8 @@
   // URL). Each key card's Last used comes from them, and a lost or revoked card tried at a door
   // is marked.
 
-  const DA_ALERTS = { lost: "Lost card", revoked: "Revoked card", deleted: "Deleted card" };
+  const DA_ALERTS = { lost: "Lost card", revoked: "Revoked card", deleted: "Deleted card",
+    archived: "Archived person's card" };
   const da = { door: "", problems: false, oldest: null, seq: 0, data: null };
 
   // A key card's Last used: the door, then when (and "refused" if it didn't open); "—" when it
@@ -4748,7 +4867,7 @@
 
   function openStaffTab() {
     if (!wristbandsOn()) return;
-    loadKeyCards(true);
+    loadKeyCards(true);   // only read while the section is open
     if (!wbDoors && state.departments.some((d) => d.card_access?.length)) loadDoors();
   }
 
@@ -4762,7 +4881,30 @@
         : !tested ? "Test remote lock-out on one door first." : null };
   }
 
+  // The Key cards section folds away to its title and a short count: folded at first, and open
+  // or closed as last left in this browser.
+  const KC_OPEN_KEY = "staff-portal.keycards-open";
+  try {
+    $("#keycards-section").open = localStorage.getItem(KC_OPEN_KEY) === "1";
+  } catch { /* folded */ }
+  $("#keycards-section").addEventListener("toggle", () => {
+    const open = $("#keycards-section").open;
+    try {
+      localStorage.setItem(KC_OPEN_KEY, open ? "1" : "0");
+    } catch { /* not remembered this time */ }
+    if (open && !$("#tab-staff").hidden) loadKeyCards(true);
+  });
+
+  // Its closed line: "14 active, 2 lost" (lost cards that haven't expired: they still open doors).
+  function renderKeyCardTotals(totals) {
+    if (totals) state.keyCardTotals = totals;
+    const t = state.keyCardTotals;
+    $("#kc-totals").replaceChildren(...!t ? [] : t.lost
+      ? [`${t.active} active, `, h("span", { class: "alert" }, `${t.lost} lost`)] : [`${t.active} active`]);
+  }
+
   async function loadKeyCards(reset) {
+    if (!$("#keycards-section").open) return;
     const rows = $("#kc-rows");
     const seq = ++kc.seq;
     if (reset) kc.oldest = null;
@@ -4780,6 +4922,7 @@
     }
     if (seq !== kc.seq) return;   // a newer filter or search was chosen meanwhile
     kc.remote = data.remote || null;
+    renderKeyCardTotals(data.totals);
     const cards = data.cards || [];
     if (reset) {
       rows.replaceChildren();
@@ -4830,7 +4973,8 @@
       : "";
     return h("tr", { class: card.state === "lost" ? "kc-lost" : null },
       h("td", null, card.holder, h("div", { class: "sub" },
-        [card.department, card.name && card.name !== card.holder ? `Card says ${card.name}` : ""].filter(Boolean).join(" · "))),
+        [card.holder_archived ? "Archived" : "", card.department,
+          card.name && card.name !== card.holder ? `Card says ${card.name}` : ""].filter(Boolean).join(" · "))),
       h("td", { class: "nowrap kc-number" }, card.card_number,
         card.cancelled_card ? h("div", { class: "sub" }, `Cancels ${card.cancelled_card}`) : null),
       h("td", null, card.summary, card.allow_lockout ? h("div", { class: "sub" }, "Opens deadbolted doors") : null),
@@ -4849,8 +4993,10 @@
     setKeyCardFilter("active");
     $("#kc-search").value = m.name;
     kc.q = m.name;
-    loadKeyCards(true);
-    $("#keycards-section").scrollIntoView({ behavior: "smooth", block: "start" });
+    const section = $("#keycards-section");
+    if (section.open) loadKeyCards(true);
+    else section.open = true;   // opening it reads the list
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function setKeyCardFilter(value) {
@@ -5018,10 +5164,13 @@
           run(() => cardDialogJob(`api/keycards/${card.id}/notice`, `Lost card notice for ${card.card_number}`)) },
         has("notice") ? "Write another notice card" : "Write a notice card"))),
       section("2. Replacement card",
-        h("p", { class: "hint" }, `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
+        h("p", { class: "hint" }, card.holder_archived ? `${card.holder} is archived, so no new card is made for ` +
+          "them. Use a notice card (or remote lock-out) instead."
+          : `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
           "time it's tapped on a door, that door refuses the lost card. Tick each door off once it's been tapped. " +
           "It uses their department's key card (or what the lost card opened)."),
-        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn", onclick: () =>
+        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn",
+          disabled: !!card.holder_archived, onclick: () =>
           run(() => cardDialogJob(`api/keycards/${card.id}/replace`, `Replacement card for ${card.holder}`)) },
         "Make a replacement card"))),
       section("3. Remote lock-out (experimental)",
@@ -6190,7 +6339,7 @@
           ? "Use the file's access settings. Phones keep their role."
           : kind === "departments" ? "Use the file's smart group, role, key card and clock-in rule. People stay in them."
           : "Use the file's PIN and settings. Anyone whose PIN changes is signed out, people you've " +
-            "turned off stay off, and Home Assistant links are kept.", "danger"],
+            "turned off stay off, people you've archived stay archived, and Home Assistant links are kept.", "danger"],
       ]);
       if (!mode) return false;
     }
@@ -6214,6 +6363,7 @@
       result.missing_pages?.length && `No page or page group here called ${result.missing_pages.join(", ")}; check those pages in Roles.`,
       result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
       result.kept_off?.length && `${result.kept_off.join(", ")} stayed turned off.`,
+      result.kept_archived?.length && `${result.kept_archived.join(", ")} stayed archived.`,
     ].filter(Boolean).join(" ");
     toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? `The ${kind === "roles" ? "role" : "person"} open on the Roles tab was reloaded.` : ""]
       .filter(Boolean).join(" "));
