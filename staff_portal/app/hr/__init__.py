@@ -27,6 +27,8 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
                 Needs attention)
   docroutes.py  the Documents section, opening and adding files, Needs attention, kinds settings
   pdfdoc.py     plain, escaped HTML that Google Drive turns into PDFs (write-ups, reviews)
+  policy.py   the point system as settings, in versions, and HR's Discipline setup (web/hr-policy.js)
+  points.py   the points ledger and its arithmetic: totals as of a day, steps, the simulator
   certificates.py  certificate types, cards and their dates, statuses, boards, reminders
   probation.py  introductory and disciplinary probation: dates, extensions, the decision
   discipline.py incidents, write-ups, signatures, appeals, voids, adjustments, step tasks
