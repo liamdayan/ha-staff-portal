@@ -1766,8 +1766,9 @@
   // ---------------------------------------------------------------- wristbands
 
   // A front-desk computer with a TT Hotel card encoder makes wristbands (day passes and
-  // overnight guests) and staff key cards. Staff Portal talks to the encoder itself, so the TT
-  // Hotel sign-in details never reach this page; this screen asks for cards and follows along.
+  // overnight guests), contractor badges and staff key cards. Staff Portal talks to the encoder
+  // itself, so the TT Hotel sign-in details never reach this page; this screen asks for cards and
+  // follows along.
   // (In This computer (USB) mode the encoder's requests pass through this page on their way to
   // the encoder: see wbLink.) What it offers is only a guide: the server checks every request
   // against the person's permissions.
@@ -1786,6 +1787,7 @@
   const WB_TYPES = {
     day_pass: { title: "Day pass", noun: "wristband", icon: "band" },
     overnight: { title: "Overnight", noun: "wristband", icon: "moon" },
+    contractor: { title: "Contractor badge", noun: "badge", icon: "badge" },
     staff: { title: "Staff card", noun: "card", icon: "card" },
   };
   const WB_CARD_WORDS = { written: "Made", failed: "Didn't work", skipped: "Skipped",
@@ -1800,6 +1802,8 @@
     moon: '<path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a7.5 7.5 0 1 0 10.1 10.1z"/>',
     card: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><circle cx="9" cy="11" r="2"/>' +
       '<path d="M5.8 15.8c.7-1.4 1.8-2 3.2-2s2.5.6 3.2 2M14.5 10h4M14.5 13h3"/>',
+    badge: '<rect x="5" y="4.5" width="14" height="17" rx="2.5"/><rect x="9.5" y="2.5" width="5" height="4" rx="1"/>' +
+      '<circle cx="12" cy="11.5" r="2"/><path d="M8.8 17.5c.6-1.3 1.7-1.9 3.2-1.9s2.6.6 3.2 1.9"/>',
     search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
     list: ICONS.list,
     up: '<path d="M12 19V5.5M6.5 11L12 5.5l5.5 5.5"/>',
@@ -2748,6 +2752,7 @@
       const sub = !t.allowed ? t.reason || "Can't be made right now."
         : type === "day_pass" ? (t.end_time_passed ? "Pick when they stop working" : `Works until ${t.expires_label}`)
         : type === "overnight" ? `Room wristbands until checkout at ${wbClock(t.checkout_time)}`
+        : type === "contractor" ? `Doors you pick, for up to ${wbPlural(t.max_days || 7, "day")}`
         : "Key cards for staff";
       return wbChoice(type, WB_TYPES[type].title, sub, WB_TYPES[type].icon,
         t.allowed ? () => wbOpenForm(type) : null);
@@ -2789,19 +2794,20 @@
       h("div", { class: "wb-title-row" }, h("h1", null, title), h("span", { class: "wb-pill-slot" })));
   }
 
-  // ---- the forms: day pass, overnight, staff card
+  // ---- the forms: day pass, overnight, contractor badge, staff card
 
   function wbOpenForm(type) {
     const o = wb.options;
     const t = o?.types?.[type];
     if (!t?.allowed) return toast(t?.reason || "That can't be made right now.");
     const f = {
-      type, t, name: "", count: 1, touched: new Set(), submitted: false, busy: false,
+      type, t, name: "", company: "", count: 1, touched: new Set(), submitted: false, busy: false,
       doors: new Set(t.door_ids || []), rooms: new Set(),
       checkout: t.default_checkout || "", expiresOn: t.default_expires_on || "",
       // A day pass's end time for people who may change it; none to start with once the usual
       // time has passed, so they pick one.
-      endTime: type === "day_pass" && t.can_edit_end_time ? (t.end_time_passed ? "" : t.end_time || "") : null,
+      endTime: type === "day_pass" && t.can_edit_end_time ? (t.end_time_passed ? "" : t.end_time || "")
+        : type === "contractor" ? t.default_end_time || "" : null,
       access: { all: false, buildings: new Set(), floors: new Set(), doors: new Set() },
       doorById: new Map((o.doors || []).map((d) => [d.id, d])),
       plan: null, planOk: false, note: "", noteShown: false, ask: 0, timer: null, fields: {}, els: {},
@@ -2818,18 +2824,28 @@
     const { type, t } = f;
     const o = wb.options;
     const staff = type === "staff";
+    const contractor = type === "contractor";
+    const guests = !staff && !contractor;
+    const noun = WB_TYPES[type].noun;
     const name = h("input", { class: "field", type: "text", maxlength: "80", autocomplete: "off",
       autocapitalize: "words", spellcheck: "false", enterkeyhint: "go",
-      placeholder: staff ? "Their full name" : "Guest or party name" });
+      placeholder: guests ? "Guest or party name" : "Their full name" });
     name.addEventListener("input", () => {
       f.name = name.value;
       wbChanged(f, "name", false);
     });
+    const company = contractor ? h("input", { class: "field", type: "text", maxlength: "60", autocomplete: "off",
+      autocapitalize: "words", spellcheck: "false", enterkeyhint: "go", placeholder: "Such as Acme Plumbing" }) : null;
+    company?.addEventListener("input", () => {
+      f.company = company.value;
+      wbChanged(f, "company", false);
+    });
     const people = [
-      wbField(f, "name", staff ? "Staff member's name" : "Guest name", name),
-      wbField(f, "count", staff ? "How many cards" : "Party size",
-        wbStepper(f, staff ? "How many cards" : "Party size", t.max || 1, staff ? "card" : "guest"),
-        staff ? null : h("p", { class: "wb-hint" }, "One wristband per guest.")),
+      wbField(f, "name", staff ? "Staff member's name" : contractor ? "Contractor's name" : "Guest name", name),
+      company ? wbField(f, "company", "Company (optional)", company) : null,
+      wbField(f, "count", guests ? "Party size" : `How many ${noun}s`,
+        wbStepper(f, guests ? "Party size" : `How many ${noun}s`, t.max || 1, guests ? "guest" : noun),
+        guests ? h("p", { class: "wb-hint" }, "One wristband per guest.") : null),
     ];
     const sections = [h("section", { class: "wb-card" }, people)];
     if (type === "day_pass") {
@@ -2838,7 +2854,7 @@
     } else if (type === "overnight") {
       const shared = new Set(t.door_ids || []);
       // Guest rooms, and doors not marked yet (a manager marks each door on the dashboard).
-      const rooms = (o.doors || []).filter((d) => !shared.has(d.id) && d.kind !== "public");
+      const rooms = (o.doors || []).filter((d) => !shared.has(d.id) && (!d.kind || d.kind === "room"));
       const checkout = h("input", { class: "field", type: "date", value: f.checkout, min: o.today,
         max: t.max_nights ? wbAddDays(o.today, t.max_nights) : null });
       f.els.checkoutHint = h("p", { class: "wb-hint", "aria-live": "polite" });
@@ -2855,6 +2871,12 @@
           wbField(f, "checkout", "Checkout date", checkout, f.els.checkoutHint),
           shared.size || t.can_edit_doors
             ? wbDoorsField(f, "Shared doors", "Every overnight wristband opens these too.") : null));
+    } else if (contractor) {
+      sections.push(
+        h("section", { class: "wb-card" }, wbField(f, "door_ids", "Doors",
+          wbDoorPicker(f.doors, "doors", o.doors || [], () => wbChanged(f, "door_ids")),
+          h("p", { class: "wb-hint" }, "Every badge opens these doors. Only doors you have access to are listed."))),
+        h("section", { class: "wb-card" }, wbEndField(f)));
     } else {
       const expires = h("input", { class: "field", type: "date", value: f.expiresOn, min: o.today,
         max: t.max_days ? wbAddDays(o.today, t.max_days) : null });
@@ -2965,7 +2987,7 @@
 
   // The doors every card of this kind opens, chosen by a manager. Someone allowed to change
   // them can, for this card only, from the public doors (and doors not marked yet). Doors
-  // hidden from the lists, or marked as rooms since, stay on it either way.
+  // hidden from the lists, or marked as rooms or staff doors since, stay on it either way.
   function wbDoorsField(f, label, hint) {
     const listed = f.doorById;
     const usual = new Set(f.t.door_ids || []);
@@ -2984,7 +3006,7 @@
       const toggle = h("button", { type: "button", class: "btn wb-change", "aria-expanded": "false" }, "Change");
       toggle.addEventListener("click", () => {
         if (!picker) {
-          const shared = [...listed.values()].filter((d) => d.kind !== "room" || usual.has(d.id));
+          const shared = [...listed.values()].filter((d) => !d.kind || d.kind === "public" || usual.has(d.id));
           picker = wbDoorPicker(f.doors, "doors", shared, () => {
             draw();
             wbChanged(f, "door_ids");
@@ -2999,6 +3021,29 @@
       line.append(toggle);
     }
     return wbField(f, "door_ids", label, box, h("p", { class: "wb-hint" }, hint));
+  }
+
+  // When a contractor badge stops working: a date and a time, later than now and at most
+  // t.max_days days away (the server's limit; the hint says how far that is).
+  function wbEndField(f) {
+    const { t } = f;
+    const today = wb.options.today;
+    const day = h("input", { class: "field", type: "date", value: f.expiresOn, min: today,
+      max: t.latest_on || wbAddDays(today, t.max_days || 7) });
+    const at = h("input", { class: "field", type: "time", step: "60", value: f.endTime });
+    f.els.expiresHint = h("p", { class: "wb-hint", "aria-live": "polite" });
+    day.addEventListener("input", () => {
+      f.expiresOn = day.value;
+      wbDrawDates(f);
+      wbChanged(f, "expires_on");
+    });
+    at.addEventListener("input", () => {
+      f.endTime = at.value.slice(0, 5);
+      wbDrawDates(f);
+      wbChanged(f, "end_time");
+    });
+    return h("div", { class: "wb-field" }, h("div", { class: "wb-when" },
+      wbField(f, "expires_on", "Works until", day), wbField(f, "end_time", "Time", at)), f.els.expiresHint);
   }
 
   // When a day pass stops working, for people who may change it: any time later than now,
@@ -3235,6 +3280,10 @@
       f.els.endHint.textContent = !f.endTime && t.end_time_passed
         ? `It's past ${usual}, when day passes usually stop working. Pick a later time, up to 11:59 PM.`
         : `Usually ${usual}. Any time later than now, up to 11:59 PM tonight.`;
+    } else if (f.type === "contractor") {
+      f.els.expiresHint.textContent = (f.expiresOn && f.endTime
+        ? `Badges stop working at ${wbExpiryLabel(f.expiresOn, f.endTime)}.` : "Pick the day and time they stop working.") +
+        ` At most ${wbPlural(t.max_days || 7, "day")} from now${t.latest_label ? `: until ${t.latest_label}` : ""}.`;
     } else if (f.type === "staff") {
       f.els.expiresHint.textContent = (f.expiresOn
         ? `Cards stop working at ${wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL)}.` : "Pick the last day it works.") +
@@ -3255,6 +3304,10 @@
     if (f.type === "day_pass" && f.endTime) body.end_time = f.endTime;
     if (f.type === "staff") {
       Object.assign(body, { access: wbAccessEntries(f.access, f.doorById), expires_on: f.expiresOn });
+    }
+    if (f.type === "contractor") {
+      Object.assign(body, { company: f.company.trim(), door_ids: [...f.doors], expires_on: f.expiresOn,
+        end_time: f.endTime });
     }
     return body;
   }
@@ -3300,10 +3353,12 @@
       : type === "day_pass" && f.endTime !== null ? (f.endTime ? wbExpiryLabel(wb.options.today, f.endTime) : "—")
       : type === "day_pass" ? t.expires_label
       : type === "overnight" ? (f.checkout ? wbExpiryLabel(f.checkout, t.checkout_time) : "—")
+      : type === "contractor" ? (f.expiresOn && f.endTime ? wbExpiryLabel(f.expiresOn, f.endTime) : "—")
       : f.expiresOn ? wbExpiryLabel(f.expiresOn, WB_STAFF_UNTIL) : "—";
+    const company = type === "contractor" ? f.company.trim() : "";
     fill(f.els.summary, [...wbRows([
-      ["For", f.name.trim() || "—"],
-      [type === "staff" ? "Cards" : "Wristbands", String(f.count)],
+      ["For", company ? `${f.name.trim() || "—"} (${company})` : f.name.trim() || "—"],
+      [`${cap(WB_TYPES[type].noun)}s`, String(f.count)],
       ["Opens", f.planOk ? f.plan.summary || "—" : "—"],
       ["Works until", until],
     ]).children]);
@@ -3317,13 +3372,18 @@
     f.submitted = true;
     f.els.problem.hidden = true;
     const staff = f.type === "staff";
+    const contractor = f.type === "contractor";
     // Quick checks first: they save a trip and point at the field. The server checks it all.
-    const missing = !f.name.trim() ? ["name", staff ? "Enter the staff member's name." : "Enter the guest's name."]
+    const missing = !f.name.trim() ? ["name", staff ? "Enter the staff member's name."
+      : contractor ? "Enter the contractor's name." : "Enter the guest's name."]
       : f.type === "day_pass" && f.endTime === "" ? ["end_time", "Pick when these wristbands stop working."]
       : f.type === "overnight" && !f.rooms.size ? ["room_ids", "Pick at least one room."]
       : f.type === "overnight" && !f.checkout ? ["checkout", "Pick a checkout date."]
       : staff && !wbAccessEntries(f.access, f.doorById).length ? ["access", "Choose what this card opens."]
       : staff && !f.expiresOn ? ["expires_on", "Pick the last day it works."]
+      : contractor && !f.doors.size ? ["door_ids", "Pick at least one door."]
+      : contractor && !f.expiresOn ? ["expires_on", "Pick the last day it works."]
+      : contractor && !f.endTime ? ["end_time", "Pick the time it stops working."]
       : null;
     if (missing) {
       wbSetError(f, ...missing);
@@ -3395,7 +3455,7 @@
     if (job.phase !== v.phase) {
       v.phase = job.phase;
       const [icon, cls] = {
-        waiting_for_card: [kind.icon === "card" ? "card" : "band", "pulse"], remove_card: ["up", "lift"],
+        waiting_for_card: [kind.icon === "moon" ? "band" : kind.icon, "pulse"], remove_card: ["up", "lift"],
         needs_attention: ["alert", "alert"],
         done: ["check", "ok"], cancelled: ["stop", "quiet"],
       }[job.phase] || [null, ""];   // queued, writing: a spinner
@@ -3574,7 +3634,7 @@
       ? job.cards.find((c) => c.status === "written" && wbSameCard(c.card_number, look.card_number)) : null;
     const state = mine ? wbCardState(job, mine) : null;
     const done = look.state === "done";
-    const noun = job?.type === "staff" || !job ? "card" : "wristband";
+    const noun = job ? (WB_TYPES[job.type] || WB_TYPES.day_pass).noun : "card";
     // The server says who may wipe it (people who see every card, or whoever made it), and
     // checks again when asked.
     const revoke = done && look.can_revoke && look.card_number
@@ -3592,7 +3652,7 @@
       `This ${noun} has no doors on it`) : null,
       done && look.message ? wbNote("", look.message) : null,
       doors.length ? h("section", { class: "group" },
-        h("h2", null, job?.type === "staff" ? "On the card" : "On the wristband"),
+        h("h2", null, `On the ${job ? noun : "wristband"}`),
         wbRows(doors.map((r) => [r.label, r.expires_label ? `Until ${r.expires_label}` : "—"]))) : null,
       done && (!job || job.type === "staff") ? wbNoticeSection(look.cancellations) : null,
       job ? h("section", { class: "group" }, h("h2", null, "Our record"), wbRows([

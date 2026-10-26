@@ -11,11 +11,15 @@ and options():
   floor 0 means "the whole building", so a zero would silently widen a card.
 - Expiry times are wall-clock times in the property's time zone. A time that doesn't exist on
   a daylight-saving day moves forward past the gap; one that happens twice uses the first.
-- A door is marked a public door or a guest room (wb_doors.kind; NULL = not marked yet, which
-  counts as both). Rooms go on overnight wristbands; public doors are the shared doors.
+- A door is marked a public door, a guest room or a staff door (wb_doors.kind; NULL = not marked
+  yet, which counts as a public door and a guest room). Rooms go on overnight wristbands; public
+  doors are the shared doors. Staff doors only go on staff cards and contractor badges.
+- Contractor badges open doors picked from anywhere in the maker's own door scope, and last at
+  most CONTRACTOR_DAYS days.
 
 Permission JSON (roles.wristbands; staff.wristbands where NULL means "same as their role"):
-{"types": ["day_pass", "overnight", "staff"], "staff_levels": ["door", "floor", "building", "all"],
+{"types": ["day_pass", "overnight", "staff", "contractor"],
+ "staff_levels": ["door", "floor", "building", "all"],
  "doors": {"all": true} | {"buildings": [n], "floors": [[building, floor]], "doors": [lock id]},
  "edit_doors": bool, "edit_end_time": bool, "max_nights": n (0 = no limit),
  "max_staff_days": n (0 = no limit), "see_all_cards": bool}
@@ -28,7 +32,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-TYPES = ("day_pass", "overnight", "staff")
+TYPES = ("day_pass", "overnight", "staff", "contractor")
 LEVELS = ("door", "floor", "building", "all")   # staff-card record levels, narrowest first
 BLANK_MAC = "000000000000"     # what floor, building and all-door records carry instead of a lock
 MAX_BUILDING = 254             # the encoder's range for building numbers...
@@ -42,7 +46,11 @@ MAX_DESCRIBED = 4              # door names in a summary before "+2 more"
 MAX_TIMESTAMP = 2 ** 32 - 1    # the encoder takes a 32-bit expiry
 STAFF_CARD_TIME = "23:59"      # staff cards last until the end of the chosen day
 LATEST_END_TIME = "23:59"      # the latest a day pass's end time can be changed to (still today)
-DOOR_KINDS = ("public", "room")   # wb_doors.kind: a public door or a guest room; NULL = not marked
+# wb_doors.kind: a public door, a guest room or a staff door; NULL = not marked
+DOOR_KINDS = ("public", "room", "staff")
+KIND_WORDS = {"public": "a public door", "room": "a guest room", "staff": "a staff door"}
+CONTRACTOR_DAYS = 7            # the longest a contractor badge lasts (a hard limit)
+CONTRACTOR_TIME = "23:59"      # a contractor badge's form starts at the end of today
 # The last date an expiry can fall on, so far-off dates are refused before any time-zone math.
 LAST_DATE = datetime.fromtimestamp(MAX_TIMESTAMP, timezone.utc).date()
 
@@ -56,11 +64,14 @@ SETTING_DEFAULTS = {
     "wb_daypass_max": "20", "wb_checkout_time": "11:00", "wb_overnight_doors": "[]",
     "wb_overnight_max": "20", "wb_staff_days": "90", "wb_staff_max": "5", "wb_lockout_daypass": "0",
     "wb_lockout_overnight": "0", "wb_lockout_staff": "1", "wb_max_records": "20",
+    "wb_contractor_max": "5", "wb_lockout_contractor": "0",
 }
 NUMBER_RANGES = {"wb_daypass_max": (1, 50), "wb_overnight_max": (1, 50),
-                 "wb_staff_days": (1, 3650), "wb_staff_max": (1, 20), "wb_max_records": (1, 64)}
+                 "wb_staff_days": (1, 3650), "wb_staff_max": (1, 20), "wb_max_records": (1, 64),
+                 "wb_contractor_max": (1, 20)}
 
-NOUNS = {"day_pass": "day passes", "overnight": "overnight wristbands", "staff": "staff cards"}
+NOUNS = {"day_pass": "day passes", "overnight": "overnight wristbands", "staff": "staff cards",
+         "contractor": "contractor badges"}
 LEVEL_REFUSALS = {"all": "You can't make cards that open every door.",
                   "building": "You can't make building cards.",
                   "floor": "You can't make floor cards.",
@@ -70,9 +81,8 @@ TOO_FAR = "That date is too far away. Pick an earlier date."
 TOO_MANY_DOORS = "That's too many doors for one card. Use floor or building access instead."
 TURNED_OFF = "Wristbands are turned off. Ask a manager to turn them on."
 NOT_ALLOWED = "You don't have access to make wristbands. Ask a manager if you need it."
-# A door picked where its kind doesn't belong: a room as a shared door, a public door as a room.
-WRONG_KIND = {"room": "{} is a guest room, not a public door. Pick a public door.",
-              "public": "{} is a public door, not a guest room. Pick a guest room."}
+CONTRACTOR_TOO_LONG = f"Contractor badges can last at most {CONTRACTOR_DAYS} days."
+NO_CONTRACTOR_DOORS = "There are no doors you can put on a badge. Ask a manager."
 
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -292,7 +302,8 @@ def _covers_floor(perm: dict | None, building: int, floor: int) -> bool:
 # ---------------------------------------------------------------- doors and settings
 
 def door_kind(value) -> str | None:
-    """A door's kind as stored: 'public', 'room', or None (not marked yet) for anything else."""
+    """A door's kind as stored: 'public', 'room', 'staff', or None (not marked yet) for anything
+    else."""
     return value if value in DOOR_KINDS else None
 
 
@@ -307,7 +318,7 @@ class _Door:
     floor_name: str
     hidden: bool
     active: bool
-    kind: str | None = None   # 'public', 'room' or None (not marked yet: counts as both)
+    kind: str | None = None   # 'public', 'room', 'staff' or None (not marked: public or room)
 
     @classmethod
     def of(cls, row) -> "_Door | None":
@@ -459,7 +470,8 @@ class _Request:
     checkout: date | None
     access: tuple[dict, ...]
     expires_on: date | None
-    end_time: str | None = None   # a day pass's end time ("21:30"); None = the setting's
+    end_time: str | None = None   # a day pass's or contractor badge's end time ("21:30")
+    company: str = ""             # a contractor's company (optional)
 
 
 def _id_tuple(raw, field: str) -> tuple[int, ...]:
@@ -484,7 +496,8 @@ def _date(raw, field: str, message: str) -> date | None:
 
 
 def _end_time(raw) -> str | None:
-    """A day pass's end time from the form ("21:30"), or None for the usual one."""
+    """An end time from the form ("21:30"): a day pass's (None for the usual one) or a
+    contractor badge's."""
     if raw is None or raw == "":
         return None
     if not isinstance(raw, str) or not HHMM_RE.match(raw):
@@ -532,8 +545,13 @@ def _read_request(data) -> _Request:
     if count is None:
         count = 1
     if not isinstance(count, int) or isinstance(count, bool):
-        label = "Quantity" if card_type == "staff" else "Party size"
+        label = "Party size" if card_type in ("day_pass", "overnight") else "Quantity"
         raise PlanError(f"{label} must be a whole number.", "count")
+    company = data.get("company") if card_type == "contractor" else None
+    if company is None:
+        company = ""
+    if not isinstance(company, str):
+        raise PlanError("Enter the company's name, or leave it blank.", "company")
     door_ids, room_ids = data.get("door_ids"), data.get("room_ids")
     access = data.get("access")
     if access is None:
@@ -548,14 +566,17 @@ def _read_request(data) -> _Request:
         checkout=_date(data.get("checkout"), "checkout", "Pick a valid checkout date."),
         access=tuple({tuple(e.items()): e for e in entries}.values()),
         expires_on=_date(data.get("expires_on"), "expires_on", "Pick a valid expiry date."),
-        end_time=_end_time(data.get("end_time")) if card_type == "day_pass" else None)
+        end_time=(_end_time(data.get("end_time")) if card_type in ("day_pass", "contractor")
+                  else None),
+        company=company)
 
 
 # ---------------------------------------------------------------- shared checks
 
 def _clean_name(request: _Request) -> str:
-    prompt = ("Enter the staff member's name." if request.type == "staff"
-              else "Enter the guest's name.")
+    prompt = {"staff": "Enter the staff member's name.",
+              "contractor": "Enter the contractor's name."}.get(request.type,
+                                                               "Enter the guest's name.")
     name = " ".join(request.name.split())
     if not name:
         raise PlanError(prompt, "name")
@@ -566,7 +587,7 @@ def _clean_name(request: _Request) -> str:
 
 def _check_count(request: _Request, maximum: int) -> int:
     if not 1 <= request.count <= maximum:
-        label = "Quantity" if request.type == "staff" else "Party size"
+        label = "Party size" if request.type in ("day_pass", "overnight") else "Quantity"
         raise PlanError(f"{label} must be between 1 and {maximum}.", "count")
     return request.count
 
@@ -590,10 +611,11 @@ def _chosen_doors(perm: dict, requested: tuple[int, ...] | None, defaults: tuple
 
 def _resolve(doors: dict[int, _Door], perm: dict, ids: tuple[int, ...],
              configured: tuple[int, ...], field: str,
-             wrong_kind: str | None = None) -> list[_Door]:
+             wanted: str | None = None) -> list[_Door]:
     """The doors in order, checked: listed, active, offered, of the right kind and in this
-    person's scope. wrong_kind: the kind refused here ('room' for shared doors, 'public' for
-    rooms); doors not marked yet count as either.
+    person's scope. wanted: the kind that belongs here ('public' for shared doors, 'room' for
+    rooms): a door marked as anything else (a staff door, say) is refused, and one not marked
+    yet counts as either. None: any kind (staff cards and contractor badges).
 
     A hidden door, or one of the wrong kind, is allowed only when it comes from the configured
     defaults (a manager may hide the pool gate from pickers and still put it on every day pass,
@@ -610,8 +632,9 @@ def _resolve(doors: dict[int, _Door], perm: dict, ids: tuple[int, ...],
             raise PlanError(f"{door.name} is no longer listed in TT Hotel." + fix, field)
         if door.hidden and not from_settings:
             raise PlanError(f"{door.name} isn't available for cards. Pick a different door.", field)
-        if wrong_kind and door.kind == wrong_kind and not from_settings:
-            raise PlanError(WRONG_KIND[wrong_kind].format(door.name), field)
+        if wanted and door.kind not in (None, wanted) and not from_settings:
+            raise PlanError(f"{door.name} is {KIND_WORDS[door.kind]}, not {KIND_WORDS[wanted]}. "
+                            f"Pick {KIND_WORDS[wanted]}.", field)
         if not door_in_scope(perm, {"lock_id": door.id, "building_number": door.building,
                                     "floor_number": door.floor}):
             raise PlanError(f"You don't have access to {door.name}.", field, 403)
@@ -700,7 +723,7 @@ def _plan_day_pass(request, perm, doors, settings, now, tz) -> Plan:
                              "You can't change which doors a day pass opens.")
     if not door_ids:
         raise PlanError("Pick at least one door.", "door_ids")
-    chosen = _resolve(doors, perm, door_ids, defaults, "door_ids", "room")
+    chosen = _resolve(doors, perm, door_ids, defaults, "door_ids", "public")
     records = [_door_record(door, "door_ids") for door in chosen]
     return _finish(request, name, count, records, expiry,
                    setting_flag(settings, "wb_lockout_daypass"), settings, now, tz,
@@ -724,11 +747,11 @@ def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
     if max_nights and nights > max_nights:
         raise PlanError("You can make overnight wristbands for up to "
                         f"{_plural(max_nights, 'night')}.", "checkout")
-    rooms = _resolve(doors, perm, request.room_ids, (), "room_ids", "public")
+    rooms = _resolve(doors, perm, request.room_ids, (), "room_ids", "room")
     shared_defaults = setting_doors(settings, "wb_overnight_doors")
     shared_ids = _chosen_doors(perm, request.door_ids, shared_defaults,
                                "You can't change the shared doors on overnight wristbands.")
-    shared = _resolve(doors, perm, shared_ids, shared_defaults, "door_ids", "room")
+    shared = _resolve(doors, perm, shared_ids, shared_defaults, "door_ids", "public")
     records = ([_door_record(door, "room_ids") for door in rooms]
                + [_door_record(door, "door_ids") for door in shared])
     return _finish(request, name, count, records, expiry,
@@ -820,7 +843,70 @@ def _plan_staff(request, perm, doors, settings, now, tz) -> Plan:
                    doors_field="access", date_field="expires_on")
 
 
-PLANNERS = {"day_pass": _plan_day_pass, "overnight": _plan_overnight, "staff": _plan_staff}
+def contractor_latest(now: float, tz: ZoneInfo) -> datetime:
+    """The latest a contractor badge may end: this time of day, CONTRACTOR_DAYS days from today
+    by the property's clock (a daylight-saving change in between makes that an hour more or less
+    than 7 x 24 hours). A time that doesn't exist then moves past the gap; one that happens
+    twice uses the first."""
+    here = datetime.fromtimestamp(now, tz)
+    later = datetime.combine(here.date() + timedelta(days=CONTRACTOR_DAYS), here.time())
+    return later.replace(tzinfo=tz, fold=0).astimezone(timezone.utc).astimezone(tz)
+
+
+def _contractor_name(request: _Request) -> str:
+    """'Sam Lee (Acme Plumbing)': the contractor's name, with their company when one is given,
+    as the card log, Look up and Door activity show it."""
+    name = _clean_name(request)
+    company = " ".join(request.company.split())
+    if not company:
+        return name
+    full = f"{name} ({company})"
+    if len(full) > MAX_NAME:
+        raise PlanError(f"The name and company together can be at most {MAX_NAME} characters.",
+                        "company")
+    return full
+
+
+def _contractor_end(request: _Request, now: float, tz: ZoneInfo) -> datetime:
+    """When a contractor badge stops working: the date and time picked, later than now and no
+    later than contractor_latest()."""
+    if request.expires_on is None:
+        raise PlanError("Pick the last day it works.", "expires_on")
+    if request.end_time is None:
+        raise PlanError("Pick the time it stops working.", "end_time")
+    today = local_today(now, tz)
+    if request.expires_on < today:
+        raise PlanError("That date has already passed. Pick a later date.", "expires_on")
+    if request.expires_on > today + timedelta(days=CONTRACTOR_DAYS):
+        raise PlanError(CONTRACTOR_TOO_LONG, "expires_on")
+    expiry = at_local_time(tz, request.expires_on, request.end_time)
+    if expiry.timestamp() <= now:
+        raise PlanError("That time has already passed. Pick a later time.", "end_time")
+    if expiry.timestamp() > contractor_latest(now, tz).timestamp():
+        raise PlanError(CONTRACTOR_TOO_LONG, "end_time")
+    return expiry
+
+
+def _plan_contractor(request, perm, doors, settings, now, tz) -> Plan:
+    """A contractor badge: the doors picked, from any kind of door in the maker's own scope (staff
+    doors too), until a date and time at most CONTRACTOR_DAYS days away."""
+    name = _contractor_name(request)
+    count = _check_count(request, setting_number(settings, "wb_contractor_max"))
+    expiry = _contractor_end(request, now, tz)
+    if not request.door_ids:
+        raise PlanError("Pick at least one door.", "door_ids")
+    records = [_door_record(door, "door_ids")
+               for door in _resolve(doors, perm, request.door_ids, (), "door_ids")]
+    most = setting_number(settings, "wb_max_records")
+    if len({(r.building, r.floor, r.mac) for r in records}) > most:
+        raise PlanError(f"That's too many doors for one badge. Pick at most {most}.", "door_ids")
+    return _finish(request, name, count, records, expiry,
+                   setting_flag(settings, "wb_lockout_contractor"), settings, now, tz,
+                   doors_field="door_ids", date_field="expires_on")
+
+
+PLANNERS = {"day_pass": _plan_day_pass, "overnight": _plan_overnight, "staff": _plan_staff,
+            "contractor": _plan_contractor}
 
 
 def plan(request: dict, perm: dict | None, doors: dict, settings: dict, now: float,
@@ -887,6 +973,14 @@ def options(perm: dict | None, doors: dict, settings: dict, now: float, tz: Zone
         perm, {"lock_id": d.id, "building_number": d.building, "floor_number": d.floor})]
     offered.sort(key=lambda d: (d.building is None, d.building or 0, d.floor is None,
                                 d.floor or 0, d.name.lower(), d.id))
+
+    contractor_reason = refusal("contractor")
+    if contractor_reason is None and not offered:
+        contractor_reason = NO_CONTRACTOR_DOORS
+    latest = contractor_latest(now, tz)
+    # The form starts at the end of today (tomorrow's, in the day's last minute).
+    end_on = today if now < at_local_time(tz, today, CONTRACTOR_TIME).timestamp() else (
+        today + timedelta(days=1))
     return {
         "enabled": reason is None,
         "reason": reason,
@@ -922,9 +1016,21 @@ def options(perm: dict | None, doors: dict, settings: dict, now: float, tz: Zone
                 "default_expires_on": (today + timedelta(days=staff_days)).isoformat(),
                 "max": setting_number(settings, "wb_staff_max"),
             },
+            "contractor": {
+                "allowed": contractor_reason is None, "reason": contractor_reason,
+                "permitted": permitted("contractor"),
+                "max": setting_number(settings, "wb_contractor_max"),
+                "max_days": CONTRACTOR_DAYS,
+                "default_expires_on": end_on.isoformat(), "default_end_time": CONTRACTOR_TIME,
+                # The latest end allowed right now (this time, CONTRACTOR_DAYS days ahead).
+                "latest_on": latest.date().isoformat(), "latest_time": latest.strftime("%H:%M"),
+                "latest_at": int(latest.timestamp()),
+                "latest_label": format_expiry(latest.timestamp(), now, tz),
+            },
         },
-        # kind: 'public', 'room' or None (not marked yet). Rooms are offered for overnight
-        # wristbands, public doors as shared doors; doors not marked yet as both.
+        # kind: 'public', 'room', 'staff' or None (not marked yet). Rooms are offered for
+        # overnight wristbands, public doors as shared doors, doors not marked yet as both, and
+        # every kind (staff doors too) for staff cards and contractor badges.
         "doors": [{"id": d.id, "name": d.name, "building": d.building,
                    "building_name": d.building_label, "floor": d.floor,
                    "floor_name": d.floor_label, "kind": d.kind} for d in offered],

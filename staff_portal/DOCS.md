@@ -521,7 +521,10 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
 - **Overnight guests:** a guest name, party size, their room or rooms and a checkout date. Each
   wristband opens the rooms plus the shared doors you chose (such as the main entrance) until
   checkout time on the checkout date (11:00 AM unless you change it). Rooms are picked from the
-  doors marked as guest rooms (see **Public doors and guest rooms** below).
+  doors marked as guest rooms (see **Public doors, guest rooms and staff doors** below).
+- **Contractor badges:** a contractor's name (and their company, if you like), how many badges,
+  the doors they need and when the badges stop working, at most 7 days ahead (see **Contractor
+  badges** below).
 - **Staff cards:** a staff member's name, how many cards, what they open (every door, whole
   buildings, whole floors or single doors) and the last day they work (until 11:59 PM that day).
 - **Look up a wristband:** put it on the encoder to see what's on it first (its card number,
@@ -560,10 +563,11 @@ offered on shared or role-based computers where each person signs in with their 
 2. Under **Day passes**, tick the doors every day pass opens and set **Day passes stop working
    at**. Under **Overnight guests**, tick the shared doors and set the **Checkout time**. Both
    times can be changed at any time; cards already made keep the time they were made with.
-   Both door lists show only public doors (and doors not marked yet).
+   Both door lists show only public doors (and doors not marked yet). Under **Contractor
+   badges**, set **Most badges at once**.
 3. Under **Doors**, rename doors to what staff call them (TT Hotel keeps its own names) and hide
    any staff should never pick. A hidden door can still be one of the day-pass or overnight
-   doors. Mark each door as a **Public door** or a **Guest room** (see below).
+   doors. Mark each door as a **Public door**, a **Guest room** or a **Staff door** (see below).
 4. In **Phones & computers**, click **Edit** on the front-desk computer and check its **Card
    encoder**. New computers start on **This computer (USB)**, the one to use for a desk with the
    encoder plugged into it. The computer must be **Shared** or **Role-based**. **Test encoder**
@@ -637,14 +641,14 @@ offered on shared or role-based computers where each person signs in with their 
    needs **Shared** or **Role-based**), or a shared computer whose role can't make wristbands.
    For **This computer (USB)** it also says whether the encoder is connected now.
 5. On the **Roles** tab, under **Wristbands**, choose what each role may make: day passes,
-   overnight wristbands, staff cards (and whether those may open single doors, floors, buildings
-   or every door), which doors they may put on cards (all doors, or chosen buildings, floors and
-   doors), the longest overnight stay and staff card, whether they may change the doors on a
-   day pass or overnight wristband, whether they **may change when day passes stop working**,
-   and whether they see everyone's cards in the card log and look-ups. A role is warned if its
-   doors don't cover the day-pass or overnight doors, because those cards would then be refused.
-   On a role-based computer, a person can have their own wristband rules (click them under their
-   role); otherwise they get their role's.
+   overnight wristbands, contractor badges, staff cards (and whether those may open single
+   doors, floors, buildings or every door), which doors they may put on cards (all doors, or
+   chosen buildings, floors and doors), the longest overnight stay and staff card, whether they
+   may change the doors on a day pass or overnight wristband, whether they **may change when
+   day passes stop working**, and whether they see everyone's cards in the card log and
+   look-ups. A role is warned if its doors don't cover the day-pass or overnight doors, because
+   those cards would then be refused. On a role-based computer, a person can have their own
+   wristband rules (click them under their role); otherwise they get their role's.
 
 Staff then see **Wristbands** in the sidebar under **Tools** (or as a tab on a narrow window).
 Each kind they may make is listed; one they may make but can't right now (a day pass after the
@@ -662,31 +666,59 @@ System → General** in Home Assistant), or the zone you enter under **Time zone
 Wristbands tab. The front-desk computer's Windows time zone must be the same: the encoder works
 out each door's time from that computer's clock.
 
-### Public doors and guest rooms
+### Public doors, guest rooms and staff doors
 
-Each door is either a **public door** (the pool gate, the main entrance, the gym) or a **guest
-room**. On the **Wristbands** tab, under **Doors**:
+Each door is a **public door** (the pool gate, the main entrance, the gym), a **guest room** or a
+**staff door** (the office, the boiler room, the laundry). On the **Wristbands** tab, under
+**Doors**:
 
-- Pick **Public door**, **Guest room** or **Not marked** next to each door. It's saved straight
-  away.
+- Pick **Public door**, **Guest room**, **Staff door** or **Not marked** next to each door. It's
+  saved straight away.
 - **Mark a whole floor or building** marks every door there at once: pick the floor or building,
-  pick what to mark them as and click **Mark**. If some of those doors are marked the other way,
+  pick what to mark them as and click **Mark**. If some of those doors are marked another way,
   it asks first.
-- The line above the list says how many doors aren't marked yet.
+- The line above the list says how many doors aren't marked yet, and how many there are of each
+  kind.
 
 What it changes:
 
 - Overnight guests' rooms are picked from the guest rooms. The shared doors (the doors every day
   pass opens, the shared doors on overnight wristbands, and the doors people who may change
   them can pick from) are the public doors.
-- A door not marked yet shows in both lists, so nothing disappears until you've marked it.
-- The add-on checks it too: a guest room picked as a shared door, or a public door picked as a
-  room, is refused with a message saying so.
+- Staff doors are only for staff cards and contractor badges. They never show as rooms or shared
+  doors, in the staff app or under **Day passes** and **Overnight guests** here.
+- A door not marked yet shows as both a room and a shared door, so nothing disappears until
+  you've marked it.
+- The add-on checks it too: a guest room or a staff door picked as a shared door, or a public
+  door or a staff door picked as a room, is refused with a message saying so. So is a staff door
+  newly ticked under **Day passes** or **Overnight guests**.
 - A door already ticked under **Day passes** or **Overnight guests** keeps going on those cards
-  if you later mark it a guest room, as a hidden door does, but the Wristbands tab warns about
-  it under that list. Untick it there, or mark it as a public door.
-- Staff cards can open any door, whatever it's marked as.
+  if you later mark it a guest room or a staff door, as a hidden door does, but the Wristbands
+  tab warns about it under that list. Untick it there, or mark it as a public door.
+- Staff cards and contractor badges can open any door, whatever it's marked as.
 - Syncing doors from TT Hotel never changes what a door is marked as.
+
+### Contractor badges
+
+A contractor badge lets a plumber or an electrician into the doors they need for a few days.
+
+- **Who may make them:** tick **Contractor badges** for a role on the **Roles** tab (or for one
+  person, on a role-based computer). Nobody may until you do. They then see **Contractor badge**
+  next to **Overnight** on the Wristbands screen.
+- **What it opens:** the doors picked when it's made, from any door the person making it has
+  access to (the **Doors they may put on cards** for their role): public doors, guest rooms,
+  staff doors and doors not marked yet. Hidden doors aren't offered.
+- **How long:** it works from when it's made until the date and time picked, which must be later
+  than now and at most 7 days away (until the same time of day, 7 days from today). A later
+  one is refused with "Contractor badges can last at most 7 days." The form starts at 11:59 PM
+  today.
+- **How many:** up to **Most badges at once** (5 unless you change it, at most 20), set on the
+  **Wristbands** tab under **Contractor badges**, with whether they open doors that are deadbolted
+  from inside (off unless you change it).
+- The card log, **Look up**, the activity log ("Made a contractor badge for Sam Lee (Acme
+  Plumbing)") and [Door activity](#door-activity) show it as a contractor badge, with the
+  contractor's name and company. It isn't a staff key card, so it isn't on the Staff tab's **Key
+  cards** list; wipe one on the encoder with **Look up**, then **Revoke (wipe this card)**.
 
 ### Changing when a day pass stops working
 
@@ -763,7 +795,8 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   one door, or tick **Problems only** for refused tries, alarms (tamper, locked after wrong tries)
   and the lost cards below.
 - **Last used** for each card: in the staff app's card log and Look up ("Pool Gate, today 3:12
-  PM"), and in the dashboard's Key cards list.
+  PM"), and in the dashboard's Key cards list. A contractor badge is listed with the
+  contractor's name and **Contractor badge**.
 - **Lost or revoked cards tried at a door.** When a card marked **Lost** or **Revoked** here is
   tried at a door after it was marked, or TT Hotel reports that a card it deleted was tried, the
   row is highlighted, the activity log says so ("Lost card tried at Pool Gate", or "Lost card
@@ -1338,12 +1371,12 @@ backups from older versions too. Restoring puts the setup back:
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
 - The Connecteam Client Secret, the TT Hotel Client Secret and password, and the Door activity
   address are never in a backup, and a restore never changes them. Wristband settings, door
-  names, whether each door is a public door or a guest room (a backup from before 0.9.0 leaves
-  that as it is), roles' wristband rules, departments, each person's department and Connecteam
-  sync details, and how many digits each PIN has (when that's known) are included, and so are
-  departments' clock-in settings (a backup from before 0.9.0 has none, so each person's own
-  setting counts). Whether remote lock-out was tested is never restored: test it again on the
-  new system.
+  names, whether each door is a public door, a guest room or a staff door (a backup from before
+  0.9.0 leaves that as it is), roles' wristband rules, departments, each person's department
+  and Connecteam sync details, and how many digits each PIN has (when that's known) are
+  included, and so are departments' clock-in settings (a backup from before 0.9.0 has none, so
+  each person's own setting counts). Whether remote lock-out was tested is never restored: test
+  it again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - **The activity log and the card history are merged, not replaced.** Entries in the backup that

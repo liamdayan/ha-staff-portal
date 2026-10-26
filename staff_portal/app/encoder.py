@@ -205,8 +205,8 @@ class EncoderError(Exception):
 # ---------------------------------------------------------------- wording
 
 def card_noun(card_type: str, plural: bool = False) -> str:
-    """'wristband' for guest jobs, 'card' for staff cards."""
-    noun = "card" if card_type == "staff" else "wristband"
+    """'wristband' for guest jobs, 'card' for staff cards, 'badge' for contractor badges."""
+    noun = {"staff": "card", "contractor": "badge"}.get(card_type, "wristband")
     return noun + "s" if plural else noun
 
 
@@ -1055,7 +1055,8 @@ class _Job:
         card_type = row.get("type", row.get("card_type"))
         kind = row.get("kind") or "write"
         count = row.get("count", 1 if kind != "write" else None)
-        if (not isinstance(job_id, int) or card_type not in ("day_pass", "overnight", "staff")
+        if (not isinstance(job_id, int)
+                or card_type not in ("day_pass", "overnight", "staff", "contractor")
                 or kind not in JOB_KINDS or not isinstance(count, int)
                 or not 1 <= count <= (100 if kind == "write" else 1)):
             raise ValueError("not a card job")

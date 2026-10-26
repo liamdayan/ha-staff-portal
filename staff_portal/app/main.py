@@ -1374,11 +1374,11 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
 
 # ---------------------------------------------------------------- wristbands (staff app)
 # A front-desk computer with a card encoder makes TT Hotel key cards: day passes, overnight
-# wristbands and staff cards. wristbands.py turns a request into a plan (checking it against the
-# person's permissions), it's recorded as a card job, and the encoder's runner (encoder.py)
-# writes the cards through TT Hotel's SN Web Socket helper on the desk computer. Screens that
-# poll (a job's progress, a look-up) only read the database and the runner's own state: they
-# never cost a TT Hotel request or wait for the encoder.
+# wristbands, contractor badges and staff cards. wristbands.py turns a request into a plan
+# (checking it against the person's permissions), it's recorded as a card job, and the encoder's
+# runner (encoder.py) writes the cards through TT Hotel's SN Web Socket helper on the desk
+# computer. Screens that poll (a job's progress, a look-up) only read the database and the
+# runner's own state: they never cost a TT Hotel request or wait for the encoder.
 
 WRISTBAND_REQUESTS_PER_MINUTE = 60   # previews while typing, new jobs, their buttons, look-ups
 WRISTBAND_LOG_PAGE = 50
@@ -1472,7 +1472,8 @@ def wristband_doors() -> dict[int, dict]:
 
 
 def card_noun(card_type: str, count: int = 1) -> str:
-    noun = {"day_pass": "day pass", "overnight": "overnight wristband"}.get(card_type, "staff card")
+    noun = {"day_pass": "day pass", "overnight": "overnight wristband",
+            "contractor": "contractor badge"}.get(card_type, "staff card")
     if count == 1:
         return f"an {noun}" if noun[0] in "aeiou" else f"a {noun}"
     return f"{count} {noun}es" if noun.endswith("s") else f"{count} {noun}s"
@@ -1491,7 +1492,7 @@ def made_for(card_type: str, name: str, room_ids) -> str:
 
 def finished_message(job: dict) -> str:
     """What a finished job says, if the encoder runner left no message of its own."""
-    noun = "card" if job["card_type"] == "staff" else "wristband"
+    noun = {"staff": "card", "contractor": "badge"}.get(job["card_type"], "wristband")
     total = len(job["cards"])
     written = sum(1 for c in job["cards"] if c["status"] in ("written", "cleared"))
     if job.get("kind") == "revoke":
@@ -4224,8 +4225,9 @@ async def admin_activity(request: web.Request):
 
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
                  "control_lock", "connecteam_enabled", "wristbands_enabled", "wb_lockout_daypass",
-                 "wb_lockout_overnight", "wb_lockout_staff", "connecteam_auto_staff",
-                 "connecteam_auto_clock_in", "wb_remote_lockout", "wb_lost_card_alert")
+                 "wb_lockout_overnight", "wb_lockout_staff", "wb_lockout_contractor",
+                 "connecteam_auto_staff", "connecteam_auto_clock_in", "wb_remote_lockout",
+                 "wb_lost_card_alert")
 PIN_PAUSE_MIN_MS, PIN_PAUSE_MAX_MS = 200, 5000
 REMOTE_LOCKOUT_APIS = ("reversed", "plain")   # TT Hotel's two calls for enrolling a card number
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minutes", 1, 1440),
@@ -4237,7 +4239,7 @@ NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minu
                    ("connecteam_poll_minutes", 30, 240), ("tthotel_sync_hours", 1, 48),
                    ("wb_daypass_max", 1, 50), ("wb_overnight_max", 1, 50),
                    ("wb_staff_days", 1, 3650), ("wb_staff_max", 1, 20), ("wb_card_wait", 10, 600),
-                   ("wb_max_records", 1, 64))
+                   ("wb_max_records", 1, 64), ("wb_contractor_max", 1, 20))
 # Times of day for wristbands: when day passes stop working, and checkout time.
 TIME_SETTINGS = {"wb_daypass_end": "The time day passes stop working",
                  "wb_checkout_time": "The checkout time"}
@@ -4396,11 +4398,28 @@ def clean_wristband_settings(data: dict) -> dict:
     return values
 
 
+def refuse_staff_doors(values: dict, current: dict) -> None:
+    """Staff doors never go on day passes or overnight wristbands, so one newly ticked as a
+    day-pass or overnight shared door is refused (ValueError). One ticked before it was marked a
+    staff door stays: it keeps working, and the Wristbands tab warns about it."""
+    added = set()
+    for key in DOOR_SETTINGS:
+        if key in values:
+            added |= set(json.loads(values[key])) - set(wristbands.setting_doors(current, key))
+    if not added:
+        return
+    for door in db.wb_doors():
+        if door["lock_id"] in added and wristbands.door_kind(door["kind"]) == "staff":
+            raise ValueError(f"{door_name(door)} is a staff door, so it can't go on day passes or "
+                             "overnight wristbands. Untick it, or mark it as a public door.")
+
+
 async def admin_update_settings(request: web.Request):
     data = await read_json(request)
     current = db.settings()
     try:
         values = clean_settings(data, current)
+        refuse_staff_doors(values, current)
     except ValueError as err:
         return bad_request(str(err))
     if values.get("phones_via_tunnel_only") == "1" and current.get("phones_via_tunnel_only") != "1":
@@ -4508,21 +4527,22 @@ async def admin_update_door(request: web.Request):
 
 
 # ---------------------------------------------------------------- door kinds
-# Each door is a public door (shared doors on day passes and overnight wristbands) or a guest
-# room (rooms on overnight wristbands). One not marked yet is offered as both, so nothing
-# disappears from staff's lists until the owner has marked it.
+# Each door is a public door (shared doors on day passes and overnight wristbands), a guest
+# room (rooms on overnight wristbands) or a staff door (only on staff cards and contractor
+# badges). One not marked yet is offered as a public door and a room, so nothing disappears
+# from staff's lists until the owner has marked it.
 
-DOOR_KIND_WORDS = {"public": "a public door", "room": "a guest room"}
-DOOR_KIND_PLURALS = {"public": "public doors", "room": "guest rooms"}
+DOOR_KIND_WORDS = wristbands.KIND_WORDS
+DOOR_KIND_PLURALS = {"public": "public doors", "room": "guest rooms", "staff": "staff doors"}
 MAX_DOOR_BATCH = 5000   # doors marked at once (a whole building)
 
 
 def clean_door_kind(value) -> str | None:
-    """'public', 'room', or None (not marked) from the dashboard."""
+    """'public', 'room', 'staff', or None (not marked) from the dashboard."""
     if value is None or value == "":
         return None
     if value not in wristbands.DOOR_KINDS:
-        raise ValueError("Choose Public door, Guest room or Not marked.")
+        raise ValueError("Choose Public door, Guest room, Staff door or Not marked.")
     return value
 
 
@@ -4836,6 +4856,8 @@ def lock_record_view(row: dict) -> dict:
             # passcode's name, the app user).
             "who": row["card_name"] or row["username"] or "",
             "card_id": row["card_id"], "card_number": row["card_card_number"] or row["card_number"],
+            # The kind of card made here it matched (day_pass, contractor...), else None.
+            "card_type": row.get("card_type"),
             "how": doorlog.HOW.get(row["record_type"], "Other"), "ok": bool(row["success"]),
             "alarm": row["record_type"] in doorlog.ALARM_TYPES, "alert": row["alert"],
             "problem": bool(row["problem"]), "battery": row["battery"]}

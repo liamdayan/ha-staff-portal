@@ -322,8 +322,9 @@ MIGRATIONS = {
         "archived_from": "TEXT",
     },
     "wb_doors": {
-        # 'public' (a shared door, such as the pool gate) or 'room' (a guest room); NULL = not
-        # marked yet, offered as both. TT Hotel's door sync never changes it.
+        # 'public' (a shared door, such as the pool gate), 'room' (a guest room) or 'staff' (a
+        # staff door: only on staff cards and contractor badges); NULL = not marked yet, offered
+        # as a public door and a room. TT Hotel's door sync never changes it.
         "kind": "TEXT",
     },
     "wb_jobs": {
@@ -415,6 +416,8 @@ DEFAULT_SETTINGS = {
     "wb_lockout_daypass": "0",       # 1: the card also opens a door that's been deadbolted inside
     "wb_lockout_overnight": "0",
     "wb_lockout_staff": "1",
+    "wb_contractor_max": "5",        # contractor badges: most at once, and whether they open
+    "wb_lockout_contractor": "0",    # deadbolted doors (they last at most 7 days)
     "wb_sectors": "0000000000011111",  # card sectors TT Hotel uses (its default: 12 to 16)
     "wb_card_wait": "60",            # seconds to wait for a wristband on the encoder
     "wb_max_records": "20",          # most doors written onto one card
@@ -1469,7 +1472,7 @@ class Database:
 
     def set_wb_door(self, lock_id: int, **fields) -> None:
         """The name staff see for a door ('' = TT Hotel's), whether it's hidden from them, and
-        its kind ('public', 'room' or None)."""
+        its kind ('public', 'room', 'staff' or None)."""
         sets = {k: v for k, v in fields.items() if k in ("name", "hidden", "kind")}
         if "kind" in sets:
             sets["kind"] = door_kind(sets["kind"])
@@ -1480,7 +1483,8 @@ class Database:
         self.conn.commit()
 
     def set_wb_door_kinds(self, lock_ids: list[int], kind: str | None) -> int:
-        """Mark many doors at once (a whole floor or building) as 'public', 'room' or None.
+        """Mark many doors at once (a whole floor or building) as 'public', 'room', 'staff' or
+        None.
         Returns how many doors there were."""
         rows = [(door_kind(kind), lock_id) for lock_id in lock_ids]
         changed = self.conn.executemany("UPDATE wb_doors SET kind = ? WHERE lock_id = ?", rows)
@@ -1938,8 +1942,9 @@ class Database:
     def lock_records(self, limit: int = 50, before: int | None = None, lock_id: int | None = None,
                      problems: bool = False) -> list[dict]:
         """Door activity, newest first (by when it happened): every door's or one door's, all of
-        it or only problems. Each row has the matched card's name and number ("card_name",
-        "card_card_number") and the door's names ("door_name", "door_alias", "door_tt_name").
+        it or only problems. Each row has the matched card's name, number and type ("card_name",
+        "card_card_number", "card_type") and the door's names ("door_name", "door_alias",
+        "door_tt_name").
         before: a record ID, for the next page (the records listed after it)."""
         where, params = [], []
         if lock_id is not None:
@@ -1958,7 +1963,7 @@ class Database:
                 params.append(before)
         return [dict(r) for r in self.conn.execute(
             f"""SELECT r.*, c.card_number AS card_card_number, j.name AS card_name,
-                d.name AS door_name, d.alias AS door_alias, d.tt_name AS door_tt_name
+                j.card_type AS card_type, d.name AS door_name, d.alias AS door_alias, d.tt_name AS door_tt_name
                 FROM wb_lock_records r LEFT JOIN wb_cards c ON c.id = r.card_id
                 LEFT JOIN wb_jobs j ON j.id = c.job_id
                 LEFT JOIN wb_doors d ON d.lock_id = r.lock_id
