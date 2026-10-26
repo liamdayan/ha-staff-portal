@@ -132,7 +132,7 @@ def test_nothing_is_recorded_until_a_point_system_is_published(tmp_path, engine)
             hr.hdb.update_person("401", start_date=day(hr, -10))
             status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["maria"])
             [prob] = section(page, "probation")["probations"]
-            assert prob["ends"] == day(hr, 80) and prob["title"] == "Introductory period"
+            assert prob["ends"] == day(hr, 79) and prob["title"] == "Introductory period"   # its 90th day
             # Published: the form opens, with the protected-leave choices.
             pol.publish()
             status, form, _ = await hr.call("GET", "/api/people/401/incident-form", cookie=s["max"])

@@ -500,14 +500,19 @@ def incident_points(body: dict, offence_key, ctx: dict, history, manager_points=
             "range": [as_points(lo), as_points(hi)], "notes": notes}
 
 
-def required_step(body: dict, ctx: dict, totals: dict, offence_key, active_step_key) -> dict:
+_SAME = object()
+
+
+def required_step(body: dict, ctx: dict, totals: dict, offence_key, active_step_key, *,
+                  escalate_from=_SAME) -> dict:
     """The step an approved incident calls for (design 7.5): the highest of the step its point
     total reaches (on the probation ladder while on probation), the offence's minimum step, its
     repeat's step, the probation floor for serious offences, and escalation while a step is still
     active. When steps go in order, points alone only reach the next step on the ladder above the
     active one (the reason says how far they reached). Only a step higher than the active one is
     due. ctx: {"on_probation", "protected", "repeat" (incident_points' repeat)}. totals: {track:
-    points}, including this incident.
+    points}, including this incident. escalate_from: the step escalation goes from, when it isn't
+    the active one (the step they were on the day it happened).
     Returns {step (key, or None: nothing new is due), reason, reached (the highest step found),
     hr_only}."""
     ctx = ctx or {}
@@ -552,19 +557,20 @@ def required_step(body: dict, ctx: dict, totals: dict, offence_key, active_step_
         found.append((policy.rank(body, prob["serious_floor"]), prob["serious_floor"],
                       f"Serious offence during {prob['name']} → "
                       f"{policy.step_name(body, prob['serious_floor'])}", None))
-    if active:
+    then = active if escalate_from is _SAME else policy.step(body, escalate_from)
+    if then:
         ordered = policy.steps(body)
         for rule in body.get("escalation") or ():
-            if rule["while"] not in (active["key"], "any"):
+            if rule["while"] not in (then["key"], "any"):
                 continue
             if rule["to"] == "next":
-                higher = [s for s in ordered if s["rank"] > active_rank]
+                higher = [s for s in ordered if s["rank"] > then["rank"]]
                 to = higher[0]["key"] if higher else None
             else:
                 to = rule["to"]
             if to:
                 found.append((policy.rank(body, to), to,
-                              f"New incident while on {active['name']} → {policy.step_name(body, to)}",
+                              f"New incident while on {then['name']} → {policy.step_name(body, to)}",
                               None))
     if not found:
         return {"step": None, "reason": "Below the first step.", "reached": None, "hr_only": False}
@@ -666,10 +672,11 @@ def _targets(db, person_id, target_id=None, incident_id=None, *, bases_only=True
 
 
 def adjust(db, person_id, track, points, starts, actor_id, reason, *, ends=None, target_id=None,
-           incident_id=None, version_id=None) -> int:
+           incident_id=None, version_id=None, scoring=None) -> int:
     """HR adds (or, minus, takes off) points from `starts`, with an optional end day. Pointing at
     an incident (target_id, or incident_id), it changes that incident's points from `starts`
-    instead: the original stays visible, and the change expires with it. Returns the line's id."""
+    instead: the original stays visible, and the change expires with it (scoring: {"hr": the
+    points HR set}, so a re-score keeps them). Returns the line's id."""
     _need_reason(reason)
     q = quarters(points)
     day = _day(starts, "the start day")
@@ -679,7 +686,7 @@ def adjust(db, person_id, track, points, starts, actor_id, reason, *, ends=None,
             raise ValueError("Give the points to add or take off.")
         return _insert(db, person_id, "adjustment", target["track"], q, target["happened"], day,
                        actor_id, reason, target_id=target["id"], incident_id=target["incident_id"],
-                       offence=target["offence"], version_id=version_id)
+                       offence=target["offence"], version_id=version_id, scoring=scoring)
     end = as_date(ends)
     if q == 0:
         raise ValueError("Give the points to add or take off.")
@@ -697,10 +704,11 @@ def adjust(db, person_id, track, points, starts, actor_id, reason, *, ends=None,
 
 
 def set_ends(db, person_id, ends, actor_id, reason, *, target_id=None, incident_id=None,
-             writeup=False, starts=None) -> list[int]:
+             writeup=False, starts=None, scoring=None) -> list[int]:
     """Change the day an incident (or added points) stops counting, from `starts` (today by
     default). writeup=True records its write-up's end date, which counts under the "writeup" and
-    "first" expiry rules; otherwise it's HR's override, which always wins. Returns the line ids."""
+    "first" expiry rules; otherwise it's HR's override, which always wins. scoring: kept on the
+    line ({"writeup": its id}, so a later change finds the same points). Returns the line ids."""
     if not writeup:
         _need_reason(reason)
     end = _day(ends, "the end day")
@@ -710,7 +718,7 @@ def set_ends(db, person_id, ends, actor_id, reason, *, target_id=None, incident_
         found.append(_insert(db, person_id, "adjustment", t["track"], 0, t["happened"], day,
                              actor_id, reason, ends=end, end_kind="writeup" if writeup else "override",
                              target_id=t["id"], incident_id=t["incident_id"], offence=t["offence"],
-                             commit=False))
+                             scoring=scoring, commit=False))
     db.conn.commit()
     return found
 
@@ -1092,6 +1100,8 @@ def _rescore_person(db, person_id, version: dict, day: date) -> dict:
         for ch in c._changes(ln, day):
             if ch["version_id"] is not None and ch["scoring"]:
                 scoring = ch["scoring"]     # the latest re-score's choices
+            elif (ch["scoring"] or {}).get("hr") is not None:
+                scoring = {**scoring, "hr": ch["scoring"]["hr"]}    # HR changed its points since
         now_q = c.amount(ln, day)
         counting = c.alive(ln, day)
         if not counting or not ln["offence"]:
@@ -1119,6 +1129,8 @@ def _rescore_person(db, person_id, version: dict, day: date) -> dict:
             prob = None
         ctx = {"happened": ln["happened"], "on_probation": prob,
                "protected": "other" if scoring.get("protected") else None}
+        if scoring.get("hr") is not None:
+            item["notes"].append(f"HR set its points to {fmt(quarters(scoring['hr']))}: kept.")
         manager = scoring.get("manager")
         result = incident_points(body, o["key"], ctx, history, manager, scoring.get("hr"))
         if manager is not None and any("Managers may choose" in e for e in result["errors"]):

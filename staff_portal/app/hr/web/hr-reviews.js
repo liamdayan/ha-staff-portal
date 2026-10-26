@@ -252,9 +252,10 @@
           data.recommendation?.choice ? h("p", null, h("strong", null, "Recommendation: "),
             form.choices[data.recommendation.choice] || data.recommendation.choice,
             data.recommendation.choice === "extend" && data.recommendation.extend_to ? ` to ${day(data.recommendation.extend_to)}` : "") : null,
-          form.probation && data.relation === "hr" ? h("p", { class: "muted small" }, data.recommendation_sent
+          form.probation && data.relation === "hr" ? h("p", { class: data.recommendation_problem ? "warn small" : "muted small" }, data.recommendation_sent
             ? "Passed to the introductory period records: confirm the outcome there."
-            : "Not passed to the introductory period records yet.") : null)));
+            : data.recommendation_problem ? `Couldn't be passed to the probation records: ${data.recommendation_problem} Decide the outcome on their page.`
+              : "Not passed to the introductory period records yet.") : null)));
     } else if (staff) {
       parts.push(card(h("h2", null, "The review"), h("p", { class: "muted" }, "Not started yet.")));
     }

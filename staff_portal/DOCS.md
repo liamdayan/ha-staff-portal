@@ -2105,7 +2105,8 @@ from it, test it and publish it. Old versions are kept, and every incident keeps
 scored under, so earlier incidents keep their points and expiry. To move people onto the new
 rules, use **Re-score people**: choose who, look at the preview (each incident's points and the day
 it stops counting, before and after), give a reason and confirm with your code. Each change is
-added as an adjustment, so the original stays visible.
+added as an adjustment, so the original stays visible. Points HR set for an incident (at approval,
+by changing them, or on appeal) are kept, and the preview says so.
 
 **How points are counted.** Every change to someone's points is a dated line, like a bank
 statement: an incident, an adjustment, a credit or a void. Totals are always added up from the
@@ -2116,26 +2117,35 @@ lines, for any day ("as of"). Points can be whole, half or quarter points, and a
   points for that offence (rounded to the nearest allowed point). A manager may choose within the
   offence's range, and HR may set any value, including 0. An absence that was protected leave
   always scores 0 and never leads to a step.
-- **When they count:** from HR's approval. Their expiry is dated from the day it happened.
+- **When they count:** from HR's approval. Their expiry is dated from the day it happened. An
+  incident is scored when HR approves it, so a repeat counts the earlier incidents HR approved
+  since it was recorded.
 - **When they stop counting:** on the end date of the write-up they led to; after a rolling window
-  (12 months after January 31 is January 31); or whichever comes first. Optionally, a clean stretch
-  with no new incident clears a total, and any new incident restarts the clock. HR can change when
-  any one entry stops counting, and that always wins. A day is a calendar day in Pacific time.
+  (12 months after January 31 is January 31); or whichever comes first. A write-up's end date
+  applies to all the points that led to its step: the points counting when HR approved its
+  incident, unless an earlier write-up already covers them (the simulator works it out the same
+  way). Under "on the write-up's end date" alone, points that never led to a write-up keep
+  counting. Optionally, a clean stretch with no new incident clears a total, and any new incident
+  restarts the clock. HR can change when any one entry stops counting, and that always wins. A
+  day is a calendar day in Pacific time.
 - **Adjustments and voids:** HR can add or take off points from a start day (with an optional end
   day), change one incident's points, or void an incident, adjustment or credit, each from the day
-  it's recorded and with a reason. Points taken off, and credits, take the oldest points first and
-  go when those would have, so they never build up against later incidents, and a total never
-  goes below 0.
+  it's recorded and with a reason. An incident is voided from its own page; an adjustment or a
+  credit from the person's **Points history**. Points taken off, and credits, take the oldest points
+  first and go when those would have, so they never build up against later incidents, and a total
+  never goes below 0.
 - **Earning points back** (off by default): after a clean stretch (say 90 days), some points come
   off, a few times a year at most. The nightly run adds them.
 
-**Steps.** When HR approves an incident, the step it calls for is the highest of: the step its
-point total reaches (on the probation ladder during probation), the offence's minimum step (theft
-goes straight to Termination review), a repeat's step, the probation step for serious offences,
-and escalation while a step is still active (a new incident while on a Final written warning goes
-to Termination review). When steps go in order, points alone only reach the next step up, and the
-reason says how far they reached ("Points 5.5 ≥ 5 → Verbal warning. Steps go in order, so the next
-step is Coaching"). Nothing is issued by itself: it's a task for the manager and HR.
+**Steps.** When HR approves an incident, the step it calls for is the highest of: the step its point
+total reaches (on the probation ladder during probation), the offence's minimum step (theft goes
+straight to Termination review), a repeat's step, the probation step for serious offences, and
+escalation while a step is still active (a new incident while on a Final written warning goes to
+Termination review). Escalation counts only a write-up delivered by the day the incident happened,
+never one approved but not delivered yet. When steps go in order, points alone only reach the next
+step up, and the reason says how far they reached ("Points 5.5 ≥ 5 → Verbal warning. Steps go in
+order, so the next step is Coaching"). Nothing is issued by itself: it's a task for the manager and
+HR.
 
 #### Recording an incident
 
@@ -2169,9 +2179,11 @@ HR admins find everything waiting under **Discipline**: incidents and write-ups 
 appeals, tasks, probation decisions, write-ups not signed yet, and signed write-ups whose PDF
 couldn't be made (also on **Needs attention**).
 
-- **Approve** an incident, or set other points with a reason, or **return it** to the manager with
-  a note; they change it and send it again. Nobody approves their own work, and an HR admin's own
-  file is handled by another HR admin.
+- **Approve** an incident, or set other points with a reason, or **return it** to the manager with a
+  note; they change it and send it again. The approval shows the points it counts now when they
+  differ from when it was recorded (a repeat of incidents approved since), and whether earlier
+  incidents of theirs are still waiting. Nobody approves their own work, and an HR admin's own file
+  is handled by another HR admin.
 - **A step is due.** When an approved incident takes someone to a higher step, their managers and
   HR get a task with a write-up already filled in. **Suspensions and termination reviews go to HR
   only**: the manager and the employee see nothing of them until HR acts.
@@ -2179,11 +2191,14 @@ couldn't be made (also on **Needs attention**).
   archive them in Connecteam by hand, which becomes a to-do), **a last-chance agreement** (you may
   also place them on disciplinary probation) or **no action**, each with a reason.
 - **Adjusting**, each with a reason and a fresh 6-digit code (or PIN), and all logged: add or take
-  away points for someone (from a date, optionally until a date), change one incident's points
-  (an adjustment line, so the original stays visible), void an incident or a write-up, and change
-  the day a write-up stops counting. **As of a date** on someone's page shows their points and
-  records as they were on any past day.
-- After any void or reduction, later write-ups are checked again. Where a later step would now be
+  away points for someone (from a date, optionally until a date), change one incident's points (an
+  adjustment line, so the original stays visible), void an incident or a write-up, change the day a
+  write-up stops counting, and, on the **Points history** in their Discipline section, **Void** an
+  adjustment or a credit, or **Change when it stops** for one incident or added points (the first
+  day it no longer counts; this wins over the expiry rules). **As of a date** on someone's page
+  shows their points and records as they were on any past day.
+- After any void or reduction, later write-ups are checked again, as each was worked out (that
+  day's points, the step they were on, which repeat it was). Where a later step would now be
   lower, HR gets a "check this" task. Nothing is undone by itself.
 
 #### Write-ups
@@ -2237,15 +2252,17 @@ probation, and what needs doing (steps due, drafts, write-ups to deliver or not 
 #### Probation
 
 - **Introductory period (new hires).** It starts on the start date from Connecteam and lasts 90
-  days, or the length the published point system sets for their department (the longest, if
-  they're in several). It's made by itself for new hires only: people whose period was already
-  over when the HR portal met them never get one. If HR confirms a different start date, it moves
-  with it. A rehire gets a new one; a transfer doesn't.
+  days, or the length the published point system sets for their department (the longest, if they're
+  in several). Its end date is its last day: 90 days from January 1 ends on March 31. It's made by
+  itself for new hires only: people whose period was already over when the HR portal met them never
+  get one. If HR confirms a different start date, it moves with it. A rehire gets a new one; a
+  transfer doesn't.
 - **Disciplinary probation.** HR places someone on it from their page, with an end date and a
   reason, for example as part of a last-chance agreement.
 - **Extending** is HR's, with a reason and a new end date: one extension of up to 30 days, and 120
-  days in all (the point system can set other limits). A leave of absence is an extension marked
-  as leave, which doesn't count against those limits. HR can also move the end earlier. The
+  days in all (the point system can set other limits). Extending answers any recommendation waiting,
+  which leaves HR's queue (it stays in the probation's history). A leave of absence is an extension
+  marked as leave, which doesn't count against those limits. HR can also move the end earlier. The
   employee is told and asked to **acknowledge** it.
 - **The end-of-probation review** is due 14 days before the end. Its writer is reminded by the
   review itself (see [Performance reviews](#performance-reviews)); with end-of-introductory-period
@@ -2254,7 +2271,10 @@ probation, and what needs doing (steps due, drafts, write-ups to deliver or not 
   decides (or waives it), on the person's page, where the recommendation shows which review it came
   from. **End employment** becomes a to-do: archive them in Connecteam by hand, then mark it done.
 - **If the end date passes with no decision**, it stays open and the manager and HR are reminded
-  daily (or, if the point system says so, it passes by itself).
+  daily (or, if the point system says so, it passes by itself, unless a recommendation to extend
+  or end employment is waiting for HR).
+- **Clearing points on passing** (if the point system says so): the incidents from during the
+  probation stop counting the day it's passed. Points from before it are left as they were.
 - An incident that happened during probation uses the probation rules, even if HR approves it
   later.
 
@@ -2279,7 +2299,8 @@ design.
 - **End of introductory period**, from each person's introductory period (see
   [Probation](#probation)). If HR moves the end date before the review's recommendation has gone
   to HR, the review moves with it. If HR extends the period after the review closed, another
-  review opens for the new end.
+  review opens for the new end, however short the extension. A disciplinary probation gets one
+  too, called **End of disciplinary probation**, covering the probation itself.
 - **Annual**, on each person's work anniversary (or, if you prefer, in one month for everyone:
   it opens on the 1st and is due at the end of the month; people who started in the last six
   months wait until next year).
@@ -2335,7 +2356,9 @@ can't be read just then, says "Not available".
 
 An end-of-introductory-period review recommends **pass**, **extend** (with a new end date) or
 **end employment**. Once it's final (approved by HR), the writer's recommendation goes to the
-person's introductory period, where HR decides the outcome (see [Probation](#probation)). The
+person's introductory period, where HR decides the outcome (see [Probation](#probation)). If it
+can't (HR decided already, or moved the end past the date recommended), the review says why, HR
+and the writer are told, HR has a to-do while the period is undecided, and it isn't tried again. The
 employee doesn't see that recommendation, in the portal or in the PDF.
 
 **What the employee sees:** nothing until it's shared (except their self-review), then the

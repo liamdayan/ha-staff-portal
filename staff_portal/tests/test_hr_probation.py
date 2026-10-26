@@ -53,34 +53,36 @@ def test_introductory_periods_follow_the_start_date_and_department(tmp_path, eng
             hr.hdb.update_person("402", start_date=day(hr, -5))
             assert probation.ensure_all(hr.hdb) == 2
             maria = probation.current(hr.hdb, "401", today(hr))
+            # Its end is its last day: 90 days in all, as the simulator counts them.
             assert (maria["kind"], maria["start"], maria["end"], maria["status"], maria["extensions"]) == \
-                ("introductory", day(hr, -10), day(hr, 80), "open", 0)
+                ("introductory", day(hr, -10), day(hr, 79), "open", 0)
             assert probation.current(hr.hdb, "401", today(hr) - timedelta(days=11)) is None
-            assert probation.current(hr.hdb, "401", today(hr) + timedelta(days=81)) is None
-            assert probation.current(hr.hdb, "402", today(hr))["end"] == day(hr, 85)
+            assert probation.current(hr.hdb, "401", today(hr) + timedelta(days=79)) is not None
+            assert probation.current(hr.hdb, "401", today(hr) + timedelta(days=80)) is None
+            assert probation.current(hr.hdb, "402", today(hr))["end"] == day(hr, 84)
             # Published: the Kitchen (502) has 60 days, from then on.
             pol.publish()
             await hr.add_people(ANN)
             hr.hdb.update_person("407", start_date=day(hr, -3))
             probation.ensure_all(hr.hdb)
             ann = probation.current(hr.hdb, "407", today(hr))
-            assert (ann["policy_key"], ann["end"]) == ("intro", day(hr, 57))
+            assert (ann["policy_key"], ann["end"]) == ("intro", day(hr, 56))
             # HR confirms a different start date: an untouched one follows it.
             hr.hdb.update_person("401", start_date=day(hr, -20))
             probation.ensure_introductory(hr.hdb, hr.hdb.person("401"))
-            assert probation.current(hr.hdb, "401", today(hr))["end"] == day(hr, 70)
+            assert probation.current(hr.hdb, "401", today(hr))["end"] == day(hr, 69)
             assert len(probation.of_person(hr.hdb, "401")) == 1
             # Employees see their own, with the end date (an HR setting), managers see more.
             status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["maria"])
             [mine] = section(page, "probation")["probations"]
-            assert mine["ends"] == day(hr, 70) and "history" not in mine and "extensions" not in mine
+            assert mine["ends"] == day(hr, 69) and "history" not in mine and "extensions" not in mine
             hr.hdb.set_settings({"probation_show_end": "0", "probation_word": "probation"})
             status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["maria"])
             sec = section(page, "probation")
             assert sec["probations"][0]["ends"] is None and sec["title"] == "Probation"
             status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["max"])
             sec = section(page, "probation")
-            assert sec["probations"][0]["ends"] == day(hr, 70) and sec["can"]["recommend"]
+            assert sec["probations"][0]["ends"] == day(hr, 69) and sec["can"]["recommend"]
             assert not sec["can"]["decide"] and "reason" not in sec["probations"][0]
             # Someone with nothing running: HR sees the section (to place someone), others don't.
             status, page, _ = await hr.call("GET", "/api/people/403", cookie=s["hana"])
@@ -97,7 +99,7 @@ def test_extensions_keep_to_the_policy_and_the_employee_acknowledges(tmp_path, e
     async def scenario():
         async with HR(tmp_path) as hr:
             s = await setup(hr, confirmed=False)
-            hr.hdb.update_person("401", start_date=day(hr, -80))     # ends in 10 days
+            hr.hdb.update_person("401", start_date=day(hr, -79))     # ends in 10 days
             row = probation.ensure_introductory(hr.hdb, hr.hdb.person("401"))
             url = f"/api/probations/{row['id']}/change"
             status, r, _ = await hr.call("POST", url, {"ends": day(hr, 40), "reason": "More time."}, s["hana"])
@@ -157,12 +159,14 @@ def test_extensions_never_pass_the_policys_maximum(tmp_path, engine):
             body = copy.deepcopy(point_system.BODY)
             body["probation"][0]["extensions"] = {"count": 1, "days": 60, "max_days": 120}
             pol.publish(body)
-            hr.hdb.update_person("401", start_date=day(hr, -10))                         # ends in 80 days
+            hr.hdb.update_person("401", start_date=day(hr, -10))                         # ends in 79 days
             row = probation.ensure_introductory(hr.hdb, hr.hdb.person("401"))
-            with pytest.raises(ValueError, match="longer than 120 days"):
-                probation.change_end(hr.hdb, row, today(hr) + timedelta(days=121), "x", "405", "Hana")
-            row = probation.change_end(hr.hdb, row, today(hr) + timedelta(days=110), "x", "405", "Hana")
-            assert row["ends"] == day(hr, 110) and row["extensions"] == 1
+            # Day 120 is 109 days from now (both the first and the last day count).
+            for later in (121, 110):
+                with pytest.raises(ValueError, match="longer than 120 days"):
+                    probation.change_end(hr.hdb, row, today(hr) + timedelta(days=later), "x", "405", "Hana")
+            row = probation.change_end(hr.hdb, row, today(hr) + timedelta(days=109), "x", "405", "Hana")
+            assert row["ends"] == day(hr, 109) and row["extensions"] == 1
     run(scenario())
 
 
@@ -207,13 +211,13 @@ def test_the_end_of_probation_review_and_hrs_decision(tmp_path, engine):
     async def scenario():
         async with HR(tmp_path) as hr:
             s = await setup(hr)
-            hr.hdb.update_person("401", start_date=day(hr, -80))     # ends in 10 days: review due
+            hr.hdb.update_person("401", start_date=day(hr, -79))     # ends in 10 days: review due
             hr.hdb.update_person("402", start_date=day(hr, -10))     # Kitchen, 60 days: not yet
             probation.ensure_all(hr.hdb)
             maria = probation.current(hr.hdb, "401", today(hr))
             due = probation.end_review_due(hr.hdb, today(hr))
-            assert due == [{"person_id": "401", "probation_id": maria["id"], "end": day(hr, 10),
-                            "due": day(hr, -4)}]
+            assert due == [{"person_id": "401", "probation_id": maria["id"], "kind": "introductory",
+                            "start": day(hr, -79), "end": day(hr, 10), "due": day(hr, -4)}]
             assert probation.end_review_due(hr.hdb, today(hr) - timedelta(days=5)) == []
             # The nightly run tells Max and HR once.
             counts = probation.daily(hr.hdb, today(hr))
