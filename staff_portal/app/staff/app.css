@@ -50,6 +50,10 @@ html, body {
 }
 
 body { min-height: 100vh; min-height: 100dvh; }
+/* No zooming: a quick double tap (typing a PIN, say) mustn't zoom the page. Pinching is stopped in
+   app.js, and fields stay at 16px or more so iPhones don't zoom in on them either. */
+html { touch-action: manipulation; }
+@media (pointer: coarse) { input, select, textarea { font-size: max(16px, 1em); } }
 
 button, select, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
