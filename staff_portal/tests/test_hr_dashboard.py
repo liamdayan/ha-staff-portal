@@ -12,14 +12,12 @@ import json
 import time
 
 import pytest
-from hr_helpers import HR, FakeConnecteam, ct_user, fresh_connecteam
+from hr_helpers import HR, FakeConnecteam, ct_user
 
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
-import transfer  # noqa: E402
-from hr import audit, crypto, hrdb, notify, signin  # noqa: E402
-from hr.service import HRService  # noqa: E402
+from hr import audit, notify, signin  # noqa: E402
 
 FIELDS = [{"id": 11, "name": "Employment Start Date", "type": "date"},
           {"id": 12, "name": "Direct manager", "type": "directManager"},
@@ -227,6 +225,32 @@ def test_hr_off_adds_no_requests(tmp_path):
                 assert not any(c.endswith("?archived") for c in ct.calls)
                 assert main.connecteam.hr_usage()["count"] == 0
                 assert hr.svc.db is None and not (tmp_path / "data" / "hr").exists()
+    run(scenario())
+
+
+def test_a_new_hire_can_sign_in_minutes_after_being_added(tmp_path):
+    async def scenario():
+        async with FakeConnecteam([ANA], fields=FIELDS) as ct:
+            async with HR(tmp_path) as hr:
+                await hr.svc.sync_people(fresh=True)
+                ct.users.append(BO)                       # added in Connecteam just now
+                body = {"mobile": "541-555-0302", "pin": "7302"}
+                assert (await hr.call("POST", "/api/signin", body))[0] == 401
+                assert hr.svc.sync_state["soon"]
+                calls = ct.count("/users/v1/users")
+                await hr.svc.tick()                       # not yet: 5 minutes since the last
+                assert ct.count("/users/v1/users") == calls
+                hr.svc.sync_state["tried"] -= 5 * 60      # 5 minutes later...
+                users, at = main.connecteam._users
+                main.connecteam._users = (users, at - 5 * 60)
+                await hr.svc.tick()                       # ...a fresh list, not an hour-old one
+                assert ct.count("/users/v1/users") == calls + 1 and not hr.svc.sync_state["soon"]
+                hr.svc.throttle.clear()
+                assert (await hr.call("POST", "/api/signin", body))[0] == 200
+                # Strangers typing numbers can't use up HR's requests: a few dozen a day at most.
+                hr.svc.sync_state["soon_count"] = 48
+                await hr.call("POST", "/api/signin", {"mobile": "541-555-0999", "pin": "1111"})
+                assert not hr.svc.sync_state["soon"]
     run(scenario())
 
 

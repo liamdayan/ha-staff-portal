@@ -47,10 +47,21 @@
   const firstName = (name) => String(name || "").split(" ")[0];
 
   class SignedOut extends Error {}
+  // A page's data that arrived after the person had already moved to another page: dropped, so
+  // a late redraw can't paint over the page they're on now.
+  class Stale extends Error {}
+  let viewSeq = 0;
+  const quiet = (err) => err instanceof SignedOut || err instanceof Stale;
+  // A page's own redraw after an action, unless the person has moved to another page meanwhile.
+  const redrawer = (fn) => {
+    const seq = viewSeq;
+    return (...args) => (seq === viewSeq ? fn(...args) : undefined);
+  };
 
   // Every request says it comes from this page (another site can't add that header), and sends
   // JSON. A sensitive action may first ask for a fresh code (or PIN), then is sent again once.
   async function api(method, path, body, { background = false, retried = false } = {}) {
+    const seq = viewSeq;
     const opts = { method, credentials: "same-origin", headers: { "X-Requested-With": "hr-portal" } };
     if (background) opts.headers["X-Background"] = "1";
     if (body !== undefined) {
@@ -74,6 +85,7 @@
       err.status = res.status;
       throw err;
     }
+    if (method === "GET" && !background && seq !== viewSeq) throw new Stale("Moved on");
     return data;
   }
 
@@ -83,7 +95,7 @@
       if (result !== false && okText) toast(okText);
       return result;
     } catch (err) {
-      if (!(err instanceof SignedOut)) toast(err.message, true);
+      if (!quiet(err)) toast(err.message, true);
       return false;
     }
   }
@@ -207,6 +219,7 @@
 
   async function route() {
     if (!me) return;
+    viewSeq += 1;
     drawNav();
     const [path, query] = (location.hash.slice(1) || "/").split("?");
     const parts = path.split("/").filter(Boolean);
@@ -223,7 +236,7 @@
       if (page && (!page.who || page.who(me))) return await page.render(main, parts.slice(1), params);
       show(h("section", { class: "card" }, h("p", null, "That page isn't here."), h("a", { href: "#/" }, "Go home")));
     } catch (err) {
-      if (err instanceof SignedOut) return;
+      if (quiet(err)) return;
       show(h("section", { class: "card" }, h("p", { class: "error" }, err.message), h("a", { href: "#/" }, "Go home")));
     }
   }
@@ -384,6 +397,7 @@
   // ---------------------------------------------------------------- home
 
   async function showHome() {
+    const again = redrawer(showHome);
     const home = await api("GET", "/api/home");
     const last = me.last_signin?.at
       ? `Last sign-in: ${when(me.last_signin.at)}${me.last_signin.ip ? `, from ${me.last_signin.ip}` : ""}. Not you? Tell HR.`
@@ -403,7 +417,7 @@
           h("button", { type: "button", onclick: () => run(async () => {
             const r = await api("POST", "/api/inbox/read", {});
             me.unread = r.unread;
-            await showHome();
+            await again();
             drawNav();
           }) }, "Mark all read")) : null));
   }
@@ -453,13 +467,14 @@
   }
 
   async function showPerson(id) {
+    const again = redrawer(() => showPerson(id));
     const data = await api("GET", `/api/people/${encodeURIComponent(id)}`);
     const p = data.person;
     const sections = data.sections.map((s) => {
       const custom = H.sections[s.name];
       const box = h("section", { class: "card", "data-section": s.name });
-      if (custom) custom(box, s, p, () => showPerson(id));
-      else drawSection(box, s, p, () => showPerson(id));
+      if (custom) custom(box, s, p, again);
+      else drawSection(box, s, p, again);
       return box;
     });
     show(h("section", { class: "card" }, h("h1", null, p.name),
@@ -482,6 +497,7 @@
   }
 
   async function doAction(a, redraw) {
+    const seq = viewSeq;
     let body = a.body;
     if (a.confirm && !(await confirmDialog(a.confirm, a.label, a.danger))) return;
     if (a.ask_text !== undefined) {
@@ -499,12 +515,13 @@
     if (result.qr) await showQr(result);
     else if (result.message) toast(result.message);
     else toast("Done.");
-    await redraw();
+    if (seq === viewSeq) await Promise.resolve(redraw()).catch((err) => { if (!quiet(err)) toast(err.message, true); });
   }
 
   // ---------------------------------------------------------------- my account
 
   async function showAccount() {
+    const again = redrawer(showAccount);
     const acc = await api("GET", "/api/account");
     const totp = h("section", { class: "card" }, h("h2", null, "Authenticator code"));
     if (acc.totp_on) {
@@ -515,11 +532,11 @@
           h("button", { type: "button", onclick: () => run(async () => {
             const r = await api("POST", "/api/account/recovery-codes", {});
             await showRecoveryCodes(r.recovery_codes);
-            await showAccount();
+            await again();
           }) }, "Make new recovery codes"),
           acc.totp_required ? null : h("button", { type: "button", class: "danger", onclick: async () => {
             if (!(await confirmDialog("Turn off your authenticator code? Signing in will only need your number and PIN.", "Turn off", true))) return;
-            if (await run(() => api("DELETE", "/api/account/authenticator"), "Authenticator turned off.")) await showAccount();
+            if (await run(() => api("DELETE", "/api/account/authenticator"), "Authenticator turned off.")) await again();
           } }, "Turn off")));
     } else if (acc.totp_required) {
       totp.append(h("p", { class: "warn" }, "Your role needs an authenticator code. Ask HR for a setup code."));
@@ -533,7 +550,7 @@
         h("div", { class: "sub" }, `Signed in ${when(s.created_at)} · last used ${when(s.last_used)}${s.ip ? ` · ${s.ip}` : ""}`),
         s.current ? null : h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
           await api("DELETE", `/api/account/sessions/${s.id}`);
-          await showAccount();
+          await again();
         }, "Signed out on that device.") }, "Sign out"))))),
       h("div", { class: "actions" }, h("button", { type: "button", class: "danger", onclick: async () => {
         if (!(await confirmDialog("Sign out on every device, including this one?", "Sign out everywhere", true))) return;
@@ -577,6 +594,7 @@
   // ---------------------------------------------------------------- HR settings
 
   async function showSettings() {
+    const again = redrawer(showSettings);
     const s = await api("GET", "/api/settings");
     const g = s.general;
     const nameOf = (id) => s.people.find((p) => p.id === id)?.name || id;
@@ -585,7 +603,7 @@
       s.people.filter((p) => p.id !== s.me).map((p) => h("option", { value: p.id }, p.name)));
 
     const setRole = async (personId, role) => {
-      if (await run(() => api("PUT", "/api/settings/role", { person_id: personId, role }), "Saved.")) await showSettings();
+      if (await run(() => api("PUT", "/api/settings/role", { person_id: personId, role }), "Saved.")) await again();
     };
     const roleForm = h("form", { class: "row", onsubmit: (e) => {
       e.preventDefault();
@@ -594,10 +612,10 @@
       h("option", { value: "manager" }, "Manager"), h("option", { value: "director" }, "Director")),
     h("button", { type: "submit", class: "primary" }, "Give role"));
     const roleList = (title, list, role) => [h("h3", null, title), list.length
-      ? h("ul", { class: "list" }, list.map((p) => h("li", null, h("div", { class: "item" }, h("span", { class: "title" }, p.name),
+      ? h("ul", { class: "list" }, list.map((p) => h("li", null, h("div", { class: "item split" }, h("span", { class: "title" }, p.name),
         p.id === s.me ? null : h("button", { type: "button", class: "linkish", onclick: async () => {
           if (await confirmDialog(`Take ${p.name}'s ${role} role away?`, "Take away", true)) await setRole(p.id, "none");
-        } }, " Take away")))))
+        } }, "Take away")))))
       : h("p", { class: "muted" }, "None yet.")];
     const roles = h("section", { class: "card" }, h("h2", null, "Roles"),
       h("p", { class: "muted small" }, "Directors see everyone except HR admins and other directors. Managers see the people in the departments you give them. Only the owner makes HR admins, in Home Assistant."),
@@ -615,7 +633,7 @@
       run(async () => {
         await api("PUT", "/api/settings/general", { totp_policy: f.totp_policy.value, session_minutes: f.session_minutes.value });
         await refreshMe();
-        await showSettings();
+        await again();
       }, "Saved.");
     } }, h("p", { class: "muted small" }, "Anyone can also turn one on for themselves in My account."),
     Object.entries(s.policies).map(([value, label]) => h("label", { class: "check" },
@@ -637,8 +655,9 @@
       : chat.on ? "Connecteam chat is on in Home Assistant, but the part that sends messages isn't ready. Only the portal inbox is used."
         : "Only the portal inbox is used. The owner can turn on Connecteam chat messages in Home Assistant (Settings, Connections, Connecteam for HR)."),
     chat.last_error ? h("p", { class: "warn" }, `Last problem sending a message: ${chat.last_error}`) : null,
+    h("p", { class: "muted small" }, "Employees' messages wait until quiet hours end."),
     h("div", { class: "row" },
-      h("label", null, "Quiet hours start", h("small", null, "Employees' messages wait until they end"), h("input", { name: "quiet_start", type: "time", value: g.quiet_start })),
+      h("label", null, "Quiet hours start", h("input", { name: "quiet_start", type: "time", value: g.quiet_start })),
       h("label", null, "Quiet hours end", h("input", { name: "quiet_end", type: "time", value: g.quiet_end }))),
     h("label", null, "Daily summary for managers and HR", h("input", { name: "summary_time", type: "time", value: g.summary_time })),
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")),
@@ -647,7 +666,7 @@
         h("div", { class: "sub" }, `${m.tries} tries. ${m.error || ""}`),
         h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
           await api("POST", `/api/messages/${m.id}/retry`, {});
-          await showSettings();
+          await again();
         }, "It will be sent again.") }, "Retry")))))] : null);
     const notifications = h("section", { class: "card" }, h("h2", null, "Notifications"), notifyForm);
 
@@ -669,6 +688,15 @@
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")));
     const fields = h("section", { class: "card" }, h("h2", null, "Connecteam profile fields"), fieldsForm);
 
+    const recordsForm = h("form", { onsubmit: (e) => {
+      e.preventDefault();
+      run(() => api("PUT", "/api/settings/general", { retention_years: recordsForm.elements.retention_years.value }), "Saved.");
+    } }, h("label", null, "Keep records of people who left for (years)",
+      h("small", null, "Then they're listed for HR to review and delete. Nothing is deleted automatically, and a legal hold stops it. Ask your employment lawyer to confirm the period."),
+      h("input", { name: "retention_years", type: "number", min: "1", max: "30", value: g.retention_years })),
+    h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")));
+    const records = h("section", { class: "card" }, h("h2", null, "Records"), recordsForm);
+
     const keyBox = h("section", { class: "card" }, h("h2", null, "HR key"),
       h("p", null, s.key.kept_out
         ? "The HR key is kept out of Home Assistant backups. After restoring a backup, HR stays locked until the owner types the HR recovery key."
@@ -685,16 +713,16 @@
           await openDialog("Your HR recovery key", [h("p", null, "Print this or write it down, and keep it in the safe. It isn't shown again."),
             h("p", { class: "code" }, r.recovery_key)], [{ label: "I've kept it", value: "ok", class: "primary" }]);
         }
-        await showSettings();
+        await again();
       } }), "Keep the HR key out of backups"));
 
     const extra = Object.entries(s.sections).filter(([name]) => H.settings[name]).map(([name, data]) => {
       const box = h("section", { class: "card", "data-settings": name });
-      H.settings[name](box, data, showSettings);
+      H.settings[name](box, data, again);
       return box;
     });
     show(h("section", { class: "card" }, h("h1", null, "HR settings")), roles, departments, signinBox, notifications,
-      fields, ...extra, keyBox);
+      fields, records, ...extra, keyBox);
 
     function managerForm(m) {
       const form = h("form", { onsubmit: (e) => {
@@ -705,7 +733,7 @@
         }
         run(async () => {
           await api("PUT", `/api/people/${encodeURIComponent(m.id)}/departments`, { groups });
-          await showSettings();
+          await again();
         }, "Saved.");
       } }, h("h3", null, m.name),
       s.departments.length ? s.departments.map((d) => h("div", { class: "row" },

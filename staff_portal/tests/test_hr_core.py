@@ -15,7 +15,7 @@ import time
 import pytest
 
 import hr_helpers  # noqa: F401  (points Connecteam at a closed local port)
-from hr import access, audit, crypto, files, hrdb, notify, people, signin, totp
+from hr import access, audit, crypto, files, notify, people, signin, totp
 from hr.hrdb import HRDatabase
 
 

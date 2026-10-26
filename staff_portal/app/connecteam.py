@@ -496,14 +496,17 @@ class Connecteam:
             self._hr_tokens[key] = (str(body["access_token"]), time.time() + ttl - 300)
             return self._hr_tokens[key][0]
 
-    async def smart_groups(self, max_age: float = SMART_GROUPS_TTL) -> list[dict]:
-        """Connecteam's smart groups as [{"id", "name", "users"}], sorted by name (cached)."""
+    async def smart_groups(self, max_age: float = SMART_GROUPS_TTL, hr: bool = False) -> list[dict]:
+        """Connecteam's smart groups as [{"id", "name", "users"}], sorted by name (cached). hr: the
+        HR portal is asking (its lane; a refusal never stops Staff Access's requests)."""
         if self._groups and time.time() - self._groups[1] < max_age:
             return self._groups[0]
+        if hr:
+            return await self._fetch_smart_groups(hr=True)
         return await self._call(self._fetch_smart_groups)
 
-    async def _fetch_smart_groups(self) -> list[dict]:
-        data = await self._get("/users/v1/smart-groups")
+    async def _fetch_smart_groups(self, hr: bool = False) -> list[dict]:
+        data = await self._get("/users/v1/smart-groups", hr=hr)
         found = []
         for g in _first_list(data, "groups")[:MAX_GROUPS]:
             if not isinstance(g, dict) or isinstance(g.get("id"), bool) or not isinstance(g.get("id"), int):

@@ -20,7 +20,6 @@ to-dos (todo) and HR settings (settings_section).
 
 import asyncio
 import hashlib
-import io
 import json
 import os
 import re
@@ -389,7 +388,6 @@ async def api_signin(request: web.Request):
                               title=f"{person['name']} signed in with a recovery code.",
                               link=f"#/people/{person['id']}")
     return signed_in(svc, request, person, ip, recovery)
-
 
 
 @rule("signed_in")
@@ -1012,9 +1010,9 @@ def departments_list(svc: HRService) -> list[dict]:
             found.append({"group": g, "name": d["name"]})
     for p in svc.db.people(archived=False):
         for g in people.groups(p):
-            if g not in seen and g in names:
+            if g not in seen:
                 seen.add(g)
-                found.append({"group": g, "name": names[g]})
+                found.append({"group": g, "name": names.get(g, f"Group {g}")})
     return found
 
 

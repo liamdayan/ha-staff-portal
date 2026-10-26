@@ -16,6 +16,7 @@ in hr/ imports main.py.
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import shutil
@@ -24,13 +25,17 @@ import time
 import urllib.parse
 from datetime import datetime
 
+from connecteam import ConnecteamError
+
 from . import access, audit, crypto, hrdb, notify, people, signin
 
 log = logging.getLogger("staff_portal")
 
 TICK = 30
 SYNC_EVERY = 3600
-SYNC_SOON_GAP = 5 * 60          # a sync for someone new signing in, at most this often
+SYNC_SOON_GAP = 5 * 60          # a sync for someone new signing in, at most this often...
+SOON_A_DAY = 48                 # ...and this many a day, so strangers typing numbers can't use up
+                                # HR's Connecteam requests
 DAILY_AT = (2, 15)              # the nightly run, in HR's time zone
 MAX_MIGRATED_DB = 64 * 1024 * 1024
 NO_CONNECTEAM = ("Connecteam is turned off in Settings → Connections, so the HR portal can't "
@@ -55,7 +60,8 @@ class HRService:
         self.keyring = crypto.Keyring(self.folder)
         self.db: hrdb.HRDatabase | None = None
         self.throttle = signin.Throttle()
-        self.sync_state = {"at": None, "error": None, "tried": 0.0, "result": None, "soon": False}
+        self.sync_state = {"at": None, "error": None, "tried": 0.0, "result": None, "soon": False,
+                           "soon_day": "", "soon_count": 0}
         self.daily_state = {"day": None, "summary_day": None, "hourly": 0.0}
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -175,7 +181,7 @@ class HRService:
             self.db.set_settings({"daily_day": day})
             await self.nightly()
         if self.sync_due(now):
-            await self.sync_people()
+            await self.sync_people(max_age=SYNC_SOON_GAP if self.sync_state["soon"] else SYNC_EVERY)
         if now - self.daily_state["hourly"] >= 3600:
             self.daily_state["hourly"] = now
             signin.prune(self.db, now)
@@ -192,13 +198,19 @@ class HRService:
 
     def sync_soon(self) -> None:
         """Someone unknown is signing in: they may have just been added in Connecteam."""
-        self.sync_state["soon"] = True
+        today = time.strftime("%Y-%m-%d")
+        state = self.sync_state
+        if state["soon_day"] != today:
+            state.update(soon_day=today, soon_count=0)
+        if state["soon"] or state["soon_count"] >= SOON_A_DAY:
+            return   # one is already waiting (it runs 5 minutes after the last), or enough today
+        state["soon_count"] += 1
+        state["soon"] = True
         self._wake.set()
 
-    async def sync_people(self, fresh: bool = False) -> dict | None:
-        """People from Connecteam (its cached list when it's recent). Never raises: problems are
-        kept in sync_state for the dashboard and HR."""
-        from connecteam import ConnecteamError
+    async def sync_people(self, fresh: bool = False, max_age: float = SYNC_EVERY) -> dict | None:
+        """People from Connecteam: its cached list when it's at most max_age old (a minute, when
+        fresh). Never raises: problems are kept in sync_state for the dashboard and HR."""
         self.sync_state.update(tried=time.time(), soon=False)
         if self.main_settings().get("connecteam_enabled") != "1":
             self.sync_state["error"] = NO_CONNECTEAM
@@ -209,8 +221,12 @@ class HRService:
             except ConnecteamError as err:   # the start date then comes from the field HR picks
                 log.info("HR portal: couldn't read Connecteam's profile fields: %s", err)
         try:
-            max_age = 60 if fresh else SYNC_EVERY
-            users = await self.connecteam.users(max_age=max_age, hr=True)
+            # Department names (smart groups): reused for 6 hours, so a few requests a day.
+            await self.connecteam.smart_groups(hr=True)
+        except ConnecteamError as err:
+            log.info("HR portal: couldn't read Connecteam's smart groups: %s", err)
+        try:
+            users = await self.connecteam.users(max_age=60 if fresh else max_age, hr=True)
             if not self.running:
                 return None
             names = self.group_names()
@@ -227,7 +243,6 @@ class HRService:
 
     async def read_fields(self) -> None:
         """Connecteam's profile field names (one request, through HR's lane)."""
-        import json
         fields = await self.connecteam.profile_fields()
         if self.running:
             self.db.set_settings({"ct_fields": json.dumps(fields)})

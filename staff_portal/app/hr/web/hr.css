@@ -114,6 +114,7 @@ button:disabled { opacity: 0.55; cursor: default; }
 .list > li:first-child { border-top: none; }
 .list a.item, .list .item { display: block; padding: 12px 2px; color: var(--text); text-decoration: none; }
 .item .title { font-weight: 600; }
+.item.split { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .item .sub { color: var(--muted); font-size: 0.875rem; }
 .unread .title::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px;
   border-radius: 50%; background: var(--accent); vertical-align: middle; }

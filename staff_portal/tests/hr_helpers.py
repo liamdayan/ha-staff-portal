@@ -147,11 +147,14 @@ class HR:
         await self.client.start_server()
         self.admin = TestClient(TestServer(main.admin_app()))
         await self.admin.start_server()
+        await main.tthotel.start()
         return self
 
     async def __aexit__(self, *exc):
         await self.client.close()
         await self.admin.close()
+        await main.encoders.close_all()   # the Front Desk PC's encoder runner (from /api/state)
+        await main.tthotel.close()
         await self.svc.stop()
 
     @property

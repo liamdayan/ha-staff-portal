@@ -361,6 +361,7 @@
     state.departments = data.departments || [];
     state.staffSync = data.staff_sync || {};
     state.notFresh = data.not_fresh || null;
+    state.hr = data.hr || {};
     $("#add-from-connecteam").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
@@ -390,6 +391,7 @@
       if (name === "wristbands") openWristbands();
       if (name === "layout") renderLayoutEditor();
       if (name === "backup") loadSafetyBackups();
+      if (name === "hr") openHr();
     } catch (err) {
       reportError(`Couldn't open the ${name} tab: ${err.message}`, err, "");
     }
@@ -2091,6 +2093,7 @@
     $("#wb-off-note").hidden = !!wb.enabled;
     renderTTStatus();
     renderConnecteam();
+    fillHrConnecteam();
   }
 
   function showConnection(box, connState, requests) {
@@ -2186,7 +2189,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (connDirty.tt || connDirty.ct) e.preventDefault();
+    if (connDirty.tt || connDirty.ct || hrctDirty) e.preventDefault();
   });
 
   // "Settings → Connections" links elsewhere open that connection (data-goto shows the tab).
@@ -6509,6 +6512,235 @@
     box.hidden = false;
     box.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
+
+  // ---------------------------------------------------------------- HR portal
+
+  // The HR portal runs on its own address (port 8788). Here the owner turns it on, chooses the HR
+  // admins and shows their setup QR codes, uses the emergency controls and sees security events.
+  // HR's own work and settings are in the HR portal itself.
+  const hr = { data: null, timer: null };
+  const HR_STATES = { off: ["Off", ""], on: ["On", "active"], locked: ["Locked: needs the recovery key", "locked"],
+    lost: ["Key missing", "locked"] };
+
+  async function openHr() {
+    try {
+      hr.data = await api("GET", "api/hr");
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    renderHr();
+  }
+
+  function renderHr() {
+    const d = hr.data;
+    if (!d) return;
+    showState($("#hr-badge"), HR_STATES[d.status] || ["", ""]);
+    const form = $("#hr-form");
+    if (!form.dataset.dirty) {
+      form.elements.hr_enabled.checked = d.enabled;
+      form.elements.hr_host.value = d.host;
+    }
+    const on = d.status === "on";
+    $("#hr-where").replaceChildren(...(on && d.url ? ["Open it at ", h("a", { href: d.url, target: "_blank", rel: "noopener noreferrer" }, d.url),
+      ". In Cloudflare, give this address its own cache rule “Bypass cache”, and turn off Rocket Loader and Email Obfuscation for it."]
+      : d.status === "off" ? [d.connecteam_on ? "Off." : "Off. Turn on Connecteam first (Settings → Connections)."]
+      : [d.status === "lost" ? "The HR key is missing and there's no locked copy, so HR records here can't be opened." : ""]));
+    $("#hr-unlock").hidden = d.status !== "locked";
+    for (const id of ["#hr-admins-box", "#hr-emergency", "#hr-events-box"]) $(id).hidden = !on;
+    if (!on) return;
+    $("#hr-admins").replaceChildren(...(d.admins.length ? d.admins.map(hrAdminRow)
+      : [h("p", { class: "hint" }, "No HR admins yet. Add yourself first, then scan your setup QR code.")]));
+    const sync = d.sync || {};
+    $("#hr-sync-status").textContent = [
+      `${d.people} active ${d.people === 1 ? "person" : "people"} from Connecteam.`,
+      sync.warning || "",
+      sync.error ? `Last sync failed: ${sync.error}` : sync.at ? `Synced ${ago(sync.at).toLowerCase()}.` : "Not synced yet.",
+    ].filter(Boolean).join(" ");
+    $("#hr-events").replaceChildren(...(d.events.length ? d.events.map((e) => h("tr", null,
+      h("td", null, when(e.ts)),
+      h("td", null, e.action, e.target ? ` · ${e.target}` : "", e.detail ? h("div", { class: "sub" }, e.detail) : null),
+      h("td", null, e.actor, e.ip ? h("div", { class: "sub" }, e.ip) : null)))
+      : [h("tr", null, h("td", { colspan: "3", class: "sub" }, "Nothing yet."))]));
+  }
+
+  function hrAdminRow(a) {
+    const notes = [a.totp_on ? "Authenticator set up" : "Authenticator not set up yet",
+      a.locked ? "Locked" : null, a.has_code ? null : "No kiosk code in Connecteam",
+      a.last_signin_at ? `Last signed in ${ago(a.last_signin_at).toLowerCase()}` : "Never signed in"].filter(Boolean);
+    return h("div", { class: "item-row" },
+      h("div", { class: "item-fields" }, h("strong", null, a.name), h("span", { class: "hint" }, notes.join(" · "))),
+      h("div", { class: "backup-actions" },
+        h("button", { type: "button", class: "btn", onclick: () => hrSetupQr(a) }, "Setup QR code"),
+        h("button", { type: "button", class: "btn danger", onclick: async () => {
+          if (!(await askConfirm(`Remove ${a.name} as an HR admin? They keep their HR sign-in as an employee.`, "Remove"))) return;
+          await run(async () => {
+            await api("PUT", "api/hr/admins", { person_ids: hr.data.admins.filter((x) => x.id !== a.id).map((x) => x.id) });
+            await openHr();
+          }, `${a.name} is no longer an HR admin.`);
+        } }, "Remove")));
+  }
+
+  function hrDialog(title, ...body) {
+    const dialog = $("#hr-dialog");
+    dialog.replaceChildren(h("form", { method: "dialog" }, h("h2", null, title), ...body,
+      h("div", { class: "dialog-actions" }, h("button", { class: "btn primary", value: "ok" }, "Done"))));
+    dialog.showModal();
+    return dialog;
+  }
+
+  async function hrSetupQr(a) {
+    await run(async () => {
+      const r = await api("POST", `api/hr/admins/${encodeURIComponent(a.id)}/setup`);
+      const link = h("input", { readonly: true, value: r.url, "aria-label": "Setup link" });
+      hrDialog(`Set up ${a.name}`,
+        h("ol", { class: "qr-steps" },
+          h("li", null, "Install an authenticator app on the phone, such as Google Authenticator or Microsoft Authenticator."),
+          h("li", null, "Point the phone's camera at this code and open the link."),
+          h("li", null, "Type the Connecteam kiosk code, scan the next code into the authenticator app, and save the recovery codes.")),
+        h("div", { class: "qr" }, h("img", { src: r.qr, alt: "Setup QR code" })),
+        h("div", { class: "copy-row" }, link, h("button", { class: "btn", type: "button", onclick: async () => {
+          try { await navigator.clipboard.writeText(r.url); toast("Link copied."); } catch { link.select(); }
+        } }, "Copy link")),
+        h("p", { class: "hint" }, `It works once, until ${when(r.expires_at)}. Whoever opens it with ${a.name}'s kiosk code sets up their sign-in, so only show it to them.`));
+      await openHr();
+    });
+  }
+
+  $("#hr-form").addEventListener("input", (e) => { e.currentTarget.dataset.dirty = "1"; });
+  $("#hr-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const turningOff = !form.elements.hr_enabled.checked && hr.data?.enabled;
+    run(async () => {
+      if (turningOff && !(await askConfirm("Turn the HR portal off? Everyone is signed out of it and it only says it's turned off until you turn it on again. Nothing in it is deleted.", "Turn off"))) return false;
+      const r = await api("PUT", "api/hr/settings", { hr_enabled: form.elements.hr_enabled.checked ? "1" : "0",
+        hr_host: form.elements.hr_host.value });
+      delete form.dataset.dirty;
+      await openHr();
+      if (r.status === "locked") toast("The HR portal is locked: type the HR recovery key below.", true);
+    }, "HR portal settings saved.");
+  });
+
+  $("#hr-unlock-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = e.currentTarget.elements.recovery_key;
+    run(async () => {
+      await api("POST", "api/hr/unlock-key", { recovery_key: input.value });
+      input.value = "";
+      await openHr();
+    }, "The HR portal is unlocked.");
+  });
+
+  $("#hr-add-admin").addEventListener("click", () => run(async () => {
+    const data = await api("GET", "api/hr/people");
+    const taken = new Set(hr.data.admins.map((a) => a.id));
+    const search = h("input", { type: "search", placeholder: "Search names", autocomplete: "off", "aria-label": "Search names" });
+    const list = h("div", { class: "ct-users" });
+    const draw = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = data.people.filter((p) => p.name.toLowerCase().includes(q));
+      list.replaceChildren(...(shown.length ? shown.map((p) => h("button", {
+        type: "button", class: "ct-user", disabled: taken.has(p.id), onclick: async () => {
+          $("#hr-dialog").close();
+          await run(async () => {
+            await api("PUT", "api/hr/admins", { person_ids: [...taken, p.id] });
+            await openHr();
+          }, `${p.name} is an HR admin. Show them their setup QR code next.`);
+        } }, h("span", null, p.name), h("small", null, taken.has(p.id) ? "Already an HR admin" : "Make HR admin")))
+        : [h("p", { class: "hint" }, data.people.length ? "No one matches." : "No people yet: wait for the first sync from Connecteam.")]));
+    };
+    search.addEventListener("input", draw);
+    hrDialog("Add an HR admin", h("p", { class: "hint" }, "People come from Connecteam."), search, list);
+    draw();
+    search.focus();
+  }));
+
+  $("#hr-sync").addEventListener("click", () => run(async () => {
+    const r = await api("POST", "api/hr/sync");
+    await openHr();
+    toast(r.warning || `Synced: ${r.added} added, ${r.updated} updated, ${r.archived} archived.`, !!r.warning);
+  }));
+
+  $("#hr-find").addEventListener("input", () => {
+    clearTimeout(hr.timer);
+    hr.timer = setTimeout(findHrPeople, 250);
+  });
+
+  async function findHrPeople() {
+    const q = $("#hr-find").value.trim();
+    const box = $("#hr-found");
+    if (!q) return box.replaceChildren();
+    try {
+      const data = await api("GET", `api/hr/people?q=${encodeURIComponent(q)}`);
+      box.replaceChildren(...(data.people.length ? data.people.slice(0, 20).map((p) => h("div", { class: "item-row" },
+        h("div", { class: "item-fields" }, h("strong", null, p.name),
+          h("span", { class: "hint" }, [p.locked ? "Locked" : "Not locked", p.totp_on ? "authenticator on" : "no authenticator"].join(" · "))),
+        h("div", { class: "backup-actions" },
+          h("button", { type: "button", class: "btn", disabled: !p.locked, onclick: () => run(async () => {
+            await api("POST", `api/hr/people/${encodeURIComponent(p.id)}/unlock`);
+            await findHrPeople();
+          }, `${p.name} is unlocked.`) }, "Unlock"),
+          h("button", { type: "button", class: "btn danger", onclick: async () => {
+            if (!(await askConfirm(`Reset ${p.name}'s HR sign-in? Their authenticator and recovery codes are removed and they're signed out everywhere.`, "Reset"))) return;
+            await run(async () => {
+              await api("POST", `api/hr/people/${encodeURIComponent(p.id)}/reset`);
+              await openHr();
+              await findHrPeople();
+            }, `${p.name}'s HR sign-in was reset.`);
+          } }, "Reset sign-in"))))
+        : [h("p", { class: "hint" }, "No one by that name.")]));
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  $("#hr-sign-out-all").addEventListener("click", async () => {
+    if (!(await askConfirm("Sign everyone out of the HR portal? They can sign in again straight away.", "Sign everyone out"))) return;
+    await run(async () => {
+      const r = await api("POST", "api/hr/sign-out-everyone");
+      toast(`${r.ended} session${r.ended === 1 ? "" : "s"} ended.`);
+      await openHr();
+    });
+  });
+
+  // Settings > Connections: Connecteam for HR (its own form, saved on its own).
+  const hrctForm = $("#hrct-form");
+  let hrctDirty = false;
+  hrctForm.addEventListener("input", () => { hrctDirty = true; });
+
+  function fillHrConnecteam() {
+    const c = state.hr?.connecteam || {};
+    if (!hrctDirty) {
+      hrctForm.elements.hr_connecteam_client_id.value = c.client_id || "";
+      const secret = hrctForm.elements.hr_connecteam_client_secret;
+      secret.value = "";
+      secret.placeholder = c.secret_set ? "Saved — leave blank to keep" : "";
+      hrctForm.elements.hr_connecteam_chat.checked = !!c.chat;
+      hrctForm.elements.hr_connecteam_clear_secret.checked = false;
+      $("#hrct-clear-row").hidden = !c.secret_set;
+    }
+    const setUp = !!(c.client_id && c.secret_set);
+    showConnection($("#conn-hr-connecteam"), !setUp ? ["Not set up", ""] : !c.chat ? ["Saved; chat off", ""]
+      : state.hr?.status !== "on" ? ["HR portal off", ""] : ["Chat on", "active"],
+    requestsText(c.used_today, "today", c.daily_cap));
+    $("#hrct-status").textContent = state.hr?.status === "on" ? ""
+      : "The HR portal is off, so nothing is sent. Turn it on in the HR portal tab.";
+  }
+
+  hrctForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = hrctForm.elements;
+    run(async () => {
+      await api("PUT", "api/hr/connecteam", { hr_connecteam_client_id: f.hr_connecteam_client_id.value,
+        hr_connecteam_client_secret: f.hr_connecteam_client_secret.value,
+        hr_connecteam_clear_secret: f.hr_connecteam_clear_secret.checked ? "1" : "0",
+        hr_connecteam_chat: f.hr_connecteam_chat.checked ? "1" : "0" });
+      hrctDirty = false;
+      await load();
+      fillHrConnecteam();
+    }, "Connecteam for HR saved.");
+  });
 
   // ---------------------------------------------------------------- start
 
