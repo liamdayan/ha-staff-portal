@@ -34,8 +34,8 @@ import segno
 from aiohttp import web
 
 from branding import Branding
-from db import (KEY_CARD_FILTERS, PRIVATE_SETTINGS, WB_ACTIVE, Database, check_pin, hash_pin,
-                page_choice, pin_length)
+from db import (KEY_CARD_FILTERS, PRIVATE_SETTINGS, STAFF_ON, WB_ACTIVE, Database, check_pin,
+                hash_pin, page_choice, pin_length, staff_off)
 from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_phone_order,
                     clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
                     visible_layout)
@@ -116,7 +116,7 @@ def connecteam_wanted() -> bool:
     rules = db.department_clock_ins()
     return any(db.clock_in_rule(dict(r), rules)[0] for r in db.conn.execute(
         "SELECT require_clock_in, clock_in_set, department_id FROM staff "
-        "WHERE connecteam_user_id IS NOT NULL AND status != 'disabled'"))
+        f"WHERE connecteam_user_id IS NOT NULL AND {STAFF_ON}"))
 
 
 def load_connecteam_usage() -> dict:
@@ -836,7 +836,8 @@ def authenticate(request: web.Request, need_unlock: bool = True,
     member = None
     if shared:
         member = db.staff(session[2]) if session[2] else None
-        if not member or member["status"] != "active" or not db.staff_allowed_on(member["id"], device):
+        if (staff_off(member) or member["status"] != "active"
+                or not db.staff_allowed_on(member["id"], device)):
             pin_sessions.pop(key, None)
             raise json_error(web.HTTPForbidden, "pin_required")
         blocked = clock_block(member) if control else None
@@ -1063,7 +1064,7 @@ async def unlock_named(request: web.Request, device: dict, data: dict) -> web.Re
         member = db.staff(int(data.get("staff_id")))
     except (TypeError, ValueError):
         member = None
-    if not member or member["status"] == "disabled" or not db.staff_allowed_on(member["id"], device):
+    if staff_off(member) or not db.staff_allowed_on(member["id"], device):
         return bad_request("Pick your name again.", 404)
     locked_msg = (f"{member['name']} is locked for a while after too many wrong PINs. "
                   "Try again later, or ask your manager to unlock you.")
@@ -1072,7 +1073,7 @@ async def unlock_named(request: web.Request, device: dict, data: dict) -> web.Re
     ok = await pin_matches(str(data.get("pin", "")), member["pin_hash"])
     # Fresh: an attempt on another device may have changed this person's count meanwhile.
     member = db.staff(member["id"])
-    if not member or member["status"] == "disabled":
+    if staff_off(member):
         return bad_request("Pick your name again.", 404)
     if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
         return bad_request(locked_msg, 403, staff_locked=True)
@@ -1101,6 +1102,8 @@ def staff_signed_in(device: dict, member: dict, ip: str) -> web.Response:
     """The right PIN for a staff member on a shared device: sign them in, unless they must be
     clocked in and aren't. Only this person's own wrong-PIN count is cleared. The device's
     count isn't, so signing in as yourself can't be used to keep guessing other people's PINs."""
+    if staff_off(member):   # turned off or archived while their PIN was being checked
+        return bad_request("Pick your name again.", 404)
     blocked = clock_block(member)
     if blocked:
         db.update_staff(member["id"], failed_pins=0)
@@ -1131,7 +1134,7 @@ async def unlock_by_pin(request: web.Request, device: dict, data: dict) -> web.R
         return bad_request("That PIN belongs to more than one person, so it can't be used here. "
                            "Ask your manager to give each person their own PIN.", 403)
     member = db.staff(matches[0]) if matches else None
-    if member and member["status"] != "disabled":
+    if not staff_off(member):
         if member["status"] == "locked" or (member["locked_until"] or 0) > time.time():
             return bad_request(f"{member['name']} is locked for a while after too many wrong PINs. "
                                "Try again later, or ask your manager to unlock you.", 403,
@@ -1348,6 +1351,9 @@ async def send_command(device: dict, member: dict | None, domain: str, service: 
     On a shared phone the signed-in staff member's own link is used. The phone's link is
     ignored there, so Home Assistant never credits the wrong person.
     """
+    if member and staff_off(db.staff(member["id"])):
+        # Turned off or archived while this was on its way: nothing is sent, as them or not.
+        raise ActionRejected("You're signed out. Sign in again.")
     linked, update = (member, db.update_staff) if member else (device, db.update_device)
     if linked.get("ha_refresh_token"):
         try:
@@ -1563,7 +1569,17 @@ async def wristband_plan(request: web.Request, device: dict, member: dict, perms
                    detail=err.message, ok=False, ip=client_ip(request))
         raise json_error(web.HTTPForbidden if err.status == 403 else web.HTTPBadRequest,
                          err.message, field=err.field) from None
+    holder = staff_named(plan.name) if plan.type == "staff" else None
+    if holder and holder["status"] == "archived":
+        message = ARCHIVED_HOLDER.format(name=holder["name"])
+        if request.path == "/api/wristbands/jobs":   # making it, not the preview as it's typed
+            db.log(actor_name(device, member), "Blocked: wristbands", role=role_label(device, member),
+                   detail=message, ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden, message, field="name")
     return plan, data, zone
+
+
+ARCHIVED_HOLDER = "{name} is archived, so no key card can be made for them."
 
 
 async def api_wristbands(request: web.Request):
@@ -1627,7 +1643,8 @@ def staff_named(name: str) -> dict | None:
     (ignoring capitals and extra spaces)."""
     wanted = " ".join(str(name or "").split()).lower()
     found = [dict(r) for r in db.conn.execute(
-        "SELECT id, name, department_id FROM staff WHERE name = ? COLLATE NOCASE", (wanted,))]
+        "SELECT id, name, department_id, status FROM staff WHERE name = ? COLLATE NOCASE",
+        (wanted,))]
     return found[0] if len(found) == 1 else None
 
 
@@ -2250,7 +2267,7 @@ def link_refusal(device_id: int, session: str, staff_id: int) -> str | None:
             or time.time() - held[1] > pin_timeout(device)):
         return "signed_out"
     member = db.staff(staff_id)
-    if (not is_shared(device) or not member or member["status"] != "active"
+    if (not is_shared(device) or staff_off(member) or member["status"] != "active"
             or not db.staff_allowed_on(member["id"], device)):
         return "signed_out"   # the app is asked for a PIN again too
     if encoder_mode(device) != "local" or not wristband_permissions(device, member)["types"]:
@@ -2790,6 +2807,7 @@ async def admin_state(request: web.Request):
         "roles": db.roles(),
         "departments": departments_view(),
         "staff_sync": staff_sync_state(),
+        "key_card_totals": db.key_card_totals(),
         "devices": device_payload(),
         "staff": [{**m, "custom_order": f"s:{m['id']}" in owners,
                    "locked": m["status"] == "locked" or (m["locked_until"] or 0) > time.time(),
@@ -2835,12 +2853,14 @@ async def admin_connecteam_users(request: web.Request):
         users = await connecteam.users()
     except ConnecteamError as err:
         return bad_request(str(err), 502)
-    linked = {r["connecteam_user_id"]: r["name"] for r in db.conn.execute(
-        "SELECT name, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
+    linked = {r["connecteam_user_id"]: r for r in db.conn.execute(
+        "SELECT name, status, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
     # Kiosk codes stay on the server: the dashboard only learns whether there is one.
     return web.json_response({"users": [
         {"id": u["id"], "name": u["name"], "has_kiosk_code": bool(u["kiosk_code"]),
-         "linked_to": linked.get(u["id"])} for u in users]})
+         "linked_to": linked[u["id"]]["name"] if u["id"] in linked else None,
+         "linked_archived": u["id"] in linked and linked[u["id"]]["status"] == "archived"}
+        for u in users]})
 
 
 connecteam_tested = [0.0]
@@ -3008,8 +3028,10 @@ async def apply_staff_sync(users: list[dict]) -> dict:
     linked = {r["connecteam_user_id"]: dict(r) for r in db.conn.execute(
         "SELECT * FROM staff WHERE connecteam_user_id IS NOT NULL")}
     new = [u for u in users if u["id"] not in linked]
+    # Archived people stay linked (so they're never added again) but are left alone.
     ours = [(u, linked[u["id"]]) for u in users
-            if u["id"] in linked and linked[u["id"]]["connecteam_auto"]]
+            if u["id"] in linked and linked[u["id"]]["connecteam_auto"]
+            and linked[u["id"]]["status"] != "archived"]
     await backfill_pin_lengths(users, linked)
 
     # Kiosk codes: whose PIN each one already is. Checking PINs is slow, so it runs off the
@@ -3104,7 +3126,8 @@ async def apply_staff_sync(users: list[dict]) -> dict:
     signed_out = set()
     for u, old in ours:
         m = db.staff(old["id"])
-        if not m or not m["connecteam_auto"] or m["connecteam_user_id"] != u["id"]:
+        if (not m or not m["connecteam_auto"] or m["connecteam_user_id"] != u["id"]
+                or m["status"] == "archived"):   # archived meanwhile
             continue
         fields = {}
         dept = department_for(u)
@@ -3144,7 +3167,7 @@ async def apply_staff_sync(users: list[dict]) -> dict:
     active = {u["id"] for u in users}
     for staff_id, uid in db.conn.execute(
             "SELECT id, connecteam_user_id FROM staff WHERE connecteam_auto = 1 "
-            "AND status != 'disabled' AND connecteam_user_id IS NOT NULL").fetchall():
+            f"AND {STAFF_ON} AND connecteam_user_id IS NOT NULL").fetchall():
         if uid not in active:
             db.update_staff(staff_id, status="disabled", connecteam_note=LEFT_CONNECTEAM)
             signed_out.add(staff_id)
@@ -3836,7 +3859,9 @@ async def admin_update_device(request: web.Request):
         return bad_request(str(err))
     if isinstance(data.get("staff_ids"), list):
         known = {m["id"] for m in db.staff_list()}
-        db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known])
+        archived = db.archived_staff_ids()   # not offered in the dashboard: kept for Restore
+        db.set_device_staff(device["id"], [int(i) for i in data["staff_ids"] if int(i) in known]
+                            + [i for i in db.device_staff_ids(device["id"]) if i in archived])
     if end_sessions:
         end_device_sessions(device["id"])
     db.update_device(device["id"], **fields)
@@ -3906,6 +3931,8 @@ async def admin_link_user(request: web.Request):
     target, update = link_target(request)
     if not target:
         raise web.HTTPNotFound()
+    if request.match_info["kind"] == "staff" and target["status"] == "archived":
+        return bad_request(f"{target['name']} is archived. Restore them first.", 409)
     data = await read_json(request)
     username = str(data.get("username", "")).strip()
     password = str(data.get("password", ""))
@@ -3964,13 +3991,21 @@ async def admin_reset_order(request: web.Request):
     return web.json_response({"ok": True})
 
 
+def name_taken_message(name: str) -> str:
+    """Why a new person can't have this name: someone has it, perhaps someone archived."""
+    row = db.conn.execute("SELECT name FROM staff WHERE name = ? COLLATE NOCASE "
+                          "AND status = 'archived'", (name,)).fetchone()
+    return (f"{row[0]} is archived under that name. Restore them (Show archived on the Staff "
+            "tab), or use another name." if row else "Someone with that name already exists.")
+
+
 async def admin_create_staff(request: web.Request):
     data = await read_json(request)
     name = clean_name(data.get("name"), 40)
     if not name:
         return bad_request("Enter the staff member's name.")
     if db.name_taken("staff", name):
-        return bad_request("Someone with that name already exists.")
+        return bad_request(name_taken_message(name))
     link = parse_connecteam_link(data)
     if link.get("connecteam_user_id") and "require_clock_in" not in link:
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
@@ -4001,6 +4036,8 @@ async def admin_update_staff(request: web.Request):
     member = db.staff(int(request.match_info["id"]))
     if not member:
         raise web.HTTPNotFound()
+    if member["status"] == "archived":
+        return bad_request(f"{member['name']} is archived. Restore them first.", 409)
     data = await read_json(request)
     fields = {}
     if "name" in data and clean_name(data["name"], 40):
@@ -4118,15 +4155,49 @@ async def admin_unlock_staff(request: web.Request):
     member = db.staff(int(request.match_info["id"]))
     if not member:
         raise web.HTTPNotFound()
-    db.update_staff(member["id"], status="active", failed_pins=0, locked_until=None)
+    db.update_staff(member["id"], failed_pins=0, locked_until=None,
+                    **({"status": "active"} if member["status"] == "locked" else {}))
     db.log(admin_name(request), f"Unlocked staff member {member['name']}")
     return web.json_response({"ok": True})
+
+
+async def admin_archive_staff(request: web.Request):
+    """Archive a person (POST /api/staff/{id}/archive) or restore them (.../restore). Archiving
+    ends their access everywhere at once and keeps everything of theirs. The answer lists their
+    key cards that still open doors: locks check cards on their own, so those keep working until
+    they expire, unless they're revoked or locked out."""
+    member = db.staff(int(request.match_info["id"]))
+    if not member:
+        raise web.HTTPNotFound()
+    who = admin_name(request)
+    if request.match_info["action"] == "restore":
+        if member["status"] != "archived":
+            return bad_request(f"{member['name']} isn't archived.", 409)
+        db.restore_staff(member["id"])
+        db.log(who, f"Restored {member['name']}")
+        return web.json_response({"ok": True, "status": db.staff(member["id"])["status"]})
+    if member["status"] == "archived":
+        return bad_request(f"{member['name']} is already archived.", 409)
+    db.archive_staff(member["id"], who)
+    staff_sessions_end(member["id"])   # signed out everywhere, and their encoder links close
+    for job_id in db.unfinished_wb_job_ids(member["id"]):
+        decide_job(db.wb_job(job_id), "cancel")   # no more cards from a job of theirs
+    cards = db.key_cards("active", holder_staff_id=member["id"], limit=KEY_CARD_PAGE)
+    one = len(cards) == 1
+    db.log(who, f"Archived {member['name']}", detail=(
+        f"{len(cards)} key card{'' if one else 's'} still open{'s' if one else ''} doors until "
+        "revoked, locked out or expired" if cards else None))
+    zone = await wristband_zone()
+    return web.json_response({"ok": True, "cards": [key_card_view(c, zone) for c in cards]})
 
 
 async def admin_delete_staff(request: web.Request):
     member = db.staff(int(request.match_info["id"]))
     if not member:
         raise web.HTTPNotFound()
+    if member["status"] != "archived":
+        return bad_request(f"Archive {member['name']} first. Only archived people can be deleted.",
+                           409)
     if member["ha_refresh_token"]:
         await ha.unlink_user(member["ha_refresh_token"])
     staff_sessions_end(member["id"])
@@ -4593,7 +4664,8 @@ ALERTS_PER_MINUTE = 20        # and this many alerts in all, so even a leaked ad
 DOOR_ACTIVITY_PAGE = 50
 DOOR_ALERTS = {"lost": ("Lost card", "was reported lost"),
                "revoked": ("Revoked card", "was revoked"),
-               "deleted": ("Deleted card", "was deleted in TT Hotel")}
+               "deleted": ("Deleted card", "was deleted in TT Hotel"),
+               "archived": ("Archived person's card", "belongs to someone who was archived")}
 callback_requests: dict[str, collections.deque] = {}   # caller -> times of its wrong addresses
 callback_deliveries: collections.deque = collections.deque()  # times of right-address deliveries
 callback_records: collections.deque = collections.deque()     # (time, records stored) of those
@@ -4688,9 +4760,9 @@ async def tthotel_records(request: web.Request):
 
 
 async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
-    """A lost, revoked or deleted card tried at a door: a line in the activity log and (if that's
-    on) a Home Assistant notification, one per card, replaced by the next, at most every
-    CARD_ALERT_GAP seconds per card (and ALERTS_PER_MINUTE in all)."""
+    """A lost, revoked or deleted card, or an archived person's, tried at a door: a line in the
+    activity log and (if that's on) a Home Assistant notification, one per card, replaced by the
+    next, at most every CARD_ALERT_GAP seconds per card (and ALERTS_PER_MINUTE in all)."""
     door = door_name(db.wb_door(lock_id) or {"name": "", "alias": "", "tt_name": "",
                                              "lock_id": lock_id})
     zone = await wristband_zone()
@@ -4906,6 +4978,7 @@ def key_card_view(card: dict, zone: ZoneInfo | None, doors: bool = False,
     view = {"id": card["id"], "job_id": card["job_id"], "card_number": card["card_number"],
             "holder": card["holder_name"] or card["name"], "name": card["name"],
             "holder_staff_id": card["holder_staff_id"], "department": card["department_name"],
+            "holder_archived": card.get("holder_status") == "archived",
             "summary": card["summary"], "made_by": card["actor"],
             "made_at": card["written_at"] or card["made_at"], "source": card["source"] or "staff_app",
             "expires_at": card["expires_at"],
@@ -4962,17 +5035,18 @@ async def admin_key_cards(request: web.Request):
     state = request.query.get("state", "active")
     if state not in KEY_CARD_FILTERS:
         return bad_request("Choose Active, Expired, Revoked, Lost or All.")
-    before = request.query.get("before", "")
-    if before and not re.fullmatch(r"\d{1,12}", before):
+    before, holder = request.query.get("before", ""), request.query.get("holder", "")
+    if not re.fullmatch(r"(\d{1,12})?", before) or not re.fullmatch(r"(\d{1,12})?", holder):
         return bad_request("invalid value")
     cards = db.key_cards(state, request.query.get("q", "")[:60], KEY_CARD_PAGE,
-                         int(before) if before else None)
+                         int(before) if before else None, int(holder) if holder else None)
     zone = await wristband_zone()
     door_rows = db.wb_doors()
     used = db.cards_last_used([c["id"] for c in cards])
     return web.json_response({"cards": [key_card_view(c, zone, c["state"] == "lost", door_rows,
                                                       used) for c in cards],
                               "more": len(cards) == KEY_CARD_PAGE,
+                              "totals": db.key_card_totals(),
                               "encoders": [{k: e[k] for k in ("device_id", "name", "status")}
                                            for e in dashboard_encoders()],
                               "remote": remote_state()})
@@ -5042,6 +5116,8 @@ async def admin_make_key_card(request: web.Request):
     data = await read_options(request)
     if db.settings().get("wristbands_enabled") != "1":
         return bad_request(wristbands.TURNED_OFF)
+    if member["status"] == "archived":
+        return bad_request(ARCHIVED_HOLDER.format(name=member["name"]))
     if member["status"] == "disabled":
         return bad_request(f"{member['name']} is turned off. Turn them on first.")
     dept = db.department(member["department_id"]) if member["department_id"] else None
@@ -5120,6 +5196,9 @@ async def admin_key_card_action(request: web.Request):
         return web.json_response({"job": job_view(db.wb_job(job_id), zone)})
     # replace: the holder's department template if there is one, else what the old card opened.
     member = db.staff(card["holder_staff_id"]) if card["holder_staff_id"] else None
+    if member and member["status"] == "archived":
+        return bad_request(f"{ARCHIVED_HOLDER.format(name=member['name'])} Write a notice card "
+                           "instead.", 409)
     dept = db.department(member["department_id"]) if member and member["department_id"] else None
     if dept and dept["card_access"]:
         access, days, lockout = dept["card_access"], dept["card_days"], dept["card_lockout"]
@@ -5839,6 +5918,7 @@ def admin_app() -> web.Application:
     app.router.add_patch(r"/api/staff/{id:\d+}", admin_update_staff)
     app.router.add_delete(r"/api/staff/{id:\d+}", admin_delete_staff)
     app.router.add_post(r"/api/staff/{id:\d+}/unlock", admin_unlock_staff)
+    app.router.add_post(r"/api/staff/{id:\d{1,12}}/{action:archive|restore}", admin_archive_staff)
     app.router.add_get(r"/api/devices/{id:\d+}/qr.svg", admin_device_qr)
     app.router.add_get("/api/activity", admin_activity)
     app.router.add_put("/api/settings", admin_update_settings)

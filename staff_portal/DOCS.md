@@ -344,7 +344,8 @@ each person sign in with their own PIN so every action is recorded under their n
    (inactive, locked, not clocked in) and when they last signed in. Click a row for everything
    else and its buttons. Search by name, role or department, and sort by **Department** (each
    department folds away with a click), **Name** or **Role**; this browser remembers the sort
-   and the folded departments.
+   and the folded departments. People you've archived are folded away under the list (see
+   [Archiving people](#archiving-people)).
 2. In **Phones**, click **Edit** on the shared phone and set **Who uses it** to
    **Shared: each person signs in with their own PIN**. Leave **Everyone on the Staff tab**
    ticked, or untick it and pick who may use that phone.
@@ -378,6 +379,7 @@ Connecteam whose PIN is their kiosk code, the staff sync fills in the length by 
   it** until you unlock it on the **Phones & computers** tab (the activity log says why). This stops
   someone with the device guessing a few PINs at a time, forever.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
+  For someone who has left, **Archive** them instead (see [Archiving people](#archiving-people)).
 - Everyone needs their own PIN: a PIN someone else already uses is refused.
 
 **Hide names (PIN only).** Tick **Hide names: people just type their PIN** under **Who uses it**
@@ -441,6 +443,49 @@ Good to know:
 - Everything else about signing in works as on shared kiosk devices: hiding names, who may sign
   in, wrong-PIN locks, signing out after the idle time, and Connecteam's clocked-in check.
 - **Preview** on the Layout tab can show a role or a person: pick them under **As**.
+
+## Archiving people
+
+When someone leaves, open their row on the **Staff** tab and click **Archive**. Their access ends
+everywhere at once, but nothing of theirs is deleted: their activity, the cards they made and
+their settings stay, and you can bring them back.
+
+The confirmation lists what stops working:
+
+- They're signed out on every phone and computer, and their PIN no longer signs them in anywhere
+  (by name, PIN only or role-based). They're left out of every name list, and out of the people
+  you can pick for a phone or computer.
+- They can't make wristbands or key cards (a card job of theirs that's still running stops), and
+  no key card can be made for them: not with **Make key card**, not as a replacement for a lost
+  card, and not in the staff app (a staff card for their exact name is refused).
+- Their Home Assistant user link is kept, but never used.
+- The Connecteam sync leaves them archived, even if they're still active in Connecteam (see
+  [Add everyone from Connecteam](#add-everyone-from-connecteam)).
+
+**Their key cards keep working.** TT Hotel locks check cards on their own, offline, so archiving
+can't switch a key card off: it opens its doors until it expires. The confirmation lists their key
+cards that still open doors, and once they're archived the **Key cards** list opens on them. For
+each one:
+
+- If you have the card, click **Revoke** and put it on the encoder: it's cleared and opens nothing.
+- If you don't, click **Report lost**, then write a lost card notice and tap it on each door (or,
+  where remote lock-out is on, lock it out remotely on doors with a gateway). See
+  [Lost cards](#lost-cards). A replacement card isn't offered for someone archived.
+
+Until that's done, [Door activity](#door-activity) flags the card if it's tried at a door with a
+gateway ("Archived person's card tried at Staff Office").
+
+Archived people are hidden from the Staff tab's list. Click **Show archived** under it to see
+them (a search shows the archived people it matches too). Each one has:
+
+- **Restore**: back as they were, with their PIN, role, department, devices and own settings.
+  They sign in with their PIN again (someone who was turned off before they were archived comes
+  back turned off). Their PIN stays theirs while they're archived: nobody else can be given it.
+- **Delete for good**: removes them completely (it asks first). Only archived people can be
+  deleted. Their past activity and the cards they made stay in the logs.
+
+Archiving, restoring and deleting are in **Activity** ("Archived Ana Lopez"). Archived people are
+in backups and migration files (and stay archived when restored), and staff exports mark them.
 
 ## Connections: TT Hotel and Connecteam
 
@@ -727,6 +772,9 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   most 20 alerts go out a minute in all (Door activity still lists every try).
   Untick **Tell Home Assistant when a lost or revoked card is tried** to keep it to the activity
   log.
+- **An archived person's card tried at a door.** A key card of someone you've
+  [archived](#archiving-people), tried after they were archived and before it expires, alerts the
+  same way ("Archived person's card tried at Staff Office"), until it's revoked or reported lost.
 - **A card that was cleared is done with.** A card revoked on an encoder, found blank by **Look
   up**, or written over goes back in the stack and may be given out again, here or in TT Hotel's
   own program. From then on its number is whoever has it now: those records aren't matched to the
@@ -946,12 +994,16 @@ If the person already has an active key card, you choose:
 ### The Key cards list
 
 **Key cards** on the Staff tab lists every staff key card, made here or at a front-desk computer
-(cards made in the staff app are matched to the person by name), newest first. Filter by
+(cards made in the staff app are matched to the person by name), newest first. The section is
+folded at first, showing only its title and a count of the cards that still open doors ("Key
+cards: 14 active, 2 lost"; a lost card counts until it expires). Click it to open the list; this
+browser remembers whether it's open. Filter by
 **Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or by the start of a
 card number. Each
 row shows who it's for, the card number, what it opens, who made it and when, when it stops
 working, its state and, for a lost card, how many of its doors it's been locked out of, and
-where it was last used (with [Door activity](#door-activity) set up).
+where it was last used (with [Door activity](#door-activity) set up). A card whose holder is
+archived says **Archived** under their name.
 
 - **Revoke** (you have the card): choose the encoder (**This computer** for the one plugged into
   the computer you're using), put that card on it, and it's cleared, so it opens nothing; it can
@@ -978,7 +1030,7 @@ lost card's screen (**Lock out…** in the Key cards list) lists its doors with 
 2. **Replacement card.** **Make a replacement card** makes the person a new key card (their
    department's, or what the lost card opened) that also carries the cancellation. Each door
    refuses the lost card once the new card has been tapped there: tick **Replacement tapped** as
-   that happens.
+   that happens. Not for someone archived: use a notice card.
 3. **Remote lock-out (experimental, off by default).** For doors with a gateway, TT Hotel can tell
    the door to refuse the card number without anyone walking there. See below.
 
@@ -1036,7 +1088,7 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
    connection**. It reports how many users and time clocks it found and how many people are
    clocked in now.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
-   greyed out.
+   greyed out (archived people too: restore them instead).
    - **Use their Connecteam kiosk code as their PIN** is ticked when Connecteam has a kiosk code
      of 4 to 8 digits for them. The add-on reads it straight from Connecteam; it's never shown
      in the dashboard. Otherwise, type a PIN.
@@ -1087,9 +1139,12 @@ then becomes a staff member here:
   stays. Once you change someone's role by hand, the sync leaves their role alone.
 - People archived or removed in Connecteam are turned off (and signed out), never deleted. If they
   come back, they're turned on again. Someone you turn off yourself stays off.
+- Someone you [archive](#archiving-people) here stays archived and is left exactly as they are,
+  whatever Connecteam says, and is never added again. Once restored, the sync keeps them up to
+  date again.
 - People you added by hand are never changed. If you delete someone the sync added, the next sync
-  adds them again: turn them off instead. For the same reason they can't be unlinked from
-  Connecteam while this is ticked.
+  adds them again while they're active in Connecteam: archive them instead. For the same reason
+  they can't be unlinked from Connecteam while this is ticked.
 
 The sync runs about once an hour while this is ticked, soon after you save the settings, and when
 you click **Sync staff now** (on the Staff tab or in Settings; at most once a minute). It uses the
@@ -1377,7 +1432,8 @@ A few rules keep a migration file safe:
   made before 0.9.0 leaves its rule as it is. Staff files carry whether someone's clock-in setting
   was changed by hand, and people linked to Connecteam who are added from one keep that.
 - Replacing staff uses the file's PINs, roles, pages and own settings, and anyone whose PIN
-  changes is signed out. Someone you've turned off stays off, even if the file has them on. A file
+  changes is signed out. Someone you've turned off stays off, even if the file has them on, and
+  someone you've archived stays archived. People archived in the file are archived here too. A file
   from before 0.7.0 has no roles or own settings for people, so replacing from one leaves theirs as
   they are.
 
