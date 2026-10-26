@@ -59,6 +59,11 @@
 - The card log, the activity log and Door activity show contractor badges with the contractor's
   name and company, and a Door activity alert about one calls it a contractor badge.
 
+**Fixes**
+
+- Staff app, Wristbands: a problem shown after pressing **Make** (under the field it's about) no
+  longer disappears when the check of a change made just before it answers late.
+
 ## 0.9.0
 
 **Make staff key cards from the dashboard**

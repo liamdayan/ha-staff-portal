@@ -3392,6 +3392,11 @@
       return;
     }
     f.busy = true;
+    // Make's answer is the latest word on this form: a preview still to come (from a change made
+    // just before) mustn't clear the problem it shows.
+    clearTimeout(f.timer);
+    f.ask += 1;
+    f.els.summary.classList.remove("updating");
     const button = f.els.submit;
     button.classList.add("working");
     button.setAttribute("aria-busy", "true");
