@@ -8,9 +8,10 @@ restarts and add-on updates:
   trash       a file out of the recycle bin into the shared drive's trash;
   rename      a person's folders, after their name changed in Connecteam;
   former      a person's folders into Former employees (HR confirmed they've left);
-  pdf         a PDF another part asked for while Google couldn't make it (documents.queue_pdf):
-              its part writes the HTML again (register_pdf_maker), Google Drive makes the PDF,
-              and it's kept like any file the portal makes (documents.add_generated).
+  pdf         a PDF another part asked for (documents.queue_pdf: a signed write-up, a closed
+              review): its part writes the HTML (register_pdf_maker), Google Drive makes the PDF,
+              and it's kept like any file the portal makes (documents.add_generated, tagged with
+              this row, so a retry never makes a second one).
 
 One piece at a time, in the background. A failure is tried again after 1 minute, 5, 30, 2 hours,
 6 hours, then daily; after 8 tries it "needs attention" (HR's list, with Retry). Some things wait

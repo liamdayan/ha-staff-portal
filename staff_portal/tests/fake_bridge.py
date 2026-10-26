@@ -122,6 +122,13 @@ class FakeBridge:
     def children(self, parent: str) -> list[dict]:
         return [f for f in self.files.values() if parent in f["parents"] and not f["trashed"]]
 
+    def names_in(self, folder: str) -> list[str]:
+        """The names of the files in every folder called that, sorted (for tests)."""
+        ids = {f["id"] for f in self.files.values()
+               if f["name"] == folder and f["mimeType"] == FOLDER}
+        return sorted(f["name"] for f in self.files.values()
+                      if set(f["parents"]) & ids and f["mimeType"] != FOLDER and not f["trashed"])
+
     # ------------------------------------------------ HTTP
 
     def app(self) -> web.Application:

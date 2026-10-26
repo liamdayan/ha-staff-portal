@@ -377,12 +377,9 @@ class HRService:
     # ------------------------------------------------------------ migration files
 
     def migration_blocker(self) -> str | None:
-        """Why a migration file can't be made now (uploads still waiting), else None."""
-        for check in self.migration_blockers:
-            reason = check(self)
-            if reason:
-                return reason
-        return None
+        """Why a migration file can't be made now (uploads still waiting; each part's reason),
+        else None."""
+        return " ".join(r for check in self.migration_blockers if (r := check(self))) or None
 
     def export(self) -> dict | None:
         """What a migration file carries of HR (None when HR was never turned on): its database,

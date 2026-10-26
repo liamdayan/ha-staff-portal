@@ -2,8 +2,9 @@
 the protected-leave question, HR's approval, step tasks and termination reviews (HR only),
 write-ups from draft to signed (in the portal, in person with the employee's PIN and code,
 refused with a witness, on paper), the signed PDF, appeals, voids, HR's adjustments, reminders,
-and who sees what. The point system and its ledger (policy.py, points.py) and the documents
-part are stand-ins (discipline_fakes.py).
+and who sees what. The point system and its ledger (policy.py, points.py) are stand-ins
+(discipline_fakes.py); documents and their PDF queue are the real part, with Google as the fake
+script (tests/fake_bridge.py).
 
 Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
 """
@@ -17,9 +18,11 @@ from datetime import date, timedelta
 import pytest
 
 import discipline_fakes
-from hr_helpers import CHANGE, HR, ct_user, next_code
+from fake_bridge import html_text
+from hr_helpers import CHANGE, HR, ct_user, next_code, queue_done
+from test_hr_documents import google
 
-from hr import discipline, notify, probation, signin  # noqa: E402
+from hr import delivery, discipline, documents, notify, probation, signin  # noqa: E402
 
 MARIA = ct_user(401, "Maria", "Lopez", code="4821", groups=[501], mobile="541-555-0401")
 BO = ct_user(402, "Bo", "Diaz", code="7302", groups=[502], mobile="541-555-0402")
@@ -99,18 +102,12 @@ async def issued(hr, s, *, approver="hana", writeup_approver="hale") -> int:
     return data["writeup"]
 
 
-async def pdf_made(hr) -> None:
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if not discipline._making:
-            break
-    await discipline.tick(hr.svc, time.time())
 
 
 # ---------------------------------------------------------------- until a policy is published
 
 def test_nothing_is_recorded_until_a_point_system_is_published(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -149,7 +146,7 @@ def test_nothing_is_recorded_until_a_point_system_is_published(tmp_path, engine)
 # ---------------------------------------------------------------- the manager form and HR
 
 def test_the_form_previews_then_hr_approves_and_a_step_is_due(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -218,7 +215,7 @@ def test_the_form_previews_then_hr_approves_and_a_step_is_due(tmp_path, engine):
 
 
 def test_protected_leave_scores_zero_and_never_leads_to_a_step(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -253,7 +250,7 @@ def test_protected_leave_scores_zero_and_never_leads_to_a_step(tmp_path, engine)
 
 
 def test_who_may_record_approve_and_see(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -292,7 +289,7 @@ def test_who_may_record_approve_and_see(tmp_path, engine):
 
 
 def test_hr_returns_an_incident_and_the_manager_sends_it_again(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -333,7 +330,7 @@ def test_hr_returns_an_incident_and_the_manager_sends_it_again(tmp_path, engine)
 
 
 def test_a_termination_review_goes_to_hr_only_and_is_never_automatic(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -386,12 +383,12 @@ def test_a_termination_review_goes_to_hr_only_and_is_never_automatic(tmp_path, e
 
 # ---------------------------------------------------------------- write-ups and signatures
 
-def test_a_write_up_from_draft_to_signed_in_the_portal(tmp_path, engine):
-    pol, pts, docs = engine
+def test_a_write_up_from_draft_to_signed_in_the_portal(tmp_path, engine, monkeypatch):
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
-        async with HR(tmp_path) as hr:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await setup(hr)
             pts.add("401", 4, today(hr) - timedelta(days=30))
             data = await record(hr, s, writeup=dict(WRITEUP))
@@ -441,29 +438,34 @@ def test_a_write_up_from_draft_to_signed_in_the_portal(tmp_path, engine):
             status, r, _ = await hr.call("POST", f"/api/writeups/{wid}/sign", {**sign, "pin": "4821"}, s["maria"])
             assert status == 200, r
             assert r["writeup"]["status"] == "active" and r["writeup"]["comment"] == "I was covering two sections."
-            await pdf_made(hr)
-            [filed] = docs.added
-            assert (filed["kind"], filed["mime"], filed["title"]) == ("writeups", "application/pdf",
-                                                                     "Written warning - Conduct (signed)")
-            assert filed["date"] == day(hr) and filed["data"].startswith(b"%PDF")
-            title, blocks = docs.pages[0]
-            flat = json.dumps(blocks)
-            assert SECRET_MANAGER not in flat and SECRET_HR not in flat and "I was covering two sections." in flat
-            assert ["signature", "Employee"] == list(blocks[-2][:2]) and "Maria Lopez" in blocks[-2][2]
-            assert discipline.get_writeup(hr.hdb, wid)["pdf_doc_id"] == 1001
+            await queue_done(hr)
+            # The signed PDF: made through the documents part's PDF queue, filed as a "writeups"
+            # document, and in Maria's Discipline folder in Drive.
+            w = discipline.get_writeup(hr.hdb, wid)
+            filed = documents.get(hr.hdb, w["pdf_doc_id"])
+            assert documents.kind(hr.hdb, filed["kind_id"])["key"] == "writeups"
+            assert (filed["mime"], documents.title_of(filed), filed["doc_date"]) == (
+                "application/pdf", "Written warning - Conduct (signed)", day(hr))
+            assert fake.names_in("Discipline") == [f"{day(hr)} Written warning - Conduct (signed).pdf"]
+            [page] = fake.pdfs
+            text = " ".join(html_text(page))
+            assert SECRET_MANAGER not in page and SECRET_HR not in page and "I was covering two sections." in text
+            title, blocks = discipline.pdf_blocks(hr.hdb, w)
+            assert ["signature", "Employee"] == list(blocks[-2][:2]) and blocks[-2][2] == "Maria Lopez"
             # The step task closed when it was delivered; Max sees how it was signed.
             assert hr.hdb.conn.execute("SELECT status FROM discipline_tasks").fetchone()[0] == "done"
             status, view, _ = await hr.call("GET", f"/api/writeups/{wid}", cookie=s["max"])
             assert view["method_word"] == "Signed in the HR portal" and view["pdf"]["filed"]
-            assert view["pdf_url"] == "/api/documents/1001/file"
+            assert view["pdf_url"] == documents.view_url(filed)
+            status, mine, _ = await hr.call("GET", f"/api/writeups/{wid}", cookie=s["maria"])
+            assert mine["pdf_url"] == view["pdf_url"] and "pdf" not in mine
             assert (await hr.call("POST", f"/api/writeups/{wid}/sign", {**sign, "pin": "4821"}, s["maria"]))[0] == 409
     run(scenario())
 
 
-def test_the_pdf_waits_while_google_drive_isnt_set_up(tmp_path, engine):
-    pol, pts, docs = engine
+def test_the_pdf_waits_while_google_drive_isnt_set_up(tmp_path, engine, monkeypatch):
+    pol, pts = engine
     pol.publish()
-    docs.google = False
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -471,28 +473,56 @@ def test_the_pdf_waits_while_google_drive_isnt_set_up(tmp_path, engine):
             wid = await issued(hr, s)
             status, r, _ = await hr.call("POST", f"/api/writeups/{wid}/refused", {"witness_name": "Ana Cruz"}, s["max"])
             assert status == 200
-            await pdf_made(hr)
-            w = discipline.get_writeup(hr.hdb, wid)
-            assert w["pdf_status"] == "waiting" and w["pdf_due"] > time.time() + 500 and docs.added == []
-            assert "isn't set up yet" in w["pdf_error"]
-            docs.google = True
-            await discipline.tick(hr.svc, time.time())
-            assert docs.added == []                           # not due yet
-            await discipline.tick(hr.svc, time.time() + 700)
-            assert [a["kind"] for a in docs.added] == ["writeups"]
-            assert discipline.get_writeup(hr.hdb, wid)["pdf_status"] == "done"
-            # Refused: the PDF says so, with the witness.
-            flat = json.dumps(docs.pages[-1][1])
-            assert "The employee refused to sign." in flat and "Ana Cruz" in flat
+            await queue_done(hr)
+            # It waits in the documents queue, without using up tries (HR sees why).
+            work = documents.pdf_work(hr.hdb, "writeups", wid)
+            assert (work["status"], work["code"], work["tries"]) == ("waiting", "not_set_up", 0)
+            assert discipline.get_writeup(hr.hdb, wid)["pdf_doc_id"] is None
+            _, view, _ = await hr.call("GET", f"/api/writeups/{wid}", cookie=s["hana"])
+            assert view["pdf"]["status"] == "waiting" and "isn't set up yet" in view["pdf"]["error"]
+            _, view, _ = await hr.call("GET", f"/api/writeups/{wid}", cookie=s["max"])
+            assert view["pdf"]["error"] is None and "pdf_url" not in view
+            _, queue, _ = await hr.call("GET", "/api/discipline/queue", cookie=s["hana"])
+            assert queue["waiting_pdfs"] == 1 and queue["pdfs"] == []
+            async with google(hr, monkeypatch) as fake:
+                await queue_done(hr)
+                assert fake.pdfs == []                           # not due yet
+                await queue_done(hr, time.time() + delivery.WAIT_SETUP + 1)
+                assert discipline.get_writeup(hr.hdb, wid)["pdf_doc_id"]
+                # Refused: the PDF says so, with the witness.
+                text = " ".join(html_text(fake.pdfs[-1]))
+                assert "The employee refused to sign." in text and "Ana Cruz" in text
+                assert fake.names_in("Discipline") == [f"{day(hr)} Coaching - Conduct (signed).pdf"]
+                # It keeps failing: HR's Needs attention page (and the Discipline page) has it,
+                # and Retry tries it again.
+                second = await issued(hr, s)
+                fake.fail_next(code="unavailable", message="Google is busy.", op="pdf", times=99)
+                status, r, _ = await hr.call("POST", f"/api/writeups/{second}/refused", {"witness_name": "Ana Cruz"}, s["max"])
+                assert status == 200
+                for n in range(delivery.MAX_TRIES):
+                    await queue_done(hr, time.time() + (n + 1) * 2 * 86400)
+                assert documents.pdf_work(hr.hdb, "writeups", second)["status"] == "attention"
+                fake.failures.clear()
+                _, queue, _ = await hr.call("GET", "/api/discipline/queue", cookie=s["hana"])
+                assert [p["id"] for p in queue["pdfs"]] == [second]
+                _, attention, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hana"])
+                assert [i["target"] for i in attention["stuck"]] == ["pdf"]
+                _, view, _ = await hr.call("GET", f"/api/writeups/{second}", cookie=s["hana"])
+                assert view["can"]["pdf_retry"]
+                status, r, _ = await hr.call("POST", f"/api/writeups/{second}/pdf-retry", {}, s["hana"])
+                assert status == 200
+                await queue_done(hr)
+                assert discipline.get_writeup(hr.hdb, second)["pdf_doc_id"]
+                assert (await hr.call("POST", f"/api/writeups/{second}/pdf-retry", {}, s["hana"]))[0] == 409
     run(scenario())
 
 
-def test_signing_in_person_refusing_with_a_witness_and_paper(tmp_path, engine):
-    pol, pts, docs = engine
+def test_signing_in_person_refusing_with_a_witness_and_paper(tmp_path, engine, monkeypatch):
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
-        async with HR(tmp_path) as hr:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await setup(hr)
             first = await issued(hr, s)
             secret = hr.enrol("401")
@@ -535,18 +565,27 @@ def test_signing_in_person_refusing_with_a_witness_and_paper(tmp_path, engine):
             r = await resp.json()
             assert resp.status == 200, r
             assert r["writeup"]["method_word"] == "Signed on paper"
-            photo = [a for a in docs.added if a["mime"] == "image/jpeg"]
-            assert photo and photo[0]["kind"] == "writeups" and photo[0]["title"].endswith("(signed on paper)")
-            assert discipline.get_writeup(hr.hdb, third)["photo_doc_id"] == 1000 + docs.added.index(photo[0]) + 1
+            photo = documents.get(hr.hdb, discipline.get_writeup(hr.hdb, third)["photo_doc_id"])
+            assert documents.kind(hr.hdb, photo["kind_id"])["key"] == "writeups" and photo["mime"] == "image/jpeg"
+            steps = [discipline.get_writeup(hr.hdb, x)["step_name"] for x in (first, second, third)]
+            assert documents.title_of(photo) == f"{steps[2]} (signed on paper)"
+            assert r["writeup"]["photo_url"] == documents.view_url(photo)
             resp = await hr.client.post(f"/api/writeups/{third}/paper", data=buf.getvalue(), headers=upload)
             assert resp.status == 409                                 # already signed
-            await pdf_made(hr)
-            assert len([a for a in docs.added if a["mime"] == "application/pdf"]) == 3
+            # Maria and Max open the photo through the documents part; another employee can't.
+            for who, code in (("maria", 200), ("max", 200), ("bo", 404)):
+                resp = await hr.client.get(r["writeup"]["photo_url"], headers={
+                    "Host": "hr.example.com", "Cookie": f"{signin.COOKIE}={s[who]}"})
+                assert resp.status == code, who
+            await queue_done(hr)
+            assert len(fake.pdfs) == 3
+            assert fake.names_in("Discipline") == sorted(
+                [f"{day(hr)} {steps[2]} (signed on paper).jpg"] + [f"{day(hr)} {x} - Conduct (signed).pdf" for x in steps])
     run(scenario())
 
 
 def test_unsigned_write_ups_remind_the_manager(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -572,7 +611,7 @@ def test_unsigned_write_ups_remind_the_manager(tmp_path, engine):
 # ---------------------------------------------------------------- appeals and voids
 
 def test_appeals_upheld_amended_and_voided(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -648,7 +687,7 @@ def test_appeals_upheld_amended_and_voided(tmp_path, engine):
 
 
 def test_hr_adjustments_voids_and_the_as_of_view(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -711,7 +750,7 @@ def test_hr_adjustments_voids_and_the_as_of_view(tmp_path, engine):
 
 
 def test_changing_when_a_write_up_stops_counting_and_voiding_it(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -740,7 +779,7 @@ def test_changing_when_a_write_up_stops_counting_and_voiding_it(tmp_path, engine
 # ---------------------------------------------------------------- who sees what
 
 def test_employees_see_their_own_issued_write_ups_and_points_as_the_policy_allows(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     body = pol.publish()
 
     async def scenario():
@@ -779,7 +818,7 @@ def test_employees_see_their_own_issued_write_ups_and_points_as_the_policy_allow
 
 
 def test_suspensions_stay_with_hr_until_approved_and_a_lower_step_is_a_downgrade(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -807,7 +846,7 @@ def test_suspensions_stay_with_hr_until_approved_and_a_lower_step_is_a_downgrade
 
 
 def test_a_lower_step_than_the_point_system_calls_for_is_a_downgrade(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -833,7 +872,7 @@ def test_a_lower_step_than_the_point_system_calls_for_is_a_downgrade(tmp_path, e
 
 
 def test_an_offence_the_policy_lets_skip_hr_counts_at_once(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     body = pol.publish()
     body["approval"] = {"all": False}
 
@@ -863,7 +902,7 @@ def test_an_offence_the_policy_lets_skip_hr_counts_at_once(tmp_path, engine):
 
 
 def test_workflow_settings_and_the_writeups_kind(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
 
     async def scenario():
         async with HR(tmp_path) as hr:

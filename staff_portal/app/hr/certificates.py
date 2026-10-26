@@ -14,9 +14,10 @@ team, or HR. The photo (or the course's PDF) is cleaned (files.py), a back photo
 front, and it's kept here encrypted while it waits for HR. A reduced copy (2 MB or less) is read by
 Google (svc.google().ocr) and ocr_dates suggests the dates. HR checks the photo against the text
 read, then confirms (or corrects) the date or rejects the card with a reason. Only a confirmed card
-becomes a document (documents.add, then documents.activate with the Connecteam document and the
-expiry date), so a rejected upload never reaches the person's folder; it's deleted after 30 days,
-and so is the text read from a card. While Google isn't set up, HR types the date.
+becomes a document (documents.add, with its Connecteam document and expiry date), so a rejected
+upload never reaches the person's folder; it's deleted after 30 days, and so is the text read from
+a card. While Google isn't set up, HR types the date. The documents part's delivery queue takes
+a confirmed card to Drive and Connecteam, and opens its photo from then on (photo_url).
 
 Status, one per type someone needs (status_of): valid, expiring (inside the first heads-up), expired,
 due (a new hire still inside their days), missing, waiting (for HR) or waived. A type can flag the
@@ -271,10 +272,7 @@ def _lower_first(text: str) -> str:
 def setup(svc) -> None:
     """On start: the tables, and the built-in types the first time."""
     db = svc.db
-    # The documents part makes its own tables when it's wired in; this makes sure the
-    # "certificates" kind exists for confirmed cards either way (it only adds what's missing).
-    documents.setup(db)
-    db.add_schema(SCHEMA)
+    db.add_schema(SCHEMA)   # the documents part (started first) has made the "certificates" kind
     now = time.time()
     for position, (key, name, reader, lasts, due, remind, message, until_valid, olcc, accepts,
                    suggest) in enumerate(BUILT_IN):
@@ -903,13 +901,11 @@ async def confirm(svc, card: dict, values: dict, viewer: access.Viewer) -> dict:
             raise ValueError(LOST)
         on = today(db)
         expires = values["expires"]
+        # Connecteam won't take a card that has already expired: Drive and the portal keep it.
         doc = await documents.add(svc, person, kind, data, card["mime"],
                                   f"{t['name']} - expires {expires.isoformat()}", on.isoformat(),
-                                  viewer, "hr")
-        # Connecteam won't take a card that has already expired: Drive and the portal keep it.
-        ct_document = t["ct_document"] if t["ct_document"] and expires > on else None
-        documents.activate(db, doc, svc.main_settings(), viewer.id, ct_document=ct_document,
-                           ct_expires=expires.isoformat())
+                                  viewer, "hr", ct_expires=expires.isoformat(),
+                                  ct_document=t["ct_document"] if expires > on else None)
         now = time.time()
         db.conn.execute("UPDATE certificates SET status = 'replaced', replaced_by = ?, replaced_at = ? "
                         "WHERE person_id = ? AND type_key = ? AND status = 'confirmed'",
@@ -1258,7 +1254,18 @@ documents.OWNED[documents.CERTIFICATES] = "certificates"
 
 # ---------------------------------------------------------------- what people see
 
-def card_view(db, c: dict, rel: str) -> dict:
+def photo_url(db, c: dict, rel: str, viewer=None) -> str | None:
+    """Where the person or HR opens a card's photo: here while it's only here (waiting for HR,
+    or turned down), then the document it became (documents.view_url: the documents part
+    fetches it from Drive when needed, and logs every look)."""
+    if c["stored"]:
+        return f"/api/people/{c['person_id']}/certificates/{c['id']}/photo"
+    doc = documents.get(db, c["document_id"]) if c["document_id"] else None
+    k = documents.kind(db, doc["kind_id"]) if doc else None
+    return documents.view_url(doc) if doc and documents.may_open(viewer, rel, doc, k) else None
+
+
+def card_view(db, c: dict, rel: str, viewer=None) -> dict:
     """A card as this relation may see it: the photo, number and read text only for the person
     and HR (managers and directors see statuses and dates)."""
     t = type_by_key(db, c["type_key"])
@@ -1274,9 +1281,8 @@ def card_view(db, c: dict, rel: str) -> dict:
         out["reason"] = _unseal(c["reason"], "certificates.reason")
     if rel in ("self", "hr"):
         out["number"] = _unseal(c["number"], "certificates.number")
-        if c["stored"] or c["document_id"]:
-            out["photo"] = f"/api/people/{c['person_id']}/certificates/{c['id']}/photo"
-            out["pdf"] = c["mime"] == files.MIME["pdf"]
+        if photo := photo_url(db, c, rel, viewer):
+            out.update(photo=photo, pdf=c["mime"] == files.MIME["pdf"])
     return out
 
 
@@ -1285,7 +1291,7 @@ def person_view(svc, v: access.Viewer, p: dict, rel: str) -> dict:
     what they can do."""
     db = svc.db
     statuses = status_of(db, p["id"])
-    cards = [card_view(db, dict(r), rel) for r in db.conn.execute(
+    cards = [card_view(db, dict(r), rel, v) for r in db.conn.execute(
         "SELECT * FROM certificates WHERE person_id = ? AND status != 'withdrawn' ORDER BY id DESC "
         "LIMIT 20", (p["id"],))]
     waivers = []
@@ -1303,7 +1309,7 @@ def person_view(svc, v: access.Viewer, p: dict, rel: str) -> dict:
             "can_waive": rel == "hr", "reading": _google(svc) is not None, "tips": list(TIPS)}
 
 
-@server.section("certificates", 20)
+@server.section("certificates", 30)
 def certificates_section(svc, v: access.Viewer, p: dict, rel: str) -> dict | None:
     """On a person's page, when they need a certificate or have one on file."""
     view = person_view(svc, v, p, rel)
@@ -1360,7 +1366,7 @@ def ct_note_text(db, note: dict) -> str:
             "too.")
 
 
-@server.settings_section("certificates", 40)
+@server.settings_section("certificates", 30)
 def certificates_settings(svc, v: access.Viewer) -> dict:
     db = svc.db
     departments = server.departments_list(svc)
@@ -1455,7 +1461,7 @@ async def api_add(request: web.Request):
     except files.FileRefused as err:
         return error(str(err))
     card = await add_card(svc, p, t, data, mime, v, rel)
-    return web.json_response({"card": card_view(db, card, rel)})
+    return web.json_response({"card": card_view(db, card, rel, v)})
 
 
 @rule("signed_in", person=True)
@@ -1464,25 +1470,20 @@ async def api_reading(request: web.Request):
     card = _card_of(request)
     if not card or request[RELATION] not in ADDERS:
         return error(server.NOT_FOUND, 404)
-    return web.json_response({"card": card_view(svc_of(request).db, card, request[RELATION])})
+    return web.json_response({"card": card_view(svc_of(request).db, card, request[RELATION],
+                                                viewer_of(request))})
 
 
 @rule("signed_in", person=True)
 async def api_photo(request: web.Request):
-    """A card's photo or PDF: the person and HR only (managers see its status and dates)."""
+    """A card's photo or PDF while it's only here (waiting for HR, or turned down): the person
+    and HR only (managers see its status and dates). A confirmed card's opens as its document
+    (photo_url)."""
     svc, v = svc_of(request), viewer_of(request)
     card, rel = _card_of(request), request[RELATION]
     if not card or rel not in ("self", "hr"):
         return error(server.NOT_FOUND, 404)
     data, mime = await _load(svc.folder, card), card["mime"]
-    if data is None and card["document_id"]:
-        doc = documents.get(svc.db, card["document_id"])
-        data = doc and await documents.load_copy(svc.folder, doc)
-        if data is None and doc and doc["drive_id"] and (bridge := _google(svc)):
-            try:
-                data = await bridge.download(doc["drive_id"])
-            except gdrive.BridgeError as err:
-                return error(f"Google Drive can't send the photo right now: {err.message}", 503)
     if data is None:
         return error("The photo isn't kept here any more.", 404)
     turn = request.query.get("turn", "0")
@@ -1537,13 +1538,13 @@ async def api_card(request: web.Request):
                  target_id=p["id"], target=p["name"], detail=t["name"], ip=svc.client_ip(request))
     warnings = _list(card["read_warnings"])
     return web.json_response({
-        "card": card_view(db, card, "hr"), "person": {"id": p["id"], "name": p["name"]},
+        "card": card_view(db, card, "hr", v), "person": {"id": p["id"], "name": p["name"]},
         "type": {"key": t["key"], "name": t["name"], "olcc": bool(t["olcc"])},
         "segments": _segments(text), "warnings": warnings,
         "suggest": {"expires": card["read_expires"], "issued": card["read_issued"],
                     "temporary": any("temporary permit" in w for w in warnings),
                     "under_21": any("under 21" in w for w in warnings)},
-        "current": card_view(db, dict(current), "hr") if current else None,
+        "current": card_view(db, dict(current), "hr", v) if current else None,
         "next": f"#/certificates/check/{following['person_id']}/{following['id']}" if following else None,
         "own": card["added_by"] == v.id})
 
@@ -1565,7 +1566,7 @@ async def api_confirm(request: web.Request):
         done = await confirm(svc, card, values, v)
     except ValueError as err:
         return error(str(err))
-    return web.json_response({"ok": True, "card": card_view(svc.db, done, "hr"),
+    return web.json_response({"ok": True, "card": card_view(svc.db, done, "hr", v),
                               "message": f"Confirmed. {request[PERSON]['name']} is told."})
 
 
@@ -1585,7 +1586,7 @@ async def api_reject(request: web.Request):
         done = reject(svc, card, reason, v)
     except ValueError as err:
         return error(str(err))
-    return web.json_response({"ok": True, "card": card_view(svc.db, done, "hr"),
+    return web.json_response({"ok": True, "card": card_view(svc.db, done, "hr", v),
                               "message": f"Not accepted. {request[PERSON]['name']} is told why."})
 
 
@@ -1671,7 +1672,7 @@ async def api_waiting(request: web.Request):
     for r in db.conn.execute("SELECT * FROM certificates WHERE status = 'waiting' AND person_id != ? "
                              "ORDER BY added_at LIMIT 200", (v.id,)):
         p = db.person(r["person_id"])
-        found.append({**card_view(db, dict(r), "hr"), "person_id": r["person_id"],
+        found.append({**card_view(db, dict(r), "hr", v), "person_id": r["person_id"],
                       "name": p["name"] if p else r["person_id"]})
     return web.json_response({"cards": found})
 

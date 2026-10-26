@@ -23,8 +23,10 @@ The flow:
   or be under appeal. Delivery is in person (the employee reads it on the manager's device, may
   comment, types their name and confirms with their kiosk PIN, and their authenticator code if
   they use one) or through the portal (they sign there). Signing confirms receipt, not
-  agreement. An unsigned one reminds the manager; it counts either way. The signed PDF goes to
-  the employee's Discipline folder in Google Drive (documents' "writeups" kind).
+  agreement. An unsigned one reminds the manager; it counts either way. The signed PDF is made
+  through the documents part's PDF queue (queue_pdf: Google Drive makes it, retried and shown on
+  HR's Needs attention page like any upload) and goes to the employee's Discipline folder in
+  Google Drive (documents' "writeups" kind), as does the photo of a page signed on paper.
 - Appeals within 7 days (an HR setting): upheld, amended (through adjustment lines) or voided.
   After any void or reduction, later write-ups are checked again, and HR gets a "check this"
   task where a later step would now be lower. Nothing is undone by itself.
@@ -39,8 +41,6 @@ write-up delivered sees only "Withdrawn on [date]". Text people type is sealed; 
 and statuses stay readable. Issued records are never rewritten: the database refuses it.
 """
 
-import asyncio
-import inspect
 import json
 import logging
 import time
@@ -49,19 +49,16 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
-from . import access, audit, crypto, documents, files, hrdb, notify, probation, server, service, signin
+from . import (access, audit, crypto, documents, files, hrdb, notify, pdfdoc, probation, server,
+               service, signin)
 from .access import Refused, rule
 from .probation import as_date, clean_text, hr_admins, team_managers, tell, today_of
 from .server import error, read_json, read_optional, svc_of, viewer_of
 
-try:   # the point system and its ledger (the points builder's part)
+try:   # the point system and its ledger (the points part, joined later: stand-ins until then)
     from . import points, policy
 except ImportError:
     points = policy = None
-try:   # safe HTML for PDFs (the documents builder's part)
-    from . import pdfdoc
-except ImportError:
-    pdfdoc = None
 
 log = logging.getLogger("staff_portal")
 
@@ -94,8 +91,6 @@ SETTINGS = {"dis_appeal_days": (7, 1, 60), "dis_sign_days": (3, 1, 30)}
 TEXT_LIMIT = 4000
 MAX_POINTS = 100
 MAX_BACK_DAYS = 365               # an incident is recorded within a year of happening
-PDF_WAIT = 600                    # no Google Drive (or no PDF maker yet): look again then
-PDF_TRIES = 8
 WRITEUP_TEXTS = ("what", "policy", "improvement", "consequences", "support")
 
 SCHEMA = """
@@ -178,11 +173,7 @@ CREATE TABLE IF NOT EXISTS writeups (
     witness_id TEXT,
     witness_name TEXT,                   -- sealed
     photo_doc_id INTEGER,                -- the signed paper page (documents)
-    pdf_doc_id INTEGER,                  -- the signed PDF (documents)
-    pdf_status TEXT,                     -- waiting, done, attention
-    pdf_tries INTEGER NOT NULL DEFAULT 0,
-    pdf_due REAL,
-    pdf_error TEXT,
+    pdf_doc_id INTEGER,                  -- the signed PDF (documents; made through its queue)
     reminded_at REAL,
     voided_by TEXT,
     voided_at REAL,
@@ -267,8 +258,7 @@ for _kind, _title in (
         ("writeup_overdue", "A write-up hasn't been signed yet."),
         ("appeal_submitted", "An appeal is waiting for HR."),
         ("appeal_decided", "An appeal was decided."),
-        ("discipline_check", "A later write-up needs checking."),
-        ("writeup_pdf_stuck", "A signed write-up couldn't be filed in Google Drive.")):
+        ("discipline_check", "A later write-up needs checking.")):
     notify.register_kind(_kind, _title)
 
 
@@ -280,7 +270,6 @@ def setup(db) -> None:
 def _part(svc) -> None:
     svc.on_start.append(lambda s: setup(s.db))
     svc.daily_jobs.append(nightly)
-    svc.tick_jobs.append(tick)
 
 
 service.PARTS.append(_part)
@@ -339,10 +328,6 @@ def setting(db, key: str) -> int:
 
 def first_name(person: dict) -> str:
     return (person.get("name") or "").split(" ")[0] or "They"
-
-
-async def _maybe(result):
-    return await result if inspect.isawaitable(result) else result
 
 
 # ---------------------------------------------------------------- the point system, read kindly
@@ -1322,15 +1307,16 @@ def send_to_sign(db, w: dict, viewer, person: dict, today: date) -> None:
 
 
 def made_active(db, w: dict, viewer, method: str, today: date, what: str, **fields) -> None:
-    """Signed, refused with a witness, or signed on paper: it's active, and its PDF is made."""
+    """Signed, refused with a witness, or signed on paper: it's active, and its signed PDF is
+    asked of the documents part's queue (made now, or once Google Drive can)."""
     if w["status"] not in ("approved", "delivered"):
         raise ValueError("It isn't waiting for a signature.")
-    _set(db, w, status="active", pdf_status="waiting", pdf_due=time.time(),
-         **_deliver_fields(db, w, viewer, method, today), **fields)
+    _set(db, w, status="active", **_deliver_fields(db, w, viewer, method, today), **fields)
     event(db, w["person_id"], what, viewer.id, viewer.name, writeup_id=w["id"],
           visibility="employee")
     db.conn.commit()
     close_tasks(db, viewer.id, writeup_id=w["id"], outcome="Write-up delivered")
+    documents.queue_pdf(db, WRITEUPS, w["person_id"], w["id"])
 
 
 def void_writeup(db, w: dict, reason: str, actor_id, actor: str, today: date, *,
@@ -1476,9 +1462,6 @@ def decide_termination(db, task: dict, outcome: str, reason: str, viewer) -> Non
 
 # ---------------------------------------------------------------- the signed PDF
 
-_making: set = set()
-
-
 def pdf_blocks(db, w: dict) -> tuple[str, list]:
     """The signed write-up as plain blocks for pdfdoc.page: only what the employee sees (no
     manager or HR notes)."""
@@ -1506,110 +1489,63 @@ def pdf_blocks(db, w: dict) -> tuple[str, list]:
     if comment:
         blocks += [("heading", "Employee's comment"), ("paragraph", comment)]
     blocks += [("heading", "Signature"),
-               ("paragraph", SIGN_STATEMENT.format(days=setting(db, "dis_appeal_days")))]
+               ("paragraph", SIGN_STATEMENT.format(days=setting(db, "dis_appeal_days"))),
+               ("row", "How", METHODS.get(w["method"] or "", ""))]
     signed = local_time(db, w["signed_at"]) if w["signed_at"] else ""
     if w["method"] == "refused":
         witness = opened(w["witness_name"], "writeup.witness_name") or ""
         blocks += [("paragraph", "The employee refused to sign."),
-                   ("signature", "Witness", f"{witness}, {signed}")]
+                   ("signature", "Witness", witness, signed)]
     elif w["method"] == "paper":
         blocks.append(("paragraph", "Signed on paper. A photo of the signed page is filed with it."))
     else:
         name = opened(w["signed_name"], "writeup.signed_name") or ""
-        blocks.append(("signature", "Employee", f"{name}, {signed} ({METHODS.get(w['method'], '')})"))
-    blocks.append(("signature", "Delivered by", w["delivered_by_name"] or ""))
+        blocks.append(("signature", "Employee", name, signed))
+    blocks.append(("signature", "Delivered by", w["delivered_by_name"] or "",
+                   local_time(db, w["delivered_at"]) if w["delivered_at"] else ""))
     return title, blocks
 
 
-async def make_pdf(svc, writeup_id) -> str:
-    """Make and file the signed PDF: "done", "waiting" (Google Drive or the PDF maker isn't ready;
-    tried again later) or "failed"."""
-    if writeup_id in _making:
-        return "waiting"
-    _making.add(writeup_id)
-    try:
-        db = svc.db
-        w = get_writeup(db, writeup_id)
-        if not w or w["status"] != "active" or w["pdf_doc_id"]:
-            return "done"
-        maker = getattr(documents, "make_pdf", None)
-        adder = getattr(documents, "add_generated", None)
-        unavailable = getattr(documents, "PdfUnavailable", ())
-        if pdfdoc is None or maker is None or adder is None:
-            _pdf_wait(db, w, "The PDF is made once the documents part is installed.")
-            return "waiting"
-        title, blocks = pdf_blocks(db, w)
-        try:
-            data = await _maybe(maker(svc, pdfdoc.page(title, blocks)))
-        except unavailable as err:
-            _pdf_wait(db, w, str(err))
-            return "waiting"
-        except Exception as err:  # noqa: BLE001 - tried again later
-            return _pdf_failed(svc, w, f"The PDF couldn't be made: {err}")
-        if not svc.running:
-            return "waiting"
-        person = db.person(w["person_id"])
-        try:
-            doc = await _maybe(adder(svc, person, WRITEUPS, data, "application/pdf", title,
-                                     w["issued_on"], w["delivered_by"]))
-        except Exception as err:  # noqa: BLE001
-            return _pdf_failed(svc, w, f"The PDF couldn't be filed: {err}")
-        doc_id = doc.get("id") if isinstance(doc, dict) else doc
-        db.conn.execute("UPDATE writeups SET pdf_doc_id = ?, pdf_status = 'done', pdf_error = NULL "
-                        "WHERE id = ?", (doc_id, w["id"]))
-        event(db, w["person_id"], "Signed PDF filed (on its way to Google Drive)", None, "HR portal",
-              writeup_id=w["id"])
-        db.conn.commit()
-        audit.record(db, "Filed a signed write-up", target_id=w["person_id"],
-                     target=person["name"] if person else None)
-        return "done"
-    finally:
-        _making.discard(writeup_id)
-
-
-def _pdf_wait(db, w: dict, why: str) -> None:
-    db.conn.execute("UPDATE writeups SET pdf_status = 'waiting', pdf_due = ?, pdf_error = ? "
-                    "WHERE id = ?", (time.time() + PDF_WAIT, why[:300], w["id"]))
-    db.conn.commit()
-
-
-def _pdf_failed(svc, w: dict, why: str) -> str:
+def pdf_page(svc, row: dict):
+    """The documents queue's PDF maker for a signed write-up (register_pdf_maker; row["ref"] is
+    the write-up): (person, title, HTML, the day it was delivered), or None when there's
+    nothing to make any more (voided, or filed already)."""
     db = svc.db
-    tries = w["pdf_tries"] + 1
-    stuck = tries >= PDF_TRIES
-    db.conn.execute("UPDATE writeups SET pdf_status = ?, pdf_tries = ?, pdf_due = ?, pdf_error = ? "
-                    "WHERE id = ?", ("attention" if stuck else "waiting", tries,
-                                     time.time() + notify.retry_after(tries), why[:300], w["id"]))
+    w = get_writeup(db, row["ref"])
+    if not w or w["status"] != "active" or w["pdf_doc_id"]:
+        return None
+    title, blocks = pdf_blocks(db, w)
+    return (w["person_id"], title, pdfdoc.page(title, blocks, subtitle=svc.property_name() or None),
+            w["issued_on"])
+
+
+def pdf_filed(svc, row: dict, doc: dict) -> None:
+    """The queue made the signed PDF (a "writeups" document, on its way to the Discipline
+    folder in Google Drive): it's the write-up's now."""
+    db = svc.db
+    w = get_writeup(db, row["ref"])
+    if not w or w["pdf_doc_id"]:
+        return
+    db.conn.execute("UPDATE writeups SET pdf_doc_id = ? WHERE id = ?", (doc["id"], w["id"]))
+    event(db, w["person_id"], "Signed PDF filed (on its way to Google Drive)", None, "HR portal",
+          writeup_id=w["id"])
     db.conn.commit()
-    if stuck:
-        tell(db, hr_admins(db, exclude=(w["person_id"],)), "writeup_pdf_stuck", link="#/discipline",
-             title="A signed write-up couldn't be filed. See Discipline.",
-             once=f"pdf-{w['id']}-{tries}")
-    return "failed"
+    person = db.person(w["person_id"])
+    audit.record(db, "Filed a signed write-up", target_id=w["person_id"],
+                 target=person["name"] if person else None)
 
 
-def make_soon(svc, writeup_id) -> None:
-    """Make the PDF in the background now (the tick job tries again if this one can't)."""
-    if svc.running:
-        asyncio.get_running_loop().create_task(_quietly(make_pdf(svc, writeup_id)))
-
-
-async def _quietly(coro) -> None:
-    try:
-        await coro
-    except Exception as err:  # noqa: BLE001 - the tick job tries again
-        log.warning("HR portal: making a write-up PDF failed: %r", err)
+def pdf_state(db, w: dict, rel: str) -> dict:
+    """How the signed PDF is going, from the documents queue's work on it: its status (waiting,
+    done, attention), and for HR the last problem."""
+    work = documents.pdf_work(db, WRITEUPS, w["id"]) if w["status"] != "draft" else None
+    stuck = not w["pdf_doc_id"] and work is not None
+    return {"status": "done" if w["pdf_doc_id"] else work and work["status"],
+            "error": work["error"] if stuck and rel == "hr" else None,
+            "filed": bool(w["pdf_doc_id"]), "attention": stuck and work["status"] == "attention"}
 
 
 # ---------------------------------------------------------------- background work
-
-async def tick(svc, now: float) -> None:
-    """Signed PDFs that are due to be made (again)."""
-    for row in svc.db.conn.execute(
-            "SELECT id FROM writeups WHERE status = 'active' AND pdf_doc_id IS NULL AND "
-            "pdf_status = 'waiting' AND pdf_due <= ? ORDER BY id LIMIT 3", (now,)).fetchall():
-        await make_pdf(svc, row["id"])
-
 
 async def nightly(svc) -> None:
     reminders(svc.db, today_of(svc.db))
@@ -1734,18 +1670,19 @@ def writeup_view(db, svc, w: dict, rel: str, viewer, person: dict, today: date) 
                      steps=[{"key": s["key"], "name": s.get("name") or s["key"]}
                             for s in steps(body) if not w["recommended_key"] or
                             rank(body, s["key"]) <= rank(body, w["recommended_key"])],
-                     pdf={"status": w["pdf_status"], "error": w["pdf_error"] if rel == "hr" else None,
-                          "filed": bool(w["pdf_doc_id"])},
+                     pdf=pdf_state(db, w, rel),
                      history=history_view(db, events_of(db, writeup_id=w["id"]), rel))
     else:
         found["history"] = history_view(db, events_of(db, writeup_id=w["id"]), "self")
     if rel == "hr":
         found["hr_note"] = opened(w["hr_note"], "writeup.hr_note") or ""
         found["void_reason"] = opened(w["void_reason"], "writeup.void_reason")
-    view_url = getattr(documents, "view_url", None)
-    if view_url and w["pdf_doc_id"]:
-        doc = documents.get(db, w["pdf_doc_id"])
-        found["pdf_url"] = view_url(doc) if doc else None
+    # The signed PDF, and the photo of a page signed on paper: documents of the "writeups" kind,
+    # opened through the documents part (can_open_file decides, every look is logged).
+    for key, column in (("pdf_url", "pdf_doc_id"), ("photo_url", "photo_doc_id")):
+        doc = documents.get(db, w[column]) if w[column] else None
+        if doc and documents.may_open(viewer, rel, doc, documents.kind(db, doc["kind_id"])):
+            found[key] = documents.view_url(doc)
     found["can"] = abilities(db, w, rel, viewer, today)
     return found
 
@@ -1768,7 +1705,7 @@ def abilities(db, w: dict, rel: str, viewer, today: date) -> dict:
             and viewer.id not in (w["created_by"], w["edited_by"], w["approved_by"]),
             "void": rel == "hr" and status != "voided",
             "change_ends": rel == "hr" and status in ("delivered", "active"),
-            "pdf_retry": rel == "hr" and w["pdf_status"] == "attention"}
+            "pdf_retry": rel == "hr" and pdf_state(db, w, rel)["attention"]}
 
 
 def incident_view(db, inc: dict, rel: str, viewer, person: dict, today: date) -> dict:
@@ -1933,7 +1870,7 @@ probation.on_pass_clear.append(_clear_probation_points)
 
 # ---------------------------------------------------------------- the person page and to-dos
 
-@server.section("discipline", 40)
+@server.section("discipline", 50)
 def discipline_section(svc, v, p: dict, rel: str) -> dict | None:
     if rel is None:
         return None
@@ -2026,18 +1963,16 @@ def hr_queue(db, v) -> dict:
     for t in db.conn.execute("SELECT * FROM discipline_tasks WHERE status = 'open' AND person_id != ? "
                              "ORDER BY id", (v.id,)):
         found["tasks"].append({**task_view(db, t, body), "name": names.get(t["person_id"])})
-    for w in db.conn.execute("SELECT * FROM writeups WHERE status = 'active' AND pdf_status = "
-                             "'attention' AND person_id != ?", (v.id,)):
-        found["pdfs"].append({"id": w["id"], "person_id": w["person_id"],
-                              "name": names.get(w["person_id"]), "error": w["pdf_error"]})
+    for row in documents.pdf_works(db, WRITEUPS, "attention"):
+        if row["person_id"] != v.id:
+            found["pdfs"].append({"id": int(row["ref"]), "person_id": row["person_id"],
+                                  "name": names.get(row["person_id"]), "error": row["error"]})
     for w in db.conn.execute("SELECT * FROM writeups WHERE status = 'delivered' AND reminded_at IS "
                              "NOT NULL AND person_id != ?", (v.id,)):
         found["unsigned"].append({"id": w["id"], "person_id": w["person_id"],
                                   "name": names.get(w["person_id"]), "issued_on": w["issued_on"]})
     found["probation"] = probation.hr_queue(db, v)
-    found["waiting_pdfs"] = db.conn.execute(
-        "SELECT COUNT(*) FROM writeups WHERE status = 'active' AND pdf_doc_id IS NULL AND "
-        "pdf_status = 'waiting'").fetchone()[0]
+    found["waiting_pdfs"] = len(documents.pdf_works(db, WRITEUPS, "waiting"))
     return found
 
 
@@ -2382,7 +2317,6 @@ async def api_sign_in_person(request):
                 signed_name=seal(name, "writeup.signed_name"),
                 comment=seal(comment or None, "writeup.comment"))
     _done(svc, request, v, person, "Write-up signed in person")
-    make_soon(svc, w["id"])
     return _writeup_reply(svc, w["id"], rel, v, person, "Signed. Thank you.")
 
 
@@ -2402,7 +2336,6 @@ async def api_sign(request):
                 signed_at=time.time(), signed_name=seal(name, "writeup.signed_name"),
                 comment=seal(comment or None, "writeup.comment"))
     _done(svc, request, v, person, "Signed a write-up")
-    make_soon(svc, w["id"])
     return _writeup_reply(svc, w["id"], rel, v, person, "Signed. Thank you.")
 
 
@@ -2435,7 +2368,6 @@ async def api_refused(request):
                 signed_at=time.time(), witness_id=witness_id,
                 witness_name=seal(typed, "writeup.witness_name"))
     _done(svc, request, v, person, "Write-up refused, witnessed")
-    make_soon(svc, w["id"])
     return _writeup_reply(svc, w["id"], rel, v, person, "Recorded. The write-up is active.")
 
 
@@ -2447,21 +2379,19 @@ async def api_paper(request):
         return error("It isn't waiting for a signature.", 409)
     if request.content_length is None or request.content_length > files.PHOTO_LIMIT:
         return error(f"That file is too big (more than {files.PHOTO_LIMIT // 2**20} MB).", 413)
-    adder = getattr(documents, "add_generated", None)
-    if adder is None:
-        return error("Files can't be filed yet: the documents part isn't installed.", 503)
     try:
         data, mime = await files.clean_upload(await request.read(), files.PHOTO_LIMIT)
     except files.FileRefused as err:
         return error(str(err))
-    title = f"{w['step_name'] or 'Write-up'} (signed on paper)"
-    doc = await _maybe(adder(svc, person, WRITEUPS, data, mime, title,
-                             today_of(svc.db).isoformat(), v.id))
+    # A document of the "writeups" kind, straight to the Discipline folder in Drive. Keyed by
+    # the write-up, so sending it twice at once files it once.
+    doc = await documents.add_generated(
+        svc, person, WRITEUPS, data, mime, f"{w['step_name'] or 'Write-up'} (signed on paper)",
+        today_of(svc.db), v.id, upload_id=f"writeup-{w['id']}-paper")
     w = get_writeup(svc.db, w["id"])
     made_active(svc.db, w, v, "paper", today_of(svc.db), "Signed on paper (photo filed)",
-                signed_at=time.time(), photo_doc_id=doc.get("id") if isinstance(doc, dict) else doc)
+                signed_at=time.time(), photo_doc_id=doc["id"])
     _done(svc, request, v, person, "Write-up signed on paper (photo filed)")
-    make_soon(svc, w["id"])
     return _writeup_reply(svc, w["id"], rel, v, person, "Filed. The write-up is active.")
 
 
@@ -2500,13 +2430,12 @@ async def api_appeal(request):
 
 @guarded("hr")
 async def api_pdf_retry(request):
+    """HR's Retry on a signed PDF that needs attention (the same as on Needs attention)."""
     svc, v, w, person, rel = _writeup(request, hr=True)
-    if w["pdf_status"] != "attention":
+    work = documents.pdf_work(svc.db, WRITEUPS, w["id"])
+    if w["pdf_doc_id"] or not work or not documents.retry(svc.db, work["id"]):
         return error("There's nothing to retry.", 409)
-    svc.db.conn.execute("UPDATE writeups SET pdf_status = 'waiting', pdf_tries = 0, pdf_due = ? "
-                        "WHERE id = ?", (time.time(), w["id"]))
-    svc.db.conn.commit()
-    make_soon(svc, w["id"])
+    _done(svc, request, v, person, "Tried a signed write-up's PDF again")
     return _writeup_reply(svc, w["id"], rel, v, person, "It will be tried again now.")
 
 
@@ -2660,5 +2589,6 @@ def can_open_file(viewer, rel: str | None, doc: dict) -> bool:
     return bool(row) and row["status"] != "voided" and rel in ("self", "manager", "director")
 
 
-if (_register := getattr(documents, "register_kind", None)) is not None:
-    _register(WRITEUPS, "Write-ups", "managers", "Discipline", "discipline", can_open=can_open_file)
+documents.register_kind(WRITEUPS, "Write-ups", "managers", "Discipline", "discipline",
+                        can_open=can_open_file)
+documents.register_pdf_maker(WRITEUPS, pdf_page, done=pdf_filed)

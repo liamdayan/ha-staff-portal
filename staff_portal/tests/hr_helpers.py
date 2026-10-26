@@ -21,7 +21,7 @@ from test_wristbands_server import Portal, free_port
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import transfer  # noqa: E402
-from hr import crypto, hrdb, notify, people, server as hr_server, signin, totp  # noqa: E402
+from hr import crypto, delivery, hrdb, notify, people, server as hr_server, signin, totp  # noqa: E402
 from hr.service import HRService  # noqa: E402
 
 HOST = "hr.example.com"
@@ -248,6 +248,13 @@ class HR:
             return resp.status, json.loads(raw)
         except ValueError:
             return resp.status, raw.decode()
+
+
+async def queue_done(hr: HR, now: float | None = None) -> None:
+    """The documents part's delivery queue has done what's due: PDFs made, files sent."""
+    await delivery.settle(hr.svc)
+    await delivery.run_due(hr.svc, now)
+    await delivery.settle(hr.svc)
 
 
 def next_code(hr: HR, person_id, secret) -> str:

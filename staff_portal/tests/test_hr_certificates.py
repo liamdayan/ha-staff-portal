@@ -377,18 +377,22 @@ def test_employee_adds_a_card_google_reads_it_hr_corrects_and_confirms(tmp_path,
             assert documents.title_of(doc) == "OLCC Service Permit - expires 2029-06-13"
             assert [d["target"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["drive"]
             await delivery.run_due(hr.svc)
+            await delivery.settle(hr.svc)
             names = [f["name"] for f in fake.files.values() if f["data"]]
             assert names == [f"{certificates.today(hr.hdb).isoformat()} OLCC Service Permit - expires 2029-06-13.jpg"]
-            # The photo now comes from the document's own copy.
-            resp = await hr.client.get(f"{path}/photo", headers={
-                "Host": "hr.example.com", "Cookie": f"{signin.COOKIE}={sessions['ana']}"})
-            assert resp.status == 200 and (await resp.read())[:3] == b"\xff\xd8\xff"
             # Deciding twice doesn't work.
             assert (await hr.call("POST", f"{path}/confirm", {"expires": "2029-06-13"}, sessions["hana"]))[0] == 409
             # Ana sees it, with its number and photo; her manager sees the dates only.
             _, mine, _ = await hr.call("GET", "/api/people/301/certificates", cookie=sessions["ana"])
             confirmed = [c for c in mine["cards"] if c["id"] == card["id"]][0]
-            assert confirmed["number"] == "123456" and confirmed["photo"]
+            assert confirmed["number"] == "123456" and confirmed["photo"] == documents.view_url(doc)
+            # The photo now opens as the document it became (its own copy, then Drive's).
+            ana = {"Host": "hr.example.com", "Cookie": f"{signin.COOKIE}={sessions['ana']}"}
+            resp = await hr.client.get(confirmed["photo"], headers=ana)
+            assert resp.status == 200 and (await resp.read())[:3] == b"\xff\xd8\xff"
+            assert (await hr.client.get(f"{path}/photo", headers=ana)).status == 404
+            max_ = {"Host": "hr.example.com", "Cookie": f"{signin.COOKIE}={sessions['max']}"}
+            assert (await hr.client.get(confirmed["photo"], headers=max_)).status == 404
             _, team, _ = await hr.call("GET", "/api/people/301/certificates", cookie=sessions["max"])
             confirmed = [c for c in team["cards"] if c["id"] == card["id"]][0]
             assert "number" not in confirmed and "photo" not in confirmed and confirmed["expires"] == "2029-06-13"
@@ -731,6 +735,7 @@ def test_connecteam_copy_and_the_daily_status_check(tmp_path, monkeypatch):
             status, _, _ = await hr.call("POST", path, {"expires": "2029-06-14"}, sessions["hana"])
             assert status == 200
             await delivery.run_due(hr.svc)
+            await delivery.settle(hr.svc)
             assert [(u, d) for u, d, _ in fake.entries] == [(301, 52114)]
             assert fake.entries[0][2]["expiresAt"] > time.time()
             # ...an expired one doesn't (Connecteam refuses past dates): Drive and the portal keep it.

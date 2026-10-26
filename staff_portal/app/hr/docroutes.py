@@ -136,7 +136,7 @@ def addable(kinds: list[dict], rel: str | None, person: dict) -> list[dict]:
     return [{"id": k["id"], "name": k["name"]} for k in kinds if documents.can_upload(rel, k)]
 
 
-@server.section("documents", 50)
+@server.section("documents", 20)
 def documents_section(svc, v: access.Viewer, p: dict, rel: str) -> dict | None:
     db = svc.db
     kinds = section_kinds(db, rel)
@@ -441,6 +441,8 @@ def _item(svc, viewer, row: dict) -> dict | None:
         title = RESTRICTED_SHOWN if doc["restricted"] else f"{k['name'] if k else 'Document'}: " \
                                                            f"{documents.title_of(doc)}"
     elif row["target"] == "pdf":
+        if str(row["person_id"]) == viewer.id:
+            return None   # their own write-up or review: another HR admin sees to it
         made_for = documents.kind_by_key(db, row["kind_key"] or "")
         title = f"A PDF for {made_for['name'] if made_for else 'another part of the portal'}"
     return {"id": row["id"], "person_id": row["person_id"], "name": svc.person_name(row["person_id"]),
@@ -563,7 +565,7 @@ def document_todos(svc, v: access.Viewer) -> list[dict]:
 
 # ---------------------------------------------------------------- kinds (HR settings)
 
-@server.settings_section("documents", 50)
+@server.settings_section("documents", 20)
 def documents_settings(svc, v: access.Viewer) -> dict:
     db = svc.db
     settings = svc.main_settings()

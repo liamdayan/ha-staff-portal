@@ -28,18 +28,18 @@ The flow: a self-review first (annual reviews only, by default) -> the writer fi
 which saves as they go -> HR's second approval (end-of-probation reviews, by default) -> the
 writer shares it and records the meeting date -> the employee reads it, comments, and
 acknowledges it ("received", not "agree") or refuses -> closed, and its PDF goes to the person's
-Reviews folder in Google Drive (the documents part). An end-of-probation review's recommendation
-(pass, extend or end) goes to the probation part once it's final; HR confirms the outcome there.
+Reviews folder in Google Drive (the documents part's PDF queue: made as soon as Google can,
+retried and shown on HR's Needs attention page like any upload). An end-of-probation review's
+recommendation (pass, extend or end) goes to the probation part once it's final; HR confirms the
+outcome there.
 
 Ratings, dates and statuses stay readable; everything people type is encrypted. A shared review
 is never rewritten (a trigger refuses it); comments and form versions are only ever added. The
-other parts used here (probation, discipline, certificates, documents, pdfdoc) are looked up when
-needed, and one that isn't there shows "Not available" instead of failing.
+parts read here (probation, discipline, certificates) are looked up when needed, and one that
+fails (or isn't there) shows "Not available" instead of failing the review.
 """
 
-import html
 import importlib
-import inspect
 import json
 import logging
 import re
@@ -48,7 +48,7 @@ from datetime import date, timedelta
 
 from aiohttp import web
 
-from . import access, audit, crypto, notify, people
+from . import access, audit, crypto, documents, notify, pdfdoc, people
 from .access import Refused, rule
 from .server import (PERSON, add_routes, departments_list, error, group_names, read_json, section,
                      settings_section, svc_of, todo, viewer_of)
@@ -92,10 +92,7 @@ GOAL_TEXT = 300
 MAX_FORMS = 20
 CATCH_UP_DAYS = 7          # a scheduled review the nightly run missed still opens this late
 ANNUAL_MIN_DAYS = 183      # a fixed-month annual review skips people who started this recently
-PDF_WAIT = 3600            # Google or the documents part not ready: the PDF is tried again then
-PDF_RETRY = (300, 1800, 7200, 21600)   # after a failure, then daily
 EDIT_AUDIT_GAP = 900       # saving as they type: one audit line per person and review this often
-NO_PDF_YET = "Saving review PDFs to Google Drive isn't available yet."
 
 # HR settings, with the recommended answers to questions 40 to 45.
 SETTINGS = {
@@ -206,10 +203,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     cancelled_at REAL,
     cancel_reason TEXT,                  -- encrypted
     recommendation_sent_at REAL,         -- end of probation: passed to the probation part
-    pdf_doc_id INTEGER,                  -- the final PDF (documents)
-    pdf_tries INTEGER NOT NULL DEFAULT 0,
-    pdf_next_at REAL,
-    pdf_error TEXT,
+    pdf_doc_id INTEGER,                  -- the final PDF (documents; made through its queue)
     created_by TEXT,
     created_at REAL NOT NULL
 );
@@ -217,7 +211,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS reviews_source ON reviews (person_id, source)
     WHERE source IS NOT NULL;
 CREATE INDEX IF NOT EXISTS reviews_person ON reviews (person_id, due);
 CREATE INDEX IF NOT EXISTS reviews_status ON reviews (status, due);
-CREATE INDEX IF NOT EXISTS reviews_pdf ON reviews (pdf_next_at) WHERE pdf_next_at IS NOT NULL;
 -- A shared review is never rewritten.
 CREATE TRIGGER IF NOT EXISTS reviews_issued BEFORE UPDATE OF person_id, kind, form_id, dept,
     ratings, texts, self_ratings, self_texts, overall, overall_reason, recommendation, extend_to
@@ -268,16 +261,13 @@ for _kind, _title in (
 
 
 def other(name: str):
-    """Another part of the HR portal, or None while it isn't here (each part arrives on its own).
-    Its functions are looked up when used, so a missing one shows "Not available"."""
+    """Another part of the HR portal this one reads (probation, discipline, certificates), or None
+    when it isn't there. Looked up when used, so one that's missing or fails shows "Not
+    available" rather than failing the review."""
     try:
         return importlib.import_module(f"{__package__}.{name}")
     except ImportError:
         return None
-
-
-async def _done(result):
-    return await result if inspect.isawaitable(result) else result
 
 
 # ---------------------------------------------------------------- small helpers
@@ -743,13 +733,15 @@ def probation_rows(db, until: date) -> list[dict]:
 
 
 def follow_probation(db, today: date) -> int:
-    """Open end-of-probation reviews, and move open ones whose probation end date moved."""
+    """Open end-of-probation reviews, and move open ones whose probation end date moved (until
+    their recommendation has gone to HR: HR extending it then is the outcome). When HR extends a
+    probation after its review closed, another review opens for the new end."""
     open_days, opened = number(db, "reviews_open_days"), 0
     current = getattr(other("probation"), "current", None)
     if current and setting(db, "reviews_probation") == "1":
         for r in [dict(x) for x in db.conn.execute(
                 "SELECT * FROM reviews WHERE kind = 'probation' AND status IN ('writing', 'approval', "
-                "'ready') AND probation_id IS NOT NULL")]:
+                "'ready') AND probation_id IS NOT NULL AND recommendation_sent_at IS NULL")]:
             try:
                 now_on = current(db, r["person_id"], today)
             except Exception as err:  # noqa: BLE001
@@ -764,13 +756,17 @@ def follow_probation(db, today: date) -> int:
         person = db.person(row["person_id"])
         if not person or person["archived"]:
             continue
-        source = f"probation:{row['probation_id']}"
-        found = db.conn.execute("SELECT * FROM reviews WHERE person_id = ? AND source = ?",
-                                (person["id"], source)).fetchone()
+        source, end = f"probation:{row['probation_id']}", (row["end"] or row["due"]).isoformat()
+        found = db.conn.execute("SELECT * FROM reviews WHERE person_id = ? AND probation_id = ? AND "
+                                "kind = 'probation' ORDER BY id DESC LIMIT 1",
+                                (person["id"], row["probation_id"])).fetchone()
         if found:
-            if found["status"] in MOVABLE and found["due"] != row["due"].isoformat():
+            if found["status"] in MOVABLE and not found["recommendation_sent_at"] and \
+                    found["due"] != row["due"].isoformat():
                 move(db, dict(found), row["due"], row["end"])
-            continue
+            if found["status"] != "closed" or (found["period_end"] or "") >= end:
+                continue
+            source = f"{source}:{end}"   # HR extended it after its review closed
         if row["due"] > today + timedelta(days=open_days):
             continue
         start = _date(person["start_date"]) or (row["end"] or row["due"]) - timedelta(days=90)
@@ -858,7 +854,7 @@ def pass_waiting(db) -> int:
         "SELECT * FROM reviews WHERE kind = 'probation' AND status IN ('ready', 'shared', 'closed') "
         "AND recommendation_sent_at IS NULL")]
     return sum(1 for r in rows if r["recommendation"] in PROBATION_CHOICES
-               and pass_recommendation(db, r, r["approved_by"] or r["submitted_by"]))
+               and pass_recommendation(db, r, r["submitted_by"] or r["approved_by"]))
 
 
 def remind(db, today: date, now: float | None = None) -> int:
@@ -952,8 +948,8 @@ def pdf_blocks(db, review: dict, person: dict, names: dict) -> list[tuple]:
             blocks.append(("row", "Rating", f"{n} of {len(scale)}: {scale[n - 1]}"))
         value = texts.get(s["key"])
         if s["kind"] == "goals":
-            for goal in value if isinstance(value, list) else []:
-                blocks.append(("paragraph", f"- {goal}"))
+            if isinstance(value, list) and value:
+                blocks.append(("list", value))
         elif isinstance(value, str) and value:
             blocks.append(("paragraph", value))
     o = overall_of(review, body, sections)
@@ -980,85 +976,33 @@ def pdf_blocks(db, review: dict, person: dict, names: dict) -> list[tuple]:
     return blocks
 
 
-def page_html(title: str, blocks: list[tuple]) -> str:
-    """The PDF's HTML: the documents part's pdfdoc.page when it's here, else the same here.
-    Everything is escaped: nothing people typed is ever HTML."""
-    maker = getattr(other("pdfdoc"), "page", None)
-    if maker is not None:
-        return maker(title, blocks)
-    esc = html.escape
-    parts = [f"<h1>{esc(title)}</h1>"]
-    for block in blocks:
-        if block[0] == "heading":
-            parts.append(f"<h2>{esc(block[1])}</h2>")
-        elif block[0] == "paragraph":
-            parts += [f"<p>{esc(line)}</p>" for line in str(block[1]).split("\n")]
-        elif block[0] == "row":
-            parts.append(f"<p><b>{esc(block[1])}:</b> {esc(block[2])}</p>")
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(title)}</title></head>'
-            f"<body>{''.join(parts)}</body></html>")
-
-
-def _pdf_later(db, review: dict, message: str, now: float, failed: bool) -> None:
-    tries = review["pdf_tries"] + (1 if failed else 0)
-    wait = (PDF_RETRY[tries - 1] if tries <= len(PDF_RETRY) else DAY) if failed else PDF_WAIT
-    db.conn.execute("UPDATE reviews SET pdf_tries = ?, pdf_next_at = ?, pdf_error = ? WHERE id = ?",
-                    (tries, now + wait, message[:300], review["id"]))
-    db.conn.commit()
-
-
-async def make_pdf(svc, review: dict, now: float | None = None) -> bool:
-    """A closed review's final PDF, made through Google Drive (documents.make_pdf) and saved to
-    the person's Reviews folder (documents.add_generated). Kept and tried again later when that
-    can't happen yet."""
-    db, now = svc.db, time.time() if now is None else now
-    docs = other("documents")
-    maker, adder = getattr(docs, "make_pdf", None), getattr(docs, "add_generated", None)
-    person = db.person(review["person_id"])
-    if maker is None or adder is None or person is None:
-        _pdf_later(db, review, NO_PDF_YET, now, False)
-        return False
-    # Claimed first, so a second look meanwhile leaves it alone.
-    db.conn.execute("UPDATE reviews SET pdf_next_at = ? WHERE id = ?", (now + 600, review["id"]))
-    db.conn.commit()
+def pdf_page(svc, row: dict):
+    """The documents queue's PDF maker for a closed review (register_pdf_maker; row["ref"] is the
+    review): (person, title, HTML, the day it closed), or None when there's nothing to make any
+    more (already saved)."""
+    db = svc.db
+    review = get(db, row["ref"])
+    person = review and db.person(review["person_id"])
+    if not review or not person or review["status"] != "closed" or review["pdf_doc_id"]:
+        return None
     title = pdf_title(review)
-    unavailable = getattr(docs, "PdfUnavailable", None)
-    try:
-        page = page_html(f"{title}: {person['name']}",
-                         pdf_blocks(db, review, person, group_names(svc)))
-        data = await _done(maker(svc, page))
-        doc = await _done(adder(svc, person, DOC_KIND, data, "application/pdf", title,
-                                notify.local_day(db, review["closed_at"]), review["closed_by"]))
-    except Exception as err:  # noqa: BLE001 - kept, and tried again
-        waiting = isinstance(unavailable, type) and isinstance(err, unavailable)
-        if not waiting:
-            log.warning("HR reviews: making a review's PDF failed: %r", err)
-        _pdf_later(db, get(db, review["id"]), str(err) if waiting else
-                   "Making the PDF failed. It's tried again later.", now, not waiting)
-        return False
-    db.conn.execute("UPDATE reviews SET pdf_doc_id = ?, pdf_next_at = NULL, pdf_error = NULL "
-                    "WHERE id = ?", (doc["id"] if isinstance(doc, dict) else doc, review["id"]))
+    blocks = pdf_blocks(db, review, person, group_names(svc))
+    page = pdfdoc.page(f"{title}: {person['name']}", blocks, subtitle=svc.property_name() or None)
+    return person, title, page, notify.local_day(db, review["closed_at"])
+
+
+def pdf_saved(svc, row: dict, doc: dict) -> None:
+    """The queue made the final PDF (a "reviews" document, on its way to the Reviews folder in
+    Google Drive): it's the review's now."""
+    db = svc.db
+    review = get(db, row["ref"])
+    if not review or review["pdf_doc_id"]:
+        return
+    db.conn.execute("UPDATE reviews SET pdf_doc_id = ? WHERE id = ?", (doc["id"], review["id"]))
     db.conn.commit()
-    audit.record(db, "Saved a review's PDF", target_id=person["id"], target=person["name"],
-                 detail=title)
-    return True
-
-
-async def make_pdfs(svc, now: float | None = None) -> int:
-    now = time.time() if now is None else now
-    rows = [dict(r) for r in svc.db.conn.execute(
-        "SELECT * FROM reviews WHERE status = 'closed' AND pdf_doc_id IS NULL AND pdf_next_at <= ? "
-        "ORDER BY pdf_next_at LIMIT 3", (now,))]
-    made = 0
-    for r in rows:
-        if svc.running:
-            made += await make_pdf(svc, r, now)
-    return made
-
-
-async def tick(svc, now: float) -> None:
-    """Every half minute (service.tick_jobs): PDFs of closed reviews that are due."""
-    await make_pdfs(svc, now)
+    person = db.person(review["person_id"])
+    audit.record(db, "Saved a review's PDF", target_id=review["person_id"],
+                 target=person["name"] if person else None, detail=pdf_title(review))
 
 
 # ---------------------------------------------------------------- what each viewer sees
@@ -1145,7 +1089,7 @@ def side_panel(db, review: dict, person: dict, today: date) -> dict:
     (discipline), certificates now (certificates), and the last review's goals. A part that isn't
     here (or fails) is None, shown as "Not available"."""
     start = _date(review["period_start"]) or today
-    end = _date(review["period_end"]) or today
+    end = min(_date(review["period_end"]) or today, today)   # points now, not on a later due day
     found = {"period": {"start": start.isoformat(), "end": end.isoformat()}}
     fn = getattr(other("discipline"), "summary_for_review", None)
     try:
@@ -1254,22 +1198,20 @@ def view(svc, viewer, review: dict, person: dict, rel: str) -> dict:
         out["assigned"] = review["assigned"] or "auto"
         out["recommendation_sent"] = bool(review["recommendation_sent_at"])
     if shared:
-        out["pdf"] = pdf_state(db, review, rel)
+        out["pdf"] = pdf_state(db, viewer, review, rel)
     return out
 
 
-def pdf_state(db, review: dict, rel: str) -> dict:
+def pdf_state(db, viewer, review: dict, rel: str) -> dict:
+    """The final PDF: its link once it's saved (the documents part opens it, by can_open), and
+    for HR how its making is going (the documents queue's last problem)."""
     found = {"ready": bool(review["pdf_doc_id"]), "link": None}
-    docs = other("documents")
-    url = getattr(docs, "view_url", None)
-    if review["pdf_doc_id"] and url is not None:
-        try:
-            doc = docs.get(db, review["pdf_doc_id"])
-            found["link"] = url(doc) if doc else None
-        except Exception as err:  # noqa: BLE001 - the link is left out
-            log.info("HR reviews: no link to a review's PDF: %r", err)
-    if rel == "hr" and not review["pdf_doc_id"] and review["status"] == "closed":
-        found["error"] = review["pdf_error"] or "Waiting to be made."
+    doc = documents.get(db, review["pdf_doc_id"]) if review["pdf_doc_id"] else None
+    if doc and documents.may_open(viewer, rel, doc, documents.kind(db, doc["kind_id"])):
+        found["link"] = documents.view_url(doc)
+    if rel == "hr" and not doc and review["status"] == "closed":
+        work = documents.pdf_work(db, DOC_KIND, review["id"])
+        found["error"] = (work and work["error"]) or "Waiting to be made."
     return found
 
 
@@ -1348,13 +1290,7 @@ def review_todos(svc, v) -> list[dict]:
             found.append({"text": "Please fill in your self-review.", "link": "#/reviews"})
         else:
             found.append({"text": "You have a review to read and acknowledge.", "link": "#/reviews"})
-    if v.is_hr:
-        stuck = db.conn.execute("SELECT COUNT(*) FROM reviews WHERE status = 'closed' AND "
-                                "pdf_doc_id IS NULL AND pdf_tries >= 3").fetchone()[0]
-        if stuck:
-            found.append({"text": f"{stuck} closed review{'s' if stuck != 1 else ''} couldn't be "
-                                  "saved to Google Drive yet. They're tried again.",
-                          "link": "#/reviews"})
+    if v.is_hr:   # (a final PDF that keeps failing is on Needs attention, with the documents')
         unsent = db.conn.execute("SELECT COUNT(*) FROM reviews WHERE kind = 'probation' AND status IN "
                                  "('ready', 'shared', 'closed') AND recommendation_sent_at IS NULL"
                                  ).fetchone()[0]
@@ -1706,7 +1642,7 @@ async def api_approve(request: web.Request):
     review = _save(db, review, {"status": "ready", "approved_by": v.id, "approved_by_name": v.name,
                                 "approved_at": time.time(), "returned_note": None})
     changed(svc, request, v, review, person, "Approved a review")
-    pass_recommendation(db, review, v.id)
+    pass_recommendation(db, review, review["submitted_by"] or v.id)   # the writer recommended it
     if review["submitted_by"]:
         notify.notify(review["submitted_by"], "review_approved", link=f"#/reviews/{review['id']}",
                       db=db, title=f"{person['name']}'s review was approved: share it at your meeting.",
@@ -1757,13 +1693,13 @@ async def api_share(request: web.Request):
 def close(svc, v, review: dict, person: dict, how: str, comment: str | None = None,
           note: str | None = None) -> dict:
     db, now = svc.db, time.time()
-    columns = {"status": "closed", "ack": how, "ack_at": now, "closed_by": v.id, "closed_at": now,
-               "pdf_next_at": now}
+    columns = {"status": "closed", "ack": how, "ack_at": now, "closed_by": v.id, "closed_at": now}
     if comment:
         columns["employee_comment"] = crypto.seal_text(comment, "reviews.employee_comment")
     if note:
         columns["close_note"] = crypto.seal_text(note, "reviews.close_note")
     review = _save(db, review, columns)
+    documents.queue_pdf(db, DOC_KIND, person["id"], review["id"])   # the final PDF, for Drive
     for pid in {*(hr_admins(db, but=[person["id"]])), review["submitted_by"] or ""} - {"", v.id}:
         notify.notify(pid, "review_acknowledged", link=f"#/reviews/{review['id']}", db=db,
                       title=f"{person['name']}'s review is closed: {ACK_WORDS[how].lower()}.",
@@ -1989,19 +1925,21 @@ def setup(db) -> None:
 def attach(svc) -> None:
     svc.on_start.append(lambda s: setup(s.db))
     svc.daily_jobs.append(nightly)
-    svc.tick_jobs.append(tick)
 
 
-def register_documents() -> bool:
-    """Final PDFs are documents of their own kind ("reviews": the Reviews folder in Drive), shown
-    here rather than in the Documents section, opened by those who see the review. False while
-    the documents part can't take it yet."""
-    register = getattr(other("documents"), "register_kind", None)
-    if register is None:
-        return False
-    register(DOC_KIND, "Reviews", "managers", "Reviews", "reviews", can_open=can_open)
-    return True
+def reminding(db, row: dict) -> bool:
+    """probation.review_reminds: an end-of-probation review for this probation and its end date
+    is here (and not cancelled), so its reminders tell the writer, and HR when it's late."""
+    return setting(db, "reviews_probation") == "1" and db.conn.execute(
+        "SELECT 1 FROM reviews WHERE probation_id = ? AND status != 'cancelled' AND period_end >= ?",
+        (row["id"], row["ends"])).fetchone() is not None
 
 
 PARTS.append(attach)
-register_documents()
+if (_probation := other("probation")) is not None:
+    _probation.review_reminds.append(reminding)
+# Final PDFs are documents of their own kind ("reviews": the Reviews folder in Drive), shown here
+# rather than in the Documents section, opened by those who see the review, and made through the
+# documents part's PDF queue.
+documents.register_kind(DOC_KIND, "Reviews", "managers", "Reviews", "reviews", can_open=can_open)
+documents.register_pdf_maker(DOC_KIND, pdf_page, done=pdf_saved)

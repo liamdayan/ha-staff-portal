@@ -39,7 +39,7 @@ def section(page, name):
 
 
 def test_introductory_periods_follow_the_start_date_and_department(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -89,7 +89,7 @@ def test_introductory_periods_follow_the_start_date_and_department(tmp_path, eng
 
 
 def test_extensions_keep_to_the_policy_and_the_employee_acknowledges(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -145,7 +145,7 @@ def test_extensions_keep_to_the_policy_and_the_employee_acknowledges(tmp_path, e
 
 
 def test_extensions_never_pass_the_policys_maximum(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -164,7 +164,7 @@ def test_extensions_never_pass_the_policys_maximum(tmp_path, engine):
 
 
 def test_hr_places_someone_on_disciplinary_probation(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -198,7 +198,7 @@ def test_hr_places_someone_on_disciplinary_probation(tmp_path, engine):
 
 
 def test_the_end_of_probation_review_and_hrs_decision(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -259,7 +259,7 @@ def test_the_end_of_probation_review_and_hrs_decision(tmp_path, engine):
 
 
 def test_an_end_date_passed_without_a_decision_reminds_daily_or_passes(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     body = pol.publish()
 
     async def scenario():
@@ -284,7 +284,7 @@ def test_an_end_date_passed_without_a_decision_reminds_daily_or_passes(tmp_path,
 
 
 def test_an_incident_during_probation_uses_its_rules_even_if_approved_later(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -312,7 +312,7 @@ def test_an_incident_during_probation_uses_its_rules_even_if_approved_later(tmp_
 
 
 def test_summary_for_the_review_side_panel(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
@@ -350,14 +350,14 @@ def test_the_hr_portal_off_keeps_discipline_inert(tmp_path, engine):
 
 
 def test_the_nightly_run_and_ticks_run_the_parts(tmp_path, engine):
-    pol, pts, docs = engine
+    pol, pts = engine
     pol.publish()
 
     async def scenario():
         async with HR(tmp_path) as hr:
             s = await setup(hr)
             assert probation.nightly in hr.svc.daily_jobs and discipline.nightly in hr.svc.daily_jobs
-            assert discipline.tick in hr.svc.tick_jobs and probation.hourly in hr.svc.tick_jobs
+            assert probation.hourly in hr.svc.tick_jobs      # (signed PDFs: the documents queue)
             hr.hdb.update_person("401", start_date=day(hr, -2))
             hr.svc.sync_state["tried"] = time.time()      # no people sync during this tick
             await hr.svc.tick()

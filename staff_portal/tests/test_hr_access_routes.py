@@ -7,14 +7,16 @@ Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
 """
 
 import asyncio
+import json
 import re
 import time
+from datetime import timedelta
 
 from aiohttp import web
 
 from hr_helpers import HR, ct_user
 
-from hr import access, signin  # noqa: E402
+from hr import access, certificates, probation, signin  # noqa: E402
 
 ANA = ct_user(201, "Ana", "Lee", code="4821", groups=[501], mobile="541-555-0201", email="ana@example.com")
 BO = ct_user(202, "Bo", "Diaz", code="7302", groups=[501], mobile="541-555-0202")
@@ -80,10 +82,10 @@ def stub_handlers(app: web.Application) -> list:
     return routes
 
 
-def foundation(page) -> list[str]:
-    """The foundation's own sections of a person's page (other parts add theirs, such as
-    documents)."""
-    return [s["name"] for s in page["sections"] if s["name"] in ("details", "signin")]
+def sections(page) -> list[str]:
+    """The sections of a person's page, in order: the foundation's (details, sign-in) and each
+    part's (documents, certificates, probation, discipline, reviews)."""
+    return [s["name"] for s in page["sections"]]
 
 
 def test_every_role_against_every_route(tmp_path):
@@ -138,20 +140,30 @@ def test_roles_follow_people_live(tmp_path):
             status, data, _ = await hr.call("GET", "/api/people?former=1", cookie=sessions["manager"])
             assert data["former"] is False and "Ana Lee" not in [p["name"] for p in data["people"]]
             hr.hdb.update_person("201", archived=0)
-            # A person's page: managers see the details but not contact details or sign-in.
+            # A person's page: managers see the details but not contact details or sign-in. Ana
+            # started 10 days ago (her introductory period) and the Pub needs a Food Handler Card.
+            hr.hdb.update_person("201", start_date=(probation.today_of(hr.hdb) - timedelta(days=10)).isoformat())
+            food = certificates.type_by_key(hr.hdb, "food_handler")
+            certificates.update_type(hr.hdb, food["id"], {"groups": json.dumps(["501"]), "groups_confirmed": 1})
+            parts = ["documents", "certificates", "probation", "discipline", "reviews"]
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["manager"])
             labels = {r["label"] for s in page["sections"] for r in s["rows"]}
             assert status == 200 and "Mobile" not in labels and "Start date" in labels
-            assert foundation(page) == ["details"] and "documents" in [s["name"] for s in page["sections"]]
+            assert sections(page) == ["details", *parts]
+            assert sections((await hr.call("GET", "/api/people/201", cookie=sessions["director"]))[1]) == \
+                ["details", *parts]
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["hr"])
-            assert foundation(page) == ["details", "signin"]
+            assert sections(page) == ["details", *parts, "signin"]
             assert "541-555-0201" in str(page)
+            # Ana herself: no Discipline section until the point system is set up.
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["employee"])
-            assert foundation(page) == ["details"] and "541-555-0201" in str(page)
+            assert sections(page) == ["details", "documents", "certificates", "probation", "reviews"]
+            assert "541-555-0201" in str(page)
             # HR admins see their own file only as an employee.
             status, page, _ = await hr.call("GET", "/api/people/205", cookie=sessions["hr"])
-            assert foundation(page) == ["details"]
+            assert sections(page) == ["details", "documents", "reviews"]
             assert "hr" not in next(s for s in page["sections"] if s["name"] == "documents")
+            assert "signin" not in sections(page) and "main" not in page["sections"][-1]
             # Bo moves to the kitchen in Connecteam: Max loses him at once.
             await hr.add_people(ANA, ct_user(202, "Bo", "Diaz", code="7302", groups=[502],
                                              mobile="541-555-0202"), MAX, DEE, HANA)

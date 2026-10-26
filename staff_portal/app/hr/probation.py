@@ -518,6 +518,10 @@ def decide(db, probation_id, outcome: str, extend_to=None, *, actor_id, actor: s
 # Called when someone passes a probation whose policy clears its points: fn(db, row, actor_id).
 # discipline.py adds the one that writes the points line.
 on_pass_clear: list = []
+# Whether an end-of-probation review is already reminding people: fn(db, row) -> bool.
+# reviews.py adds one, so its writer isn't told twice that the review is due ("probation_due"
+# here, and the review's own reminders, with HR told when it's late).
+review_reminds: list = []
 
 
 def acknowledge(db, row: dict, person_id) -> None:
@@ -588,11 +592,14 @@ def daily(db, today: date) -> dict:
                            "decision. HR decides.")
                 counts["reminded"] += 1
         elif today >= due and row["told_due"] != row["ends"]:
-            tell(db, staff, "probation_due", link=link, once=f"prob-due-{row['id']}-{row['ends']}",
-                 title=f"{person['name']}: the end-of-{words} review is due. It ends on {row['ends']}.")
+            if not any(check(db, row) for check in review_reminds):
+                tell(db, staff, "probation_due", link=link,
+                     once=f"prob-due-{row['id']}-{row['ends']}",
+                     title=f"{person['name']}: the end-of-{words} review is due. It ends on "
+                           f"{row['ends']}.")
+                counts["due"] += 1
             db.conn.execute("UPDATE probations SET told_due = ? WHERE id = ?", (row["ends"], row["id"]))
             db.conn.commit()
-            counts["due"] += 1
     return counts
 
 
@@ -635,7 +642,7 @@ def view(db, row: dict, rel: str) -> dict:
     return found
 
 
-@server.section("probation", 30)
+@server.section("probation", 40)
 def probation_section(svc, v, p: dict, rel: str) -> dict | None:
     db = svc.db
     try:

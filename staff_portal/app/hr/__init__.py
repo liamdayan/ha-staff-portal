@@ -1,5 +1,6 @@
 """The HR portal: a third web server in the add-on (HR_PORT, 8788), reached only through the
-Cloudflare Tunnel at its own address, for employee files, documents and certificates.
+Cloudflare Tunnel at its own address, for employee files: documents, certificates, discipline and
+probation, and performance reviews.
 
 It's off until the owner turns it on in the dashboard; while off it answers a plain "turned off"
 page, asks nothing of Connecteam or Google, and keeps nothing.
@@ -18,10 +19,12 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   ctapi.py    HR's own Connecteam requests: chat messages, certificate copies (HR's lane)
   gdrive.py   Google Drive through the owner's Apps Script (bridge.gs), and its OCR
   ocr_dates.py  the dates on a card, from the text Google read
+  parts.py    imports every part below, so each adds itself (service.PARTS) before the service
   documents.py  kinds of document and who sees each, files, recycle bin, retention, legal holds,
-                and other parts' kinds (register_kind, add_generated, make_pdf)
+                and other parts' kinds and PDFs (register_kind, add_generated, queue_pdf)
   folders.py    each person's folders in Google Drive, found by ID and tag, never by name
-  delivery.py   the queue of work for Google Drive and Connecteam (retries, Needs attention)
+  delivery.py   the queue of work for Google Drive and Connecteam, and of PDFs to make (retries,
+                Needs attention)
   docroutes.py  the Documents section, opening and adding files, Needs attention, kinds settings
   pdfdoc.py     plain, escaped HTML that Google Drive turns into PDFs (write-ups, reviews)
   certificates.py  certificate types, cards and their dates, statuses, boards, reminders

@@ -3,8 +3,10 @@ a fixed month, check-ins, the end of probation, the gap between two), who writes
 flow (self-review, writing, HR's approval, sharing, acknowledging, the final PDF), who sees what
 (private notes, comments, the side panel), reminders, and the settings.
 
-The other parts reviews use (probation, discipline, certificates, documents' PDFs) are small
-stand-ins here. Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
+The other parts reviews read (probation, discipline, certificates) are small stand-ins here (the
+real ones together: test_hr_parts_together.py); final PDFs go through the real documents part's
+PDF queue, with Google as the fake script (tests/fake_bridge.py). Nothing here talks to a real
+Connecteam, Google, TT Hotel or Home Assistant.
 """
 
 import asyncio
@@ -17,9 +19,10 @@ from datetime import date, timedelta
 
 import pytest
 
-from hr_helpers import HR, ct_user
+from hr_helpers import HR, ct_user, queue_done
+from test_hr_documents import google
 
-from hr import audit, documents, notify, reviews, signin  # noqa: E402
+from hr import audit, delivery, documents, notify, reviews, signin  # noqa: E402
 
 ANA = ct_user(301, "Ana", "Lee", code="4821", groups=[501], mobile="541-555-0301")
 BO = ct_user(302, "Bo", "Diaz", code="7302", groups=[501, 502], mobile="541-555-0302")
@@ -89,30 +92,6 @@ def fake_probation(rows=(), current=None, record=True):
     if record:
         mod.record_recommendation = lambda *args: mod.recorded.append(args)
     return mod
-
-
-def fake_documents(monkeypatch, fail=None):
-    """documents.make_pdf and add_generated (the documents part's, not built in this branch)."""
-    made = {"html": [], "added": []}
-
-    class PdfUnavailable(Exception):
-        pass
-
-    async def make_pdf(svc, page):
-        if fail and fail[0]:
-            raise fail[0]
-        made["html"].append(page)
-        return b"%PDF-1.4 fake"
-
-    async def add_generated(svc, person, kind, data, mime, title, doc_date, actor_id):
-        made["added"].append((person["id"], kind, data, mime, title, doc_date, actor_id))
-        return {"id": 900 + len(made["added"])}
-
-    monkeypatch.setattr(documents, "PdfUnavailable", PdfUnavailable, raising=False)
-    monkeypatch.setattr(documents, "make_pdf", make_pdf, raising=False)
-    monkeypatch.setattr(documents, "add_generated", add_generated, raising=False)
-    made["unavailable"] = PdfUnavailable
-    return made
 
 
 # ---------------------------------------------------------------- forms
@@ -437,7 +416,7 @@ def test_extra_reviews_started_by_hand(tmp_path):
 
 def test_an_annual_review_from_self_review_to_pdf(tmp_path, monkeypatch):
     async def scenario():
-        async with HR(tmp_path) as hr:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await setup(hr)
             db = hr.hdb
             rid = open_review(hr, "301", source="annual:2026")
@@ -519,7 +498,7 @@ def test_an_annual_review_from_self_review_to_pdf(tmp_path, monkeypatch):
                                          {"answer": "received", "comment": "Thanks <b>Max</b>."}, cookie=s["301"])
             assert status == 200
             r = reviews.get(db, rid)
-            assert (r["status"], r["ack"]) == ("closed", "received") and r["pdf_next_at"]
+            assert (r["status"], r["ack"]) == ("closed", "received")
             assert "review_acknowledged" in inbox_kinds(hr, "303")
             assert "review_acknowledged" in inbox_kinds(hr, "306") and "review_acknowledged" in inbox_kinds(hr, "307")
             assert (await hr.call("POST", path + "/acknowledge", {"answer": "received"}, cookie=s["301"]))[0] == 409
@@ -527,18 +506,23 @@ def test_an_annual_review_from_self_review_to_pdf(tmp_path, monkeypatch):
             with pytest.raises(sqlite3.DatabaseError):
                 db.conn.execute("UPDATE reviews SET ratings = '{}' WHERE id = ?", (rid,))
             db.conn.rollback()
-            # The final PDF: what Ana saw, escaped, to her Reviews folder.
-            made = fake_documents(monkeypatch)
-            assert await reviews.make_pdfs(hr.svc) == 1
-            pid, kind, data_, mime, title, doc_date, actor_id = made["added"][0]
-            assert (pid, kind, mime, actor_id) == ("301", "reviews", "application/pdf", "301")
-            assert title == f"Annual review {r['due'][:4]}" and doc_date == today(hr).isoformat()
-            page = made["html"][0]
+            # The final PDF: what Ana saw, escaped, made through the documents part's PDF queue and
+            # saved as a "reviews" document in her Reviews folder.
+            await queue_done(hr)
+            doc = documents.get(db, reviews.get(db, rid)["pdf_doc_id"])
+            title = f"Annual review {r['due'][:4]}"
+            assert documents.kind(db, doc["kind_id"])["key"] == "reviews" and doc["mime"] == "application/pdf"
+            assert (documents.title_of(doc), doc["doc_date"]) == (title, today(hr).isoformat())
+            assert fake.names_in("Reviews") == [f"{today(hr).isoformat()} {title}.pdf"]
+            [page] = fake.pdfs
             assert "Ana Lee" in page and "Late twice." in page and "Learn the bar" in page
             assert "Thanks &lt;b&gt;Max&lt;/b&gt;." in page and "<b>Max</b>" not in page
             assert "Acknowledged as received" in page and "not that they agree" in page
-            assert reviews.get(db, rid)["pdf_doc_id"] == 901
-            assert await reviews.make_pdfs(hr.svc) == 0
+            documents.queue_pdf(db, "reviews", "301", rid)          # asked again: nothing more
+            await queue_done(hr)
+            assert len(fake.pdfs) == 1
+            status, data, _ = await hr.call("GET", path, cookie=s["301"])
+            assert data["pdf"] == {"ready": True, "link": documents.view_url(doc)}
             done = {"Opened a review", "Viewed a review", "Worked on a review", "Sent a self-review",
                     "Finished writing a review", "Shared a review", "Acknowledged a review",
                     "Saved a review's PDF", "Worked on a self-review"}
@@ -551,7 +535,7 @@ def test_an_annual_review_from_self_review_to_pdf(tmp_path, monkeypatch):
 
 def test_end_of_probation_review_with_hr_approval(tmp_path, monkeypatch):
     async def scenario():
-        async with HR(tmp_path) as hr:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await setup(hr)
             db = hr.hdb
             day = today(hr)
@@ -586,7 +570,7 @@ def test_end_of_probation_review_with_hr_approval(tmp_path, monkeypatch):
                           cookie=s["303"])
             await hr.call("POST", path + "/submit", {}, cookie=s["303"])
             assert (await hr.call("POST", path + "/approve", {}, cookie=s["307"]))[0] == 200
-            assert probation.recorded == [(db, 9, "extend", new_end, rid, "307")]
+            assert probation.recorded == [(db, 9, "extend", new_end, rid, "303")]   # the writer's
             r = reviews.get(db, rid)
             assert (r["status"], r["approved_by_name"]) == ("ready", "Ivy Moe") and r["recommendation_sent_at"]
             assert "review_approved" in inbox_kinds(hr, "303")
@@ -600,11 +584,11 @@ def test_end_of_probation_review_with_hr_approval(tmp_path, monkeypatch):
                                   cookie=s["302"]))[0] == 409
             assert (await hr.call("POST", path + "/close", {"how": "refused", "note": "Walked out."},
                                   cookie=s["303"]))[0] == 200
-            made = fake_documents(monkeypatch)
-            await reviews.make_pdfs(hr.svc)
-            page = made["html"][0]
+            await queue_done(hr)
+            [page] = fake.pdfs
             assert "Refused to acknowledge" in page and "Extend" not in page and "Walked out" not in page
-            assert made["added"][0][4] == "End of introductory period review"
+            doc = documents.get(db, reviews.get(db, rid)["pdf_doc_id"])
+            assert documents.title_of(doc) == "End of introductory period review"
     run(scenario())
 
 
@@ -772,7 +756,9 @@ def test_side_panel_with_and_without_the_other_parts(tmp_path, monkeypatch):
             status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s["303"])
             side = data["side"]
             r = reviews.get(db, rid)
-            assert calls == [("301", date.fromisoformat(r["period_start"]), date.fromisoformat(r["period_end"]))]
+            # Points now: the period up to today (its end is the due day, still to come).
+            assert calls == [("301", date.fromisoformat(r["period_start"]),
+                              min(date.fromisoformat(r["period_end"]), today(hr)))]
             assert side["discipline"]["points"] == [{"track": "Discipline", "total": 2.5}]
             assert side["discipline"]["writeups"] == [{"date": "2026-09-01", "step": "Verbal", "status": "active"}]
             assert side["discipline"]["next_drop"] == {"date": "2027-01-02", "points": 1}
@@ -872,7 +858,7 @@ def test_reminders_go_once_each(tmp_path):
     run(scenario())
 
 
-def test_pdf_waits_for_google_and_retries(tmp_path, monkeypatch):
+def test_the_pdf_waits_for_google_in_the_documents_queue(tmp_path, monkeypatch):
     async def scenario():
         async with HR(tmp_path) as hr:
             s = await setup(hr)
@@ -884,58 +870,29 @@ def test_pdf_waits_for_google_and_retries(tmp_path, monkeypatch):
             await hr.call("POST", f"/api/reviews/{rid}/share", {"meeting_date": today(hr).isoformat()},
                           cookie=s["303"])
             await hr.call("POST", f"/api/reviews/{rid}/close", {"how": "paper"}, cookie=s["303"])
-            now = time.time()
-            # The documents part's PDFs aren't here: it waits an hour, without using a try.
-            for name in ("make_pdf", "add_generated"):
-                monkeypatch.delattr(documents, name, raising=False)
-            assert await reviews.make_pdfs(hr.svc, now) == 0
-            r = reviews.get(db, rid)
-            assert (r["pdf_error"], r["pdf_tries"]) == (reviews.NO_PDF_YET, 0)
-            assert r["pdf_next_at"] == pytest.approx(now + reviews.PDF_WAIT)
-            assert await reviews.make_pdfs(hr.svc, now + 60) == 0     # not due yet
-            # Google isn't set up: waits too.
-            fail = [None]
-            made = fake_documents(monkeypatch, fail)
-            fail[0] = made["unavailable"]("Google Drive isn't set up yet.")
-            now += reviews.PDF_WAIT
-            assert await reviews.make_pdfs(hr.svc, now) == 0
-            r = reviews.get(db, rid)
-            assert (r["pdf_error"], r["pdf_tries"]) == ("Google Drive isn't set up yet.", 0)
+            await queue_done(hr)
+            # Google isn't set up: the documents queue keeps it, without using up tries. HR sees why;
+            # the writer only that it's coming.
+            work = documents.pdf_work(db, "reviews", rid)
+            assert (work["status"], work["code"], work["tries"]) == ("waiting", "not_set_up", 0)
             status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s["306"])
-            assert data["pdf"] == {"ready": False, "link": None, "error": "Google Drive isn't set up yet."}
+            assert data["pdf"]["ready"] is False and data["pdf"]["error"] == delivery.NO_GOOGLE
             status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s["303"])
             assert "error" not in data["pdf"]
-            # Real failures count, back off, and show on HR's to-do list after 3.
-            fail[0] = RuntimeError("boom")
-            for tries in (1, 2, 3):
-                now = reviews.get(db, rid)["pdf_next_at"]
-                assert await reviews.make_pdfs(hr.svc, now) == 0
-                assert reviews.get(db, rid)["pdf_tries"] == tries
-            assert reviews.get(db, rid)["pdf_next_at"] == pytest.approx(now + reviews.PDF_RETRY[2])
-            status, home, _ = await hr.call("GET", "/api/home", cookie=s["306"])
-            assert any("Google Drive" in t["text"] for t in home["todos"])
-            fail[0] = None
-            assert await reviews.make_pdfs(hr.svc, reviews.get(db, rid)["pdf_next_at"]) == 1
-            monkeypatch.setattr(documents, "view_url", lambda doc: f"/api/documents/{doc['id']}/file",
-                                raising=False)
-            monkeypatch.setattr(documents, "get", lambda db_, did: {"id": did})
+            async with google(hr, monkeypatch) as fake:
+                await queue_done(hr, time.time() + delivery.WAIT_SETUP + 1)
+                assert len(fake.pdfs) == 1 and fake.names_in("Reviews") == [
+                    f"{notify.local_day(db)} Extra review.pdf"]
+            doc = documents.get(db, reviews.get(db, rid)["pdf_doc_id"])
             status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s["302"])
-            assert data["pdf"] == {"ready": True, "link": "/api/documents/901/file"}
+            assert data["pdf"] == {"ready": True, "link": documents.view_url(doc)}
             assert data["review"]["ack_word"] == "Acknowledged on paper"
+            # Bo opens it; Ana (another employee) can't.
+            for who, code in (("302", 200), ("301", 404)):
+                resp = await hr.client.get(documents.view_url(doc), headers={
+                    "Host": "hr.example.com", "Cookie": f"{signin.COOKIE}={s[who]}"})
+                assert resp.status == code, who
     run(scenario())
-
-
-def test_pdf_html_is_plain_and_uses_pdfdoc_when_there(tmp_path, monkeypatch):
-    monkeypatch.setitem(sys.modules, "hr.pdfdoc", None)
-    page = reviews.page_html("Review <x>", [("heading", "A & B"), ("paragraph", "one\n<script>"),
-                                            ("row", "Rating", "4 of 5")])
-    assert "<h1>Review &lt;x&gt;</h1>" in page and "<h2>A &amp; B</h2>" in page
-    assert "<p>&lt;script&gt;</p>" in page and "<script>" not in page
-    assert "<p><b>Rating:</b> 4 of 5</p>" in page
-    pdfdoc = types.ModuleType("hr.pdfdoc")
-    pdfdoc.page = lambda title, blocks: f"pdfdoc:{title}:{len(blocks)}"
-    monkeypatch.setitem(sys.modules, "hr.pdfdoc", pdfdoc)
-    assert reviews.page_html("T", [("heading", "x")]) == "pdfdoc:T:1"
 
 
 # ---------------------------------------------------------------- settings and wiring
@@ -969,7 +926,7 @@ def test_review_settings(tmp_path):
 def test_reviews_are_wired_into_the_hr_portal(tmp_path):
     async def scenario():
         async with HR(tmp_path, enabled=False) as hr:
-            assert reviews.nightly in hr.svc.daily_jobs and reviews.tick in hr.svc.tick_jobs
+            assert reviews.nightly in hr.svc.daily_jobs   # (final PDFs: the documents queue)
             # Off: nothing made, nothing kept.
             assert hr.svc.db is None and not (tmp_path / "data" / "hr").exists()
             status, body, _ = await hr.call("GET", "/api/reviews")
@@ -986,14 +943,18 @@ def test_reviews_are_wired_into_the_hr_portal(tmp_path):
     run(scenario())
 
 
-def test_final_pdfs_are_their_own_kind_of_document(monkeypatch):
-    calls = []
-    monkeypatch.setattr(documents, "register_kind", lambda *a, **k: calls.append((a, k)), raising=False)
-    assert reviews.register_documents()
-    (args, kwargs), = calls
-    assert args == ("reviews", "Reviews", "managers", "Reviews", "reviews")
-    can_open = kwargs["can_open"]
+def test_final_pdfs_are_their_own_kind_of_document(tmp_path):
+    """The "reviews" kind (the Reviews folder in Drive), opened by those who see the review, and
+    made by the documents part's PDF queue."""
+    assert documents.REGISTERED["reviews"] == ("Reviews", "managers", "Reviews")
+    assert documents.OWNED["reviews"] == "reviews" and documents.CAN_OPEN["reviews"] is reviews.can_open
+    assert documents.PDF_MAKERS["reviews"] == (reviews.pdf_page, reviews.pdf_saved)
+    can_open = reviews.can_open
     assert all(can_open(None, rel, {}) for rel in ("self", "manager", "director", "hr"))
     assert not can_open(None, None, {})
-    monkeypatch.delattr(documents, "register_kind")
-    assert not reviews.register_documents()
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            k = documents.kind_by_key(hr.hdb, "reviews")
+            assert (k["name"], k["folder"], k["visibility"]) == ("Reviews", "Reviews", "managers")
+    run(scenario())

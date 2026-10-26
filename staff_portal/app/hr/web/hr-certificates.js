@@ -380,7 +380,8 @@
       img ? [h("div", { class: "cert-photo" }, img), h("div", { class: "actions" },
         h("button", { type: "button", onclick: () => setZoom(zoom - 0.5), "aria-label": "Zoom out" }, "−"),
         h("button", { type: "button", onclick: () => setZoom(zoom + 0.5), "aria-label": "Zoom in" }, "+"),
-        h("button", { type: "button", onclick: () => { turn = (turn + 90) % 360; img.src = `${c.photo}?turn=${turn}`; } }, "Turn"),
+        // Turning works while the photo waits here; a confirmed card opens as its document.
+        c.status === "waiting" ? h("button", { type: "button", onclick: () => { turn = (turn + 90) % 360; img.src = `${c.photo}?turn=${turn}`; } }, "Turn") : null,
         h("a", { class: "button", href: c.photo, target: "_blank", rel: "noopener" }, "Full size"))]
         : c.photo ? h("a", { class: "button", href: c.photo, download: "" }, "Download the PDF")
           : h("p", { class: "muted" }, "The photo isn't kept here any more."));

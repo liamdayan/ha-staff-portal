@@ -12,9 +12,10 @@ kind is restricted is fixed when it's made, because its files are stored apart.
 Other parts of the HR portal keep their own kinds here (register_kind): certificates, signed
 write-ups, final reviews. Those are left out of the Documents section, their part decides who
 may open them (can_open), and files the portal makes itself go straight to Drive
-(add_generated). PDFs are made by Google Drive from plain HTML (pdfdoc.py, make_pdf); while
-Google isn't set up, the part keeps its record and the delivery queue makes the PDF later
-(queue_pdf, register_pdf_maker).
+(add_generated). PDFs are made by Google Drive from plain HTML (pdfdoc.py, make_pdf), always
+through the delivery queue: the part asks for one (queue_pdf), and the queue has the part write
+its HTML (register_pdf_maker) as soon as Google can make it, keeps the PDF (add_generated), and
+retries or puts it on HR's Needs attention list like any upload.
 
 A file's life:
 - added: its type checked from its bytes, pictures re-encoded without metadata, PDFs byte for
@@ -529,9 +530,11 @@ def waiting_count(db, person_id) -> int:
 
 
 async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, doc_date: str,
-              viewer, rel: str, *, waiting: bool | None = None) -> dict:
+              viewer, rel: str, *, waiting: bool | None = None, ct_document: int | None = None,
+              ct_expires: str | None = None) -> dict:
     """A cleaned file (files.clean_upload) for someone's file. HR's go straight on their way to
-    Drive (activate); anyone else's wait for HR (waiting=True: HR's too). Returns the document.
+    Drive (activate, with ct_document and ct_expires for its Connecteam copy: a confirmed
+    certificate's); anyone else's wait for HR (waiting=True: HR's too). Returns the document.
     Raises ValueError when too many already wait in that file."""
     db = svc.db
     waiting = rel != "hr" if waiting is None else waiting
@@ -550,7 +553,8 @@ async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, do
     db.conn.commit()
     doc = get(db, cur.lastrowid)
     if not waiting:
-        activate(db, doc, svc.main_settings(), viewer.id if viewer else None, now=now)
+        activate(db, doc, svc.main_settings(), viewer.id if viewer else None,
+                 ct_document=ct_document, ct_expires=ct_expires, now=now)
     return get(db, doc["id"])
 
 
@@ -662,7 +666,7 @@ def restore(db, doc: dict, settings: dict, now: float | None = None) -> None:
 class PdfUnavailable(Exception):
     """A PDF can't be made now: Google Drive isn't set up (code "not_set_up"), or the bridge
     failed (its gdrive error code: outdated, unavailable, quota, ...). The message is plain.
-    Keep the record and let the delivery queue make the PDF later (queue_pdf)."""
+    The delivery queue's "pdf" work waits or tries again (parts ask through queue_pdf)."""
 
     def __init__(self, message: str, code: str = "not_set_up"):
         super().__init__(message)
@@ -670,8 +674,9 @@ class PdfUnavailable(Exception):
 
 
 async def make_pdf(svc, html: str) -> bytes:
-    """A PDF of plain HTML (pdfdoc.page), made by Google Drive through the bridge. Raises
-    PdfUnavailable, or ValueError for HTML that's empty or too long."""
+    """A PDF of plain HTML (pdfdoc.page), made by Google Drive through the bridge (the queue's
+    "pdf" work calls it). Raises PdfUnavailable, or ValueError for HTML that's empty or too
+    long."""
     bridge = svc.google() if svc is not None else None
     if bridge is None or not svc.main_settings().get("hr_google_drive"):
         raise PdfUnavailable(NO_PDF)
@@ -693,10 +698,26 @@ def register_pdf_maker(kind_key: str, maker, *, done=None) -> None:
 
 
 def queue_pdf(db, kind_key: str, person_id, ref, now: float | None = None) -> int | None:
-    """Make this PDF later through the delivery queue (target "pdf"): for the kind's part to
-    call when make_pdf raised PdfUnavailable. ref: the part's own record (say, the write-up's
-    ID), handed back in row["ref"]. Asking twice for the same one queues it once."""
+    """Make this PDF through the delivery queue (target "pdf"): straight away in the background
+    when Google can, else once it can, retried like any upload, and on HR's Needs attention list
+    when it keeps failing. ref: the part's own record (say, the write-up's ID), handed back in
+    row["ref"]. Asking twice for the same one queues it once."""
     return queue(db, person_id, "pdf", None, now, kind_key=kind_key, ref=str(ref))
+
+
+def pdf_work(db, kind_key: str, ref) -> dict | None:
+    """The queue's latest work on that PDF (status waiting, done, attention or skipped, with
+    error and tries), or None: for the part to show how it's going, and offer HR's Retry."""
+    row = db.conn.execute("SELECT * FROM deliveries WHERE target = 'pdf' AND kind_key = ? AND "
+                          "ref = ? ORDER BY id DESC LIMIT 1", (kind_key, str(ref))).fetchone()
+    return dict(row) if row else None
+
+
+def pdf_works(db, kind_key: str, status: str) -> list[dict]:
+    """The queue's PDF work for one kind in one status (waiting, attention), oldest first."""
+    return [dict(r) for r in db.conn.execute(
+        "SELECT * FROM deliveries WHERE target = 'pdf' AND kind_key = ? AND status = ? ORDER BY id",
+        (kind_key, status))]
 
 
 async def run_maker(fn, *args):

@@ -1,20 +1,17 @@
-"""Stand-ins for the parts the discipline workflow calls but doesn't own, for its tests:
+"""Stand-ins for the point system the discipline workflow calls but doesn't own (the points part,
+joined later), for its tests: policy.py and points.py, as a published point system and an
+in-memory points ledger with the names discipline.py calls (policy.current/get;
+points.incident_points, add_incident_entry, adjust, void, totals, history, required_step,
+next_drop). The shapes here are the ones the points part must provide, or discipline's adapters
+must be changed to (see the integration notes). Documents and PDFs are the real parts.
 
-- policy.py and points.py (the points builder's): a published point system and an in-memory
-  points ledger with the contract's names (policy.current/get; points.incident_points,
-  add_incident_entry, adjust, void, totals, history, required_step, next_drop);
-- documents.py's register_kind / add_generated / make_pdf / PdfUnavailable / view_url, and
-  pdfdoc.page (the documents builder's).
-
-install(monkeypatch) puts them in place and returns (policy, points, docs).
+install(monkeypatch) puts them in place and returns (policy, points).
 """
 
 import copy
-import html
-import types
 from datetime import date, timedelta
 
-from hr import discipline, documents, probation  # noqa: E402
+from hr import discipline, probation  # noqa: E402
 
 STEPS = [
     {"key": "coaching", "name": "Coaching", "rank": 1, "active_days": 90},
@@ -195,51 +192,10 @@ class FakePoints:
                 "points": sum(line["points"] for line in counting if line["ends"] == first)}
 
 
-class PdfUnavailable(Exception):
-    pass
-
-
-class FakeDocs:
-    """documents.py's part for write-ups: kinds registered, files filed, PDFs made."""
-
-    def __init__(self):
-        self.kinds: list[tuple] = []
-        self.added: list[dict] = []
-        self.pages: list[tuple] = []      # (title, blocks) given to pdfdoc.page
-        self.google = True                # False: make_pdf says Google isn't set up
-
-    def register_kind(self, key, name, level, subfolder, owner_section, can_open=None):
-        self.kinds.append((key, name, level, subfolder, owner_section, can_open))
-
-    async def add_generated(self, svc, person, kind_key, data, mime, title, doc_date, actor_id):
-        self.added.append({"person": person["id"], "kind": kind_key, "data": data, "mime": mime,
-                           "title": title, "date": doc_date, "actor": actor_id})
-        return {"id": 1000 + len(self.added)}
-
-    async def make_pdf(self, svc, page_html):
-        if not self.google:
-            raise PdfUnavailable("Google Drive isn't set up yet, so the PDF waits.")
-        return b"%PDF-1.4 " + page_html.encode()
-
-    def page(self, title, blocks):
-        self.pages.append((title, blocks))
-        return "<h1>" + html.escape(title) + "</h1>" + "".join(
-            "<p>" + " ".join(html.escape(str(x)) for x in b[1:]) + "</p>" for b in blocks)
-
-    def view_url(self, doc):
-        return f"/api/documents/{doc['id']}/file"
-
-
 def install(monkeypatch):
     pol = FakePolicy()
     pts = FakePoints(pol)
-    docs = FakeDocs()
     monkeypatch.setattr(discipline, "policy", pol)
     monkeypatch.setattr(discipline, "points", pts)
     monkeypatch.setattr(probation, "policy", pol)
-    monkeypatch.setattr(discipline, "pdfdoc", types.SimpleNamespace(page=docs.page))
-    for name in ("register_kind", "add_generated", "make_pdf", "view_url"):
-        monkeypatch.setattr(documents, name, getattr(docs, name), raising=False)
-    monkeypatch.setattr(documents, "PdfUnavailable", PdfUnavailable, raising=False)
-    monkeypatch.setattr(documents, "get", lambda db, doc_id: {"id": doc_id})
-    return pol, pts, docs
+    return pol, pts

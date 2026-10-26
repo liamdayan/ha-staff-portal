@@ -1515,12 +1515,13 @@ trying every combination offline.
 ## HR portal
 
 The HR portal is a second, private website built into Staff Access, at its own address, for
-employee files, documents and certificates. It takes its people and departments from
-Connecteam. What each person sees depends on their role, and everything they do is written to
-an audit log only HR admins see.
+employee files: documents, certificates, discipline and probation, and performance reviews. It
+takes its people and departments from Connecteam. What each person sees depends on their role,
+and everything they do is written to an audit log only HR admins see. Files go to a Google
+shared drive, one folder per employee.
 
 It's **off until you turn it on**. While it's off, nothing changes for anyone, nothing extra is
-asked of Connecteam, and its address only says "The HR portal is turned off."
+asked of Connecteam or Google, and its address only says "The HR portal is turned off."
 
 ### Before you start
 
@@ -1572,11 +1573,12 @@ The tab also shows how its two connections are doing, **Google Drive (HR files)*
 
 ### Google Drive for HR files
 
-The HR portal keeps employee files, such as certificates and signed policies, in a Google
-**shared drive**, one folder per employee. Staff Access reaches the drive through a small script
-that runs in **your own Google account**. There's no Google Cloud project, no key file and
-nothing to change in the Google Workspace admin console. You set it up once, under **Settings →
-Connections → Google Drive (HR files)**, before or after turning the HR portal on.
+The HR portal keeps employee files (documents, certificates, signed write-ups and final reviews)
+in a Google **shared drive**, one folder per employee, with a subfolder for each: **Documents**,
+**Certificates**, **Discipline** and **Reviews**. Staff Access reaches the drive through a small
+script that runs in **your own Google account**. There's no Google Cloud project, no key file
+and nothing to change in the Google Workspace admin console. You set it up once, under
+**Settings → Connections → Google Drive (HR files)**, before or after turning the HR portal on.
 
 Until it's set up, nothing is sent to Google. After that, Google is only asked when you open,
 save or test this connection, or when the HR portal works with files.
@@ -1631,7 +1633,8 @@ match**, **Access refused**, **Google not answering**, **Google busy**, **Unexpe
   **_OCR scratch** in the HR drive, Staff Access takes its text, and the copy is deleted at once.
 - To make a PDF (a signed write-up or a final review), Staff Access sends plain text laid out as
   a simple page; Google Drive turns it into a Google Doc in **_OCR scratch**, saves that as a PDF,
-  and the Doc is deleted at once. The PDF is then kept in the person's folder like any other file.
+  and the Doc is deleted at once. The PDF is then kept in the person's folder like any other file
+  (see [PDFs of write-ups and reviews](#pdfs-of-write-ups-and-reviews)).
 - It **only answers Staff Access**. "Who has access: Anyone" lets Staff Access reach it without a
   Google sign-in, but every request must be signed with the secret only your Staff Access has,
   and each one works for 5 minutes and only once. Opened in a web browser, it just says it's
@@ -1833,172 +1836,117 @@ have room. Normal use is a few requests a day. If Connecteam refuses an HR reque
 permission or plan feature), only that HR task stops, and if it says "too many requests", only
 the HR portal waits: Staff Access's own time clock checks keep running.
 
-### Discipline and probation
+### A person's page
 
-The HR portal runs your points-based discipline system: incidents, write-ups that stop counting
-after a while, appeals, and probation. The point system itself (offences, points, steps and when
-points expire) is set up by HR in the portal. **Until HR publishes a point system, nobody can
-record an incident**, and the Discipline sections say so. Probation works from the start.
+Everything about one person is on their page in the HR portal, in this order, each part showing
+only what the person looking may see:
 
-The portal recommends; people decide. Reaching a step makes a task for a person, never a warning
-by itself, and a termination is always HR's decision.
+1. **Details**: name, departments, start date and direct manager (contact details for HR and the
+   person themselves).
+2. **Documents**: their files (see [Documents](#documents)).
+3. **Certificates**: the cards their job needs and their status (see
+   [Certificates](#certificates)), when they need one or have one on file.
+4. **Probation**: their introductory period or disciplinary probation (see
+   [Probation](#probation)).
+5. **Discipline**: points, incidents and write-ups (see [Discipline and
+   probation](#discipline-and-probation)). Employees see it once the point system is set up or
+   they have a write-up.
+6. **Reviews**: their performance reviews (see [Performance reviews](#performance-reviews)).
+7. **Sign-in** (HR admins only): set up, reset or unlock their sign-in, and end their access.
 
-#### Recording an incident
+An HR admin sees their own page only as an employee would.
 
-Managers (and directors and HR) open the person's page and click **Record an incident**. The one
-form asks:
+### Documents
 
-- **the offence** and **the day it happened** (within the last year);
-- **what happened**, in plain facts (their managers and HR see this);
-- for attendance offences, **"Was this protected leave?"**: Oregon sick time, Paid Leave Oregon,
-  OFLA/FMLA, jury duty, military leave, domestic violence leave, work injury or other. Any answer
-  but **No** records it with 0 points, and it never leads to a step. Ask your employment lawyer
-  to confirm the list;
-- **points**: the offence's default, or other points within the range the point system allows for
-  it, with a reason.
+Each person's page in the HR portal has a **Documents** section: the files in their file that
+the person looking may see, with **Open** (photos open in the portal) or **Download** (PDFs are
+always downloaded, never opened inside the portal). Every file is kept in Google Drive, in the
+person's folder, with the date first in its name, such as `2026-10-25 Handbook
+acknowledgement.pdf`, so folders sort in order.
 
-As you fill it in, a preview says what it means, for example "Maria: 4 → 6 points. Reaches Written
-warning. A write-up is needed." When it reaches a step, the same form takes the write-up: the
-expected improvement, what happens if it happens again, support offered, a follow-up date and a
-note for managers and HR (the employee never sees that note). The policy broken is quoted
-automatically. You can ask for a lower step than the point system calls for, with a reason; HR
-decides, and it's recorded as a downgrade. When the step is one HR handles alone (a suspension or
-a termination review), the preview only says HR decides.
+**Kinds of document** (HR settings → Kinds of document). Each kind has who can see it, its folder
+in Google Drive, and who may add one. HR can rename kinds and add more. The kinds at the start:
 
-**HR approves every incident before it counts** or the employee sees anything (the point system
-can relax this for minor offences later). Points count from HR's approval, and expire counting
-from the day it happened.
+| Kind | Who can see it | Who may add one |
+|---|---|---|
+| Signed policies | The employee, their managers, directors and HR | HR |
+| Training records | The employee, their managers, directors and HR | Managers, directors and HR |
+| Hiring paperwork | Directors and HR | HR |
+| Other | HR admins only | HR |
+| I-9 | Restricted: HR admins only, kept apart | HR |
+| Reasonable accommodation | Restricted: HR admins only, kept apart | HR |
 
-#### What HR does
+Certificates, signed write-ups (with photos of pages signed on paper) and final reviews are kinds
+too, but they're shown in their own sections, which decide who sees them; HR can rename them and
+change their Drive folder only. Changing who can see a kind takes effect at once. Changing its
+Drive folder only affects new files.
 
-HR admins find everything waiting under **Discipline**: incidents and write-ups to approve,
-appeals, tasks, probation decisions, write-ups not signed yet, and signed write-ups that couldn't
-be filed.
+**Adding a file.** Open someone's page, choose the kind, a title and the date on the document,
+and the file: a photo (JPEG, PNG or WebP) or a PDF, up to 15 MB (25 MB for HR, for scanned
+paperwork). The type is checked from the file itself, not its name. Photos are saved afresh
+without their camera details or location; PDFs are kept exactly as they are. Files that anyone
+but HR adds wait for HR to **Accept** or **Don't accept** them (with a reason, which whoever
+added it sees). A file that isn't accepted never reaches Google Drive and is removed after 30
+days. Nobody checks their own upload: an HR admin's own file is checked by another HR admin.
 
-- **Approve** an incident, or set other points with a reason, or **return it** to the manager with
-  a note; they change it and send it again. Nobody approves their own work, and an HR admin's own
-  file is handled by another HR admin.
-- **A step is due.** When an approved incident takes someone to a higher step, their managers and
-  HR get a task with a write-up already filled in. **Suspensions and termination reviews go to HR
-  only**: the manager and the employee see nothing of them until HR acts.
-- **A termination review is never automatic.** HR chooses **terminate** (recorded here; then
-  archive them in Connecteam by hand, which becomes a to-do), **a last-chance agreement** (you may
-  also place them on disciplinary probation) or **no action**, each with a reason.
-- **Adjusting**, each with a reason and a fresh 6-digit code (or PIN), and all logged: add or take
-  away points for someone (from a date, optionally until a date), change one incident's points
-  (an adjustment line, so the original stays visible), void an incident or a write-up, and change
-  the day a write-up stops counting. **As of a date** on someone's page shows their points and
-  records as they were on any past day.
-- After any void or reduction, later write-ups are checked again. Where a later step would now be
-  lower, HR gets a "check this" task. Nothing is undone by itself.
+**Restricted files (I-9, Reasonable accommodation).** Only HR admins see them; managers,
+directors and the employee never learn one exists, and they're never copied to Connecteam. On a
+person's page HR sees how many there are, and **Show restricted files** lists them. Every look is
+in the audit log. They're kept apart in Google Drive: in the **HR Restricted** shared drive if
+you picked one (see [The drives](#the-drives)), otherwise in a **Restricted** folder in the HR
+drive, and HR settings warns that every member of that drive can open it.
 
-#### Write-ups
+**Getting files to Google Drive (and Connecteam).** Each file is kept encrypted on the Home
+Assistant computer until it's in Google Drive, then 30 more days for quick opening; after that
+it's fetched from Drive when someone opens it. Each file shows where it is, for HR: **Google
+Drive: Sent**, **Waiting** or **Needs attention**. If Google doesn't answer, the file is tried
+again after 1 minute, 5, 30, 2 hours and 6 hours, then daily. After 8 tries it goes on HR's
+**Needs attention** page with **Retry**. A retry never makes a second copy. While Google Drive
+isn't set up, or its script is out of date, files simply wait (without using up tries), and HR's
+to-do list says so. A migration file can't be made while files are waiting to reach Google Drive
+or waiting for HR.
 
-A write-up goes **Draft → With HR → Approved → Delivered → Active → Expired**. HR can send a
-draft back with a note, and a write-up can be voided or be under appeal. Once approved, its words
-are never changed.
+**Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
+turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
+HR), and only where "latest file only, and the employee sees it there" is fine. Restricted files
+never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
+can fix ("not assigned this document's pack in Connecteam") go on **Needs attention** at once,
+with **Retry** and **Don't copy to Connecteam**.
 
-Delivering it, once HR has approved it:
+**Deleting.** HR deletes a file with a fresh 6-digit code (or PIN). It stays in the person's
+**Recycle bin** for 30 days and can be **Restored**; then it's removed from the computer and
+moved to the shared drive's trash, which Google empties 30 days later. Connecteam can't remove
+files for Staff Access, so a deleted file that was copied there becomes a to-do on **Needs
+attention**: remove it in Connecteam, then press **Done**. The audit log keeps the line.
 
-- **In person.** Click **Deliver in person** and hand your phone or computer to the employee. It
-  shows only what they may see. They can add a comment, type their name and confirm with their
-  PIN (their Connecteam kiosk code), plus the 6-digit code if they use an authenticator. Wrong
-  tries count towards locking their HR sign-in, as at sign-in.
-- **Through the portal.** Click **Send to sign in the portal**: they're told something is waiting,
-  and sign it there.
-- **On paper.** On the same in-person page, **Print** it (the printout has signature lines), have
-  it signed, then **Add the photo** of the signed page.
-- **Refused to sign.** Record it with a witness: another HR portal user confirming with their
-  mobile number and PIN, or the witness's name typed in. It still counts.
+**Legal hold.** On a person's page, HR can **Put on legal hold** (with a reason, and a fresh
+code). Nothing in that file can then be deleted, the recycle bin isn't emptied for them, and
+they're left off the retention list, until HR lifts it.
 
-The signing page says plainly that signing confirms they received it, not that they agree. If a
-write-up sent through the portal isn't signed within 3 days (a setting), the manager is reminded,
-then every 3 days; it counts either way. The signed PDF goes to the employee's **Discipline**
-folder in Google Drive (only what the employee sees is in it); while Google Drive isn't connected
-it waits and is tried again.
+**After someone leaves.** Records are kept 5 years after they leave (HR settings → Records).
+After that the person is listed on **Needs attention** under **Past the time records are kept**,
+and HR gets a note in the inbox. Nothing is deleted by itself: HR reviews the person's files and
+presses **Delete their files** (a fresh code; they go to the recycle bin first). When HR confirms
+someone has left, **Move Drive folder to Former employees** on their page moves their folder
+there; it never happens by itself. When someone's name changes in Connecteam, their Drive folder
+is renamed overnight. Folders are always found by their Connecteam ID, never by name, so two
+people with the same name never get mixed up.
 
-#### Appeals
+**Needs attention** (HR admins, in the menu) lists files waiting for HR to check, uploads and PDFs
+that couldn't be sent or made, those still waiting to be tried again, copies to remove in
+Connecteam, records past the time they're kept, and legal holds. HR's own file is left off it:
+another HR admin sees to it.
 
-An employee can appeal a write-up within **7 days** of receiving it (a setting), once. HR decides,
-with a note the employee and their manager both see: **upheld** (no change), **amended** (other
-points, through an adjustment line, or a lower step) or **voided** (the write-up and its incident
-stop counting). The HR admin who wrote or approved the write-up doesn't decide its appeal.
+#### PDFs of write-ups and reviews
 
-#### Who sees what
-
-| | Employee | Their managers and directors | HR admins |
-|---|---|---|---|
-| Their write-ups | Once delivered, without managers' or HR's notes | Yes, without HR's notes | All |
-| Incidents | No (their write-ups say what happened) | Yes, not voided ones | All |
-| Point total and history | If the point system's switches allow | Yes | Yes |
-| Expired write-ups and points | If the switches allow | Yes | Yes |
-| Suspensions and termination reviews | Nothing until HR acts | Nothing until HR acts | Yes |
-| Voided write-ups | "Withdrawn on [date]" if it was delivered | The same | Everything |
-
-Each manager's **My team** lists everyone whose file they see, with points, current step,
-probation, and what needs doing (steps due, drafts, write-ups to deliver or not signed yet).
-
-#### Probation
-
-- **Introductory period (new hires).** It starts on the start date from Connecteam and lasts 90
-  days, or the length the published point system sets for their department (the longest, if
-  they're in several). It's made by itself for new hires only: people whose period was already
-  over when the HR portal met them never get one. If HR confirms a different start date, it moves
-  with it. A rehire gets a new one; a transfer doesn't.
-- **Disciplinary probation.** HR places someone on it from their page, with an end date and a
-  reason, for example as part of a last-chance agreement.
-- **Extending** is HR's, with a reason and a new end date: one extension of up to 30 days, and 120
-  days in all (the point system can set other limits). A leave of absence is an extension marked
-  as leave, which doesn't count against those limits. HR can also move the end earlier. The
-  employee is told and asked to **acknowledge** it.
-- **The end-of-probation review** is due 14 days before the end; the manager and HR are told. The
-  manager recommends **pass**, **extend** (with a date) or **end employment**, from the review or
-  on the person's page. HR decides (or waives it). **End employment** becomes a to-do: archive them
-  in Connecteam by hand, then mark it done.
-- **If the end date passes with no decision**, it stays open and the manager and HR are reminded
-  daily (or, if the point system says so, it passes by itself).
-- An incident that happened during probation uses the probation rules, even if HR approves it
-  later.
-
-Screens say **"introductory period"** for new hires (or "probation", a setting), and employees see
-their end date (a setting). Probation doesn't change Oregon at-will employment; have your
-employment lawyer check the wording.
-
-#### Who is told
-
-Through the portal inbox, and Connecteam chat when it's on (never with details):
-
-- an incident or write-up sent to HR: HR; returned: the manager;
-- a step is due: the manager and HR, straight away; a termination review: HR only;
-- a write-up ready to deliver: the manager; waiting for a signature: the employee; not signed in
-  time: the manager;
-- an appeal: HR; decided: the employee and the manager;
-- probation review due or overdue: the manager and HR; extended or passed: the employee, the
-  manager and HR.
-
-#### Settings
-
-In **HR settings → Write-ups and probation**: days to appeal (7), days before the manager is
-reminded of an unsigned write-up (3), whether screens say "introductory period" or "probation",
-and whether employees see their probation end date.
-
-### Notifications
-
-- **The portal's inbox** always works, for everyone, and the home page lists to-dos.
-- **Connecteam chat messages** are optional: tick **Send Connecteam chat messages** in
-  **Settings → Connections → Connecteam for HR** (see [Connecteam for HR](#connecteam-for-hr)).
-  They need the **chat.write** and **publishers.read** permissions (Connecteam's Communications
-  hub), and a custom publisher named "Hot Lake HR" in Connecteam. Without them, people see things
-  in the inbox only, and HR settings say why.
-- Messages never say what it's about, only that there's something new in the HR portal, with its
-  address.
-- Employees' messages wait out **quiet hours** (9 PM to 7 AM by default), and each person gets at
-  most one message a day unless it's urgent. Managers, directors and HR get urgent things straight
-  away and everything else in one **daily summary** (8 AM by default). HR sets these times in
-  **HR settings → Notifications**, in Pacific time.
-- Each message is one Connecteam request. A message that can't be sent is tried again after 1
-  minute, 5, 30, 2 hours and 6 hours, then daily; after 8 tries HR sees it in **HR settings →
-  Notifications** with a **Retry** button, and on their to-do list.
+Signed write-ups and closed reviews become PDFs, made by Google Drive through the script and kept
+like any other file, in the person's **Discipline** or **Reviews** folder. They're made in the
+background as soon as the write-up is signed or the review closed. While Google Drive isn't set
+up, or its script is out of date, they wait (without using up tries) and are made once it is. If
+Google fails, they're tried again like uploads, and after 8 tries they go on **Needs attention**
+with **Retry** (also on the write-up itself, **File the PDF again**). Asking again never makes a
+second copy. A PDF holds only what the employee was shown: never managers' or HR's notes, and
+never an end-of-introductory-period recommendation.
 
 ### Certificates
 
@@ -2096,8 +2044,152 @@ Staff Access can't fetch a card someone added in Connecteam's own app, so HR get
 "Jane uploaded a card in Connecteam: approve or reject it there, and ask her to add it in the HR
 portal." Tell staff to add their cards in the HR portal.
 
-A migration file can't be made while cards are waiting for HR (their photos are only on this
+Once confirmed, a card's photo opens as the document it became (from this computer for 30 days,
+then from Google Drive), for the person and HR only, and every look is in the audit log. A
+migration file can't be made while cards are waiting for HR (their photos are only on this
 computer): check them first.
+
+### Discipline and probation
+
+The HR portal runs your points-based discipline system: incidents, write-ups that stop counting
+after a while, appeals, and probation. The point system itself (offences, points, steps and when
+points expire) is set up by HR in the portal. **Until HR publishes a point system, nobody can
+record an incident**, and the Discipline sections say so. Probation works from the start.
+
+The portal recommends; people decide. Reaching a step makes a task for a person, never a warning
+by itself, and a termination is always HR's decision.
+
+#### Recording an incident
+
+Managers (and directors and HR) open the person's page and click **Record an incident**. The one
+form asks:
+
+- **the offence** and **the day it happened** (within the last year);
+- **what happened**, in plain facts (their managers and HR see this);
+- for attendance offences, **"Was this protected leave?"**: Oregon sick time, Paid Leave Oregon,
+  OFLA/FMLA, jury duty, military leave, domestic violence leave, work injury or other. Any answer
+  but **No** records it with 0 points, and it never leads to a step. Ask your employment lawyer
+  to confirm the list;
+- **points**: the offence's default, or other points within the range the point system allows for
+  it, with a reason.
+
+As you fill it in, a preview says what it means, for example "Maria: 4 → 6 points. Reaches Written
+warning. A write-up is needed." When it reaches a step, the same form takes the write-up: the
+expected improvement, what happens if it happens again, support offered, a follow-up date and a
+note for managers and HR (the employee never sees that note). The policy broken is quoted
+automatically. You can ask for a lower step than the point system calls for, with a reason; HR
+decides, and it's recorded as a downgrade. When the step is one HR handles alone (a suspension or
+a termination review), the preview only says HR decides.
+
+**HR approves every incident before it counts** or the employee sees anything (the point system
+can relax this for minor offences later). Points count from HR's approval, and expire counting
+from the day it happened.
+
+#### What HR does
+
+HR admins find everything waiting under **Discipline**: incidents and write-ups to approve,
+appeals, tasks, probation decisions, write-ups not signed yet, and signed write-ups whose PDF
+couldn't be made (also on **Needs attention**).
+
+- **Approve** an incident, or set other points with a reason, or **return it** to the manager with
+  a note; they change it and send it again. Nobody approves their own work, and an HR admin's own
+  file is handled by another HR admin.
+- **A step is due.** When an approved incident takes someone to a higher step, their managers and
+  HR get a task with a write-up already filled in. **Suspensions and termination reviews go to HR
+  only**: the manager and the employee see nothing of them until HR acts.
+- **A termination review is never automatic.** HR chooses **terminate** (recorded here; then
+  archive them in Connecteam by hand, which becomes a to-do), **a last-chance agreement** (you may
+  also place them on disciplinary probation) or **no action**, each with a reason.
+- **Adjusting**, each with a reason and a fresh 6-digit code (or PIN), and all logged: add or take
+  away points for someone (from a date, optionally until a date), change one incident's points
+  (an adjustment line, so the original stays visible), void an incident or a write-up, and change
+  the day a write-up stops counting. **As of a date** on someone's page shows their points and
+  records as they were on any past day.
+- After any void or reduction, later write-ups are checked again. Where a later step would now be
+  lower, HR gets a "check this" task. Nothing is undone by itself.
+
+#### Write-ups
+
+A write-up goes **Draft → With HR → Approved → Delivered → Active → Expired**. HR can send a
+draft back with a note, and a write-up can be voided or be under appeal. Once approved, its words
+are never changed.
+
+Delivering it, once HR has approved it:
+
+- **In person.** Click **Deliver in person** and hand your phone or computer to the employee. It
+  shows only what they may see. They can add a comment, type their name and confirm with their
+  PIN (their Connecteam kiosk code), plus the 6-digit code if they use an authenticator. Wrong
+  tries count towards locking their HR sign-in, as at sign-in.
+- **Through the portal.** Click **Send to sign in the portal**: they're told something is waiting,
+  and sign it there.
+- **On paper.** On the same in-person page, **Print** it (the printout has signature lines), have
+  it signed, then **Add the photo** of the signed page. The photo goes to the employee's
+  **Discipline** folder in Google Drive with the write-up, and opens from it (**Signed page
+  (photo)**) for the employee, their managers and HR.
+- **Refused to sign.** Record it with a witness: another HR portal user confirming with their
+  mobile number and PIN, or the witness's name typed in. It still counts.
+
+The signing page says plainly that signing confirms they received it, not that they agree. If a
+write-up sent through the portal isn't signed within 3 days (a setting), the manager is reminded,
+then every 3 days; it counts either way. The signed PDF goes to the employee's **Discipline**
+folder in Google Drive (only what the employee sees is in it; see [PDFs of write-ups and
+reviews](#pdfs-of-write-ups-and-reviews)).
+
+#### Appeals
+
+An employee can appeal a write-up within **7 days** of receiving it (a setting), once. HR decides,
+with a note the employee and their manager both see: **upheld** (no change), **amended** (other
+points, through an adjustment line, or a lower step) or **voided** (the write-up and its incident
+stop counting). The HR admin who wrote or approved the write-up doesn't decide its appeal.
+
+#### Who sees what
+
+| | Employee | Their managers and directors | HR admins |
+|---|---|---|---|
+| Their write-ups | Once delivered, without managers' or HR's notes | Yes, without HR's notes | All |
+| Incidents | No (their write-ups say what happened) | Yes, not voided ones | All |
+| Point total and history | If the point system's switches allow | Yes | Yes |
+| Expired write-ups and points | If the switches allow | Yes | Yes |
+| Suspensions and termination reviews | Nothing until HR acts | Nothing until HR acts | Yes |
+| Voided write-ups | "Withdrawn on [date]" if it was delivered | The same | Everything |
+
+Each manager's **My team** lists everyone whose file they see, with points, current step,
+probation, and what needs doing (steps due, drafts, write-ups to deliver or not signed yet).
+
+#### Probation
+
+- **Introductory period (new hires).** It starts on the start date from Connecteam and lasts 90
+  days, or the length the published point system sets for their department (the longest, if
+  they're in several). It's made by itself for new hires only: people whose period was already
+  over when the HR portal met them never get one. If HR confirms a different start date, it moves
+  with it. A rehire gets a new one; a transfer doesn't.
+- **Disciplinary probation.** HR places someone on it from their page, with an end date and a
+  reason, for example as part of a last-chance agreement.
+- **Extending** is HR's, with a reason and a new end date: one extension of up to 30 days, and 120
+  days in all (the point system can set other limits). A leave of absence is an extension marked
+  as leave, which doesn't count against those limits. HR can also move the end earlier. The
+  employee is told and asked to **acknowledge** it.
+- **The end-of-probation review** is due 14 days before the end. Its writer is reminded by the
+  review itself (see [Performance reviews](#performance-reviews)); with end-of-introductory-period
+  reviews turned off, the manager and HR are told instead. The manager recommends **pass**,
+  **extend** (with a date) or **end employment**, from the review or on the person's page. HR
+  decides (or waives it), on the person's page, where the recommendation shows which review it came
+  from. **End employment** becomes a to-do: archive them in Connecteam by hand, then mark it done.
+- **If the end date passes with no decision**, it stays open and the manager and HR are reminded
+  daily (or, if the point system says so, it passes by itself).
+- An incident that happened during probation uses the probation rules, even if HR approves it
+  later.
+
+Screens say **"introductory period"** for new hires (or "probation", a setting), and employees see
+their end date (a setting). Probation doesn't change Oregon at-will employment; have your
+employment lawyer check the wording.
+
+#### Settings
+
+In **HR settings → Write-ups and probation**: days to appeal (7), days before the manager is
+reminded of an unsigned write-up (3), whether screens say "introductory period" or "probation",
+and whether employees see their probation end date.
+
 ### Performance reviews
 
 Managers write reviews in the HR portal, on a phone or a computer, under **Reviews**. Every rule
@@ -2106,8 +2198,10 @@ design.
 
 **Kinds of review**
 
-- **End of introductory period**, from each person's introductory period (probation). It opens
-  when that review is due, and if the end date moves (an extension), the review moves with it.
+- **End of introductory period**, from each person's introductory period (see
+  [Probation](#probation)). If HR moves the end date before the review's recommendation has gone
+  to HR, the review moves with it. If HR extends the period after the review closed, another
+  review opens for the new end.
 - **Annual**, on each person's work anniversary (or, if you prefer, in one month for everyone:
   it opens on the 1st and is due at the end of the month; people who started in the last six
   months wait until next year).
@@ -2146,7 +2240,9 @@ it and add comments, choosing who may see each one. Everyone working on a review
    anything they'd like. The writer can carry on without it if it doesn't come.
 2. **The writer fills in the form.** Tap a number to rate; everything saves as you go. A
    read-only **Background** panel shows the points and write-ups in the period, certificate
-   status, and the goals from the last review. Anything not set up yet says "Not available".
+   status (with flags such as "May not serve alcohol"), and the goals from the last review: points
+as they are today, write-ups delivered in the review's period. Anything not set up yet, or that
+can't be read just then, says "Not available".
    The overall rating is worked out from the ratings (their average); the writer can choose
    another, with a reason. **Finish** lists anything still missing.
 3. **HR's approval** (end-of-introductory-period reviews only, by default). HR approves it or
@@ -2156,13 +2252,13 @@ it and add comments, choosing who may see each one. Everyone working on a review
    acknowledging means they received it, not that they agree. They can also refuse. For someone
    who can't use the HR portal, the writer can record that they acknowledged on paper, refused
    in the meeting, or didn't answer.
-6. **Closed.** The final PDF goes to the person's **Reviews** folder in Google Drive. Until Google
-   Drive is connected it waits, and HR sees a to-do if it keeps failing.
+6. **Closed.** The final PDF goes to the person's **Reviews** folder in Google Drive (see [PDFs of
+   write-ups and reviews](#pdfs-of-write-ups-and-reviews)).
 
 An end-of-introductory-period review recommends **pass**, **extend** (with a new end date) or
-**end employment**. Once it's final (approved), the recommendation goes to the person's
-introductory period, where HR confirms the outcome. The employee doesn't see that
-recommendation, in the portal or in the PDF.
+**end employment**. Once it's final (approved by HR), the writer's recommendation goes to the
+person's introductory period, where HR decides the outcome (see [Probation](#probation)). The
+employee doesn't see that recommendation, in the portal or in the PDF.
 
 **What the employee sees:** nothing until it's shared (except their self-review), then the
 ratings, comments, goals and overall rating, and only the comments marked for them. Never the
@@ -2187,90 +2283,66 @@ period only, every review, or none), how many days before the due date reviews o
 gap that skips a review (21 days), the reminder timing above, and which form each kind uses.
 Reviews aren't linked to pay, and Connecteam's own "Performance" feature isn't used.
 
+### Notifications
+
+- **The portal's inbox** always works, for everyone, and the home page lists to-dos.
+- **Connecteam chat messages** are optional: tick **Send Connecteam chat messages** in
+  **Settings → Connections → Connecteam for HR** (see [Connecteam for HR](#connecteam-for-hr)).
+  They need the **chat.write** and **publishers.read** permissions (Connecteam's Communications
+  hub), and a custom publisher named "Hot Lake HR" in Connecteam. Without them, people see things
+  in the inbox only, and HR settings say why.
+- Messages never say what it's about, only that there's something new in the HR portal, with its
+  address.
+- Employees' messages wait out **quiet hours** (9 PM to 7 AM by default), and each person gets at
+  most one message a day unless it's urgent. Managers, directors and HR get urgent things straight
+  away and everything else in one **daily summary** (8 AM by default). HR sets these times in
+  **HR settings → Notifications**, in Pacific time.
+- Each message is sent once, however often the nightly run (2:15 AM Pacific) runs.
+- Each message is one Connecteam request. A message that can't be sent is tried again after 1
+  minute, 5, 30, 2 hours and 6 hours, then daily; after 8 tries HR sees it in **HR settings →
+  Notifications** with a **Retry** button, and on their to-do list.
+
+**Who is told what**
+
+| What happened | Who is told |
+|---|---|
+| A document added by someone other than HR; one not accepted | HR; whoever added it |
+| An upload or PDF that keeps failing; records past the time they're kept | HR |
+| A recovery code used to sign in; a sign-in reset | HR; the person |
+| A card added (in the portal, or in Connecteam's own app) | HR |
+| A card confirmed; not accepted | The person; the person and whoever added it for them |
+| A card running out (heads-ups) | The person; managers and HR in their daily summary |
+| A card expired or missing (every 2 days) | The person, their managers and HR |
+| An incident or write-up sent to HR; returned | HR; the manager |
+| A step is due; a termination review | The manager and HR, straight away; HR only |
+| A write-up ready to deliver; waiting for a signature; not signed in time | The manager; the employee; the manager |
+| An appeal; decided | HR; the employee and the manager |
+| A probation review due (only with end-of-introductory-period reviews off), or the end passed undecided | The manager and HR |
+| A probation extended, passed or placed; a recommendation from a review | The employee, the manager and HR; HR |
+| A review opened, due soon, due or late | The writer (HR too once it's 14 days late) |
+| A review to approve; approved or sent back | HR; the writer |
+| A self-review asked for; a review shared | The employee |
+| A review acknowledged or closed | The writer and HR |
+
 ### HR settings
 
-HR admins find these in the HR portal under **HR settings**: roles, managers' departments, who
-must use an authenticator code, how soon people are signed out, notifications, which
-Connecteam profile fields hold the start date and direct manager, and the HR key (below).
+HR admins find these in the HR portal under **HR settings**, in this order:
 
-### Documents
+- **Roles** and managers' departments (who is primary), who must use an authenticator code, how
+  soon people are signed out, **Notifications** (quiet hours and the daily summary), which
+  Connecteam profile fields hold the start date and direct manager, and **Records** (how long
+  records of people who left are kept).
+- **Kinds of document** (see [Documents](#documents)).
+- **Certificates**: who needs which card, the kinds of certificate, reminders and their Connecteam
+  documents (see [Certificates](#certificates)).
+- **Write-ups and probation**: days to appeal, the unsigned write-up reminder, "introductory
+  period" or "probation", and whether employees see their end date (see [Discipline and
+  probation](#discipline-and-probation)).
+- **Reviews**: kinds, timing, self-reviews, HR's approval, and the forms (see [Performance
+  reviews](#performance-reviews)).
+- **HR key** (see [The HR key and backups](#the-hr-key-and-backups)).
 
-Each person's page in the HR portal has a **Documents** section: the files in their file that
-the person looking may see, with **Open** (photos open in the portal) or **Download** (PDFs are
-always downloaded, never opened inside the portal). Every file is kept in Google Drive, in the
-person's folder, with the date first in its name, such as `2026-10-25 Handbook
-acknowledgement.pdf`, so folders sort in order.
-
-**Kinds of document** (HR settings → Kinds of document). Each kind has who can see it, its folder
-in Google Drive, and who may add one. HR can rename kinds and add more. The kinds at the start:
-
-| Kind | Who can see it | Who may add one |
-|---|---|---|
-| Signed policies | The employee, their managers, directors and HR | HR |
-| Training records | The employee, their managers, directors and HR | Managers, directors and HR |
-| Hiring paperwork | Directors and HR | HR |
-| Other | HR admins only | HR |
-| I-9 | Restricted: HR admins only, kept apart | HR |
-| Reasonable accommodation | Restricted: HR admins only, kept apart | HR |
-
-Certificates, signed write-ups and final reviews are kinds too, but they're shown in their own
-sections, which decide who sees them. Changing who can see a kind takes effect at once. Changing
-its Drive folder only affects new files.
-
-**Adding a file.** Open someone's page, choose the kind, a title and the date on the document,
-and the file: a photo (JPEG, PNG or WebP) or a PDF, up to 15 MB (25 MB for HR, for scanned
-paperwork). The type is checked from the file itself, not its name. Photos are saved afresh
-without their camera details or location; PDFs are kept exactly as they are. Files that anyone
-but HR adds wait for HR to **Accept** or **Don't accept** them (with a reason, which whoever
-added it sees). A file that isn't accepted never reaches Google Drive and is removed after 30
-days. Nobody checks their own upload: an HR admin's own file is checked by another HR admin.
-
-**Restricted files (I-9, Reasonable accommodation).** Only HR admins see them; managers,
-directors and the employee never learn one exists, and they're never copied to Connecteam. On a
-person's page HR sees how many there are, and **Show restricted files** lists them. Every look is
-in the audit log. They're kept apart in Google Drive: in the **HR Restricted** shared drive if
-you picked one (see [The drives](#the-drives)), otherwise in a **Restricted** folder in the HR
-drive, and HR settings warns that every member of that drive can open it.
-
-**Getting files to Google Drive (and Connecteam).** Each file is kept encrypted on the Home
-Assistant computer until it's in Google Drive, then 30 more days for quick opening; after that
-it's fetched from Drive when someone opens it. Each file shows where it is, for HR: **Google
-Drive: Sent**, **Waiting** or **Needs attention**. If Google doesn't answer, the file is tried
-again after 1 minute, 5, 30, 2 hours and 6 hours, then daily. After 8 tries it goes on HR's
-**Needs attention** page with **Retry**. A retry never makes a second copy. While Google Drive
-isn't set up, or its script is out of date, files simply wait (without using up tries), and HR's
-to-do list says so. A migration file can't be made while files are waiting to reach Google Drive
-or waiting for HR.
-
-**Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
-turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
-HR), and only where "latest file only, and the employee sees it there" is fine. Restricted files
-never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
-can fix ("not assigned this document's pack in Connecteam") go on **Needs attention** at once,
-with **Retry** and **Don't copy to Connecteam**.
-
-**Deleting.** HR deletes a file with a fresh 6-digit code (or PIN). It stays in the person's
-**Recycle bin** for 30 days and can be **Restored**; then it's removed from the computer and
-moved to the shared drive's trash, which Google empties 30 days later. Connecteam can't remove
-files for Staff Access, so a deleted file that was copied there becomes a to-do on **Needs
-attention**: remove it in Connecteam, then press **Done**. The audit log keeps the line.
-
-**Legal hold.** On a person's page, HR can **Put on legal hold** (with a reason, and a fresh
-code). Nothing in that file can then be deleted, the recycle bin isn't emptied for them, and
-they're left off the retention list, until HR lifts it.
-
-**After someone leaves.** Records are kept 5 years after they leave (HR settings → Records).
-After that the person is listed on **Needs attention** under **Past the time records are kept**,
-and HR gets a note in the inbox. Nothing is deleted by itself: HR reviews the person's files and
-presses **Delete their files** (a fresh code; they go to the recycle bin first). When HR confirms
-someone has left, **Move Drive folder to Former employees** on their page moves their folder
-there; it never happens by itself. When someone's name changes in Connecteam, their Drive folder
-is renamed overnight. Folders are always found by their Connecteam ID, never by name, so two
-people with the same name never get mixed up.
-
-**Needs attention** (HR admins, in the menu) lists files waiting for HR to check, uploads that
-couldn't be sent, uploads still waiting to be tried again, copies to remove in Connecteam,
-records past the time they're kept, and legal holds.
+Changing settings asks for a fresh code (or PIN), and each change is in the audit log.
 
 ### The audit log
 
@@ -2316,10 +2388,12 @@ folder (`/data/hr`), apart from Staff Access's own.
 
 **Moving to new hardware.** A migration file (Backup tab → Migrate) carries the HR portal too:
 its settings (including both HR connections: the Google script's Web app URL and secret, the
-drives, and the Connecteam for HR keys), its records and its key. With the key kept out of backups, only the locked copy
-travels, and the new install asks for the HR recovery key. A migration file can't be made while
-uploads are still waiting to reach Google Drive or Connecteam: wait for them to go, then try
-again.
+drives, and the Connecteam for HR keys), its records and its key. With the key kept out of
+backups, only the locked copy travels, and the new install asks for the HR recovery key. A
+migration file can't be made while files are still waiting to reach Google Drive or Connecteam,
+or uploads and certificate photos are waiting for HR (they're only on this computer): the
+dashboard says which, so wait for them or check them, then try again. PDFs still to be made
+travel with the records and are made on the new computer.
 
 ### Keeping records
 

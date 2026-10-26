@@ -582,6 +582,8 @@
     }
     if (w.pdf && w.pdf.error) out.push(h("p", { class: "warn small" }, `Signed PDF: ${w.pdf.error}`));
     if (w.pdf_url) out.push(link("Signed PDF", w.pdf_url));
+    else if (w.pdf && w.pdf.status === "waiting" && !w.pdf.error) out.push(h("p", { class: "muted small" }, "The signed PDF is on its way to Google Drive."));
+    if (w.photo_url) out.push(link("Signed page (photo)", w.photo_url));
     return out;
   }
 
