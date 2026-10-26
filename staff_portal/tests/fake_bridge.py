@@ -13,13 +13,18 @@ Reading text (ocr) is faked: the text registered for those exact bytes (set_ocr_
 image in --ocr-dir (card.jpg and card.jpg.txt: matched by a small grayscale thumbnail, so a
 re-encoded or slightly smaller copy still matches), else the next text queued with
 POST /fake/ocr-text {"text": ...}, else --ocr-text.
+
+Making a PDF (pdf) is faked too: a small, valid one-font PDF holding the HTML's text, line by
+line (html_text), so tests can look for what it says. The HTML sent is kept in .pdfs.
 """
 
 import argparse
 import asyncio
 import base64
 import hashlib
+import html as html_lib
 import io
+import re
 import json
 import os
 import secrets
@@ -39,6 +44,7 @@ OTHER_DRIVE = "0AOtherDriveAAAAAAAAA"
 DRIVES = {HR_DRIVE: "HR Employee Files", RESTRICTED_DRIVE: "HR Restricted",
           OTHER_DRIVE: "Marketing"}
 SELF_TEST_TEXT = "EXPIRES 06/14/2029"
+OP_VERSIONS = {"pdf": gdrive.PDF_VERSION}   # ops a script older than this doesn't have
 
 
 class Refused(Exception):
@@ -70,6 +76,7 @@ class FakeBridge:
         self.ocr_default = ocr_text
         self.ocr_images: list[tuple[int, str]] = []
         self.ocr_calls = 0
+        self.pdfs: list[str] = []                # the HTML of every PDF made
         if ocr_dir:
             self.load_ocr_dir(ocr_dir)
         self._ids = 0
@@ -221,7 +228,7 @@ class FakeBridge:
             raise Refused("auth", "That request was already used.")
         self.nonces[nonce] = now
         handler = getattr(self, f"op_{op}", None)
-        if req["v"] != gdrive.PROTOCOL or handler is None:
+        if req["v"] != gdrive.PROTOCOL or handler is None or self.version < OP_VERSIONS.get(op, 0):
             raise Refused("outdated", "This script is older than Staff Access.")
         self.ops.append(op)
         return handler(args)
@@ -348,9 +355,23 @@ class FakeBridge:
             raise Refused("not_allowed", "Pick the HR shared drive in Staff Access first.")
         data = self._bytes(args.get("data"))
         self.ocr_calls += 1
+        self._scratch()
+        return {"text": self.read_text(data)}
+
+    def _scratch(self) -> None:
         if not self._find(self.allowed[0], {"staff_access": "ocr_scratch"}, "folder"):
             self.add("_OCR scratch", self.allowed[0], props={"staff_access": "ocr_scratch"})
-        return {"text": self.read_text(data)}
+
+    def op_pdf(self, args):
+        html = args.get("html")
+        if not isinstance(html, str) or not html.strip() or len(html) > gdrive.MAX_HTML:
+            raise Refused("bad_request", "A PDF is made from 1 character to 2 MB of HTML.")
+        if not self.allowed:
+            raise Refused("not_allowed", "Pick the HR shared drive in Staff Access first.")
+        self._scratch()
+        self.pdfs.append(html)
+        data = text_pdf(html_text(html))
+        return {"data": base64.b64encode(data).decode(), "size": len(data)}
 
     def read_text(self, data: bytes) -> str:
         known = self.ocr_texts.get(hashlib.sha256(data).hexdigest())
@@ -382,6 +403,51 @@ class FakeBridge:
         checks.append({"check": "Read text from a test image", "ok": True,
                        "detail": f'Google read the test image: "{SELF_TEST_TEXT}".'})
         return {"checks": checks}
+
+
+def html_text(html: str) -> list[str]:
+    """The text of the HTML a PDF is made from, a line per heading, paragraph, row or line break."""
+    text = re.sub(r"(?is)<(head|style|script)\b.*?</\1>", "", html)
+    text = re.sub(r"(?i)<br\s*/?>|</(p|h[1-6]|tr|li|div|table)>", "\n", text)
+    text = re.sub(r"(?i)</t[dh]>", "  ", text)
+    text = html_lib.unescape(re.sub(r"<[^>]*>", "", text))
+    return [" ".join(line.split()) for line in text.split("\n") if line.strip()]
+
+
+def text_pdf(lines: list[str], per_page: int = 48, width: int = 90) -> bytes:
+    """A small valid PDF (Helvetica, letter size) with these lines of text, wrapped."""
+    wrapped = []
+    for line in lines:
+        while len(line) > width:
+            cut = line.rfind(" ", 0, width)
+            cut = cut if cut > 0 else width
+            wrapped.append(line[:cut])
+            line = line[cut:].lstrip()
+        wrapped.append(line)
+    pages = [wrapped[i:i + per_page] for i in range(0, len(wrapped), per_page)] or [[]]
+
+    def literal(line: str) -> str:
+        safe = line.encode("latin-1", "replace").decode("latin-1")
+        return "(" + safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") + ")"
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", "",
+               "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+    kids = []
+    for page in pages:
+        stream = "BT /F1 11 Tf 14 TL 56 740 Td " + " ".join(f"{literal(l)} Tj T*" for l in page) + " ET"
+        objects.append(f"<< /Length {len(stream.encode('latin-1'))} >>\nstream\n{stream}\nendstream")
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources "
+                       f"<< /Font << /F1 3 0 R >> >> /Contents {len(objects)} 0 R >>")
+        kids.append(f"{len(objects)} 0 R")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(kids)} >>"
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for n, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n{body}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return bytes(out)
 
 
 def _thumb_hash(data: bytes) -> int | None:

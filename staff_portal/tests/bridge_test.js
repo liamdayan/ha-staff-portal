@@ -35,6 +35,8 @@ function makeWorld() {
     calls: [],
     failNext: null,        // {method, message}: the next such Drive call throws this
     removeDenied: false,   // permanent delete refused (not a Manager of the drive)
+    pdfFails: false,       // saving a Google Doc as a PDF fails
+    pdfTooBig: false,      // ...or makes one over 25 MB
     ocrRead: (bytes) => {
       const text = unsigned(bytes).toString("latin1");
       return text.startsWith("TEXT:") ? text.slice(5) : "";
@@ -159,7 +161,10 @@ function makeServices(world) {
         const file = world.add({ name: meta.name, mimeType: meta.mimeType, parents: [parent], driveId,
           appProperties: { ...(meta.appProperties || {}) }, properties: { ...(meta.properties || {}) } });
         if (blob) {
-          if (meta.mimeType === GOOGLE_DOC) {
+          if (meta.mimeType === GOOGLE_DOC && blob.mime === "text/html") {
+            assert.strictEqual(typeof blob.getBytes(), "string");
+            file.html = blob.getBytes();   // a PDF being made
+          } else if (meta.mimeType === GOOGLE_DOC) {
             file.text = world.ocrRead(blob.getBytes(), blob.mime);
             file.ocrLanguage = opts.ocrLanguage;
             file.convertedFrom = blob.mime;
@@ -236,7 +241,17 @@ function makeServices(world) {
     getFileById(id) {
       const f = world.files.get(id);
       if (!f) throw new Error("No item with the given ID could be found.");
-      return { getBlob: () => ({ getBytes: () => f.bytes.slice() }) };
+      return {
+        getBlob: () => ({ getBytes: () => f.bytes.slice() }),
+        // A Google Doc saved as a PDF: here, a small PDF holding the HTML's text.
+        getAs(mime) {
+          assert.strictEqual(mime, "application/pdf");
+          if (f.mimeType !== GOOGLE_DOC || world.pdfFails) throw new Error("Conversion failed");
+          if (world.pdfTooBig) return { getBytes: () => ({ length: 25 * 1024 * 1024 + 1 }) };
+          const text = f.html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+          return { getBytes: () => signed(Buffer.from(`%PDF-1.4\n(${text})\n%%EOF\n`, "latin1")) };
+        },
+      };
     },
   };
   const DocumentApp = {
@@ -330,7 +345,7 @@ test("ping: version, account and shared drives", () => {
   const ctx = load(world);
   const reply = post(ctx, request("ping"));
   assert.ok(reply.ok);
-  assert.strictEqual(reply.version, 1);
+  assert.strictEqual(reply.version, 2);
   assert.strictEqual(reply.result.email, world.email);
   assert.deepStrictEqual(reply.result.drives.map((d) => d.name).sort(),
     ["HR Employee Files", "HR Restricted", "Marketing"]);
@@ -610,6 +625,47 @@ test("Google's own errors come back in plain words", () => {
   world.failNext = { method: "Files.list", message: "Internal Error" };
   const err = refused(ctx, "ensureFolder", { parent: HR, name: "x", props: { a: "1" } }, "unavailable");
   assert.match(err.message, /Internal Error/);
+});
+
+test("pdf: a Google Doc from the HTML in _OCR scratch, saved as a PDF, then deleted", () => {
+  const { world, ctx } = ready();
+  const html = "<!doctype html><html><body><h1>Written warning</h1><p>Jane &amp; Bo &#233;</p></body></html>";
+  const result = ok(ctx, "pdf", { html });
+  const bytes = Buffer.from(result.data, "base64");
+  assert.ok(bytes.toString("latin1").startsWith("%PDF-1.4"));
+  assert.match(bytes.toString("latin1"), /Written warning Jane &amp; Bo &#233;/);
+  assert.strictEqual(result.size, bytes.length);
+  const docs = () => [...world.files.values()].filter((f) => f.mimeType === GOOGLE_DOC);
+  assert.strictEqual(docs().length, 0, "the Google Doc is deleted");
+  const scratch = [...world.files.values()].filter((f) => f.name === "_OCR scratch");
+  assert.strictEqual(scratch.length, 1);
+  assert.strictEqual(scratch[0].driveId, HR);
+  // The scratch folder is shared with reading cards.
+  ok(ctx, "ocr", { data: b64("TEXT:x"), mimeType: "image/png" });
+  ok(ctx, "pdf", { html: "<p>again</p>" });
+  assert.strictEqual([...world.files.values()].filter((f) => f.name === "_OCR scratch").length, 1);
+  // Nothing to make it from, or too much, is refused before Drive is touched.
+  const before = world.calls.length;
+  refused(ctx, "pdf", { html: "" }, "bad_request");
+  refused(ctx, "pdf", { html: "   " }, "bad_request");
+  refused(ctx, "pdf", { html: 5 }, "bad_request");
+  refused(ctx, "pdf", {}, "bad_request");
+  refused(ctx, "pdf", { html: "x".repeat(2 * 1024 * 1024 + 1) }, "bad_request");
+  assert.strictEqual(world.calls.length, before);
+});
+
+test("pdf: the doc is removed when saving fails, a huge PDF is refused, and it needs a drive", () => {
+  const { world, ctx } = ready();
+  world.pdfFails = true;
+  refused(ctx, "pdf", { html: "<p>x</p>" }, "unavailable");
+  const docs = () => [...world.files.values()].filter((f) => f.mimeType === GOOGLE_DOC);
+  assert.strictEqual(docs().length, 0);
+  world.pdfFails = false;
+  world.pdfTooBig = true;
+  refused(ctx, "pdf", { html: "<p>x</p>" }, "too_big");
+  assert.strictEqual(docs().length, 0);
+  const fresh = load(makeWorld());
+  assert.match(refused(fresh, "pdf", { html: "<p>x</p>" }, "not_allowed").message, /Pick the HR shared drive/);
 });
 
 test("selfTest: sign-in, the drive, a test folder and reading a test image", () => {

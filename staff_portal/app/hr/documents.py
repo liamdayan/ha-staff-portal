@@ -5,9 +5,16 @@ Kinds (HR settings): a name, who can see it (access.LEVELS), its Drive subfolder
 (HR only; managers and directors too; or the employee too: anyone but HR waits for HR to check
 it), and whether it's copied to Connecteam (only while the owner has the Connecteam documents
 copy on). The defaults follow the owner's decisions. "I-9" and "Reasonable accommodation" are
-restricted: HR admins only (nobody else even learns one exists), stored apart (folders.py), every
-look logged, never copied to Connecteam. Whether a kind is restricted is fixed when it's made,
-because its files are stored apart.
+restricted: HR admins only (nobody else even learns one exists), stored apart (folders.py, and
+sealed with keys of their own here), every look logged, never copied to Connecteam. Whether a
+kind is restricted is fixed when it's made, because its files are stored apart.
+
+Other parts of the HR portal keep their own kinds here (register_kind): certificates, signed
+write-ups, final reviews. Those are left out of the Documents section, their part decides who
+may open them (can_open), and files the portal makes itself go straight to Drive
+(add_generated). PDFs are made by Google Drive from plain HTML (pdfdoc.py, make_pdf); while
+Google isn't set up, the part keeps its record and the delivery queue makes the PDF later
+(queue_pdf, register_pdf_maker).
 
 A file's life:
 - added: its type checked from its bytes, pictures re-encoded without metadata, PDFs byte for
@@ -27,33 +34,45 @@ Titles and reasons are encrypted; dates, kinds and statuses stay readable so lis
 """
 
 import asyncio
+import inspect
 import os
 import re
 import secrets
 import sqlite3
 import time
 import urllib.parse
+import weakref
 from datetime import date
 
-from . import access, crypto, files, folders, hrdb, notify
+from . import access, audit, crypto, files, folders, gdrive, hrdb, notify, service
 
 DAY = 86400
 BIN_DAYS = 30            # deleted files can be restored for this long
 CACHE_DAYS = 30          # a delivered file stays here this long for quick viewing
 REJECTED_DAYS = 30       # a rejected upload goes after this long
 MAX_KINDS = 50
+MAX_WAITING = 30         # uploads waiting for HR in one person's file, at most
 FILE_PURPOSE = "file.document"
+RESTRICTED_PURPOSE = "file.restricted"   # restricted files are sealed with a key of their own
 CERTIFICATES = "certificates"
 RESTRICTED = "restricted"
+KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 UPLOADERS = {"hr": "HR admins only",
              "managers": "Their managers and directors too (HR checks it)",
              "employee": "The employee too (HR checks it)"}
 UPLOAD_RELATIONS = {"hr": {"hr"}, "managers": {"manager", "director", "hr"},
                     "employee": {"self", "manager", "director", "hr"}}
 STATUS_WORDS = {"waiting": "Waiting for HR", "active": "Saved", "rejected": "Not accepted",
-                "deleted": "In the recycle bin"}
+                "deleted": "In the recycle bin", "gone": "Deleted"}
 SHOWN = ("waiting", "active", "rejected")
 HOLD_ON = "A legal hold is on for this person: nothing in their file can be deleted."
+COPIES_OFF = ("Connecteam copies are off. The owner turns them on in Home Assistant: Settings, "
+              "Connections, Connecteam for HR, Copy confirmed certificates to Connecteam.")
+NO_PDF = ("PDFs are made through Google Drive, which isn't set up yet. The owner connects it in "
+          "Home Assistant: Settings, Connections, Google Drive (HR files). The PDF is made as "
+          "soon as it is.")
+TOO_MANY_WAITING = (f"There are already {MAX_WAITING} uploads waiting for HR in this file. Add "
+                    "more once HR has checked those.")
 
 # The kinds a new HR portal starts with: (key, name, who sees it, Drive subfolder, copied to
 # Connecteam, who may add one).
@@ -67,14 +86,21 @@ BUILT_IN = (
     ("accommodation", "Reasonable accommodation", RESTRICTED, "Reasonable accommodation", 0, "hr"),
 )
 
-# Kinds another part of the HR portal shows in a section of its own ({key: section name}), such
-# as certificates: the Documents section leaves them out.
-OWNED: dict[str, str] = {}
+# Kinds other parts of the HR portal add (register_kind): {key: (name, level, subfolder)}.
+REGISTERED: dict[str, tuple] = {}
+# Kinds another part shows in a section of its own ({key: section name}): the Documents section
+# leaves them out, and their own part adds, accepts and deletes them.
+OWNED: dict[str, str] = {CERTIFICATES: "certificates"}
+# Who may open a file of a kind another part owns: {key: can_open(viewer, rel, doc) -> bool}.
+CAN_OPEN: dict = {}
+# PDFs made later by the delivery queue (target "pdf"): {kind key: (maker, done)}, where
+# maker(svc, row) -> (person, title, html[, doc_date]) or None, and done(svc, row, doc).
+PDF_MAKERS: dict = {}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS doc_kinds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT UNIQUE,                     -- the built-in kinds (NULL for kinds HR adds)
+    key TEXT UNIQUE,                     -- built-in and registered kinds (NULL for kinds HR adds)
     name TEXT NOT NULL,
     visibility TEXT NOT NULL,            -- access.LEVELS
     folder TEXT NOT NULL,                -- the Drive subfolder
@@ -115,12 +141,14 @@ CREATE INDEX IF NOT EXISTS documents_person ON documents (person_id, status);
 CREATE INDEX IF NOT EXISTS documents_status ON documents (status);
 -- Work for Google Drive and Connecteam, tried until it's done: a file to Drive, its Connecteam
 -- copy, moving a deleted one to Drive's trash, renaming a person's folders, moving them to
--- Former employees. It survives restarts and updates.
+-- Former employees, making a PDF another part asked for. It survives restarts and updates.
 CREATE TABLE IF NOT EXISTS deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id INTEGER,                 -- NULL for work on a person's folders
+    document_id INTEGER,                 -- the file (a PDF: the one made, once it's made)
     person_id TEXT NOT NULL,
-    target TEXT NOT NULL,                -- drive, connecteam, trash, rename, former
+    target TEXT NOT NULL,                -- drive, connecteam, trash, rename, former, pdf
+    kind_key TEXT,                       -- pdf: the kind it's for (its part makes the HTML)...
+    ref TEXT,                            -- ...and that part's record (a write-up, a review)
     status TEXT NOT NULL DEFAULT 'waiting',  -- waiting, done, attention, skipped
     tries INTEGER NOT NULL DEFAULT 0,
     due_at REAL NOT NULL,
@@ -150,17 +178,51 @@ CREATE TABLE IF NOT EXISTS doc_todos (
 );
 """
 
+notify.register_kind("document_waiting", "A document is waiting for HR to check it.")
+notify.register_kind("document_rejected", "A document you added wasn't accepted. See why in the HR portal.")
+notify.register_kind("records_due", "A former employee's records are past the time they're kept.")
+
 
 def setup(db) -> None:
-    """The tables, and the built-in kinds the first time (on start)."""
+    """The tables, and the built-in and registered kinds the first time (on start)."""
     db.add_schema(SCHEMA + folders.SCHEMA)
+    _ensure_kinds(db)
+
+
+def _ensure_kinds(db) -> None:
     now = time.time()
-    for position, (key, name, level, folder, connecteam, uploaders) in enumerate(BUILT_IN):
+    rows = [(key, name, level, folder, connecteam, uploaders)
+            for key, name, level, folder, connecteam, uploaders in BUILT_IN]
+    rows += [(key, name, level, folder, 0, "hr") for key, (name, level, folder) in REGISTERED.items()]
+    for position, (key, name, level, folder, connecteam, uploaders) in enumerate(rows):
         db.conn.execute(
             "INSERT OR IGNORE INTO doc_kinds (key, name, visibility, folder, connecteam, uploaders, "
             "position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (key, name, level, folder, connecteam, uploaders, position * 10, now))
     db.conn.commit()
+
+
+# ---------------------------------------------------------------- other parts' kinds
+
+def register_kind(key: str, name: str, level: str, subfolder: str, owner_section: str, *,
+                  can_open=None) -> None:
+    """A kind of document another part of the HR portal owns, such as "writeups" (Discipline:
+    subfolder "Discipline", level "managers") or "reviews". Called when that part is imported.
+    The kind is made on start if it isn't there (HR may rename it later, and its Drive
+    subfolder), it's left out of the Documents section (owner_section shows it), and
+    can_open(viewer, rel, doc) -> bool, when given, decides who may open its files; otherwise
+    the kind's level does."""
+    if not isinstance(key, str) or not KEY_RE.fullmatch(key):
+        raise ValueError("A kind's key is short lowercase text, like writeups.")
+    if level not in access.LEVELS:
+        raise ValueError(f"Choose a level from {', '.join(access.LEVELS)}.")
+    REGISTERED[key] = (" ".join(str(name or "").split())[:60] or key, level,
+                       folders.clean_subfolder(subfolder))
+    OWNED[key] = str(owner_section or key)
+    if can_open is not None:
+        CAN_OPEN[key] = can_open
+    if hrdb.current is not None:
+        _ensure_kinds(hrdb.current)
 
 
 # ---------------------------------------------------------------- kinds
@@ -187,18 +249,24 @@ def is_restricted(k: dict) -> bool:
     return k["visibility"] == RESTRICTED
 
 
+def owned_by(k: dict) -> str | None:
+    """The section of another part that shows this kind, or None (the Documents section)."""
+    return OWNED.get(k["key"]) if k.get("key") else None
+
+
 def fixed_fields(k: dict) -> set[str]:
     """What HR can't change on a kind: a restricted kind stays restricted, HR only and out of
-    Connecteam; certificates keep the design's rules (their own part decides the rest)."""
-    if is_restricted(k):
+    Connecteam; a kind another part owns keeps that part's rules (HR can rename it and change its
+    Drive subfolder)."""
+    if is_restricted(k) or owned_by(k):
         return {"visibility", "uploaders", "connecteam", "ct_document"}
-    if k["key"] == CERTIFICATES:
-        return {"visibility", "uploaders", "ct_document"}
     return set()
 
 
-def clean_kind(data: dict, current: dict | None = None) -> dict:
-    """The fields of a kind HR is adding or changing, checked. Raises ValueError (plain words)."""
+def clean_kind(data: dict, current: dict | None = None, copies: bool = True) -> dict:
+    """The fields of a kind HR is adding or changing, checked. copies: whether the owner has the
+    Connecteam copy on (a kind's copy can only be turned on then). Raises ValueError (plain
+    words)."""
     fixed = fixed_fields(current) if current else set()
     values = {}
     if "name" in data or current is None:
@@ -222,7 +290,10 @@ def clean_kind(data: dict, current: dict | None = None) -> dict:
             raise ValueError("Choose who may add one.")
         values["uploaders"] = who
     if ("connecteam" in data or current is None) and "connecteam" not in fixed:
-        values["connecteam"] = 0 if restricted else 1 if data.get("connecteam") in (True, 1, "1") else 0
+        on = not restricted and data.get("connecteam") in (True, 1, "1")
+        if on and not copies and not (current and current["connecteam"]):
+            raise ValueError(COPIES_OFF)
+        values["connecteam"] = 1 if on else 0
     if "ct_document" in data and "ct_document" not in fixed and not restricted:
         doc = data.get("ct_document")
         if doc in (None, "", 0):
@@ -232,6 +303,10 @@ def clean_kind(data: dict, current: dict | None = None) -> dict:
             values["ct_document"] = int(doc)
         else:
             raise ValueError("Choose the Connecteam document from the list.")
+    copied = values.get("connecteam", current["connecteam"] if current else 0)
+    target = values["ct_document"] if "ct_document" in values else (current or {}).get("ct_document")
+    if copied and not target and "connecteam" not in fixed:
+        raise ValueError("Choose the Connecteam document these go to.")
     return values
 
 
@@ -270,9 +345,28 @@ def can_see(rel: str | None, k: dict) -> bool:
 
 
 def can_open(rel: str | None, k: dict) -> bool:
-    """Whether they may open the file itself. Certificates: the employee and HR only; managers
-    and directors see their status and dates."""
+    """Whether they may open the file itself, by the kind's level. Certificates: the employee
+    and HR only; managers and directors see their status and dates."""
     return can_see(rel, k) and (k["key"] != CERTIFICATES or rel in ("self", "hr"))
+
+
+def may_open(viewer, rel: str | None, doc: dict, k: dict | None) -> bool:
+    """Whether this viewer may open this file: restricted files HR admins only; a kind another
+    part owns by that part's can_open; others by the kind's level. Waiting ones too (the person
+    who added it, and anyone who sees the kind); rejected ones only HR and whoever added it; the
+    recycle bin only HR."""
+    if rel is None or k is None or doc["status"] not in SHOWN + ("deleted",):
+        return False
+    if doc["status"] == "deleted" and rel != "hr":
+        return False
+    if doc["restricted"] or is_restricted(k):
+        return rel == "hr"
+    check = CAN_OPEN.get(k["key"]) if k["key"] else None
+    if check is not None:
+        return bool(check(viewer, rel, doc))
+    if doc["status"] == "rejected" and rel != "hr" and str(doc["added_by"]) != str(viewer.id):
+        return False
+    return can_open(rel, k)
 
 
 def can_upload(rel: str | None, k: dict) -> bool:
@@ -308,6 +402,11 @@ def get(db, doc_id) -> dict | None:
     return dict(row) if row else None
 
 
+def by_upload_id(db, upload_id: str) -> dict | None:
+    row = db.conn.execute("SELECT * FROM documents WHERE upload_id = ?", (upload_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def of_person(db, person_id, statuses=SHOWN + ("deleted",)) -> list[dict]:
     marks = ",".join("?" * len(statuses))
     return [dict(r) for r in db.conn.execute(
@@ -336,6 +435,8 @@ def clean_title(value, default: str) -> str:
 
 def clean_date(value, db) -> str:
     """The document's date (YYYY-MM-DD; today in HR's time zone when blank). Raises ValueError."""
+    if isinstance(value, date):
+        value = value.isoformat()
     text = str(value or "").strip()
     if not text:
         return notify.local_day(db)
@@ -348,11 +449,22 @@ def clean_date(value, db) -> str:
     return found.isoformat()
 
 
+def kind_of_file(doc: dict) -> str:
+    """"pdf" or "image", for showing it."""
+    return "pdf" if doc["mime"] == files.MIME["pdf"] else "image"
+
+
 def file_name(doc: dict) -> str:
     """Its name in Drive: the date first, so folders sort in order ("2026-10-25 Handbook
     acknowledgement.pdf")."""
     kind_of = next((x for x, m in files.MIME.items() if m == doc["mime"]), "pdf")
     return f"{doc['doc_date']} {title_of(doc)}.{files.EXTENSION[kind_of]}"
+
+
+def view_url(doc) -> str:
+    """Where the portal opens a document (a doc, or its ID): the route checks who's asking, by
+    the kind's own part (can_open) or its level, and logs every look."""
+    return f"/api/documents/{int(doc['id'] if isinstance(doc, dict) else doc)}/file"
 
 
 def files_dir(folder: str) -> str:
@@ -363,13 +475,22 @@ def copy_path(folder: str, doc: dict) -> str:
     return os.path.join(files_dir(folder), f"{doc['upload_id']}.bin")
 
 
+def _purpose(restricted) -> str:
+    return RESTRICTED_PURPOSE if restricted else FILE_PURPOSE
+
+
 def _write(path: str, data: bytes) -> None:
     crypto.write_private(path, data)
 
 
-async def save_copy(folder: str, upload_id: str, data: bytes) -> None:
+def _read(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+async def save_copy(folder: str, upload_id: str, data: bytes, restricted: bool = False) -> None:
     """The encrypted copy on this computer (in a worker thread)."""
-    sealed = await crypto.seal_async(data, FILE_PURPOSE)
+    sealed = await crypto.seal_async(data, _purpose(restricted))
     await asyncio.to_thread(_write, os.path.join(files_dir(folder), f"{upload_id}.bin"), sealed)
 
 
@@ -379,14 +500,9 @@ async def load_copy(folder: str, doc: dict) -> bytes | None:
         return None
     try:
         blob = await asyncio.to_thread(_read, copy_path(folder, doc))
-        return await crypto.unseal_async(blob, FILE_PURPOSE)
+        return await crypto.unseal_async(blob, _purpose(doc["restricted"]))
     except (OSError, crypto.Damaged):
         return None
-
-
-def _read(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
 
 
 def drop_copy(db, folder: str, doc: dict) -> None:
@@ -400,21 +516,30 @@ def drop_copy(db, folder: str, doc: dict) -> None:
 
 async def cache_copy(db, folder: str, doc: dict, data: bytes, now: float | None = None) -> None:
     """Keep a file fetched from Drive here again for CACHE_DAYS (it was opened)."""
-    await save_copy(folder, doc["upload_id"], data)
+    await save_copy(folder, doc["upload_id"], data, bool(doc["restricted"]))
     now = time.time() if now is None else now
     db.conn.execute("UPDATE documents SET stored = 1, keep_until = ? WHERE id = ?",
                     (now + CACHE_DAYS * DAY, doc["id"]))
     db.conn.commit()
 
 
+def waiting_count(db, person_id) -> int:
+    return db.conn.execute("SELECT COUNT(*) FROM documents WHERE person_id = ? AND status = "
+                           "'waiting'", (str(person_id),)).fetchone()[0]
+
+
 async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, doc_date: str,
-              viewer, rel: str) -> dict:
+              viewer, rel: str, *, waiting: bool | None = None) -> dict:
     """A cleaned file (files.clean_upload) for someone's file. HR's go straight on their way to
-    Drive (activate); anyone else's wait for HR. Returns the document."""
+    Drive (activate); anyone else's wait for HR (waiting=True: HR's too). Returns the document.
+    Raises ValueError when too many already wait in that file."""
+    db = svc.db
+    waiting = rel != "hr" if waiting is None else waiting
+    if waiting and waiting_count(db, person["id"]) >= MAX_WAITING:
+        raise ValueError(TOO_MANY_WAITING)
     upload_id = secrets.token_urlsafe(24)
-    await save_copy(svc.folder, upload_id, data)
-    db, now = svc.db, time.time()
-    waiting = rel != "hr"
+    await save_copy(svc.folder, upload_id, data, is_restricted(k))
+    now = time.time()
     cur = db.conn.execute(
         "INSERT INTO documents (person_id, kind_id, title, doc_date, mime, size, upload_id, "
         "restricted, status, added_by, added_by_name, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "
@@ -426,6 +551,46 @@ async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, do
     doc = get(db, cur.lastrowid)
     if not waiting:
         activate(db, doc, svc.main_settings(), viewer.id if viewer else None, now=now)
+    return get(db, doc["id"])
+
+
+async def add_generated(svc, person, kind_key: str, data: bytes, mime: str, title: str,
+                        doc_date, actor_id=None, *, upload_id: str | None = None) -> dict:
+    """A file the portal made itself (a signed write-up's PDF, a final review's) for the kind
+    another part registered: no HR check, straight into the delivery queue to that kind's Drive
+    subfolder. person: the person (or their ID). upload_id: a key of the caller's that makes it
+    idempotent (asking again returns the same document). Returns the document. Raises
+    ValueError."""
+    db = svc.db
+    k = kind_by_key(db, kind_key)
+    if k is None:
+        raise ValueError(f"There's no kind of document {kind_key!r}: register_kind it first.")
+    pid = str(person["id"] if isinstance(person, dict) else person)
+    if db.person(pid) is None:
+        raise ValueError("That person isn't in the HR portal.")
+    sniffed = files.sniff(data)
+    if sniffed is None or files.MIME[sniffed] != mime or len(data) > files.DOCUMENT_LIMIT:
+        raise ValueError("A generated file is a PDF or picture of up to 25 MB, of the type it says.")
+    if upload_id and (found := by_upload_id(db, upload_id)):
+        return found
+    upload_id = upload_id or secrets.token_urlsafe(24)
+    await save_copy(svc.folder, upload_id, data, is_restricted(k))
+    now = time.time()
+    try:
+        cur = db.conn.execute(
+            "INSERT INTO documents (person_id, kind_id, title, doc_date, mime, size, upload_id, "
+            "restricted, status, added_by, added_by_name, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+            "'active', ?, ?, ?)",
+            (pid, k["id"], crypto.seal_text(clean_title(title, k["name"]), "documents.title"),
+             clean_date(doc_date, db), mime, len(data), upload_id, 1 if is_restricted(k) else 0,
+             None if actor_id is None else str(actor_id),
+             svc.person_name(actor_id) if actor_id else "HR portal", now))
+    except sqlite3.IntegrityError:   # made meanwhile with the same upload_id
+        db.conn.rollback()
+        return by_upload_id(db, upload_id)
+    db.conn.commit()
+    doc = get(db, cur.lastrowid)
+    activate(db, doc, svc.main_settings(), actor_id, now=now)
     return get(db, doc["id"])
 
 
@@ -464,7 +629,8 @@ def delete(db, doc: dict, actor_id, now: float | None = None) -> None:
     db.conn.execute("UPDATE documents SET status = 'deleted', deleted_by = ?, deleted_at = ? "
                     "WHERE id = ?", (actor_id, now, doc["id"]))
     db.conn.execute("UPDATE deliveries SET status = 'skipped', error = 'Deleted' WHERE document_id "
-                    "= ? AND status IN ('waiting', 'attention')", (doc["id"],))
+                    "= ? AND target IN ('drive', 'connecteam') AND status IN ('waiting', "
+                    "'attention')", (doc["id"],))
     if doc["ct_copied_at"]:
         db.conn.execute("INSERT INTO doc_todos (document_id, person_id, what, created_at) VALUES "
                         "(?, ?, 'remove_connecteam', ?)", (doc["id"], doc["person_id"], now))
@@ -474,13 +640,14 @@ def delete(db, doc: dict, actor_id, now: float | None = None) -> None:
 def restore(db, doc: dict, settings: dict, now: float | None = None) -> None:
     """Out of the recycle bin: back as it was, and anything not yet done is done."""
     now = time.time() if now is None else now
-    was_waiting = doc["decided_at"] is None   # deleted before HR accepted it
+    # Deleted before HR checked it, after HR rejected it (only those have a reason), or saved.
+    status = "waiting" if doc["decided_at"] is None else "rejected" if doc["reason"] else "active"
     db.conn.execute("UPDATE documents SET status = ?, deleted_by = NULL, deleted_at = NULL "
-                    "WHERE id = ?", ("waiting" if was_waiting else "active", doc["id"]))
+                    "WHERE id = ?", (status, doc["id"]))
     db.conn.execute("UPDATE doc_todos SET done_at = ?, done_by = 'restored' WHERE document_id = ? "
                     "AND done_at IS NULL", (now, doc["id"]))
     db.conn.commit()
-    if was_waiting:
+    if status != "active":
         return
     if not doc["drive_id"]:
         queue(db, doc["person_id"], "drive", doc["id"], now)
@@ -490,22 +657,88 @@ def restore(db, doc: dict, settings: dict, now: float | None = None) -> None:
         queue(db, doc["person_id"], "connecteam", doc["id"], now)
 
 
+# ---------------------------------------------------------------- PDFs (made by Google Drive)
+
+class PdfUnavailable(Exception):
+    """A PDF can't be made now: Google Drive isn't set up (code "not_set_up"), or the bridge
+    failed (its gdrive error code: outdated, unavailable, quota, ...). The message is plain.
+    Keep the record and let the delivery queue make the PDF later (queue_pdf)."""
+
+    def __init__(self, message: str, code: str = "not_set_up"):
+        super().__init__(message)
+        self.message, self.code = message, code
+
+
+async def make_pdf(svc, html: str) -> bytes:
+    """A PDF of plain HTML (pdfdoc.page), made by Google Drive through the bridge. Raises
+    PdfUnavailable, or ValueError for HTML that's empty or too long."""
+    bridge = svc.google() if svc is not None else None
+    if bridge is None or not svc.main_settings().get("hr_google_drive"):
+        raise PdfUnavailable(NO_PDF)
+    try:
+        return await bridge.render_pdf(html)
+    except gdrive.BridgeError as err:
+        raise PdfUnavailable(err.message, err.code) from None
+
+
+def register_pdf_maker(kind_key: str, maker, *, done=None) -> None:
+    """How the delivery queue makes a PDF another part asked for (queue_pdf) once Google can:
+    maker(svc, row) (may be async) returns (person, title, html) or (person, title, html,
+    doc_date) for the queue's row (row["ref"] is the part's own record), or None when there's
+    nothing to make any more. The PDF is then kept with add_generated, and done(svc, row, doc)
+    (optional, may be async) is told which document it became."""
+    if not callable(maker) or (done is not None and not callable(done)):
+        raise ValueError("A PDF maker is a function.")
+    PDF_MAKERS[kind_key] = (maker, done)
+
+
+def queue_pdf(db, kind_key: str, person_id, ref, now: float | None = None) -> int | None:
+    """Make this PDF later through the delivery queue (target "pdf"): for the kind's part to
+    call when make_pdf raised PdfUnavailable. ref: the part's own record (say, the write-up's
+    ID), handed back in row["ref"]. Asking twice for the same one queues it once."""
+    return queue(db, person_id, "pdf", None, now, kind_key=kind_key, ref=str(ref))
+
+
+async def run_maker(fn, *args):
+    result = fn(*args)
+    return await result if inspect.isawaitable(result) else result
+
+
 # ---------------------------------------------------------------- the delivery queue's rows
 
+_service = None   # the running HR service (a weak reference), so new work starts straight away
+
+
 def queue(db, person_id, target: str, document_id: int | None = None,
-          now: float | None = None) -> int | None:
+          now: float | None = None, *, kind_key: str | None = None,
+          ref: str | None = None) -> int | None:
     """Add work for delivery.py, unless the same work is already waiting. Returns its ID."""
     now = time.time() if now is None else now
     same = db.conn.execute(
         "SELECT id FROM deliveries WHERE person_id = ? AND target = ? AND document_id IS ? AND "
-        "status IN ('waiting', 'attention')", (str(person_id), target, document_id)).fetchone()
+        "kind_key IS ? AND ref IS ? AND status IN ('waiting', 'attention')",
+        (str(person_id), target, document_id, kind_key, ref)).fetchone()
     if same:
         return None
-    cur = db.conn.execute("INSERT INTO deliveries (document_id, person_id, target, due_at, "
-                          "created_at) VALUES (?, ?, ?, ?, ?)",
-                          (document_id, str(person_id), target, now, now))
+    cur = db.conn.execute("INSERT INTO deliveries (document_id, person_id, target, kind_key, ref, "
+                          "due_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (document_id, str(person_id), target, kind_key, ref, now, now))
     db.conn.commit()
+    _poke()
     return cur.lastrowid
+
+
+def _poke() -> None:
+    """New work: the delivery queue looks now rather than at its next half-minute tick."""
+    svc = _service() if _service is not None else None
+    if svc is None or not svc.running:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    from . import delivery
+    delivery.kick(svc)
 
 
 def deliveries_of(db, doc_id: int) -> list[dict]:
@@ -521,7 +754,7 @@ def release_if_done(db, doc_id: int, now: float | None = None) -> None:
         "status IN ('waiting', 'attention')", (doc_id,)).fetchone()
     if not open_work:
         db.conn.execute("UPDATE documents SET keep_until = ? WHERE id = ? AND status = 'active' "
-                        "AND drive_id IS NOT NULL", (now + CACHE_DAYS * DAY, doc_id))
+                        "AND drive_id IS NOT NULL AND stored = 1", (now + CACHE_DAYS * DAY, doc_id))
         db.conn.commit()
 
 
@@ -531,6 +764,8 @@ def retry(db, delivery_id: int, now: float | None = None) -> bool:
                               "WHERE id = ? AND status = 'attention'",
                               (time.time() if now is None else now, delivery_id)).rowcount
     db.conn.commit()
+    if changed:
+        _poke()
     return bool(changed)
 
 
@@ -596,22 +831,33 @@ def past_retention(db, now: float | None = None) -> list[dict]:
         if due is None or due > now or on_hold(db, p["id"]):
             continue
         count = db.conn.execute("SELECT COUNT(*) FROM documents WHERE person_id = ? AND status IN "
-                                "('waiting', 'active')", (p["id"],)).fetchone()[0]
+                                "('waiting', 'active', 'rejected')", (p["id"],)).fetchone()[0]
         if count:
             found.append({"id": p["id"], "name": p["name"], "left_at": p["archived_at"],
                           "due_at": due, "documents": count})
     return found
 
 
+def delete_all(db, person_id, actor_id, now: float | None = None) -> int:
+    """Every document in someone's file into the recycle bin (HR, once their records are past
+    retention). Returns how many. Raises ValueError under a legal hold."""
+    if on_hold(db, person_id):
+        raise ValueError(HOLD_ON)
+    docs = of_person(db, person_id, SHOWN)
+    for doc in docs:
+        delete(db, doc, actor_id, now)
+    return len(docs)
+
+
 # ---------------------------------------------------------------- the nightly run
 
 def nightly(svc, now: float | None = None) -> dict:
     """Copies kept long enough here go; the recycle bin empties into Drive's trash after 30 days
-    (not under a legal hold); rejected uploads go after 30 days; folders of people whose name
-    changed are renamed. Returns counts."""
+    and rejected uploads go after 30 days (neither under a legal hold); folders of people whose
+    name changed are renamed; HR hears of records newly past retention. Returns counts."""
     db, folder = svc.db, svc.folder
     now = time.time() if now is None else now
-    counts = {"cached": 0, "binned": 0, "rejected": 0, "renamed": 0, "strays": 0}
+    counts = {"cached": 0, "binned": 0, "rejected": 0, "renamed": 0, "strays": 0, "due": 0}
     for doc in [dict(r) for r in db.conn.execute(
             "SELECT * FROM documents WHERE status = 'active' AND stored = 1 AND keep_until < ?",
             (now,))]:
@@ -630,6 +876,8 @@ def nightly(svc, now: float | None = None) -> dict:
         counts["binned"] += 1
     for doc in [dict(r) for r in db.conn.execute(
             "SELECT * FROM documents WHERE status = 'rejected' AND keep_until < ?", (now,))]:
+        if on_hold(db, doc["person_id"]):
+            continue
         drop_copy(db, folder, doc)
         db.conn.execute("UPDATE documents SET status = 'gone' WHERE id = ?", (doc["id"],))
         db.conn.commit()
@@ -639,6 +887,11 @@ def nightly(svc, now: float | None = None) -> dict:
         person = db.person(pid)
         if person and folders.needs_rename(db, person) and queue(db, pid, "rename", None, now):
             counts["renamed"] += 1
+    for due in past_retention(db, now):
+        for admin in db.with_role(access.HR_ADMIN):
+            if notify.notify(admin, "records_due", db=db, link="#/attention",
+                             once=f"retention-{due['id']}"):
+                counts["due"] += 1
     counts["strays"] = remove_strays(db, folder, now)
     return counts
 
@@ -702,3 +955,33 @@ def _blocker(conn) -> str | None:
                 f"accept or reject {'it' if checking == 1 else 'them'} in the HR portal. Once HR "
                 "has, try again.")
     return None
+
+
+# ---------------------------------------------------------------- the part's hooks
+
+def _part(svc) -> None:
+    """The documents part of a new HR service (service.PARTS): its tables on start, the delivery
+    queue every half minute, the nightly clean-up, the migration check, and its pages."""
+    from . import delivery, docroutes  # noqa: F401 - the queue, and the routes and sections
+    svc.on_start.append(_started)
+    svc.tick_jobs.append(delivery.tick)
+    svc.daily_jobs.append(_nightly)
+    svc.migration_blockers.append(migration_blocker)
+    svc.on_stop.append(delivery.stop)
+
+
+def _started(svc) -> None:
+    global _service
+    setup(svc.db)
+    _service = weakref.ref(svc)
+
+
+async def _nightly(svc) -> None:
+    counts = nightly(svc)
+    if counts["binned"] or counts["rejected"]:
+        audit.record(svc.db, "Emptied the documents recycle bin",
+                     detail=f"{counts['binned']} deleted and {counts['rejected']} rejected file(s) "
+                            "removed after 30 days")
+
+
+service.PARTS.append(_part)

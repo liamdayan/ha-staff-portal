@@ -80,6 +80,12 @@ def stub_handlers(app: web.Application) -> list:
     return routes
 
 
+def foundation(page) -> list[str]:
+    """The foundation's own sections of a person's page (other parts add theirs, such as
+    documents)."""
+    return [s["name"] for s in page["sections"] if s["name"] in ("details", "signin")]
+
+
 def test_every_role_against_every_route(tmp_path):
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -136,15 +142,16 @@ def test_roles_follow_people_live(tmp_path):
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["manager"])
             labels = {r["label"] for s in page["sections"] for r in s["rows"]}
             assert status == 200 and "Mobile" not in labels and "Start date" in labels
-            assert [s["name"] for s in page["sections"]] == ["details"]
+            assert foundation(page) == ["details"] and "documents" in [s["name"] for s in page["sections"]]
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["hr"])
-            assert [s["name"] for s in page["sections"]] == ["details", "signin"]
+            assert foundation(page) == ["details", "signin"]
             assert "541-555-0201" in str(page)
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["employee"])
-            assert [s["name"] for s in page["sections"]] == ["details"] and "541-555-0201" in str(page)
+            assert foundation(page) == ["details"] and "541-555-0201" in str(page)
             # HR admins see their own file only as an employee.
             status, page, _ = await hr.call("GET", "/api/people/205", cookie=sessions["hr"])
-            assert [s["name"] for s in page["sections"]] == ["details"]
+            assert foundation(page) == ["details"]
+            assert "hr" not in next(s for s in page["sections"] if s["name"] == "documents")
             # Bo moves to the kitchen in Connecteam: Max loses him at once.
             await hr.add_people(ANA, ct_user(202, "Bo", "Diaz", code="7302", groups=[502],
                                              mobile="541-555-0202"), MAX, DEE, HANA)

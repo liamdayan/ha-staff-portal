@@ -57,6 +57,7 @@ from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, 
                        parse_networks)
 from hr import access as hr_access, audit as hr_audit, crypto as hr_crypto, signin as hr_signin
 from hr import ctapi, gdrive, server as hr_server
+from hr import documents as hr_documents  # noqa: F401 - the documents part adds itself (service.PARTS)
 from hr.gdrive import BridgeError
 from hr.service import HRService
 

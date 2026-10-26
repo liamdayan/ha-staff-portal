@@ -6,9 +6,11 @@
  *
  * What it can do: only what Staff Access asks, and only inside the shared drive(s) you picked in
  * Staff Access (their IDs are saved below in Script Properties by a signed request). It makes
- * folders, uploads, renames, moves, downloads and trashes files there, and reads the text on a
- * card photo (Google Drive turns a copy into a Google Doc in an "_OCR scratch" folder, takes its
- * text and deletes it straight away). Anything outside those drives is refused.
+ * folders, uploads, renames, moves, downloads and trashes files there, reads the text on a card
+ * photo (Google Drive turns a copy into a Google Doc in an "_OCR scratch" folder, takes its text
+ * and deletes it straight away), and makes PDFs of write-ups and reviews the same way (a Google
+ * Doc from plain text Staff Access sends, saved as a PDF and deleted straight away). Anything
+ * outside those drives is refused.
  *
  * Who can use it: only requests signed with the secret below, which only your Staff Access has.
  * Each request is good for 5 minutes and only once. Keep this script private. To change the
@@ -25,10 +27,12 @@ var PROTOCOL = 1;                          // the request format Staff Access se
 var MAX_BYTES = 25 * 1024 * 1024;          // a file uploaded, downloaded or read
 var MAX_BASE64 = Math.ceil(MAX_BYTES / 3) * 4;
 var MAX_BODY = MAX_BASE64 + 64 * 1024;
+var MAX_HTML = 2 * 1024 * 1024;            // characters of HTML a PDF is made from
 var CLOCK_SKEW_MS = 5 * 60 * 1000;         // a request this far off the clock is refused
 var NONCE_SECONDS = 600;                   // a request's nonce is remembered this long
 var FOLDER = "application/vnd.google-apps.folder";
 var GOOGLE_DOC = "application/vnd.google-apps.document";
+var PDF = "application/pdf";
 var OCR_FOLDER = "_OCR scratch";
 var OCR_TYPES = ["image/jpeg", "image/png", "image/gif", "application/pdf"];
 var SCRATCH_MINUTES = 60;                  // leftovers of runs cut short are removed after this
@@ -36,7 +40,7 @@ var TEST_TEXT = /06\/14\/2029/;            // what the self-test image says ("EX
 var ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 
 var OPS = {ping: ping, setup: setup, ensureFolder: ensureFolder, rename: rename, move: move,
-           upload: upload, download: download, trash: trash, ocr: ocr, selfTest: selfTest};
+           upload: upload, download: download, trash: trash, ocr: ocr, pdf: pdf, selfTest: selfTest};
 
 // A web browser opening the address sees only this.
 function doGet() {
@@ -391,9 +395,9 @@ function ocr(args) {
   return {text: readText(checkData(args.data), args.mimeType)};
 }
 
-// Google Drive reads the text: a copy becomes a Google Doc in "_OCR scratch" in the HR drive,
-// its text is taken, and it's deleted at once.
-function readText(bytes, mime) {
+// "_OCR scratch" at the top of the HR drive (made the first time), where the Google Docs made to
+// read a card or make a PDF live for a moment.
+function scratchFolder() {
   var drives = allowedDrives();
   if (!drives.length) throw fail("not_allowed", "Pick the HR shared drive in Staff Access first.");
   var top = {id: drives[0], driveId: drives[0]};
@@ -403,12 +407,41 @@ function readText(bytes, mime) {
                           properties: {staff_access: "ocr_scratch"}},
                          null, {supportsAllDrives: true, fields: "id,name"});
   clearScratch({id: scratch.id, driveId: top.id});
+  return scratch;
+}
+
+// Google Drive reads the text: a copy becomes a Google Doc in "_OCR scratch" in the HR drive,
+// its text is taken, and it's deleted at once.
+function readText(bytes, mime) {
+  var scratch = scratchFolder();
   var doc = Drive.Files.create({name: "Reading " + new Date().toISOString(), mimeType: GOOGLE_DOC,
                                 parents: [scratch.id]},
                                Utilities.newBlob(bytes, mime, "card"),
                                {supportsAllDrives: true, ocrLanguage: "en", fields: "id"});
   try {
     return DocumentApp.openById(doc.id).getBody().getText();
+  } finally {
+    removeForGood(doc.id);
+  }
+}
+
+// A PDF of a write-up or review: Staff Access sends plain HTML it made (everything in it is
+// escaped text), it becomes a Google Doc in "_OCR scratch", is saved as a PDF, and the Doc is
+// deleted at once. Staff Access then keeps the PDF in the person's folder like any other file.
+function pdf(args) {
+  var html = args.html;
+  if (typeof html !== "string" || !html.trim() || html.length > MAX_HTML) {
+    throw fail("bad_request", "A PDF is made from 1 character to 2 MB of HTML.");
+  }
+  var scratch = scratchFolder();
+  var doc = Drive.Files.create({name: "Making a PDF " + new Date().toISOString(), mimeType: GOOGLE_DOC,
+                                parents: [scratch.id]},
+                               Utilities.newBlob(html, "text/html", "page.html"),
+                               {supportsAllDrives: true, fields: "id"});
+  try {
+    var bytes = DriveApp.getFileById(doc.id).getAs(PDF).getBytes();
+    if (bytes.length > MAX_BYTES) throw fail("too_big", "That PDF is bigger than 25 MB.");
+    return {data: Utilities.base64Encode(bytes), size: bytes.length};
   } finally {
     removeForGood(doc.id);
   }

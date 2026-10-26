@@ -38,9 +38,11 @@ import weakref
 import aiohttp
 
 PROTOCOL = 1          # the request format (bridge.gs's PROTOCOL)
-SCRIPT_VERSION = 1    # the script written by script_source(); ping says which one is deployed
+SCRIPT_VERSION = 2    # the script written by script_source(); ping says which one is deployed
 MIN_SCRIPT_VERSION = 1   # the oldest deployed script file operations still work with
+PDF_VERSION = 2       # the oldest deployed script that makes PDFs (the pdf op)
 MAX_BYTES = 25 * 1024 * 1024          # a file uploaded, downloaded or read
+MAX_HTML = 2 * 1024 * 1024            # characters of HTML a PDF is made from
 MAX_REPLY = 36 * 1024 * 1024          # a reply: a 25 MB file as base64 is about 33.4 MB
 MAX_AT_ONCE = 2
 SHORT_TIMEOUT = 60    # seconds: ping, setup, folders, rename, move, trash
@@ -329,6 +331,23 @@ class Bridge:
         if not isinstance(text, str):
             raise BridgeError("bad_reply", "Google didn't send the text back.")
         return text[:200_000]
+
+    async def render_pdf(self, html: str) -> bytes:
+        """A PDF of plain HTML (hr/pdfdoc.py makes it): the script turns it into a Google Doc in
+        the "_OCR scratch" folder of the HR drive, saves that as a PDF and deletes it straight
+        away. Raises BridgeError("outdated") while the deployed script is older than PDF_VERSION."""
+        if not isinstance(html, str) or not html.strip() or len(html) > MAX_HTML:
+            raise ValueError("A PDF is made from 1 character to 2 MB of HTML.")
+        result = await self._call("pdf", {"html": html}, LONG_TIMEOUT, min_version=PDF_VERSION)
+        try:
+            data = base64.b64decode(result.get("data") or "", validate=True)
+        except (ValueError, TypeError):
+            raise BridgeError("bad_reply", "Google sent the PDF in a form Staff Access can't "
+                                           "read.") from None
+        _check_size(data)
+        if not data.startswith(b"%PDF-"):
+            raise BridgeError("bad_reply", "Google didn't send a PDF back.")
+        return data
 
     async def self_test(self) -> list[dict]:
         """Test connection: [{"check", "ok", "detail"}] for signing in, the drive, making and

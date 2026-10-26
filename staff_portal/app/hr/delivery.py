@@ -7,13 +7,17 @@ restarts and add-on updates:
   connecteam  its copy on the person's Connecteam document (hr/ctapi.py, HR's request lane);
   trash       a file out of the recycle bin into the shared drive's trash;
   rename      a person's folders, after their name changed in Connecteam;
-  former      a person's folders into Former employees (HR confirmed they've left).
+  former      a person's folders into Former employees (HR confirmed they've left);
+  pdf         a PDF another part asked for while Google couldn't make it (documents.queue_pdf):
+              its part writes the HTML again (register_pdf_maker), Google Drive makes the PDF,
+              and it's kept like any file the portal makes (documents.add_generated).
 
 One piece at a time, in the background. A failure is tried again after 1 minute, 5, 30, 2 hours,
 6 hours, then daily; after 8 tries it "needs attention" (HR's list, with Retry). Some things wait
-without using up a try: Google Drive not set up yet, the script needing a new version, or
-Connecteam's lane being full or paused. Problems only a person can fix (say, someone not
-assigned the document's pack in Connecteam) need attention at once, in plain words.
+without using up a try: Google Drive not set up yet, the script needing a new version,
+Connecteam's lane being full or paused, or Connecteam's copies stopped until the owner fixes the
+HR connection. Problems only a person can fix (say, someone not assigned the document's pack in
+Connecteam) need attention at once, in plain words.
 """
 
 import asyncio
@@ -22,7 +26,7 @@ import time
 import weakref
 from datetime import date
 
-from . import audit, ctapi, documents, folders, gdrive, notify
+from . import audit, ctapi, documents, files, folders, gdrive, notify
 
 log = logging.getLogger("staff_portal")
 
@@ -34,8 +38,11 @@ NO_GOOGLE = ("Google Drive isn't set up yet, so files wait here (encrypted). The
              "it in Home Assistant: Settings, Connections, Google Drive (HR files).")
 LOST = "The file isn't on this computer any more, so it can't be sent. Add it again."
 COPY_OFF = "Not copied: the Connecteam documents copy is off."
+NO_MAKER = "The part of the HR portal that makes this PDF isn't running, so it waits."
 TARGET_WORDS = {"drive": "Google Drive", "connecteam": "Connecteam", "trash": "Drive's trash",
-                "rename": "Renaming a Drive folder", "former": "Moving a Drive folder"}
+                "rename": "Renaming a Drive folder", "former": "Moving a Drive folder",
+                "pdf": "Making a PDF"}
+CT_SETUP = ("stopped", "not_set_up")   # the HR connection itself: the owner fixes it, then it goes
 
 notify.register_kind("upload_stuck", "An upload to Google Drive or Connecteam needs attention.")
 
@@ -133,7 +140,7 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
     db = svc.db
     now = time.time() if now is None else now
     work = {"drive": _drive, "connecteam": _connecteam, "trash": _trash, "rename": _rename,
-            "former": _former}.get(row["target"])
+            "former": _former, "pdf": _pdf}.get(row["target"])
     try:
         if work is None:
             raise Skip("Unknown work")
@@ -164,6 +171,9 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
             _set(db, row, "skipped", error=COPY_OFF)
             _release(db, row)
             return "skipped"
+        if err.code in CT_SETUP or (err.code == "not_allowed" and _ct_stopped()):
+            _set(db, row, "waiting", due_at=now + WAIT_SETUP, error=err.message, code=err.code)
+            return "waiting"
         if not err.retry:
             return _stuck(svc, row, err.message, err.code, row["tries"] + 1)
         return _failed(svc, row, err.message, err.code, now)
@@ -176,6 +186,11 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
     _set(db, row, "done", done_at=time.time(), error=None, code=None)
     _release(db, row)
     return "done"
+
+
+def _ct_stopped() -> bool:
+    """Whether Connecteam refused the HR connection's copies as a whole (keys or permissions)."""
+    return bool(ctapi.default is not None and ctapi.default.stopped.get("documents"))
 
 
 def _release(db, row: dict) -> None:
@@ -312,3 +327,35 @@ async def _rename(svc, row: dict) -> None:
 async def _former(svc, row: dict) -> None:
     person = _person(svc, row)
     await folders.move_to_former(svc.db, _bridge(svc), svc.main_settings(), person)
+
+
+async def _pdf(svc, row: dict) -> None:
+    db = svc.db
+    doc = documents.get(db, row["document_id"]) if row["document_id"] else None
+    found = documents.PDF_MAKERS.get(row["kind_key"])
+    if found is None:
+        raise Wait(NO_MAKER, WAIT_SETUP, "no_maker")
+    maker, done = found
+    if doc is None:
+        _bridge(svc)   # nothing is asked of the part until Google can make it
+        try:
+            made = await documents.run_maker(maker, svc, row)
+            if not made:
+                raise Skip("Nothing to make any more")
+            person, title, html = made[:3]
+            day = made[3] if len(made) > 3 else notify.local_day(db, row["created_at"])
+            try:
+                data = await documents.make_pdf(svc, html)
+            except documents.PdfUnavailable as err:
+                if err.code == "not_set_up":
+                    raise Wait(NO_GOOGLE, WAIT_SETUP, "not_set_up") from None
+                raise gdrive.BridgeError(err.code, err.message) from None
+            # Tagged with this row, so a retry after a crash finds it instead of adding another.
+            doc = await documents.add_generated(svc, person, row["kind_key"], data, files.MIME["pdf"],
+                                                title, day, upload_id=f"pdf-{row['id']}")
+        except ValueError as err:   # the part's HTML or record isn't right: a person looks
+            raise Attention(str(err), "bad_request") from None
+        db.conn.execute("UPDATE deliveries SET document_id = ? WHERE id = ?", (doc["id"], row["id"]))
+        db.conn.commit()
+    if done is not None:
+        await documents.run_maker(done, svc, row, doc)
