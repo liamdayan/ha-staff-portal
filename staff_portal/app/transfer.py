@@ -1137,7 +1137,8 @@ def clean_logs(data: dict, now: float | None = None) -> dict | None:
             written_at=_time(row.get("written_at")),
             state=row.get("state") if row.get("state") in CARD_STATES else "active",
             state_at=_time(row.get("state_at")), state_by=_text(row.get("state_by"), 120),
-            cancelled_card=_text(row.get("cancelled_card"), 40)))
+            cancelled_card=_text(row.get("cancelled_card"), 40),
+            cleared_at=_time(row.get("cleared_at"))))
 
     lockouts, seen = [], set()
     for row in _log_rows(data, "wb_lockouts"):

@@ -49,8 +49,8 @@ import doorlog
 import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
 from tthotel import TTHotel, TTHotelError
-from encoder import (NO_LINK, NO_REPLY, UNREACHABLE, EncoderError, Encoders, local_address,
-                     local_device)
+from encoder import (DASHBOARD_PREFIX, NO_LINK, NO_REPLY, UNREACHABLE, EncoderError, Encoders,
+                     dashboard_user, local_address, local_device)
 from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, ha_networks,
                        parse_networks)
 
@@ -142,13 +142,34 @@ def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
             db.setting_int("tthotel_sync_hours"))
 
 
+DOORS_IN_USE_DAYS = 90   # a key card made from the dashboard this recently, or door activity
+                         # (TT Hotel's lock records), means the door list is still in use
+
+
 def tthotel_wanted() -> bool:
-    """Whether anything needs TT Hotel's door list: Wristbands is on and some computer has a
-    card encoder, typed in, This computer (USB) or Automatic (so TT Hotel isn't asked for
-    nothing)."""
-    return db.settings().get("wristbands_enabled") == "1" and db.conn.execute(
-        "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_local = 1 "
-        "OR encoder_auto = 1) AND status != 'revoked' LIMIT 1").fetchone() is not None
+    """Whether anything needs TT Hotel's door list (so TT Hotel isn't asked for nothing):
+    Wristbands is on, and some computer has a card encoder (typed in, This computer (USB) or
+    Automatic), or the dashboard's own encoder (This computer, in its card dialogs) is linked or
+    made a key card lately, or TT Hotel sends door activity (whose records are only kept for
+    doors on the list)."""
+    if db.settings().get("wristbands_enabled") != "1":
+        return False
+    if db.conn.execute(
+            "SELECT 1 FROM devices WHERE (encoder_url IS NOT NULL OR encoder_local = 1 "
+            "OR encoder_auto = 1) AND status != 'revoked' LIMIT 1").fetchone() is not None:
+        return True
+    if dashboard_links or door_delivery["at"] is not None:
+        return True
+    since = time.time() - DOORS_IN_USE_DAYS * 86400
+    last_record = db.last_lock_record()
+    if last_record is not None and last_record > since:
+        return True
+    # A key card made on a dashboard's own encoder, still valid or ended lately (on the index
+    # for key cards, by end date).
+    return db.conn.execute(
+        "SELECT 1 FROM wb_jobs WHERE card_type = 'staff' AND kind = 'write' AND expires_at > ? "
+        "AND encoder_url LIKE ? ESCAPE '\\' LIMIT 1",
+        (since, DASHBOARD_PREFIX.replace("_", "\\_") + "%")).fetchone() is not None
 
 
 def load_setting_object(key: str) -> dict:
@@ -1660,6 +1681,9 @@ async def api_wristband_job_action(request: web.Request):
     job = visible_job(request, member, perms)
     if action != "cancel" and job["status"] != "needs_attention":
         return bad_request("This job isn't waiting for a decision any more.", 409)
+    if action != "cancel" and dashboard_user(job["encoder_url"]) is not None:
+        # Made on the encoder of a computer with the dashboard open: only that page goes on.
+        return bad_request("This card is being made from the dashboard: try it again there.", 409)
     if job["status"] in WB_ACTIVE:
         decide_job(job, action)   # a job that ends short is logged when it ends
     return web.json_response({"job": job_view(db.wb_job(job["id"]), await wristband_zone())})
@@ -1785,7 +1809,7 @@ def note_cleared_card(found: dict, job: dict | None, device: dict, member: dict)
     if (not entry or entry["state"] != "active" or found.get("blank")
             or not lookup_empty(found)):
         return False
-    db.set_card_state(entry["id"], "revoked", FOUND_CLEARED)
+    db.set_card_state(entry["id"], "revoked", FOUND_CLEARED, cleared=True)
     db.log(actor_name(device, member),
            f"Card {entry['card_number']} ({job['name']}) found cleared on the encoder",
            role=role_label(device, member), detail="Marked revoked: it has no doors on it")
@@ -2119,17 +2143,22 @@ def card_done(job_id: int, seq: int) -> None:
     kind = job.get("kind") or "write"
     target = db.key_card(job["target_card_id"]) if job.get("target_card_id") else None
     if kind == "revoke":
+        # The card itself is cleared (a lost one found again stays lost): a lock record from
+        # later on is whoever it's given to next, not this card (db.match_card).
         if target and target["state"] == "active":
-            db.set_card_state(target["id"], "revoked", job["actor"])
+            db.set_card_state(target["id"], "revoked", job["actor"], cleared=True)
             db.log(job["actor"], f"Revoked key {card_label(target)}", role=job["role"],
                    ip=job["ip"])
-        elif not target:
+        elif target:
+            db.mark_card_cleared(target["id"])
+        else:
             # A wristband (only staff cards are key cards), or a card with no record here.
             other = db.wb_card(job["target_card_id"]) if job.get("target_card_id") else None
             if other and other["state"] != "active":
+                db.mark_card_cleared(other["id"])
                 return
             if other:
-                db.set_card_state(other["id"], "revoked", job["actor"])
+                db.set_card_state(other["id"], "revoked", job["actor"], cleared=True)
             db.log(job["actor"], f"Revoked card {job['target_card']}" + (
                 f" ({other['name']})" if other else ""), role=job["role"], ip=job["ip"])
         return
@@ -2392,13 +2421,24 @@ async def close_all_links(app: web.Application) -> None:
 # another computer) replaces the older one. A link closes when Wristbands is turned off or its
 # user is no longer an administrator. Through ingress a close code may not reach the page, so a
 # {"type": "closing", "why"} message goes first, and {"type": "linked"} says it was taken.
+#
+# One account may be signed in on several computers (a shared front-desk login), so the page
+# sends an ID of its own ("page": made once per browser tab, kept when it reloads) with its
+# ticket, its card jobs and their Try again: a job runs only through the link of the page that
+# started it (DashboardRelay.bound_page), and only that page may try it again.
 
 DASHBOARD_LOCAL_USER = "local"   # the dashboard opened on this computer itself (no ingress)
 NO_DASHBOARD_LINK = "Open this card dialog again to connect the card encoder on this computer."
 DASHBOARD_NOT_LINKED = ("The card encoder on this computer isn't connected. Wait for it to "
                         "connect, then try again.")
 DASHBOARD_WRISTBANDS_OFF = "Wristbands is turned off. Turn it on in the Wristbands tab first."
-dashboard_tickets: dict[str, tuple[str, float]] = {}   # ticket -> (user, expires at)
+DASHBOARD_ELSEWHERE = ("Another window (or another computer signed in as you) has the card "
+                       "encoder link now. Click Use it here, then try again.")
+DASHBOARD_NOT_YOURS = ("This card job was started in another window or on another computer: "
+                       "only that window can try it again. Stop it to start again here.")
+PAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+dashboard_tickets: dict[str, tuple[str, float, str | None]] = {}   # ticket -> (user, expires at,
+                                                                   # page)
 recent_dashboard_tickets: dict[str, list[float]] = {}
 dashboard_links: dict[str, EncoderLink] = {}           # user -> their link
 
@@ -2435,6 +2475,17 @@ async def dashboard_link_refusal(user: str, ingress: bool) -> str | None:
     return None
 
 
+def page_id(data: dict) -> str | None:
+    """The dashboard page's own ID from a request body, or None (a page from before 0.9.0)."""
+    page = data.get("page") if isinstance(data, dict) else None
+    return page if isinstance(page, str) and PAGE_ID_RE.match(page) else None
+
+
+async def optional_json(request: web.Request) -> dict:
+    """A request's JSON body, or {} when it has none."""
+    return await read_json(request) if request.body_exists else {}
+
+
 def dashboard_tickets_too_busy(user: str) -> bool:
     now = time.time()
     times = [t for t in recent_dashboard_tickets.get(user, []) if now - t < 60]
@@ -2454,13 +2505,14 @@ async def admin_encoder_ticket(request: web.Request):
         return bad_request(DASHBOARD_WRISTBANDS_OFF, 409)
     if dashboard_tickets_too_busy(user):
         return bad_request("Too many requests at once. Wait a moment and try again.", 429)
+    page = page_id(await optional_json(request))
     now = time.time()
     if len(dashboard_tickets) >= MAX_LINK_TICKETS:   # the oldest go first
         for key in sorted(dashboard_tickets, key=lambda k: dashboard_tickets[k][1])[
                 :len(dashboard_tickets) - MAX_LINK_TICKETS + 1]:
             del dashboard_tickets[key]
     ticket = secrets.token_urlsafe(24)
-    dashboard_tickets[ticket] = (user, now + LINK_TICKET_SECONDS)
+    dashboard_tickets[ticket] = (user, now + LINK_TICKET_SECONDS, page)
     return web.json_response({"ticket": ticket, "expires_in": LINK_TICKET_SECONDS,
                               "path": "api/encoder/link"})
 
@@ -2489,7 +2541,7 @@ async def admin_encoder_link(request: web.Request):
             await say_closing(ws, refusal)
         return refusal
     relay = encoders.dashboard_relay(user)
-    number = relay.attach(ws.send_json)
+    number = relay.attach(ws.send_json, entry[2])
     link = EncoderLink(number, ws, user, 0)
     old, dashboard_links[user] = dashboard_links.get(user), link
     if old is not None:
@@ -2530,20 +2582,38 @@ async def close_dashboard_links(app: web.Application) -> None:
                            for link in list(dashboard_links.values())), return_exceptions=True)
 
 
-def dashboard_encoder(request: web.Request) -> dict:
+def dashboard_encoder(request: web.Request, data: dict) -> dict:
     """This computer: the encoder on the computer this admin has the dashboard open on. Its link
-    must be open (the dialog opens it before starting a job), and a job of theirs still
-    unfinished there comes back ("job") to finish or stop first. Returned like
+    must be open, from this very page (data's "page": the dialog opens it before starting a
+    job), and a job of theirs still unfinished there comes back ("job") to finish or stop first.
+    The job about to start is bound to this page (DashboardRelay.bound_page). Returned like
     chosen_encoder."""
     user = admin_user(request)
     relay = encoders.find_dashboard_relay(user) if user else None
     if relay is None or not relay.connected:
         raise json_error(web.HTTPConflict, DASHBOARD_NOT_LINKED)
+    if relay.page != page_id(data):
+        raise json_error(web.HTTPConflict, DASHBOARD_ELSEWHERE)
     job = encoder_job(relay.url)
     if job:
         raise json_error(web.HTTPConflict, "A card job on this computer isn't finished yet. "
                          "Finish it or stop it first.", job=job_view(job, None))
+    relay.bound_page = relay.page
     return {"id": None, "name": "This computer", "encoder_url": relay.url, "encoder_port": None}
+
+
+def dashboard_job_refusal(job: dict, data: dict) -> str | None:
+    """Why this page may not try a card job on a dashboard's own encoder again (or skip its
+    card), or None: only the page that started it may, while its link is there."""
+    user = dashboard_user(job["encoder_url"])
+    if user is None:
+        return None
+    relay = encoders.find_dashboard_relay(user)
+    if relay is None or relay.bound_page != page_id(data):
+        return DASHBOARD_NOT_YOURS
+    if relay.connected and relay.page != relay.bound_page:
+        return DASHBOARD_ELSEWHERE
+    return None
 
 
 STAFF_SECURITY_HEADERS = {
@@ -4509,7 +4579,14 @@ async def admin_wristband_jobs(request: web.Request):
 # a lost or revoked card tried at a door is noted in the activity log and Home Assistant. Nothing
 # else ever happens because of them: no TT Hotel request, no card job, no command.
 
-CALLBACK_PER_MINUTE = 300     # deliveries from one address (TT Hotel sends one per few records)
+# Limits. The right address has budgets of its own, shared by every caller (TT Hotel's servers
+# vary): requests with a wrong one never use them up, so they can't get TT Hotel's deliveries
+# refused. Over a budget, TT Hotel is answered 429 rather than "success", so it sends those
+# records again later and nothing real is lost.
+CALLBACK_PER_MINUTE = 300     # deliveries to the right address (TT Hotel sends one per few records)
+RECORDS_PER_MINUTE = 1000     # ...and records stored from them, so even a leaked address can't
+                              # push the door history out (LOCK_RECORDS_MAX_ROWS) in minutes
+WRONG_ADDRESS_PER_MINUTE = 30  # requests with a wrong address, per caller
 CARD_ALERT_GAP = 600          # one alert per card this often at most, however often it's tried
 ALERTS_PER_MINUTE = 20        # and this many alerts in all, so even a leaked address can't flood
                               # the activity log or Home Assistant (Door activity lists them all)
@@ -4517,7 +4594,9 @@ DOOR_ACTIVITY_PAGE = 50
 DOOR_ALERTS = {"lost": ("Lost card", "was reported lost"),
                "revoked": ("Revoked card", "was revoked"),
                "deleted": ("Deleted card", "was deleted in TT Hotel")}
-callback_requests: dict[str, collections.deque] = {}   # address -> times of its deliveries
+callback_requests: dict[str, collections.deque] = {}   # caller -> times of its wrong addresses
+callback_deliveries: collections.deque = collections.deque()  # times of right-address deliveries
+callback_records: collections.deque = collections.deque()     # (time, records stored) of those
 card_alerts: dict[str, float] = {}                      # card -> when it last alerted
 recent_alerts: collections.deque = collections.deque()  # when the last alerts were
 # The last delivery with the right address, for the dashboard (since the add-on started).
@@ -4533,9 +4612,10 @@ def callback_token() -> str:
     return token
 
 
-def callbacks_too_busy(ip: str) -> bool:
+def wrong_addresses_too_busy(ip: str) -> bool:
+    """Whether this caller tried too many wrong addresses this minute (counting this one)."""
     now = time.time()
-    if len(callback_requests) > 1000:   # addresses can be many: forget the quiet ones
+    if len(callback_requests) > 1000:   # callers can be many: forget the quiet ones
         for key in [k for k, times in callback_requests.items() if not times or now - times[-1] > 60]:
             del callback_requests[key]
         if len(callback_requests) > 1000:
@@ -4543,21 +4623,47 @@ def callbacks_too_busy(ip: str) -> bool:
     times = callback_requests.setdefault(ip, collections.deque())
     while times and now - times[0] > 60:
         times.popleft()
-    if len(times) >= CALLBACK_PER_MINUTE:
+    if len(times) >= WRONG_ADDRESS_PER_MINUTE:
         return True
     times.append(now)
     return False
 
 
+def deliveries_too_busy(now: float) -> bool:
+    """Whether the right address had CALLBACK_PER_MINUTE deliveries this minute (else this one
+    counts)."""
+    while callback_deliveries and now - callback_deliveries[0] > 60:
+        callback_deliveries.popleft()
+    if len(callback_deliveries) >= CALLBACK_PER_MINUTE:
+        return True
+    callback_deliveries.append(now)
+    return False
+
+
+def records_too_many(now: float, count: int) -> bool:
+    """Whether storing `count` more records would go past RECORDS_PER_MINUTE (else they count).
+    A delivery is stored whole or not at all (doorlog.MAX_RECORDS fits in an empty minute)."""
+    while callback_records and now - callback_records[0][0] > 60:
+        callback_records.popleft()
+    if count and sum(n for _, n in callback_records) + count > RECORDS_PER_MINUTE:
+        return True
+    if count:
+        callback_records.append((now, count))
+    return False
+
+
 async def tthotel_records(request: web.Request):
-    """Lock records from TT Hotel. The right address always gets "success", whatever was sent,
-    so TT Hotel never sends the same thing again and again; what can't be read is dropped, and
-    so are records for doors TT Hotel hasn't listed here (sync the doors)."""
-    if callbacks_too_busy(client_ip(request)):
-        return web.Response(status=429, text="Too many requests.")
+    """Lock records from TT Hotel. The right address gets "success", whatever was sent, so TT
+    Hotel never sends the same thing again and again; what can't be read is dropped, and so are
+    records for doors TT Hotel hasn't listed here (sync the doors). Only over the right
+    address's own limits is it 429, and TT Hotel sends those again later."""
     token = db.settings().get("tthotel_callback_token", "")
     if not token or not secrets.compare_digest(request.match_info["token"].encode(), token.encode()):
+        if wrong_addresses_too_busy(client_ip(request)):
+            return web.Response(status=429, text="Too many requests.")
         raise web.HTTPNotFound()
+    if deliveries_too_busy(time.time()):
+        return web.Response(status=429, text="Too many requests.")
     try:
         async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
             body = await request.read()   # at most the staff app's client_max_size
@@ -4569,6 +4675,10 @@ async def tthotel_records(request: web.Request):
     now = time.time()
     lock_id, records, dropped = doorlog.read_delivery(body, request.content_type, now)
     known = lock_id is not None and db.wb_door(lock_id) is not None
+    if known and records_too_many(now, len(records)):
+        log.warning("TT Hotel sent more lock records this minute than Staff Access stores; it "
+                    "will send them again")
+        return web.Response(status=429, text="Too many records this minute.")
     added = db.add_lock_records(lock_id, records, now) if known and records else []
     door_delivery.update(at=now, kept=len(added), lock_id=lock_id, known=known or lock_id is None,
                          dropped=dropped + (0 if known else len(records)))
@@ -4611,7 +4721,15 @@ async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
                       f"{f' · {when}' if when else ''}")
         if db.settings().get("wb_lost_card_alert") != "1":
             continue
-        message = (f"{label} {why}. It was tried at {door}{f' {when}' if when else ''}, and "
+        # Home Assistant shows the message as Markdown, and whoever has the address can send
+        # any text: so only a card number that is one (digits) and the name of a card made here,
+        # never TT Hotel's own text, and every mark that could make a link or formatting is
+        # escaped.
+        shown = number if number and number.isascii() and number.isdigit() else ""
+        named = f"Card {shown}" if shown else "A card"
+        named += f" ({markdown_text(card['name'])})" if card and card["name"] else ""
+        message = (f"{named} {why}. It was tried at {markdown_text(door)}"
+                   f"{f' {when}' if when else ''}, and "
                    f"{'the door opened' if record['success'] else 'the door refused it'}. "
                    "See Staff Access, Wristbands tab, Door activity.")
         tag = re.sub(r"[^0-9A-Za-z]", "", str(card["id"] if card else number or record["username"]))
@@ -4619,6 +4737,13 @@ async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
             "title": action, "message": message,
             "notification_id": f"staff_access_card_{tag[:40] or lock_id}"}),
             "tell Home Assistant a lost card was tried")
+
+
+def markdown_text(text: str) -> str:
+    """Text shown as itself in Markdown (a Home Assistant notification): every ASCII punctuation
+    mark escaped, so it can't make a link, an image, an address that turns into a link, or
+    formatting."""
+    return re.sub(r"([!-/:-@\[-`{-~])", r"\\\1", " ".join(str(text).split()))
 
 
 def last_used_view(row: dict | None, zone: ZoneInfo | None) -> dict | None:
@@ -4718,7 +4843,7 @@ def chosen_encoder(data: dict, request: web.Request | None = None) -> dict:
     dashboard is open on: dashboard_encoder), the computer chosen ("device_id"), or the only
     one there is. Returned like a device row (id, name, encoder_url, encoder_port)."""
     if data.get("encoder") == "here" and request is not None:
-        return dashboard_encoder(request)
+        return dashboard_encoder(request, data)
     encoders = dashboard_encoders()
     if not encoders:
         raise json_error(web.HTTPBadRequest, NO_ENCODER)
@@ -5264,8 +5389,12 @@ async def admin_key_card_job_action(request: web.Request):
     if not job:
         raise json_error(web.HTTPNotFound, "That card job wasn't found.")
     action = request.match_info["action"]
+    data = await optional_json(request)
     if action != "cancel" and job["status"] != "needs_attention":
         return bad_request("This job isn't waiting for a decision any more.", 409)
+    refusal = dashboard_job_refusal(job, data) if action != "cancel" else None
+    if refusal:
+        return bad_request(refusal, 409)
     if job["status"] in WB_ACTIVE:
         decide_job(job, action)
     return web.json_response({"job": job_view(db.wb_job(job["id"]), await wristband_zone())})

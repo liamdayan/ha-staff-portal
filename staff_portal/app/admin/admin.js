@@ -2667,7 +2667,8 @@
       if (wb.synced_at) lines.push(`Doors last synced ${ago(wb.synced_at).toLowerCase()}: ${plural(wb.doors || 0, "door")}.`);
       lines.push(wb.needed
         ? `Checking for new doors about every ${plural(Number(state.settings.tthotel_sync_hours) || 6, "hour")}.`
-        : "No computer has a card encoder yet, so TT Hotel isn't checked for new doors.");
+        : "Nothing uses TT Hotel's door list yet (no computer has a card encoder, no key card was made on " +
+          "This computer lately and no door activity came in), so TT Hotel isn't checked for new doors.");
       lines.push(`Calls this month: ${count(wb.used_month)} of ${count(wb.monthly_cap)} ` +
         `(TT Hotel's free limit is ${count(wb.quota || 30000)}).`);
     }
@@ -3853,6 +3854,24 @@
     CE_GetVersion: {},
   };
 
+  // This page's own ID, sent with the link's ticket, the card jobs it starts and their Try again:
+  // a job only runs through the link of the page that started it, so with one account signed in
+  // on two computers a card is never written on the other one's encoder. Kept for the tab
+  // (sessionStorage), so a reload carries on with the job it started.
+  const HERE_PAGE = (() => {
+    const made = () => Array.from(crypto.getRandomValues(new Uint8Array(18)),
+      (b) => b.toString(16).padStart(2, "0")).join("");
+    try {
+      const kept = sessionStorage.getItem("here-page");
+      if (kept && /^[0-9a-f]{36}$/.test(kept)) return kept;
+      const id = made();
+      sessionStorage.setItem("here-page", id);
+      return id;
+    } catch {
+      return made();
+    }
+  })();
+
   // The link while this page holds it (hereHold opens it): to the add-on (ws; state "connecting",
   // "open", "lost", "refused" or "replaced") and to SN Web Socket (helper).
   let here = null;
@@ -3914,7 +3933,7 @@
     clearTimeout(link.timer);
     let pass = null;
     try {
-      pass = await api("POST", HERE_TICKET_PATH, {});
+      pass = await api("POST", HERE_TICKET_PATH, { page: HERE_PAGE });
     } catch (err) {
       if (here !== link || link.ws) return;
       // Refused (Wristbands turned off, say): say why, and try again only after a while.
@@ -4444,7 +4463,7 @@
   // instead, to finish or stop first (null).
   async function postHereJob(path, body) {
     try {
-      const { job } = await api("POST", path, { ...body, encoder: HERE });
+      const { job } = await api("POST", path, { ...body, encoder: HERE, page: HERE_PAGE });
       hereJob = job.id;
       return job;
     } catch (err) {
@@ -4635,7 +4654,7 @@
         clearTimeout(v.timer);
         part("actions").classList.add("working");
         try {
-          v.job = (await api("POST", `api/keycards/jobs/${v.job.id}/${action}`, {})).job;
+          v.job = (await api("POST", `api/keycards/jobs/${v.job.id}/${action}`, { page: HERE_PAGE })).job;
         } catch (err) {
           toast(err.message, true);
         } finally {

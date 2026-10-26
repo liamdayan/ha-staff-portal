@@ -631,6 +631,11 @@ class LocalRelay:
     def connected(self) -> bool:
         return self._send is not None
 
+    @property
+    def usable(self) -> bool:
+        """Connected, and requests may go through it (DashboardRelay: the job's own page)."""
+        return self.connected and self._may_send()
+
     def attach(self, send) -> int:
         """A link opened: it replaces any other (whose request in flight fails). Returns its
         number, for feed() and detach()."""
@@ -725,7 +730,7 @@ class LocalRelay:
             raise EncoderError(2, function, "not sent through a browser")
         async with self._lock:
             send = self._send
-            if send is None:
+            if send is None or not self._may_send():
                 raise EncoderError(NO_LINK, function)
             request_id = f"sp-{_SESSION_TAG}-{next(_request_ids)}"
             answer = asyncio.get_running_loop().create_future()
@@ -746,6 +751,10 @@ class LocalRelay:
                     answer.exception()   # seen, even when nobody waited for it (a Stop, say)
         return _reply_code(reply), reply
 
+    def _may_send(self) -> bool:
+        """Whether requests may go through the link that's there now."""
+        return True
+
     def check(self) -> None:
         """Raise EncoderError unless the link is there and SN Web Socket wasn't said to be out of
         reach."""
@@ -764,17 +773,41 @@ class DashboardRelay(LocalRelay):
     """The dashboard's own link (This computer, in Make key card, Revoke and the lost card
     dialogs): the same messages as a computer's, from the dashboard page open on the computer an
     admin is using, while a card dialog there needs it. One per Home Assistant user, at
-    dashboard_address(user); there's no device behind it."""
+    dashboard_address(user); there's no device behind it.
+
+    One admin may be signed in on several computers (a shared front-desk account), and a newer
+    link replaces the older one. So each link says which page it's from (page: an ID the page
+    made, the same after it reconnects or reloads), and a card job is bound to the page that
+    started it (bound_page, set as it starts): its requests only ever go through that page's
+    link. Another page's link fails them (NO_LINK) instead, so a card is never written on
+    another computer's encoder."""
 
     def __init__(self, user: str):
         super().__init__(0)
         self.user = user
         self.url = dashboard_address(user)
+        self.page: str | None = None         # the page the link is from (None: an older page)
+        self.bound_page: str | None = None   # the page the card job is from
+
+    def attach(self, send, page: str | None = None) -> int:
+        link = super().attach(send)
+        self.page = page
+        return link
+
+    def elsewhere(self) -> bool:
+        """Whether the link is from another page than the card job's."""
+        return self.connected and self.page != self.bound_page
+
+    def _may_send(self) -> bool:
+        return self.page == self.bound_page
 
     def name(self) -> str:
         return "this computer"
 
     def missing_message(self) -> str:
+        if self.elsewhere():
+            return ("Another window (or another computer signed in as you) has the card encoder "
+                    "link now. Click Use it here to carry on here")
         return "Connecting to the card encoder on this computer…"
 
     def summary(self) -> str:
@@ -790,6 +823,10 @@ class DashboardRelay(LocalRelay):
         return "Checking SN Web Socket on this computer"
 
     def problem(self, code: int) -> str | None:
+        if code == NO_LINK and self.elsewhere():
+            return ("The card encoder link was taken by another window, or another computer "
+                    "signed in as you. Click Use it here in the window that started this card, "
+                    "then try again.")
         if code == NO_LINK:
             return ("The card encoder on this computer isn't connected. Keep this page open, "
                     "then try again.")
@@ -1597,13 +1634,13 @@ class EncoderRunner:
         """This computer (USB): wait up to card_wait for the computer's browser link (Wristbands
         open on it), then give up, so the job needs attention."""
         relay = self._relay
-        if relay is None or relay.connected:
+        if relay is None or relay.usable:
             return
         seq = job.current
         self._set_live(job, "waiting_for_link", seq, relay.missing_message())
         loop = asyncio.get_running_loop()
         deadline = loop.time() + job.card_wait
-        while not relay.connected:
+        while not relay.usable:
             if job.cancel or self._closed:
                 raise _Cancelled()
             if loop.time() >= deadline:

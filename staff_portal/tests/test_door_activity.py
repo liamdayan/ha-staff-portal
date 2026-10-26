@@ -65,6 +65,8 @@ def stored(p: Portal) -> list[dict]:
 def fresh_state(monkeypatch) -> list:
     """Clear what the callback keeps in memory, and catch Home Assistant notifications."""
     main.callback_requests.clear()
+    main.callback_deliveries.clear()
+    main.callback_records.clear()
     main.card_alerts.clear()
     main.recent_alerts.clear()
     main.door_delivery.update(at=None, kept=0, dropped=0, lock_id=None, known=True)
@@ -182,12 +184,35 @@ def test_the_address_its_secret_and_its_limits(tmp_path, monkeypatch):
             assert len(form(POOL, huge)) > 64 * 1024
             assert await deliver(p, POOL, huge) == (200, "success")
             assert len(stored(p)) == 1
-            # Each address may send so many a minute.
+            # Wrong addresses: so many a minute from one caller, and they never use up what the
+            # right address may send (TT Hotel isn't refused because someone guesses).
+            monkeypatch.setattr(main, "WRONG_ADDRESS_PER_MINUTE", 3)
             monkeypatch.setattr(main, "CALLBACK_PER_MINUTE", 3)
-            main.callback_requests.clear()
-            codes = [(await deliver(p, POOL, [], **{"X-Forwarded-For": "203.0.113.9"}))[0]
-                     for _ in range(4)]
-            assert codes == [200, 200, 200, 429]
+            main.callback_deliveries.clear()
+            guesser = {"X-Forwarded-For": "203.0.113.9"}
+            codes = [(await deliver(p, POOL, [], token="g" * 43, **guesser))[0]
+                     for _ in range(5)]
+            assert codes == [404, 404, 404, 429, 429]
+            assert (await deliver(p, POOL, [], **guesser))[0] == 200
+            # The right address may send so many a minute, from wherever it comes.
+            codes = [(await deliver(p, POOL, [], **{"X-Forwarded-For": f"198.51.100.{i}"}))[0]
+                     for i in range(3)]
+            assert codes == [200, 200, 429]
+            # ...and so many records are stored a minute: a delivery past that is refused whole
+            # (TT Hotel sends it again later), never cut short or dropped.
+            main.callback_deliveries.clear()
+            monkeypatch.setattr(main, "CALLBACK_PER_MINUTE", 100)
+            monkeypatch.setattr(main, "RECORDS_PER_MINUTE", 5)
+            now = time.time()
+            assert await deliver(p, POOL, [record(49, str(70 + i), at=now - i) for i in range(3)]
+                                 ) == (200, "success")
+            assert len(stored(p)) == 4
+            later = [record(49, str(80 + i), at=now - i) for i in range(3)]
+            assert (await deliver(p, POOL, later))[0] == 429
+            assert len(stored(p)) == 4
+            main.callback_records.clear()   # a minute on
+            assert await deliver(p, POOL, later) == (200, "success")
+            assert len(stored(p)) == 7
             # None of it reached TT Hotel.
             assert main.tthotel._api_sent == 0
     run(scenario())
@@ -351,7 +376,10 @@ def test_lost_and_revoked_cards_alert_once_per_card_per_ten_minutes(tmp_path, mo
             assert [a[1] for a in alerts(p)[-2:]] == ["Revoked card tried at Pool Gate",
                                                       "Deleted card tried at Pool Gate"]
             assert sent[-1][2]["notification_id"] == "staff_access_card_8080"
-            assert "Card 8080 (Old) was deleted in TT Hotel" in sent[-1][2]["message"]
+            # TT Hotel's own name for it is in the activity log, not in Home Assistant.
+            assert "Card 8080 was deleted in TT Hotel" in sent[-1][2]["message"]
+            assert "Old" not in sent[-1][2]["message"]
+            assert alerts(p)[-1][3].startswith("Card 8080 (Old) · refused")
             _, data = await p.admin_call("GET", "/api/door-activity?problems=1")
             assert [r["alert"] for r in data["records"]] == ["deleted", "revoked", "lost", "lost",
                                                              "lost"]
@@ -371,6 +399,164 @@ def test_lost_and_revoked_cards_alert_once_per_card_per_ten_minutes(tmp_path, mo
             assert stored(p)[-1]["card_id"] == active and stored(p)[-1]["alert"] is None
             assert len(alerts(p)) == 5 and len(sent) == 4
     run(scenario())
+
+
+def test_a_cleared_card_given_out_again_is_someone_else(tmp_path, monkeypatch):
+    """A card cleared here (revoked on an encoder, found blank, written over) goes back in the
+    stack and may be given out again in TT Hotel's own program: records from after that aren't
+    the old card, so they neither alert nor count as its use. A replaced card that was never
+    handed back (revoked, not cleared) and a lost card still alert."""
+    sent = fresh_state(monkeypatch)
+
+    async def scenario():
+        p = Portal(tmp_path)
+        hal = card(p, "3661413478", name="Hal Former")
+        replaced = card(p, "555000333", name="Ida")
+        lost = card(p, "555000444", name="Joe")
+        hour_ago = time.time() - 3600
+        p.db.set_card_state(hal, "revoked", "Admin", cleared=True)
+        p.db.set_card_state(replaced, "revoked", "Replaced by card 1")
+        p.db.set_card_state(lost, "lost", "Admin")
+        p.db.conn.execute("UPDATE wb_cards SET state_at = ?, cleared_at = CASE WHEN id = ? "
+                          "THEN ? ELSE cleared_at END WHERE id IN (?, ?, ?)",
+                          (hour_ago, hal, hour_ago, hal, replaced, lost))
+        p.db.conn.execute("UPDATE wb_cards SET written_at = ? WHERE id = ?",
+                          (hour_ago - 3600, hal))   # made an hour before it was revoked
+        p.db.conn.commit()
+        async with p:
+            now = time.time()
+            # A guest's card with the cleared card's number (in either byte order): nobody's.
+            await deliver(p, POOL, [record(49, "3661413478", at=now - 60),
+                                    record(49, "1723612378", at=now - 50)])
+            await settle()
+            assert [(r["card_id"], r["alert"], r["problem"]) for r in stored(p)] == [
+                (None, None, 0), (None, None, 0)]
+            assert sent == []
+            # A tap from before it was cleared, arriving late, is still Hal's (and no alert);
+            # one a moment after it (the lock's clock running ahead) too, but no alert either.
+            await deliver(p, POOL, [record(49, "3661413478", at=hour_ago - 600),
+                                    record(49, "3661413478", at=hour_ago + 60)])
+            await settle()
+            assert [(r["card_id"], r["alert"]) for r in stored(p)[-2:]] == [(hal, None), (hal, None)]
+            assert sent == []
+            _, data = await p.admin_call("GET", "/api/door-activity")
+            assert [r["who"] for r in data["records"]][:2] == ["", ""]   # the guest's taps
+            # Replaced (never cleared) and lost cards still alert.
+            await deliver(p, SPA, [record(49, "555000333", at=now - 5),
+                                   record(49, "555000444", success=0, at=now - 4)])
+            await settle()
+            assert [(r["card_id"], r["alert"]) for r in stored(p)[-2:]] == [
+                (replaced, "revoked"), (lost, "lost")]
+            assert len(sent) == 2
+            # The lost card found and cleared on an encoder: it stays lost, but from then on its
+            # number is someone else's. A tap between lost and cleared still alerted.
+            p.db.mark_card_cleared(lost)
+            assert p.db.key_card(lost)["state"] == "lost"
+            await deliver(p, SPA, [record(49, "555000444", at=time.time() + 400)])
+            await settle()
+            assert stored(p)[-1]["card_id"] is None and stored(p)[-1]["alert"] is None
+            assert p.db.match_card("555000444", now - 4)["id"] == lost
+            # Written again here: the new card from then on (written over = cleared).
+            again = card(p, "3661413478", name="Kim")
+            p.db.retire_card_number("3661413478", again, "Bob")
+            p.db.conn.execute("UPDATE wb_cards SET written_at = ? WHERE id = ?", (now, again))
+            p.db.conn.commit()
+            assert p.db.match_card("3661413478", now + 30)["id"] == again
+            assert p.db.match_card("3661413478", hour_ago - 600)["id"] == hal
+    run(scenario())
+
+
+def test_revoking_on_an_encoder_marks_the_card_cleared(tmp_path, monkeypatch):
+    fresh_state(monkeypatch)
+    p = Portal(tmp_path)
+    active, lost = card(p, "1000001"), card(p, "1000002")
+    p.db.set_card_state(lost, "lost", "Admin")
+    for target in (active, lost):
+        job_id = p.db.add_wb_job(card_type="staff", name="Eve", count=1, records=[],
+                                 summary="Revoke", expires_at=time.time() + 86400,
+                                 allow_lockout=False, staff_id=p.bob, device_id=p.device,
+                                 actor="Bob", role=None, ip=None, encoder_url="ws://127.0.0.1:1",
+                                 kind="revoke", target_card_id=target,
+                                 target_card=p.db.wb_card(target)["card_number"])
+        p.db.update_wb_card(job_id, 1, status="written", written_at=time.time(),
+                            card_number=p.db.wb_card(target)["card_number"])
+        main.card_done(job_id, 1)
+    rows = {r["id"]: dict(r) for r in p.db.conn.execute(
+        "SELECT id, state, cleared_at FROM wb_cards WHERE id IN (?, ?)", (active, lost))}
+    assert rows[active]["state"] == "revoked" and rows[active]["cleared_at"]
+    assert rows[lost]["state"] == "lost" and rows[lost]["cleared_at"]
+
+
+def test_home_assistant_never_gets_text_that_makes_links(tmp_path, monkeypatch):
+    """Whoever has the address can send any text: what reaches Home Assistant's Markdown is a
+    card number (digits only) and the names of cards made here, every punctuation mark
+    escaped."""
+    sent = fresh_state(monkeypatch)
+
+    async def scenario():
+        p = Portal(tmp_path)
+        named = card(p, "424242", name="[Reset](https://evil.example) <b>*x*</b>")
+        p.db.set_card_state(named, "lost", "Admin")
+        p.db.conn.execute("UPDATE wb_cards SET state_at = ? WHERE id = ?",
+                          (time.time() - 60, named))
+        p.db.conn.commit()
+        async with p:
+            now = time.time()
+            link = "[Re-authorize Staff Access](https://evil.example/login) www.evil.example"
+            await deliver(p, POOL, [record(51, "99", at=now - 3, username=link),
+                                    record(51, "[x](https://evil.example)", at=now - 2),
+                                    record(49, "424242", at=now - 1)])
+            await settle()
+            messages = [data["message"] for _, _, data in sent]
+            assert len(messages) == 3
+            assert messages[0].startswith("Card 99 was deleted in TT Hotel. It was tried at Pool "
+                                          "Gate")
+            assert messages[1].startswith("A card was deleted in TT Hotel.")
+            assert messages[2].startswith(
+                r"Card 424242 (\[Reset\]\(https\:\/\/evil\.example\) \<b\>\*x\*\<\/b\>) "
+                "was reported lost")
+            for message in messages:
+                assert "evil.example/login" not in message and "](" not in message
+                assert "www.evil" not in message and "<b>" not in message
+            # The activity log and Door activity keep TT Hotel's text, shown as plain text.
+            _, data = await p.admin_call("GET", "/api/door-activity")
+            assert data["records"][-1]["who"] == link
+    run(scenario())
+
+
+def test_records_from_the_future_are_dropped():
+    now = time.time()
+    assert doorlog.read_record(record(49, at=now + 2 * 3600), now) is None
+    ahead = doorlog.read_record(record(49, at=now + 600), now)
+    assert ahead is not None and abs(ahead["at"] - (now + 600)) < 1
+    # A lock clock far ahead with TT Hotel's own time fine: listed at TT Hotel's time.
+    skewed = doorlog.read_record(record(49, lockDate=int((now + 30 * 86400) * 1000),
+                                        serverDate=int(now * 1000)), now)
+    assert skewed["at"] == skewed["server_date"]
+
+
+def test_door_list_is_wanted_for_the_dashboards_encoder_and_door_activity(tmp_path, monkeypatch):
+    fresh_state(monkeypatch)
+    p = Portal(tmp_path, encoder_url=None)
+    p.db.conn.execute("UPDATE devices SET encoder_url = NULL, encoder_local = 0, encoder_auto = 0")
+    p.db.conn.commit()
+    p.db.update_settings({"wristbands_enabled": "1"})
+    assert not main.tthotel_wanted()
+    # A key card made on This computer from the dashboard (valid, or ended lately).
+    job_id = p.db.add_wb_job(card_type="staff", name="Eve", count=1, records=[], summary="Pool",
+                             expires_at=time.time() - 10 * 86400, allow_lockout=False,
+                             staff_id=None, device_id=None, actor="Admin", role=None, ip=None,
+                             encoder_url="local:dashboard-" + "a1" * 16)
+    assert main.tthotel_wanted()
+    p.db.conn.execute("UPDATE wb_jobs SET expires_at = ? WHERE id = ?",
+                      (time.time() - 200 * 86400, job_id))
+    p.db.conn.commit()
+    assert not main.tthotel_wanted()
+    # TT Hotel sending door activity (records are only kept for doors on the list).
+    main.door_delivery["at"] = time.time()
+    assert main.tthotel_wanted()
+    p.db.update_settings({"wristbands_enabled": "0"})
+    assert not main.tthotel_wanted()
 
 
 def test_alerts_in_all_are_capped(tmp_path, monkeypatch):

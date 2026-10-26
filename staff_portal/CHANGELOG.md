@@ -16,6 +16,12 @@
   log.
 - If the page is closed mid-card, the next card you start on that computer brings the unfinished
   one back, to **Try again** or **Stop**.
+- One account signed in on two computers (a shared front-desk login): a card is only ever made
+  on the encoder of the window that started it. A card dialog opened on the other computer takes
+  the link but can't carry on (or **Try again**) that card there; **Use it here**, then **Try
+  again**, in the first window finishes it.
+- TT Hotel's door list keeps being synced when key cards are made only on This computer (or Door
+  activity comes in), so new doors still show up.
 
 **Door activity**
 
@@ -30,6 +36,14 @@
   notification, at most once per card every 10 minutes. Untick **Tell Home Assistant when a lost
   or revoked card is tried** to keep it to the Activity tab.
 - Door battery levels now update with each lock record.
+- A card cleared here (revoked on an encoder, found blank by Look up, or written over) is done
+  with: when it's given out again, here or in TT Hotel's own program, its taps aren't counted as
+  the old card's and never alert. A replaced card that was never handed back still alerts.
+- The Home Assistant notification names only cards made here (TT Hotel's own names stay in the
+  activity log), and shows any link or formatting marks as plain text.
+- The address has limits of its own: 300 deliveries and 1,000 records a minute from wherever they
+  come (TT Hotel sends anything over that again later). Requests to a wrong address are limited
+  separately and never hold up TT Hotel's. Records dated more than an hour ahead are left out.
 - The Door activity address is never in backups (migration files carry it), and **Make a new
   address** replaces it if it ever gets out. Staff Access makes no TT Hotel requests for any of
   this, and passcodes are never stored.

@@ -27,6 +27,11 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 EARLIEST_MS = 946684800000   # 2000-01-01: a lock date before this is a lock that lost its clock
 LOCK_AHEAD = 300             # seconds a lock's clock may be ahead of TT Hotel's and still be used
 LOCK_BEHIND = 30 * 86400     # ...or behind it (a gateway that was offline uploads late)
+FUTURE_SLACK = 3600          # a time later than this from now is dropped: TT Hotel's clock and
+                             # ours agree far better, and a record "from the future" would stay
+                             # at the top of Door activity and a card's Last used
+CLOCK_SLACK = 300            # seconds either way a record's time and a card's are compared with
+                             # (when a card was written or cleared), for the lock's clock
 
 # Record types from TT Hotel's cloud (its "Record type of cloud" list) worth listing, and how the
 # door was opened, in the dashboard's words. Locking, door sensors, parking locks and the like
@@ -105,7 +110,7 @@ def read_record(item, now: float) -> dict | None:
         return None
     kind = _whole(item.get("recordType"), 0, 10_000)
     success = _whole(item.get("success"), 0, 1)
-    latest = int((now + 366 * 86400) * 1000)
+    latest = int((now + FUTURE_SLACK) * 1000)
     lock_ms = _whole(item.get("lockDate"), EARLIEST_MS, latest)
     server_ms = _whole(item.get("serverDate"), EARLIEST_MS, latest)
     if kind not in HOW or success is None or (lock_ms is None and server_ms is None):
@@ -146,9 +151,13 @@ def card_keys(number: str) -> list[str]:
 def alert_for(record: dict, card: dict | None) -> str | None:
     """Why a record should alert someone: "lost" or "revoked" (a card made here in that state,
     tried after it was marked so, not a tap from before that arrived late), "deleted" (TT Hotel
-    says a deleted card was tried), else None."""
+    says a deleted card was tried), else None. A card that was cleared (cleared_at: revoked on an
+    encoder, say) opens nothing from then on, so only a lost card tried before it was found and
+    cleared alerts: a record matched to it a moment after that is a lock's clock running ahead."""
     if card and card["state"] in ("lost", "revoked") and (card["state_at"] or 0) <= record["at"]:
-        return card["state"]
+        cleared = card.get("cleared_at")
+        if cleared is None or record["at"] < cleared:
+            return card["state"]
     return "deleted" if record["record_type"] == DELETED_CARD else None
 
 

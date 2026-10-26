@@ -342,6 +342,10 @@ MIGRATIONS = {
         "state_by": "TEXT",
         # The number of a lost or replaced card this card also carries a cancellation for.
         "cancelled_card": "TEXT",
+        # When the card itself was cleared: by a revoke job, found blank on an encoder, or its
+        # number written again. It opens nothing from then on and may be given out again (in
+        # TT Hotel's own program, too), so a lock record from later on isn't this card.
+        "cleared_at": "REAL",
     },
     "roles": {
         # Pages for people with this role on role-based devices (JSON like a phone's choice;
@@ -464,7 +468,7 @@ CARD_NUMBER_DIGITS = 6         # a card log search this many digits or longer is
 BUSY_SECONDS = 5               # how long a write waits for another connection's (a backup's)
 WAL_LIMIT = 16 * 1024 * 1024   # the write-ahead log is cut back to this after a checkpoint
 WB_CARD_FIELDS = {"status", "card_number", "error", "written_at", "state", "state_at", "state_by",
-                  "cancelled_card"}
+                  "cancelled_card", "cleared_at"}
 WB_JOB_KINDS = ("write", "revoke", "notice")
 CARD_STATES = ("active", "revoked", "lost")
 LOCKOUT_METHODS = ("remote", "notice", "replacement")
@@ -489,7 +493,7 @@ CardJobRow = collections.namedtuple(
                   "department_id source kind target_card_id target_card cancel_until")
 CardRow = collections.namedtuple(
     "CardRow", "id job_id seq status card_number error written_at state state_at state_by "
-               "cancelled_card")
+               "cancelled_card cleared_at")
 LockoutRow = collections.namedtuple("LockoutRow", "card_id lock_id method status detail tries at")
 # What a migration brings besides a backup's contents (see migrate.py): every column of a door.
 DOOR_COLUMNS = ("lock_id", "tt_name", "alias", "mac", "lock_type", "building_number",
@@ -1732,22 +1736,40 @@ class Database:
             (card_id,)).fetchone()
         return dict(row) if row else None
 
-    def set_card_state(self, card_id: int, state: str, by: str | None) -> None:
+    def set_card_state(self, card_id: int, state: str, by: str | None, *,
+                       cleared: bool = False) -> None:
+        """cleared: the card itself was cleared just now (see mark_card_cleared)."""
         assert state in CARD_STATES
-        self.conn.execute("UPDATE wb_cards SET state = ?, state_at = ?, state_by = ? WHERE id = ?",
-                          (state, time.time(), None if by is None else str(by)[:120], card_id))
+        now = time.time()
+        self.conn.execute(
+            """UPDATE wb_cards SET state = ?, state_at = ?, state_by = ?,
+               cleared_at = CASE WHEN ? THEN ? ELSE cleared_at END WHERE id = ?""",
+            (state, now, None if by is None else str(by)[:120], int(cleared), now, card_id))
+        self.conn.commit()
+
+    def mark_card_cleared(self, card_id: int) -> None:
+        """The card itself was just cleared (it keeps its state: a lost card found and cleared
+        stays lost). From then on it opens nothing and may be given out again, so lock records
+        from later on are no longer matched to it (match_card)."""
+        self.conn.execute("UPDATE wb_cards SET cleared_at = ? WHERE id = ? AND cleared_at IS NULL",
+                          (time.time(), card_id))
         self.conn.commit()
 
     def retire_card_number(self, card_number: str, keep_card_id: int, by: str) -> list[int]:
         """A card number was just written again (a card is reusable once cleared): every older
         record of it that still counts as active is marked revoked, so the list never shows two
         live cards with one number. Returns their IDs."""
+        number, now = str(card_number)[:40], time.time()
         ids = [r[0] for r in self.conn.execute(
             """SELECT id FROM wb_cards WHERE card_number = ? AND id != ? AND status = 'written'
-               AND state = 'active'""", (str(card_number)[:40], keep_card_id))]
+               AND state = 'active'""", (number, keep_card_id))]
         self.conn.executemany(
             "UPDATE wb_cards SET state = 'revoked', state_at = ?, state_by = ? WHERE id = ?",
-            [(time.time(), str(by)[:120], i) for i in ids])
+            [(now, str(by)[:120], i) for i in ids])
+        # Whatever was on the card before (in any state) is gone now.
+        self.conn.execute(
+            """UPDATE wb_cards SET cleared_at = ? WHERE card_number = ? AND id != ?
+               AND status = 'written' AND cleared_at IS NULL""", (now, number, keep_card_id))
         self.conn.commit()
         return ids
 
@@ -1799,14 +1821,18 @@ class Database:
         """The card made here that a lock record's card number is, or None: compared without
         leading zeros, as written, then with its bytes reversed (doorlog.card_keys). A number
         written again after its card was cleared is the card it was at the time: the last one
-        written by then (a few minutes either way, for the lock's clock)."""
+        written by then (a few minutes either way, for the lock's clock). A card cleared before
+        the record (cleared_at) is never it: a cleared card goes back in the stack and may have
+        been given out again in TT Hotel's own program, so the record is left unmatched."""
+        slack = doorlog.CLOCK_SLACK
         for key in doorlog.card_keys(number):
             row = self.conn.execute(
-                """SELECT c.id, c.card_number, c.state, c.state_at, j.name FROM wb_cards c
-                   JOIN wb_jobs j ON j.id = c.job_id
+                """SELECT c.id, c.card_number, c.state, c.state_at, c.cleared_at, j.name
+                   FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
                    WHERE ltrim(c.card_number, '0') = ? AND c.status = 'written' AND j.kind = 'write'
+                   AND (c.cleared_at IS NULL OR ? <= c.cleared_at + ?)
                    ORDER BY COALESCE(c.written_at, j.ts) <= ? DESC, COALESCE(c.written_at, j.ts) DESC,
-                   c.id DESC LIMIT 1""", (key, at + 300)).fetchone()
+                   c.id DESC LIMIT 1""", (key, at, slack, at + slack)).fetchone()
             if row:
                 return dict(row)
         return None

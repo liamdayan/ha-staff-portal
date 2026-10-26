@@ -106,14 +106,17 @@ class FakeDashboard(FakeBrowser):
     the allow-list are dropped, as the page does. closing: what the add-on said before closing
     the link."""
 
-    def __init__(self, client: TestClient, headers: dict, helper_url: str | None):
+    def __init__(self, client: TestClient, headers: dict, helper_url: str | None,
+                 page: str | None = None):
         super().__init__(None, None, helper_url)
         self.client = client
         self.headers = headers
+        self.page = page                    # the page's own ID (None: a page from before 0.9.0)
         self.closing: list[str] = []
 
     async def ticket(self) -> str:
-        status, reply = await call(self.client, "POST", "/api/encoder/ticket", self.headers)
+        status, reply = await call(self.client, "POST", "/api/encoder/ticket", self.headers,
+                                   {"page": self.page} if self.page else None)
         assert status == 200, reply
         assert reply["expires_in"] == 30 and reply["path"] == "api/encoder/link"
         return reply["ticket"]
@@ -442,6 +445,84 @@ def test_the_dashboard_link_closes_and_its_jobs_need_attention(tmp_path, monkeyp
                     assert await page.wait_closed() == main.LINK_STOPPING
                     assert page.closing == ["stopping"]
                     await page.close()
+                finally:
+                    await ingress.close()
+    run(scenario())
+
+
+def test_one_account_on_two_computers_never_writes_on_the_other_one(tmp_path, monkeypatch):
+    """A shared front-desk account signed in on two computers: a job only ever runs through
+    the link of the page that started it, and only that page may try it again."""
+    monkeypatch.setattr(main, "LINK_CHECK_SECONDS", 0.05)
+    one, two = "1" * 36, "2" * 36
+
+    async def scenario():
+        async with Simulator() as sim1, Simulator() as sim2, \
+                FakeTTHotel([tt_lock(d) for d in DOORS]):
+            p = dashboard_portal(tmp_path, monkeypatch)
+            tthotel_account(p)
+            p.db.update_settings({"wb_card_wait": "1"})
+            async with p:
+                ingress = await ingress_client()
+                pat = as_user(PAT)
+                make = f"/api/staff/{p.cy}/keycard"
+                try:
+                    desk1 = await FakeDashboard(ingress, pat, sim_url(sim1), one).open()
+                    # Another page can't start a job on desk 1's link.
+                    status, reply = await call(ingress, "POST", make, pat,
+                                               {"encoder": "here", "page": two})
+                    assert status == 409 and reply["error"] == main.DASHBOARD_ELSEWHERE
+                    status, reply = await call(ingress, "POST", make, pat,
+                                               {"encoder": "here", "page": one})
+                    assert status == 200, reply
+                    job_id = reply["job"]["id"]
+                    await job_until(ingress, pat, job_id, waiting_for(1))
+                    # Desk 2 (the same account) opens a card dialog: its link takes over, and
+                    # desk 1's card needs attention, saying why.
+                    desk2 = await FakeDashboard(ingress, pat, sim_url(sim2), two).open()
+                    assert await desk1.wait_closed() == main.LINK_REPLACED
+                    job = await job_until(ingress, pat, job_id,
+                                          lambda j: j["status"] == "needs_attention")
+                    assert "taken by another window" in job["message"]
+                    # Desk 2 is shown desk 1's job, and can't try it again (or skip its card).
+                    status, reply = await call(ingress, "POST", make, pat,
+                                               {"encoder": "here", "page": two})
+                    assert status == 409 and reply["job"]["id"] == job_id
+                    for action in ("retry", "skip"):
+                        status, reply = await call(ingress, "POST",
+                                                   f"/api/keycards/jobs/{job_id}/{action}", pat,
+                                                   {"page": two})
+                        assert status == 409 and reply["error"] == main.DASHBOARD_NOT_YOURS
+                    # Desk 1 can't either while desk 2 has the link: Use it here first.
+                    status, reply = await call(ingress, "POST",
+                                               f"/api/keycards/jobs/{job_id}/retry", pat,
+                                               {"page": one})
+                    assert status == 409 and reply["error"] == main.DASHBOARD_ELSEWHERE
+                    await asyncio.sleep(0.2)
+                    # Nothing for the job ever reached desk 2's encoder.
+                    assert desk2.calls == [] and not sim2.calls and not sim2.cards
+                    # Even if the runner were told to go on, it waits for desk 1's page.
+                    runner = main.encoders.find(f"local:dashboard-{PAT}")
+                    assert runner.retry(job_id)
+                    job = await job_until(ingress, pat, job_id,
+                                          lambda j: j["status"] == "needs_attention")
+                    assert desk2.calls == [] and not sim2.calls
+                    await desk1.close()
+                    # Use it here on desk 1 (the same page, linking again): Try again finishes.
+                    desk1 = await FakeDashboard(ingress, pat, sim_url(sim1), one).open()
+                    assert await desk2.wait_closed() == main.LINK_REPLACED
+                    status, reply = await call(ingress, "POST",
+                                               f"/api/keycards/jobs/{job_id}/retry", pat,
+                                               {"page": one})
+                    assert status == 200, reply
+                    await job_until(ingress, pat, job_id, waiting_for(1))
+                    number = sim1.place_card()
+                    job = await job_until(ingress, pat, job_id, lambda j: j["status"] == "done")
+                    assert job["cards"][0]["card_number"] == number
+                    sim1.remove_card()
+                    assert not sim2.cards and desk2.calls == []
+                    await desk1.close()
+                    await desk2.close()
                 finally:
                     await ingress.close()
     run(scenario())

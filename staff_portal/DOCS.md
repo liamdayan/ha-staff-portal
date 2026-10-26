@@ -670,8 +670,10 @@ built to use a small share and never get the account blocked:
   last key; blank wristbands (never used before) and staff cards for whole floors, buildings or
   every door need a fresh one, so they need the internet.
 - The door list is synced every 6 hours (change it under **Check for new doors every**), only
-  while Wristbands is on and a computer has a card encoder. A sync is one or two requests, plus
-  signing in about once every 90 days.
+  while Wristbands is on and something uses it: a computer has a card encoder, a key card was made
+  on **This computer** from the dashboard in the last 90 days (or its card dialog is open), or
+  [Door activity](#door-activity) is coming in. A sync is one or two requests, plus signing in
+  about once every 90 days.
 - Its own hard limits: 7,500 requests a month (a quarter of the free plan), counted across
   add-on restarts, and 30 a minute. Automatic door syncs stop at half of that, keeping the rest
   for making cards.
@@ -725,6 +727,12 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   most 20 alerts go out a minute in all (Door activity still lists every try).
   Untick **Tell Home Assistant when a lost or revoked card is tried** to keep it to the activity
   log.
+- **A card that was cleared is done with.** A card revoked on an encoder, found blank by **Look
+  up**, or written over goes back in the stack and may be given out again, here or in TT Hotel's
+  own program. From then on its number is whoever has it now: those records aren't matched to the
+  old card (no **Last used**, no name) and never alert. A card marked revoked because it was
+  replaced, and never handed back, still alerts, and so does a lost card until it's found and
+  cleared.
 
 To set it up:
 
@@ -755,12 +763,20 @@ What to know:
 - Passcodes are never stored: a passcode is shown by its name in TT Hotel.
 - Each door's battery level is updated from its records.
 - The time shown is the lock's own clock, unless it's clearly wrong (more than 30 days behind TT
-  Hotel's, or 5 minutes ahead), when TT Hotel's is used.
+  Hotel's, or 5 minutes ahead), when TT Hotel's is used. A record more than an hour in the future
+  is left out.
 - Door activity keeps 50,000 records and 180 days. It isn't in backups (TT Hotel keeps its own
   six months). Neither is the address, and a restore never changes it; a migration file carries it,
   so TT Hotel's Callback URL keeps working on the new install.
-- Each address can send 300 deliveries a minute. Staff Access reads at most 300 records (64 KB)
-  from one, and always answers TT Hotel "success", so TT Hotel never sends the same ones again.
+- The address takes up to 300 deliveries and stores up to 1,000 records a minute, from wherever
+  they come; past that, TT Hotel is asked to send them again later, so nothing real is lost and a
+  leaked address can't wipe the door history in minutes. Staff Access reads at most 300 records
+  (64 KB) from one delivery, and otherwise always answers TT Hotel "success", so TT Hotel never
+  sends the same ones again. Requests to a wrong address are limited separately (30 a minute from
+  one place) and never hold up TT Hotel's.
+- The Home Assistant notification only names cards made here and shows a card number only when
+  it's digits; TT Hotel's own names (which whoever has the address could set to anything) stay in
+  the activity log and Door activity, where they're shown as plain text.
 
 ### Troubleshooting
 
@@ -907,6 +923,13 @@ It asks which card encoder to use, with **This computer (the one you're using)**
   mid-card, the card needs attention, and the next card you start on this computer shows that one
   first, to **Try again** or **Stop**. On a front-desk computer that also has Wristbands open,
   make one card at a time: the staff app and the dashboard share its encoder.
+
+  **One account on two computers** (a shared front-desk login): a card is only ever made on the
+  encoder of the window that started it. If another window or computer opens a card dialog
+  meanwhile, it takes the encoder link, and the card waiting in the first window needs attention
+  ("The card encoder link was taken by another window"): click **Use it here** there, then **Try
+  again**. The other window is shown that unfinished card, but can only **Stop** it (then start
+  its own). Reloading the page keeps the window's card; a new tab is another window.
 - **A computer's card encoder** (set up in Phones & computers). One set to **This computer (USB)**
   is reached through that computer, so **Wristbands** must be open there (the card waits for it).
 

@@ -168,7 +168,9 @@ encoder, without opening TT Hotel's own software.
   only while it's making or looking up a card. The add-on never sends it to an encoder you
   haven't set up or confirmed.
 - **Door activity** arrives at an address with a long random secret that only TT Hotel is given
-  (and that you can replace at any time); it's never in backups, and passcodes are never stored.
+  (and that you can replace at any time), with limits of its own that wrong guesses can't use
+  up; it's never in backups, passcodes are never stored, and text from it never reaches a Home
+  Assistant notification as a link.
 - **Backup files** include the activity log and card history, but never Home Assistant
   sign-ins, pending setup codes, the Connecteam secret, the TT Hotel secret and password, or the
   Door activity address. A
