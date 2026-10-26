@@ -1513,6 +1513,9 @@ match**, **Access refused**, **Google not answering**, **Google busy**, **Unexpe
   except its own temporary copies (below) and test folders.
 - To read a card, Google Drive turns a copy of the photo into a Google Doc in a folder named
   **_OCR scratch** in the HR drive, Staff Access takes its text, and the copy is deleted at once.
+- To make a PDF (a signed write-up or a final review), Staff Access sends plain text laid out as
+  a simple page; Google Drive turns it into a Google Doc in **_OCR scratch**, saves that as a PDF,
+  and the Doc is deleted at once. The PDF is then kept in the person's folder like any other file.
 - It **only answers Staff Access**. "Who has access: Anyone" lets Staff Access reach it without a
   Google sign-in, but every request must be signed with the secret only your Staff Access has,
   and each one works for 5 minutes and only once. Opened in a web browser, it just says it's
@@ -1544,7 +1547,9 @@ anyone else.
 #### When the script is out of date
 
 After an update, Staff Access may need a newer script. The connection then says **Script out of
-date**. To update it (the Web app URL stays the same):
+date**. (Script version 2 adds making PDFs of write-ups and reviews. Files keep going to Drive
+with version 1 meanwhile; PDFs wait until the new version is deployed.) To update it (the Web app
+URL stays the same):
 
 1. Click **Copy the script**.
 2. In script.google.com, open the project, select everything in the editor, paste over it and
@@ -1735,6 +1740,85 @@ the HR portal waits: Staff Access's own time clock checks keep running.
 HR admins find these in the HR portal under **HR settings**: roles, managers' departments, who
 must use an authenticator code, how soon people are signed out, notifications, which
 Connecteam profile fields hold the start date and direct manager, and the HR key (below).
+
+### Documents
+
+Each person's page in the HR portal has a **Documents** section: the files in their file that
+the person looking may see, with **Open** (photos open in the portal) or **Download** (PDFs are
+always downloaded, never opened inside the portal). Every file is kept in Google Drive, in the
+person's folder, with the date first in its name, such as `2026-10-25 Handbook
+acknowledgement.pdf`, so folders sort in order.
+
+**Kinds of document** (HR settings → Kinds of document). Each kind has who can see it, its folder
+in Google Drive, and who may add one. HR can rename kinds and add more. The kinds at the start:
+
+| Kind | Who can see it | Who may add one |
+|---|---|---|
+| Signed policies | The employee, their managers, directors and HR | HR |
+| Training records | The employee, their managers, directors and HR | Managers, directors and HR |
+| Hiring paperwork | Directors and HR | HR |
+| Other | HR admins only | HR |
+| I-9 | Restricted: HR admins only, kept apart | HR |
+| Reasonable accommodation | Restricted: HR admins only, kept apart | HR |
+
+Certificates, signed write-ups and final reviews are kinds too, but they're shown in their own
+sections, which decide who sees them. Changing who can see a kind takes effect at once. Changing
+its Drive folder only affects new files.
+
+**Adding a file.** Open someone's page, choose the kind, a title and the date on the document,
+and the file: a photo (JPEG, PNG or WebP) or a PDF, up to 15 MB (25 MB for HR, for scanned
+paperwork). The type is checked from the file itself, not its name. Photos are saved afresh
+without their camera details or location; PDFs are kept exactly as they are. Files that anyone
+but HR adds wait for HR to **Accept** or **Don't accept** them (with a reason, which whoever
+added it sees). A file that isn't accepted never reaches Google Drive and is removed after 30
+days. Nobody checks their own upload: an HR admin's own file is checked by another HR admin.
+
+**Restricted files (I-9, Reasonable accommodation).** Only HR admins see them; managers,
+directors and the employee never learn one exists, and they're never copied to Connecteam. On a
+person's page HR sees how many there are, and **Show restricted files** lists them. Every look is
+in the audit log. They're kept apart in Google Drive: in the **HR Restricted** shared drive if
+you picked one (see [The drives](#the-drives)), otherwise in a **Restricted** folder in the HR
+drive, and HR settings warns that every member of that drive can open it.
+
+**Getting files to Google Drive (and Connecteam).** Each file is kept encrypted on the Home
+Assistant computer until it's in Google Drive, then 30 more days for quick opening; after that
+it's fetched from Drive when someone opens it. Each file shows where it is, for HR: **Google
+Drive: Sent**, **Waiting** or **Needs attention**. If Google doesn't answer, the file is tried
+again after 1 minute, 5, 30, 2 hours and 6 hours, then daily. After 8 tries it goes on HR's
+**Needs attention** page with **Retry**. A retry never makes a second copy. While Google Drive
+isn't set up, or its script is out of date, files simply wait (without using up tries), and HR's
+to-do list says so. A migration file can't be made while files are waiting to reach Google Drive
+or waiting for HR.
+
+**Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
+turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
+HR), and only where "latest file only, and the employee sees it there" is fine. Restricted files
+never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
+can fix ("not assigned this document's pack in Connecteam") go on **Needs attention** at once,
+with **Retry** and **Don't copy to Connecteam**.
+
+**Deleting.** HR deletes a file with a fresh 6-digit code (or PIN). It stays in the person's
+**Recycle bin** for 30 days and can be **Restored**; then it's removed from the computer and
+moved to the shared drive's trash, which Google empties 30 days later. Connecteam can't remove
+files for Staff Access, so a deleted file that was copied there becomes a to-do on **Needs
+attention**: remove it in Connecteam, then press **Done**. The audit log keeps the line.
+
+**Legal hold.** On a person's page, HR can **Put on legal hold** (with a reason, and a fresh
+code). Nothing in that file can then be deleted, the recycle bin isn't emptied for them, and
+they're left off the retention list, until HR lifts it.
+
+**After someone leaves.** Records are kept 5 years after they leave (HR settings → Records).
+After that the person is listed on **Needs attention** under **Past the time records are kept**,
+and HR gets a note in the inbox. Nothing is deleted by itself: HR reviews the person's files and
+presses **Delete their files** (a fresh code; they go to the recycle bin first). When HR confirms
+someone has left, **Move Drive folder to Former employees** on their page moves their folder
+there; it never happens by itself. When someone's name changes in Connecteam, their Drive folder
+is renamed overnight. Folders are always found by their Connecteam ID, never by name, so two
+people with the same name never get mixed up.
+
+**Needs attention** (HR admins, in the menu) lists files waiting for HR to check, uploads that
+couldn't be sent, uploads still waiting to be tried again, copies to remove in Connecteam,
+records past the time they're kept, and legal holds.
 
 ### The audit log
 

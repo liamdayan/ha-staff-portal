@@ -1,0 +1,12 @@
+/* HR portal: documents (hr-documents.js). Phone first, light and dark, using hr.css's colours. */
+.doc-image { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain;
+  margin: 4px 0 10px; border-radius: 10px; background: var(--bg); }
+.doc-note { margin: 6px 0; }
+.doc-add, .doc-hr { margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--line); }
+.doc-add input[type="file"] { padding: 9px 10px; }
+.doc-restricted { margin-bottom: 6px; }
+.item .title .badge { font-weight: 500; vertical-align: middle; }
+.list .item .actions { margin-top: 8px; }
+.list .item .actions .button, .list .item .actions button { min-height: 40px; padding: 8px 14px; }
+.doc-kind > div { min-width: 0; }
+.doc-kind > button { flex: none; white-space: nowrap; }

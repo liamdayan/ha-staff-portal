@@ -440,6 +440,9 @@ def _item(svc, viewer, row: dict) -> dict | None:
     if doc:
         title = RESTRICTED_SHOWN if doc["restricted"] else f"{k['name'] if k else 'Document'}: " \
                                                            f"{documents.title_of(doc)}"
+    elif row["target"] == "pdf":
+        made_for = documents.kind_by_key(db, row["kind_key"] or "")
+        title = f"A PDF for {made_for['name'] if made_for else 'another part of the portal'}"
     return {"id": row["id"], "person_id": row["person_id"], "name": svc.person_name(row["person_id"]),
             "target": row["target"], "word": delivery.TARGET_WORDS.get(row["target"], row["target"]),
             "title": title, "error": row["error"], "tries": row["tries"],

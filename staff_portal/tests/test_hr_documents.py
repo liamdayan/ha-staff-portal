@@ -28,7 +28,7 @@ from hr import access, audit, crypto, ctapi, delivery, docroutes, documents, fil
     pdfdoc, signin  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fake_bridge import FOLDER, HR_DRIVE, RESTRICTED_DRIVE, FakeBridge  # noqa: E402
+from fake_bridge import HR_DRIVE, RESTRICTED_DRIVE, FakeBridge  # noqa: E402
 
 SECRET = "docs-secret-" + "d" * 30
 DAY = 86400
@@ -502,6 +502,8 @@ def test_uploads_are_checked_cleaned_named_by_date_and_wait_for_hr(tmp_path, mon
             await upload(hr, s["manager"], "202", training, jpeg((1, 2, 3)))
             status, r = await upload(hr, s["manager"], "202", training, jpeg((4, 5, 6)))
             assert status == 400 and "waiting for HR" in r["error"]
+            await delivery.settle(hr.svc)
+            assert "waiting for HR to accept or reject it" in hr.svc.migration_blocker()
             assert "Added a document (waiting for HR)" in actions(hr)
             assert {"Accepted a document", "Didn't accept a document"} <= set(actions(hr))
     run(scenario())
@@ -599,6 +601,30 @@ def test_a_retry_after_a_lost_reply_never_makes_a_second_copy(tmp_path, monkeypa
             await delivery.run_due(hr.svc, now=row["due_at"])
             assert deliveries(hr, did)[0]["status"] == "done"
             assert len(copies()) == 1 and documents.get(hr.hdb, did)["drive_id"] == copies()[0]["id"]
+    run(scenario())
+
+
+def test_a_script_deployed_afresh_is_told_its_drives_again(tmp_path, monkeypatch):
+    async def scenario():
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
+            s = await people(hr)
+            await upload(hr, s["hr"], "202", kid(hr, "policies"), PDF, title="First")
+            await delivery.settle(hr.svc)
+            # The owner deployed the script again: it no longer knows which drives it may use.
+            fake.allowed = []
+            status, r = await upload(hr, s["hr"], "202", kid(hr, "policies"), PDF, title="Second")
+            did = r["document"]["id"]
+            await delivery.settle(hr.svc)
+            [row] = deliveries(hr, did)
+            assert (row["status"], row["tries"], row["code"]) == ("waiting", 1, "not_allowed")
+            assert fake.allowed == [HR_DRIVE]                 # told again
+            await delivery.run_due(hr.svc, now=row["due_at"])
+            doc = documents.get(hr.hdb, did)
+            assert deliveries(hr, did)[0]["status"] == "done"
+            # The same folders, found again by their tags.
+            assert drive_path(fake, doc["drive_id"])[:4] == ["HR Employee Files", "Employees",
+                                                             "Diaz, Bo (CT 202)", "Documents"]
+            assert len([f for f in fake.files.values() if f["name"] == "Diaz, Bo (CT 202)"]) == 1
     run(scenario())
 
 
@@ -798,7 +824,7 @@ def test_records_past_retention_are_listed_never_deleted_by_themselves(tmp_path)
             assert [p["name"] for p in documents.past_retention(hr.hdb)] == ["Ana Lee"]
             # Never deleted by themselves: the nightly run only tells HR (once).
             for _ in range(2):
-                counts = documents.nightly(hr.svc)
+                assert documents.nightly(hr.svc)["binned"] == 0
             assert documents.of_person(hr.hdb, "201", ("active",))
             assert [i["kind"] for i in notify.inbox(hr.hdb, "205")].count("records_due") == 1
             status, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
@@ -934,7 +960,7 @@ def test_pdfdoc_makes_plain_escaped_html():
 def test_pdfs_are_made_through_google_drive_and_kept_in_the_kinds_folder(tmp_path, monkeypatch):
     async def scenario():
         async with HR(tmp_path) as hr:
-            s = await people(hr)
+            await people(hr)
             html = pdfdoc.page("Written warning", [("rows", [("Employee", "Bo Diaz")]),
                                                    ("paragraph", "Late three times.")])
             with pytest.raises(documents.PdfUnavailable) as caught:
@@ -979,7 +1005,7 @@ def test_pdfs_are_made_through_google_drive_and_kept_in_the_kinds_folder(tmp_pat
 def test_a_pdf_google_cant_make_yet_is_made_later_by_the_queue(tmp_path, monkeypatch):
     async def scenario():
         async with HR(tmp_path) as hr:
-            await people(hr)
+            s = await people(hr)
             made, finished = [], []
 
             def maker(svc, row):
@@ -1022,6 +1048,8 @@ def test_a_pdf_google_cant_make_yet_is_made_later_by_the_queue(tmp_path, monkeyp
                 assert status(skipped)[0] == "skipped"
                 assert tuple(status(broken))[::2] == ("attention", "bad_request")
                 assert tuple(status(lost)) == ("waiting", 0, "no_maker")
+                status_code, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
+                assert [(i["word"], i["title"]) for i in att["stuck"]] == [("Making a PDF", "A PDF for Reviews")]
                 # Making it doesn't wait for a migration file.
                 assert hr.svc.migration_blocker() is None
     run(scenario())
