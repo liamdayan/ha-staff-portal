@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2
+
+**Roles tab**
+
+- **Individual devices now folds away**, in a role and in a person's own settings. It's folded
+  when you open one, showing how many devices are set; click it to open the list. It stays open
+  while you work on that role or person, including after **Save**.
+
 ## 0.9.1
 
 **Archiving people**

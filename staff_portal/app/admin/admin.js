@@ -1648,9 +1648,9 @@
   // the Staff tab, say), so saving it later can't put old settings back.
   function refreshEditing() {
     if (!editing || editing.dirty) return;
-    const { filter, area, onlySelected } = editing;
+    const { filter, area, onlySelected, devicesOpen } = editing;
     const fresh = editing.kind === "person" ? personEditing(editing.id) : roleEditing(editing.id);
-    editing = fresh ? { ...fresh, filter, area, onlySelected } : null;
+    editing = fresh ? { ...fresh, filter, area, onlySelected, devicesOpen } : null;
     renderRoleEditor();
   }
 
@@ -1905,10 +1905,22 @@
     only.addEventListener("change", () => { editing.onlySelected = only.checked; drawList(); });
     const filters = h("div", { class: "filters" }, search, areaSel,
       h("label", { class: "check" }, only, person ? "Only their own settings" : "Only selected"),
-      h("span", { class: "count", id: "role-count" }),
       h("button", { type: "button", class: "linkish", onclick: () => { entities = null; drawList(); loadEntities(); } },
         "Reload devices"));
     return { filters, listBox, drawList };
+  }
+
+  // The Individual devices list folds away to its title and how many are set: folded each time a
+  // role or person is opened (areas cover most devices), and kept as it is while that one is open.
+  function deviceFold(filters, listBox) {
+    const fold = h("details", { class: "fold-section device-fold", open: !!editing.devicesOpen },
+      h("summary", null,
+        h("span", { class: "chev", "aria-hidden": "true" }),
+        h("h3", { class: "editor-sub" }, "Individual devices"),
+        h("span", { class: "fold-count", id: "role-count" })),
+      filters, listBox);
+    fold.addEventListener("toggle", () => { if (editing) editing.devicesOpen = fold.open; });
+    return fold;
   }
 
   function renderRoleEditor() {
@@ -1985,9 +1997,7 @@
       }),
       ...wristbandSection(),
       areaSection(drawList),
-      h("h3", { class: "editor-sub" }, "Individual devices"),
-      filters,
-      listBox);
+      deviceFold(filters, listBox));
     updateCount();
     drawList();
   }
@@ -2043,9 +2053,7 @@
       }),
       ...wristbandSection(),
       areaSection(drawList),
-      h("h3", { class: "editor-sub" }, "Individual devices"),
-      filters,
-      listBox);
+      deviceFold(filters, listBox));
     updateCount();
     drawList();
   }

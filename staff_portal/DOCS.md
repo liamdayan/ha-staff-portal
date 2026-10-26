@@ -78,7 +78,9 @@ In **Roles**, create a role such as *Maintenance*. A role is used in two ways: a
 computer shows what its own role allows, and on a **role-based** one each person who signs in
 sees what *their* role allows (see [Role-based devices](#role-based-devices-each-persons-own-access)).
 
-Every device in Home Assistant is listed, grouped by area. For each one choose:
+Every device in Home Assistant is listed under **Individual devices**, grouped by area. The list
+is folded when you open a role: click **Individual devices** to open it (its line says how many
+devices are set). For each one choose:
 
 | Setting | What staff get |
 |---|---|

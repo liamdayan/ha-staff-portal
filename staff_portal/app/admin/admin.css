@@ -864,6 +864,9 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .fold-section[open] > summary > .chev { transform: rotate(45deg); }
 .fold-section > summary:hover > .chev { border-color: var(--text); }
 .fold-count { color: var(--muted); font-size: 14px; }
+/* Roles tab: the Individual devices list folds the same way. */
+.device-fold { margin-top: 18px; }
+.device-fold > summary .editor-sub { margin: 0; }
 .fold-count .alert { color: var(--danger); font-weight: 600; }
 .kc-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
 .kc-intro .hint { flex: 1 1 260px; margin: 0; }
