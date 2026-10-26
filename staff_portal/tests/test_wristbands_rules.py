@@ -596,6 +596,12 @@ def test_options_shape():
             "staff": {"allowed": False, "reason": "You don't have permission to make staff "
                       "cards.", "levels": [], "max_days": 0, "default_expires_on": "2026-01-12",
                       "max": 5, "permitted": False},
+            "contractor": {"allowed": False, "reason": "You don't have permission to make "
+                           "contractor badges.", "permitted": False, "max": 5, "max_days": 7,
+                           "default_expires_on": "2025-10-14", "default_end_time": "23:59",
+                           "latest_on": "2025-10-21", "latest_time": "05:00",
+                           "latest_at": utc(2025, 10, 21, 12),
+                           "latest_label": "5:00 AM Tue, Oct 21"},
         },
         "see_all_cards": False,
     }

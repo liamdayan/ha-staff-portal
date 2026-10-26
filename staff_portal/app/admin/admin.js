@@ -350,7 +350,10 @@
       document.documentElement.style.setProperty("--accent", state.settings.accent_color);
     }
     state.roles = data.roles;
-    state.staff = data.staff;
+    // Archived people are only on the Staff tab's archived list: never offered anywhere else.
+    state.staff = data.staff.filter((m) => m.status !== "archived");
+    state.archived = data.staff.filter((m) => m.status === "archived");
+    state.keyCardTotals = data.key_card_totals || null;
     state.areas = data.areas;
     state.layout = data.layout;
     state.devices = data.devices;
@@ -375,6 +378,7 @@
     renderWristbandStatus();
     renderEncoderList();
     $("#keycards-section").hidden = !wristbandsOn();
+    renderKeyCardTotals();
   }
 
   // ---------------------------------------------------------------- tabs
@@ -950,7 +954,7 @@
   // departments are remembered in this browser; who's opened and the search aren't.
   const STAFF_VIEW_KEY = "staff-portal.staff-view";
   const STAFF_SORTS = ["department", "name", "role"];
-  const staffView = { q: "", sort: "department", folded: new Set(), open: new Set() };
+  const staffView = { q: "", sort: "department", folded: new Set(), open: new Set(), archived: false };
   try {
     const saved = JSON.parse(localStorage.getItem(STAFF_VIEW_KEY) || "null");
     if (STAFF_SORTS.includes(saved?.sort)) staffView.sort = saved.sort;
@@ -969,6 +973,11 @@
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
   function renderStaff() {
+    renderStaffList();
+    renderArchived();
+  }
+
+  function renderStaffList() {
     const list = $("#staff-list");
     $("#staff-tools").hidden = !state.staff.length;
     if (!state.staff.length) {
@@ -1094,11 +1103,7 @@
     } else {
       actions.push(h("button", { class: "btn", onclick: () => linkUser(m, "staff") }, "Link HA user"));
     }
-    actions.push(h("button", { class: "btn danger", onclick: () => run(async () => {
-      if (!await askConfirm(`Delete ${m.name}? Their past activity stays in the log.`, "Delete")) return false;
-      await api("DELETE", `api/staff/${m.id}`);
-      await load();
-    }, "Deleted.") }, "Delete"));
+    actions.push(h("button", { class: "btn danger", onclick: () => run(() => archiveStaff(m)) }, "Archive"));
     return [
       h("div", { class: "phone-head" },
         h("div", null,
@@ -1139,6 +1144,165 @@
     renderStaff();
   });
   $("#staff-search").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+
+  // ---- archived people
+
+  // Archived people are kept, with everything they did, but have no access anywhere. They're
+  // left out of the list above and folded away under it (Show archived), each with Restore and
+  // Delete for good. A search shows the archived people it matches, folded or not.
+  function renderArchived() {
+    const box = $("#staff-archived");
+    const q = staffView.q.trim().toLowerCase();
+    const people = state.archived.filter((m) => !q || [m.name, roleName(m), departmentOf(m)?.name, m.ha_user]
+      .some((text) => text && text.toLowerCase().includes(q))).sort(byName);
+    if (!people.length) {
+      box.replaceChildren();
+      return;
+    }
+    const open = staffView.archived || !!q;
+    const head = h("button", { type: "button", class: "staff-group-head", "aria-expanded": String(open),
+      onclick: () => {
+        staffView.archived = !staffView.archived;
+        renderArchived();
+        $("#staff-archived .staff-group-head")?.focus({ preventScroll: true });
+      } },
+    h("span", { class: "chev", "aria-hidden": "true" }),
+    h("span", { class: "staff-group-name" }, `${open ? "Archived" : "Show archived"} (${people.length})`));
+    box.replaceChildren(h("section", { class: "staff-group" }, head,
+      open ? h("div", { class: "staff-group-body" }, people.map(archivedRow)) : null));
+  }
+
+  function archivedRow(m) {
+    const cards = m.key_cards || 0;
+    const sub = [roleName(m), departmentOf(m)?.name, m.archived_at
+      ? `Archived ${when(m.archived_at)}${m.archived_by ? ` by ${m.archived_by}` : ""}` : "Archived"];
+    return h("article", { class: "staff-row archived" },
+      h("div", { class: "staff-archived-row" },
+        h("span", { class: "staff-row-main" }, h("span", { class: "staff-row-name" }, m.name),
+          h("span", { class: "staff-row-sub" }, sub.filter(Boolean).join(" \u00b7 "))),
+        cards && wristbandsOn() ? h("button", { type: "button", class: "linkish kc-warn",
+          onclick: () => showKeyCardsFor(m) },
+        `${plural(cards, "key card")} still open${cards === 1 ? "s" : ""} doors`) : null,
+        h("span", { class: "card-actions" },
+          h("button", { class: "btn", onclick: () => run(() => restoreStaff(m)) }, "Restore"),
+          h("button", { class: "btn danger", onclick: () => run(() => deleteForGood(m)) }, "Delete for good"))));
+  }
+
+  // Kiosk-mode phones and computers have their own token and PIN, and belong to no one in
+  // particular, so archiving someone leaves them signed in. The ones that look like this person's
+  // (named after them, or using their Home Assistant user) are offered for revoking.
+  function kioskDevicesOf(m) {
+    const words = [m.name, m.name.split(/\s+/)[0]].filter((w) => w && w.length > 1)
+      .map((w) => new RegExp(`(^|[^\\p{L}\\p{N}])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}\\p{N}])`, "iu"));
+    const kiosks = state.devices.filter((d) => d.signin_mode === "phone" && d.status !== "revoked");
+    const theirs = kiosks.filter((d) => words.some((re) => re.test(d.name)) || (m.ha_user && d.ha_user === m.ha_user));
+    return { theirs, others: kiosks.length - theirs.length };
+  }
+
+  function kioskRevokeRow(d) {
+    const role = state.roles.find((r) => r.id === d.role_id)?.name;
+    const done = h("span", { class: "hint", hidden: true }, "Revoked");
+    const button = h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
+      await api("POST", `api/devices/${d.id}/revoke`);
+      d.status = "revoked";
+      button.hidden = true;
+      done.hidden = false;
+    }, `${d.name} is revoked and signed out.`) }, "Revoke");
+    return h("li", { class: "archive-kiosk-row" },
+      h("span", null, d.name, h("small", null, ` \u00b7 ${d.kind === "computer" ? "computer" : "phone"}` +
+        `${role ? ` \u00b7 ${role}` : ""}${d.ha_user ? ` \u00b7 HA user ${d.ha_user}` : ""}`)), button, done);
+  }
+
+  // Archive: their own access ends at once, and nothing is deleted. Their key cards keep opening
+  // doors (locks check cards on their own), so the dialog lists the ones still valid and says
+  // what to do; afterwards the Key cards list opens on them. Kiosk-mode devices that look like
+  // theirs can be revoked from the dialog, and their Home Assistant user is theirs to turn off.
+  async function archiveStaff(m) {
+    const cards = wristbandsOn() || m.key_cards
+      ? (await api("GET", `api/keycards?state=active&holder=${m.id}`)).cards || [] : [];
+    const dialog = $("#archive-dialog");
+    const phones = phonesFor(m);
+    const kiosk = kioskDevicesOf(m);
+    const remote = remoteInfo();
+    $("[data-title]", dialog).textContent = `Archive ${m.name}?`;
+    fill($("[data-body]", dialog),
+      h("p", null, "Their own access ends straight away:"),
+      h("ul", null, [
+        `They're signed out, and their PIN stops working on shared and role-based phones and computers` +
+          `${phones.length ? ` (${phones.join(", ")})` : ""}.`,
+        "They can't make wristbands, contractor badges or key cards, and no key card can be made for them.",
+        m.ha_user ? `Staff Access stops using their Home Assistant user (${m.ha_user}). It can still sign in to ` +
+          "Home Assistant itself: turn it off there, under Settings > People." : null,
+        m.connecteam_user_id ? "The Connecteam sync leaves them archived, even while they're active there." : null,
+      ].filter(Boolean).map((text) => h("li", null, text))),
+      kiosk.theirs.length ? h("div", { class: "archive-cards" },
+        h("p", { class: "wb-warn" }, "Kiosk-mode phones and computers have their own PIN and aren't tied to " +
+          "anyone, so archiving doesn't sign them out. If one of these is theirs, revoke it:"),
+        h("ul", { class: "archive-kiosk" }, kiosk.theirs.map(kioskRevokeRow)),
+        kiosk.others ? h("p", { class: "hint" }, `If another of the ${plural(kiosk.others, "Kiosk-mode device")} ` +
+          "is theirs, revoke it under Phones & computers.") : null)
+        : kiosk.others ? h("p", { class: "hint" }, "Kiosk-mode phones and computers have their own PIN and aren't " +
+          "tied to anyone, so archiving doesn't sign them out: if one is theirs, revoke it under Phones & computers.") : null,
+      h("p", { class: "hint" }, "Nothing is deleted: their activity and the cards they made stay. Restore them " +
+        "any time from Show archived, under the list."),
+      cards.length ? h("div", { class: "archive-cards" },
+        h("p", { class: "wb-warn" }, (cards.length === 1 ? "Their key card still opens doors until it expires"
+          : `Their ${cards.length} key cards still open doors until they expire`) +
+          ": locks check cards on their own, so archiving can't switch them off."),
+        h("ul", null, cards.map((c) => h("li", null,
+          `No. ${c.card_number} \u00b7 ${c.summary} \u00b7 until ${c.expires_label || when(c.expires_at)}`))),
+        h("p", { class: "hint" }, "Next, in the Key cards list: if you have the card, Revoke it. If not, " +
+          "Report lost, then write a lost card notice and tap it on each door" +
+          `${remote.enabled ? " (or lock it out remotely, on doors with a gateway)" : ""}. ` +
+          "Until then, Door activity flags the card at any door.")) : null);
+    const ok = await new Promise((resolve) => {
+      dialog.returnValue = "";
+      dialog.onclose = () => resolve(dialog.returnValue === "archive");
+      dialog.showModal();
+      $("button[value=cancel]", dialog).focus();
+    });
+    if (!ok) return false;
+    const result = await api("POST", `api/staff/${m.id}/archive`);
+    staffView.open.delete(m.id);
+    await load();
+    const left = result.cards?.length || 0;
+    toast(left ? `${m.name} is archived. ${plural(left, "key card")} still open${left === 1 ? "s" : ""} doors: ` +
+      "revoke or report lost below."
+      : `${m.name} is archived.`);
+    if (left && wristbandsOn()) showKeyCardsFor(m);
+    return false;
+  }
+
+  async function restoreStaff(m) {
+    if (!await askConfirm(`Restore ${m.name}? They're back as they were: their PIN, role, department, devices ` +
+      "and own settings.", "Restore")) return false;
+    const { status } = await api("POST", `api/staff/${m.id}/restore`);
+    await load();
+    toast(status === "disabled" ? `${m.name} is restored, still turned off as before. Turn them on with Edit.`
+      : `${m.name} is restored and can sign in with their PIN again.`);
+    return false;
+  }
+
+  async function deleteForGood(m) {
+    // Their key cards still open doors: once they're deleted, Door activity can't tell whose
+    // they are, so those are dealt with first.
+    const cards = m.key_cards || 0;
+    if (cards) {
+      if (await askConfirm(`${m.name} still has ${plural(cards, "key card")} that open${cards === 1 ? "s" : ""} doors. ` +
+        `Revoke ${cards === 1 ? "it" : "them"} or report ${cards === 1 ? "it" : "them"} lost first, or delete ` +
+        `${m.name} once ${cards === 1 ? "it has" : "they have"} expired.`, wristbandsOn() ? "Show key cards" : "OK")
+        && wristbandsOn()) showKeyCardsFor(m);
+      return false;
+    }
+    const again = m.connecteam_auto && state.staffSync?.enabled
+      ? " Add everyone from Connecteam adds them again if they're still active in Connecteam." : "";
+    if (!await askConfirm(`Delete ${m.name} for good? They're removed from Staff Access and can't be restored. ` +
+      `Their past activity and the cards made stay in the logs.${again}`, "Delete for good")) return false;
+    await api("DELETE", `api/staff/${m.id}`);
+    await load();
+    toast(`${m.name} is deleted.`);
+    return false;
+  }
 
   // Connecteam link and, for clocked-in-only people, whether they're on the clock right now.
   function clockBadge(m) {
@@ -1366,7 +1530,8 @@
         type: "button", class: "ct-user", disabled: !!u.linked_to,
         onclick: () => { dialog.close(); editStaff(null, u); },
       }, h("span", null, u.name),
-        h("small", null, u.linked_to ? `Already added as ${u.linked_to}`
+        h("small", null, u.linked_archived ? `Archived as ${u.linked_to}: restore them on the Staff tab`
+          : u.linked_to ? `Already added as ${u.linked_to}`
           : u.has_kiosk_code ? "Add" : "Add (no kiosk code)"))));
       if (!shown.length) list.replaceChildren(h("p", { class: "hint" }, users.length ? "No one matches." : "No active users in Connecteam."));
     };
@@ -1486,9 +1651,9 @@
   // the Staff tab, say), so saving it later can't put old settings back.
   function refreshEditing() {
     if (!editing || editing.dirty) return;
-    const { filter, area, onlySelected } = editing;
+    const { filter, area, onlySelected, devicesOpen } = editing;
     const fresh = editing.kind === "person" ? personEditing(editing.id) : roleEditing(editing.id);
-    editing = fresh ? { ...fresh, filter, area, onlySelected } : null;
+    editing = fresh ? { ...fresh, filter, area, onlySelected, devicesOpen } : null;
     renderRoleEditor();
   }
 
@@ -1743,10 +1908,22 @@
     only.addEventListener("change", () => { editing.onlySelected = only.checked; drawList(); });
     const filters = h("div", { class: "filters" }, search, areaSel,
       h("label", { class: "check" }, only, person ? "Only their own settings" : "Only selected"),
-      h("span", { class: "count", id: "role-count" }),
       h("button", { type: "button", class: "linkish", onclick: () => { entities = null; drawList(); loadEntities(); } },
         "Reload devices"));
     return { filters, listBox, drawList };
+  }
+
+  // The Individual devices list folds away to its title and how many are set: folded each time a
+  // role or person is opened (areas cover most devices), and kept as it is while that one is open.
+  function deviceFold(filters, listBox) {
+    const fold = h("details", { class: "fold-section device-fold", open: !!editing.devicesOpen },
+      h("summary", null,
+        h("span", { class: "chev", "aria-hidden": "true" }),
+        h("h3", { class: "editor-sub" }, "Individual devices"),
+        h("span", { class: "fold-count", id: "role-count" })),
+      filters, listBox);
+    fold.addEventListener("toggle", () => { if (editing) editing.devicesOpen = fold.open; });
+    return fold;
   }
 
   function renderRoleEditor() {
@@ -1823,9 +2000,7 @@
       }),
       ...wristbandSection(),
       areaSection(drawList),
-      h("h3", { class: "editor-sub" }, "Individual devices"),
-      filters,
-      listBox);
+      deviceFold(filters, listBox));
     updateCount();
     drawList();
   }
@@ -1881,9 +2056,7 @@
       }),
       ...wristbandSection(),
       areaSection(drawList),
-      h("h3", { class: "editor-sub" }, "Individual devices"),
-      filters,
-      listBox);
+      deviceFold(filters, listBox));
     updateCount();
     drawList();
   }
@@ -2437,8 +2610,14 @@
   // add-on itself talks to TT Hotel and to the encoder; this tab sets up the account, the defaults
   // and the door names, and the Roles tab says who may make which cards (wristbandPicker).
 
-  const WB_TYPES = [["day_pass", "Day passes"], ["overnight", "Overnight wristbands"], ["staff", "Staff cards"]];
-  const WB_TYPE_NAMES = { day_pass: "Day pass", overnight: "Overnight", staff: "Staff card" };
+  const WB_TYPES = [["day_pass", "Day passes"], ["overnight", "Overnight wristbands"],
+    ["contractor", "Contractor badges"], ["staff", "Staff cards"]];
+  const WB_TYPE_NAMES = { day_pass: "Day pass", overnight: "Overnight", contractor: "Contractor badge",
+    staff: "Staff card" };
+  const WB_NOUNS = { staff: "card", contractor: "badge" };   // everything else is a wristband
+  // What a door is marked as (Doors, below): staff doors only go on staff cards and contractor badges.
+  const KIND_WORDS = { public: "public door", room: "guest room", staff: "staff door" };
+  const KIND_PLURALS = { public: "public doors", room: "guest rooms", staff: "staff doors" };
   const WB_LEVELS = [["door", "Single doors"], ["floor", "Whole floors"], ["building", "Whole buildings"],
     ["all", "Every door (a master card)"]];
   const WB_NONE = { types: [], staff_levels: [], doors: { buildings: [], floors: [], doors: [] },
@@ -2448,7 +2627,7 @@
   const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
   // FormData leaves unticked boxes out, so every checkbox in the form is listed here.
   const WB_CHECKBOXES = ["wristbands_enabled", "wb_lockout_daypass",
-    "wb_lockout_overnight", "wb_lockout_staff", "wb_remote_lockout"];
+    "wb_lockout_overnight", "wb_lockout_contractor", "wb_lockout_staff", "wb_remote_lockout"];
   const WB_STATUS = { queued: "Waiting for the encoder", running: "Being made", needs_attention: "Needs attention",
     done: "Done", cancelled: "Stopped" };
   // The day-pass and overnight door lists, ticked but maybe not saved yet. Kept apart from the
@@ -2632,7 +2811,7 @@
     const typeBoxes = WB_TYPES.map(([t, label]) => check(types.has(t), label, (ev) => {
       toggle(types, t, ev.target.checked);
       emit();
-    }));
+    }, t === "contractor" ? " · any of the doors below, for up to 7 days" : null));
     const levelBox = h("div", { class: "wb-indent" },
       h("div", { class: "wb-count" }, "Staff cards they make may open:"),
       WB_LEVELS.map(([l, label]) => check(levels.has(l), label, (ev) => {
@@ -2671,7 +2850,7 @@
       const out = [];
       const v = scopeValue();
       const outside = (key) => lockIds(state.settings[key]).map((id) => wbDoors?.find((d) => d.id === id))
-        .filter((d) => d && d.active && !scopeHas(v, d)).map(doorName);
+        .filter((d) => d && d.active && d.kind !== "staff" && !scopeHas(v, d)).map(doorName);
       if (types.has("day_pass")) {
         const missing = outside("wb_daypass_doors");
         if (!lockIds(state.settings.wb_daypass_doors).length) {
@@ -2850,7 +3029,7 @@
   }
 
   // The day-pass and overnight door lists: the public doors (and doors not marked yet), grouped
-  // by building and floor.
+  // by building and floor. Guest rooms and staff doors are left out.
   function renderDefaultDoors() {
     drawDoorChecks($("#wb-daypass-doors"), $("#wb-daypass-count"), wbPicks.wb_daypass_doors,
       $("#wb-daypass-rooms"), "day passes open");
@@ -2858,15 +3037,55 @@
       $("#wb-overnight-rooms"), "every overnight wristband opens");
   }
 
-  // Guest rooms ticked as shared doors (marked after they were chosen) still go on the cards,
-  // so say so.
+  // Guest rooms ticked as shared doors (marked after they were chosen) still go on the cards, so
+  // say so. Staff doors never do: marking one takes it off these lists, and one still ticked
+  // (from a restored backup, say) is left off every card and dropped when the settings are saved.
   function sharedRoomsWarning(warnEl, picked, opens) {
-    const rooms = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "room").map(doorName);
-    const one = rooms.length === 1;
-    warnEl.textContent = rooms.length ? `${listNames(rooms)} ${one ? "is marked as a guest room" : "are marked as guest rooms"}` +
-      `, but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. Untick ${one ? "it" : "them"}, ` +
-      `or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.` : "";
-    warnEl.hidden = !rooms.length;
+    const rooms = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "room");
+    const staff = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "staff");
+    const lines = [];
+    if (rooms.length) {
+      const one = rooms.length === 1;
+      lines.push(`${listNames(rooms.map(doorName))} ${one ? "is" : "are"} marked as ${one ? "a guest room" : "guest rooms"}, ` +
+        `but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. ` +
+        `Untick ${one ? "it" : "them"}, or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.`);
+    }
+    if (staff.length) {
+      const one = staff.length === 1;
+      lines.push(`${listNames(staff.map(doorName))} ${one ? "is a staff door" : "are staff doors"}, so ` +
+        `${one ? "it's" : "they're"} left off these cards, and unticked when you save.`);
+    }
+    warnEl.textContent = lines.join(" ");
+    warnEl.hidden = !lines.length;
+  }
+
+  // The shared doors (day passes, every overnight wristband) the add-on took a new staff door
+  // off ({setting: [lock ID]}): off the saved settings and the ticks here too.
+  // newStaff: the doors just made staff doors, unticked here too (saved or not).
+  function applyUnshared(unshared, newStaff = []) {
+    for (const [key, ids] of Object.entries(unshared || {})) {
+      if (!wbPicks[key]) continue;
+      state.settings[key] = JSON.stringify(lockIds(state.settings[key]).filter((id) => !ids.includes(id)));
+    }
+    for (const picked of Object.values(wbPicks)) {
+      for (const id of [...Object.values(unshared || {}).flat(), ...newStaff.map((d) => d.id)]) picked.delete(id);
+    }
+  }
+
+  // Which of these doors are day-pass or overnight shared doors (ticked, saved or not), as
+  // "the day-pass doors and the overnight shared doors".
+  function sharedPlaces(doors) {
+    const ids = new Set(doors.map((d) => d.id));
+    const where = [["wb_daypass_doors", "the day-pass doors"], ["wb_overnight_doors", "the overnight shared doors"]]
+      .filter(([key]) => [...wbPicks[key]].some((id) => ids.has(id)) ||
+        lockIds(state.settings[key]).some((id) => ids.has(id)))
+      .map(([, words]) => words);
+    return where.join(" and ");
+  }
+
+  function sharedDoorsOf(doors) {
+    return doors.filter((d) => ["wb_daypass_doors", "wb_overnight_doors"].some((key) =>
+      wbPicks[key].has(d.id) || lockIds(state.settings[key]).includes(d.id)));
   }
 
   function drawDoorChecks(box, countEl, picked, warnEl, opens) {
@@ -2879,13 +3098,13 @@
       box.replaceChildren(doorsPending());
       return;
     }
-    // Shared doors are public doors, or ones not marked yet. A guest room or a door TT Hotel no
-    // longer lists stays here while it's ticked, so it can be unticked.
-    const doors = wbDoors.filter((d) => (d.active && d.kind !== "room") || picked.has(d.id));
+    // Shared doors are public doors, or ones not marked yet. A guest room, a staff door or a door
+    // TT Hotel no longer lists stays here while it's ticked, so it can be unticked.
+    const doors = wbDoors.filter((d) => (d.active && (!d.kind || d.kind === "public")) || picked.has(d.id));
     const unknown = [...picked].filter((id) => !wbDoors.some((d) => d.id === id));
     if (!doors.length && !unknown.length) {
       box.replaceChildren(h("p", { class: "hint" }, wbDoors.some((d) => d.active)
-        ? "Every door is marked as a guest room. Mark the shared doors as public doors under Doors below."
+        ? "Every door is marked as a guest room or a staff door. Mark the shared doors as public doors under Doors below."
         : "No doors yet. Save your TT Hotel details, then click Test connection or Sync from TT Hotel."));
       return;
     }
@@ -2902,7 +3121,7 @@
         rows.push(h("div", { class: "wb-door-group" }, `${b.name} · ${f.name}`));
         for (const d of f.doors) {
           rows.push(row(d.id, doorName(d), !d.active ? " · no longer in TT Hotel"
-            : d.kind === "room" ? " · guest room" : d.hidden ? " · hidden from staff" : ""));
+            : d.kind === "room" || d.kind === "staff" ? ` · ${KIND_WORDS[d.kind]}` : d.hidden ? " · hidden from staff" : ""));
         }
       }
     }
@@ -3304,22 +3523,23 @@
 
   // ------------------------------------------------ door kinds: public doors and guest rooms
 
-  const DOOR_KINDS = [["", "Not marked"], ["public", "Public door"], ["room", "Guest room"]];
-  const KIND_PLURALS = { public: "public doors", room: "guest rooms" };
+  const DOOR_KINDS = [["", "Not marked"], ["public", "Public door"], ["room", "Guest room"], ["staff", "Staff door"]];
   let markChoice = { where: "", kind: "room" };   // the floor or building and kind last marked
 
-  // How many doors aren't marked yet (they show as both rooms and shared doors until they are).
+  // How many doors aren't marked yet (they show as both rooms and shared doors until they are),
+  // and how many there are of each kind.
   function renderKindStatus() {
     const status = $("#wb-kinds-status");
     if (!status || !wbDoors) return;
     const active = wbDoors.filter((d) => d.active);
     const open = active.filter((d) => !d.kind).length;
-    const counted = (kind) => plural(active.filter((d) => d.kind === kind).length, kind === "room" ? "guest room" : "public door");
+    const counted = (kind) => plural(active.filter((d) => d.kind === kind).length, KIND_WORDS[kind]);
+    const counts = `${counted("public")}, ${counted("room")} and ${counted("staff")}`;
     status.className = open ? "wb-warn" : "hint";
     status.textContent = !active.length ? ""
       : open ? `${plural(open, "door")} ${open === 1 ? "isn't" : "aren't"} marked yet. Until ${open === 1 ? "it is" : "they are"}, ` +
-        `staff see ${open === 1 ? "it" : "them"} both as a guest room and as a shared door.`
-      : `Every door is marked: ${counted("public")} and ${counted("room")}.`;
+        `staff see ${open === 1 ? "it" : "them"} both as a guest room and as a shared door. Marked so far: ${counts}.`
+      : `Every door is marked: ${counts}.`;
   }
 
   // Marks a whole floor or building at once.
@@ -3351,20 +3571,34 @@
       if (!target) return;
       const value = kind.value || null;
       markChoice = { where: where.value, kind: kind.value };
-      // Doors already marked the other way are only changed once the owner says so.
+      // Doors already marked the other way are only changed once the owner says so, and so are
+      // shared doors about to become staff doors (that takes them off day passes and overnight
+      // wristbands).
       const other = target.doors.filter((d) => d.kind && d.kind !== value);
+      const shared = value === "staff" ? sharedDoorsOf(target.doors.filter((d) => d.kind !== "staff")) : [];
       const doors = plural(target.doors.length, "door");
+      const parts = [];
+      if (other.length) {
+        parts.push(`${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked another way now.`);
+      }
+      if (shared.length) {
+        parts.push(`${listNames(shared.map(doorName))} ${shared.length === 1 ? "is one of" : "are among"} ` +
+          `${sharedPlaces(shared)}. Staff doors never go on day passes or overnight wristbands, so ` +
+          `${shared.length === 1 ? "it's" : "they're"} taken off ${shared.length === 1 ? "that list" : "those lists"}.`);
+      }
       const question = value
-        ? `${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked the other ` +
-          `way now. Mark all ${doors} as ${KIND_PLURALS[value]}?`
+        ? `${parts.join(" ")} Mark all ${doors} as ${KIND_PLURALS[value]}?`
         : `Unmark all ${doors} on ${target.label}? Staff then see them both as guest rooms and as shared doors.`;
-      if (other.length && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
-      await api("POST", "api/wristbands/doors/kind", { door_ids: target.doors.map((d) => d.id), kind: value });
+      if ((other.length || shared.length) && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
+      const reply = await api("POST", "api/wristbands/doors/kind", { door_ids: target.doors.map((d) => d.id), kind: value });
       for (const d of target.doors) d.kind = value;
+      applyUnshared(reply.unshared, value === "staff" ? target.doors : []);
       renderDoors();
       renderDefaultDoors();
       $("#wb-doors .wb-mark button")?.focus();
-      toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` : `${target.label}: ${doors} unmarked.`);
+      toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` +
+        (shared.length ? ` ${listNames(shared.map(doorName))} ${shared.length === 1 ? "is" : "are"} no longer on day passes or overnight wristbands.` : "")
+        : `${target.label}: ${doors} unmarked.`);
     }));
     return h("div", { class: "wb-mark" }, h("span", null, "Mark a whole floor or building:"), where,
       h("span", null, "as"), kind, go);
@@ -3378,20 +3612,32 @@
     pick.value = d.kind || "";
     pick.addEventListener("change", () => run(async () => {
       const value = pick.value || null;
+      // A shared door made a staff door comes off day passes and overnight wristbands: ask first.
+      const places = value === "staff" && d.kind !== "staff" ? sharedPlaces([d]) : "";
+      if (places && !(await askConfirm(`${doorName(d)} is one of ${places}. Staff doors never go on day passes ` +
+        "or overnight wristbands, so it's taken off. Mark it as a staff door?", "Mark it"))) {
+        pick.value = d.kind || "";
+        return;
+      }
+      let reply;
       try {
-        await api("PATCH", `api/wristbands/doors/${d.id}`, { kind: value });
+        reply = await api("PATCH", `api/wristbands/doors/${d.id}`, { kind: value });
       } catch (err) {
         pick.value = d.kind || "";
         throw err;
       }
       d.kind = value;
+      applyUnshared(reply.unshared, value === "staff" ? [d] : []);
       pick.classList.toggle("wb-unmarked", !value);
       renderKindStatus();
       renderDefaultDoors();
       const shared = ["wb_daypass_doors", "wb_overnight_doors"].some((key) => wbPicks[key].has(d.id));
-      toast(value === "room" && shared ? `${doorName(d)} is a guest room now, but it's still one of the shared ` +
-        "doors above: untick it there."
-        : value ? `${doorName(d)} is a ${value === "room" ? "guest room" : "public door"} now.`
+      toast(value === "staff" && places ? `${doorName(d)} is a staff door now, and no longer on day passes ` +
+        "or overnight wristbands: only staff cards and contractor badges open it."
+        : value && value !== "public" && shared ? `${doorName(d)} is a ${KIND_WORDS[value]} now, but it's still ` +
+        "one of the shared doors above: untick it there."
+        : value === "staff" ? `${doorName(d)} is a staff door now: only staff cards and contractor badges open it.`
+        : value ? `${doorName(d)} is a ${KIND_WORDS[value]} now.`
         : `${doorName(d)} isn't marked: staff see it both as a room and as a shared door.`);
     }));
     return pick;
@@ -3463,7 +3709,7 @@
     const numbers = made.map((c) => c.card_number).filter(Boolean);
     const shown = numbers.slice(0, WB_SHOWN_NUMBERS).join(", ") +
       (numbers.length > WB_SHOWN_NUMBERS ? ` +${numbers.length - WB_SHOWN_NUMBERS} more` : "");
-    const noun = j.type === "staff" ? "card" : "wristband";
+    const noun = WB_NOUNS[j.type] || "wristband";
     const unfinished = j.status === "needs_attention" || (j.status === "cancelled" && made.length < j.count);
     return h("tr", null,
       h("td", { class: "nowrap" }, when(j.created_at)),
@@ -3485,7 +3731,8 @@
   // URL). Each key card's Last used comes from them, and a lost or revoked card tried at a door
   // is marked.
 
-  const DA_ALERTS = { lost: "Lost card", revoked: "Revoked card", deleted: "Deleted card" };
+  const DA_ALERTS = { lost: "Lost card", revoked: "Revoked card", deleted: "Deleted card",
+    archived: "Archived person's card" };
   const da = { door: "", problems: false, oldest: null, seq: 0, data: null };
 
   // A key card's Last used: the door, then when (and "refused" if it didn't open); "—" when it
@@ -3570,7 +3817,8 @@
       h("td", { class: "nowrap" }, when(r.at)),
       h("td", null, r.door),
       h("td", null, who,
-        r.card_number && r.who ? h("div", { class: "sub" }, `Card ${r.card_number}`) : null,
+        r.card_number && r.who ? h("div", { class: "sub" },
+          `${r.card_type === "contractor" ? "Contractor badge · " : ""}Card ${r.card_number}`) : null,
         r.alert ? h("div", { class: "sub da-alert-note" }, DA_ALERTS[r.alert] || "Card not in use") : null),
       h("td", null, r.how),
       h("td", null, h("span", { class: `badge ${result[1]}` }, result[0])));
@@ -4909,7 +5157,7 @@
 
   function openStaffTab() {
     if (!wristbandsOn()) return;
-    loadKeyCards(true);
+    loadKeyCards(true);   // only read while the section is open
     if (!wbDoors && state.departments.some((d) => d.card_access?.length)) loadDoors();
   }
 
@@ -4923,7 +5171,30 @@
         : !tested ? "Test remote lock-out on one door first." : null };
   }
 
+  // The Key cards section folds away to its title and a short count: folded at first, and open
+  // or closed as last left in this browser.
+  const KC_OPEN_KEY = "staff-portal.keycards-open";
+  try {
+    $("#keycards-section").open = localStorage.getItem(KC_OPEN_KEY) === "1";
+  } catch { /* folded */ }
+  $("#keycards-section").addEventListener("toggle", () => {
+    const open = $("#keycards-section").open;
+    try {
+      localStorage.setItem(KC_OPEN_KEY, open ? "1" : "0");
+    } catch { /* not remembered this time */ }
+    if (open && !$("#tab-staff").hidden) loadKeyCards(true);
+  });
+
+  // Its closed line: "14 active, 2 lost" (lost cards that haven't expired: they still open doors).
+  function renderKeyCardTotals(totals) {
+    if (totals) state.keyCardTotals = totals;
+    const t = state.keyCardTotals;
+    $("#kc-totals").replaceChildren(...!t ? [] : t.lost
+      ? [`${t.active} active, `, h("span", { class: "alert" }, `${t.lost} lost`)] : [`${t.active} active`]);
+  }
+
   async function loadKeyCards(reset) {
+    if (!$("#keycards-section").open) return;
     const rows = $("#kc-rows");
     const seq = ++kc.seq;
     if (reset) kc.oldest = null;
@@ -4941,6 +5212,7 @@
     }
     if (seq !== kc.seq) return;   // a newer filter or search was chosen meanwhile
     kc.remote = data.remote || null;
+    renderKeyCardTotals(data.totals);
     const cards = data.cards || [];
     if (reset) {
       rows.replaceChildren();
@@ -4991,7 +5263,8 @@
       : "";
     return h("tr", { class: card.state === "lost" ? "kc-lost" : null },
       h("td", null, card.holder, h("div", { class: "sub" },
-        [card.department, card.name && card.name !== card.holder ? `Card says ${card.name}` : ""].filter(Boolean).join(" · "))),
+        [card.holder_archived ? "Archived" : "", card.department,
+          card.name && card.name !== card.holder ? `Card says ${card.name}` : ""].filter(Boolean).join(" · "))),
       h("td", { class: "nowrap kc-number" }, card.card_number,
         card.cancelled_card ? h("div", { class: "sub" }, `Cancels ${card.cancelled_card}`) : null),
       h("td", null, card.summary, card.allow_lockout ? h("div", { class: "sub" }, "Opens deadbolted doors") : null),
@@ -5010,8 +5283,10 @@
     setKeyCardFilter("active");
     $("#kc-search").value = m.name;
     kc.q = m.name;
-    loadKeyCards(true);
-    $("#keycards-section").scrollIntoView({ behavior: "smooth", block: "start" });
+    const section = $("#keycards-section");
+    if (section.open) loadKeyCards(true);
+    else section.open = true;   // opening it reads the list
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function setKeyCardFilter(value) {
@@ -5179,10 +5454,13 @@
           run(() => cardDialogJob(`api/keycards/${card.id}/notice`, `Lost card notice for ${card.card_number}`)) },
         has("notice") ? "Write another notice card" : "Write a notice card"))),
       section("2. Replacement card",
-        h("p", { class: "hint" }, `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
+        h("p", { class: "hint" }, card.holder_archived ? `${card.holder} is archived, so no new card is made for ` +
+          "them. Use a notice card (or remote lock-out) instead."
+          : `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
           "time it's tapped on a door, that door refuses the lost card. Tick each door off once it's been tapped. " +
           "It uses their department's key card (or what the lost card opened)."),
-        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn", onclick: () =>
+        h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn",
+          disabled: !!card.holder_archived, onclick: () =>
           run(() => cardDialogJob(`api/keycards/${card.id}/replace`, `Replacement card for ${card.holder}`)) },
         "Make a replacement card"))),
       section("3. Remote lock-out (experimental)",
@@ -6351,7 +6629,7 @@
           ? "Use the file's access settings. Phones keep their role."
           : kind === "departments" ? "Use the file's smart group, role, key card and clock-in rule. People stay in them."
           : "Use the file's PIN and settings. Anyone whose PIN changes is signed out, people you've " +
-            "turned off stay off, and Home Assistant links are kept.", "danger"],
+            "turned off stay off, people you've archived stay archived, and Home Assistant links are kept.", "danger"],
       ]);
       if (!mode) return false;
     }
@@ -6375,6 +6653,7 @@
       result.missing_pages?.length && `No page or page group here called ${result.missing_pages.join(", ")}; check those pages in Roles.`,
       result.bad_pin && `${result.bad_pin} left out because their PIN in the file was damaged.`,
       result.kept_off?.length && `${result.kept_off.join(", ")} stayed turned off.`,
+      result.kept_archived?.length && `${result.kept_archived.join(", ")} stayed archived.`,
     ].filter(Boolean).join(" ");
     toast([`Imported ${word[1]}: ${notes}.`, extra, reloaded ? `The ${kind === "roles" ? "role" : "person"} open on the Roles tab was reloaded.` : ""]
       .filter(Boolean).join(" "));
@@ -6408,17 +6687,25 @@
         `to be set up again after this restore${setup.length === 1 ? "" : ` (${setup.slice(0, 8).join(", ")}` +
         `${setup.length > 8 ? ", \u2026" : ""})`}, because ${setup.length === 1 ? "it wasn't" : "they weren't"} ` +
         "signed in on this system.";
+    // People archived here since the backup was made stay archived (Restore brings them back).
+    const kept = info.kept_archived || [];
+    const keptNote = !kept.length ? ""
+      : `\n\n${listNames(kept)} ${kept.length === 1 ? "is" : "are"} archived here but not in the backup, so ` +
+        `${kept.length === 1 ? "stays" : "stay"} archived. Restore ${kept.length === 1 ? "them" : "any of them"} ` +
+        "from Show archived on the Staff tab if you want them back.";
     const ok = await askConfirm(
       `Restore the backup of ${info.property_name || "Staff Access"} from ${fullDate(info.exported_at)}?\n\n` +
       `It has ${counts.join(", ")}. Everything in Staff Access now (settings, roles, layout, phones and staff) ` +
       "is replaced. The activity log and card history are kept, and any entries in the backup that aren't " +
       "here yet are added. A copy of the current setup is saved first, so you can undo this." +
-      setupNote,
+      setupNote + keptNote,
       "Replace and restore");
     if (!ok) return false;
-    await api("POST", "api/restore", body);
+    const result = await api("POST", "api/restore", body);
     await reloadEverything();
-    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring.");
+    const stayed = result.kept_archived || [];
+    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring." +
+      (stayed.length ? ` ${listNames(stayed)} stayed archived.` : ""));
     return false;
   }
 

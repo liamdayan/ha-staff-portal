@@ -112,7 +112,7 @@ def test_backups_carry_the_logs_and_restores_add_them_without_duplicates(tmp_pat
             assert re.search(r'filename="staff-portal-backup-\d{4}-\d\d-\d\d\.json\.gz"',
                              headers["Content-Disposition"])
             backup = json.loads(gzip.decompress(raw))
-            assert backup["schema"] == 4
+            assert backup["schema"] == 5
             for key, row_type in transfer.LOG_ROWS.items():
                 assert backup[key]["columns"] == list(row_type._fields)
             at = backup["activity"]["columns"].index("action")
@@ -169,7 +169,7 @@ def test_backups_carry_the_logs_and_restores_add_them_without_duplicates(tmp_pat
             assert name.endswith(".json.gz")
             status, headers, copy = await download(p, f"/api/safety-backups/{name}")
             assert status == 200 and headers["Content-Type"] == "application/gzip"
-            assert json.loads(gzip.decompress(copy))["schema"] == 4
+            assert json.loads(gzip.decompress(copy))["schema"] == 5
             status, info = await p.admin_call("POST", "/api/restore/preview", {"safety_backup": name})
             assert status == 200 and info["has_logs"], info
             status, reply = await p.admin_call("POST", "/api/restore", {"safety_backup": name})
@@ -564,7 +564,7 @@ def test_migration_files_that_are_refused(tmp_path):
                 if message is None:
                     assert migrate.open_file(sealed, code, main.VERSION)[1]["format"] == (
                         "staff-portal-migrate")
-                    assert migrate.open_file(good.decode(), code, main.VERSION)[0]["schema"] == 4
+                    assert migrate.open_file(good.decode(), code, main.VERSION)[0]["schema"] == 5
                     continue
                 status, reply = await upload(f, "/api/migrate/restore", file=sealed, code=typed)
                 assert status == 400 and message in reply["error"], (message, reply)

@@ -15,9 +15,9 @@ What files never contain:
 - Anything of the HR portal (hr/): its settings (on or off, its address, the Connecteam for HR
   connection, and the Google Drive connection: its script's address and secret, and the
   drives) and its records, which live in their own database. A restore leaves them as they are.
-- The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door or
-  guest room) chosen here travel, and land on doors the system already has. A backup from before
-  0.9.0 has no kind, and leaves each door's as it is.
+- The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door,
+  guest room or staff door) chosen here travel, and land on doors the system already has. A
+  backup from before 0.9.0 has no kind, and leaves each door's as it is.
 - Door activity (TT Hotel's lock records): TT Hotel keeps its own six months of them.
 (A migration file, migrate.py, carries all of these but door activity, encrypted.)
 Departments (with their key card templates, and their clock-in rules from 0.9.0) are in backups;
@@ -26,6 +26,8 @@ record of wristbands and key cards made are in backups from 0.8.6 (schema 4), an
 them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
+Archived people (0.9.1) travel as archived, in backups and migration files with when, by whom
+and the status Restore puts back; staff exports only mark them ("archived": true).
 """
 
 import base64
@@ -51,10 +53,13 @@ from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean
 
 FORMAT = "staff-portal"
 MIGRATE_FORMAT = "staff-portal-migrate"   # a migration file's header (migrate.py)
-BACKUP_SCHEMA = 4          # 4: the activity log and card records (0.8.6)
+BACKUP_SCHEMA = 5          # 5: archived people, staff doors, contractor badges (0.9.1): an
+                           #    older version would read them as active people, doors not
+                           #    marked and unknown card jobs, so it refuses the file
+                           # 4: the activity log and card records (0.8.6)
                            # 3: wristbands and card encoders (0.8.0)
                            # 2: role pages, people's roles, pages and own changes (0.7.0)
-READABLE_SCHEMAS = (1, 2, 3, 4)
+READABLE_SCHEMAS = (1, 2, 3, 4, 5)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members",
          "departments": "departments", "backup": "a full backup"}
 PIN_HASH_RE = re.compile(r"^[0-9a-f]{32}\$[0-9a-f]{128}$")
@@ -63,7 +68,7 @@ OWNER_RE = re.compile(r"^([ds]):(\d{1,9})$")
 LEVELS = ("view", "control")
 OVERRIDE_LEVELS = ("none", "view", "control")   # a person's own changes ('none' = Hidden)
 DEVICE_STATUSES = ("pending", "active", "locked", "revoked")
-STAFF_STATUSES = ("active", "disabled", "locked")
+STAFF_STATUSES = ("active", "disabled", "locked", "archived")
 IMPORT_MODES = ("replace", "copy", "skip")
 MAX_ROWS = 5000          # per table in a backup, or entries in an export
 # Tables that link things (a role's devices, a person's own settings...) grow with everything
@@ -361,6 +366,17 @@ def _override_levels(raw, area_ids: dict[str, int], missing_areas: set[str]) -> 
     return entities, areas
 
 
+def archived_fields(row: dict) -> dict:
+    """An archived person's archived_at, archived_by and archived_from (the status Restore puts
+    back) from a backup; all None for anyone else (and in backups from before archiving)."""
+    if row.get("status") != "archived":
+        return {"archived_at": None, "archived_by": None, "archived_from": None}
+    return {"archived_at": _time(row.get("archived_at"), time.time()),
+            "archived_by": (_name(row.get("archived_by"), 120) or None
+                            if isinstance(row.get("archived_by"), str) else None),
+            "archived_from": "disabled" if row.get("archived_from") == "disabled" else "active"}
+
+
 def _write_overrides(db, staff_id: int, entities: dict, areas: dict) -> None:
     """Replace a person's own changes, without committing."""
     c = db.conn
@@ -436,7 +452,8 @@ def export_staff(db, version: str) -> dict:
                 "areas": {area_names[a]: lvl for a, lvl in areas.items() if a in area_names}}
     return _envelope("staff", version, staff=[
         {"name": r["name"], "pin_hash": r["pin_hash"], "pin_length": pin_length(r["pin_length"]),
-         "enabled": r["status"] != "disabled",
+         "enabled": r["status"] not in ("disabled", "archived"),
+         **({"archived": True} if r["status"] == "archived" else {}),
          "phones": sorted(allowed.get(r["id"], [])),
          "connecteam_user_id": r["connecteam_user_id"], "require_clock_in": bool(r["require_clock_in"]),
          "clock_in_set": bool(r["clock_in_set"]),
@@ -554,7 +571,8 @@ def _import_staff(db, rows: list, mode: str) -> dict:
     area_ids = {a["name"].lower(): a["id"] for a in db.areas()}
     layout = db.layout()
     result = {"added": 0, "replaced": 0, "skipped": 0, "bad_pin": 0, "missing_phones": set(),
-              "kept_off": [], "signed_out": [], "missing_roles": set(), "missing_pages": set(),
+              "kept_off": [], "kept_archived": [], "signed_out": [], "missing_roles": set(),
+              "missing_pages": set(),
               "missing_areas": set(), "missing_departments": set()}
     for raw in rows:
         name = _name(raw.get("name"), 40)
@@ -565,6 +583,8 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             result["bad_pin"] += 1
             continue
         status = "active" if raw.get("enabled", True) is not False else "disabled"
+        if raw.get("archived") is True:
+            status = "archived"
         length = pin_length(raw.get("pin_length"))   # unknown in older files, or if damaged
         device_ids = []
         for phone in raw.get("phones") if isinstance(raw.get("phones"), list) else []:
@@ -577,9 +597,17 @@ def _import_staff(db, rows: list, mode: str) -> dict:
         if staff_id and mode == "skip":
             result["skipped"] += 1
             continue
+        if staff_id and mode == "copy" and current[staff_id]["status"] == "archived":
+            # A copy would be them again, active with their PIN: Restore them instead.
+            result["skipped"] += 1
+            result["kept_archived"].append(name)
+            continue
         if staff_id and mode == "replace":
             old = current[staff_id]
-            if old["status"] == "disabled" and status != "disabled":
+            if old["status"] == "archived" and status != "archived":
+                status = "archived"   # archived here stays archived, the same way
+                result["kept_archived"].append(name)
+            elif old["status"] == "disabled" and status == "active":
                 # Someone you turned off stays off: an older file (or one from another
                 # property) mustn't quietly let them back in.
                 status = "disabled"
@@ -589,7 +617,7 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             db.conn.execute(
                 """UPDATE staff SET pin_hash = ?, pin_length = ?, status = ?, failed_pins = 0,
                    locked_until = NULL WHERE id = ?""", (pin_hash, length, status, staff_id))
-            if pin_hash != old["pin_hash"] or status == "disabled":
+            if pin_hash != old["pin_hash"] or status in ("disabled", "archived"):
                 result["signed_out"].append(staff_id)   # a new PIN means signing in again
             result["replaced"] += 1
         else:
@@ -608,6 +636,11 @@ def _import_staff(db, rows: list, mode: str) -> dict:
                                  1 if raw.get("clock_in_set") is True else 0, staff_id))
             existing[name.lower()] = staff_id
             result["added"] += 1
+        if status == "archived":   # archived by the file: Restore puts back what they were here
+            was = current[staff_id]["status"] if staff_id in current else "active"
+            db.conn.execute("""UPDATE staff SET archived_at = COALESCE(archived_at, ?),
+                               archived_from = COALESCE(archived_from, ?) WHERE id = ?""",
+                            (time.time(), "disabled" if was == "disabled" else "active", staff_id))
         db.conn.executemany(
             "INSERT OR IGNORE INTO staff_devices (staff_id, device_id) VALUES (?, ?)",
             [(staff_id, d) for d in device_ids])
@@ -641,6 +674,24 @@ def _import_staff(db, rows: list, mode: str) -> dict:
                 "missing_departments"):
         result[key] = sorted(result[key])
     return result
+
+
+def keep_archived(snap: dict, archived_here: list[dict]) -> list[str]:
+    """People archived here whom a backup (made before they were archived) has as not archived,
+    matched by name: they stay archived, as a staff import keeps them (Restore, under Show
+    archived on the Staff tab, brings them back). archived_here: their name, archived_at and
+    archived_by. Changes snap's staff rows (clean_backup's); returns their names."""
+    here = {m["name"].casefold(): m for m in archived_here}
+    kept = []
+    for row in snap["staff"]:
+        old = here.get(row["name"].casefold())
+        if old is None or row["status"] == "archived":
+            continue
+        row.update(status="archived", archived_at=_time(old.get("archived_at"), time.time()),
+                   archived_by=old.get("archived_by"),
+                   archived_from="disabled" if row["status"] == "disabled" else "active")
+        kept.append(row["name"])
+    return kept
 
 
 def import_departments(db, data, mode: str) -> dict:
@@ -739,7 +790,8 @@ def make_backup(db, branding, version: str) -> dict:
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in, role_id, layout_pages, wristbands, department_id,
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                      connecteam_note, pin_length FROM staff"""),
+                      connecteam_note, pin_length, archived_at, archived_by, archived_from
+                      FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
                             card_days, card_lockout, created_at, clock_in FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
@@ -915,7 +967,8 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "connecteam_note": (_name(row.get("connecteam_note"), 120) or None
                                           if isinstance(row.get("connecteam_note"), str) else None),
                       # Backups from before 0.8.3 don't know it: the PIN pad waits for a pause.
-                      "pin_length": pin_length(row.get("pin_length"))})
+                      "pin_length": pin_length(row.get("pin_length")),
+                      **archived_fields(row)})
     staff_ids = {m["id"] for m in staff}
     staff_entities = {(r["staff_id"], r["entity_id"]): ("view" if r["level"] == "control" and not controllable(r["entity_id"])
                                                          else r["level"])

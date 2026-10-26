@@ -78,7 +78,9 @@ In **Roles**, create a role such as *Maintenance*. A role is used in two ways: a
 computer shows what its own role allows, and on a **role-based** one each person who signs in
 sees what *their* role allows (see [Role-based devices](#role-based-devices-each-persons-own-access)).
 
-Every device in Home Assistant is listed, grouped by area. For each one choose:
+Every device in Home Assistant is listed under **Individual devices**, grouped by area. The list
+is folded when you open a role: click **Individual devices** to open it (its line says how many
+devices are set). For each one choose:
 
 | Setting | What staff get |
 |---|---|
@@ -344,7 +346,8 @@ each person sign in with their own PIN so every action is recorded under their n
    (inactive, locked, not clocked in) and when they last signed in. Click a row for everything
    else and its buttons. Search by name, role or department, and sort by **Department** (each
    department folds away with a click), **Name** or **Role**; this browser remembers the sort
-   and the folded departments.
+   and the folded departments. People you've archived are folded away under the list (see
+   [Archiving people](#archiving-people)).
 2. In **Phones**, click **Edit** on the shared phone and set **Who uses it** to
    **Shared: each person signs in with their own PIN**. Leave **Everyone on the Staff tab**
    ticked, or untick it and pick who may use that phone.
@@ -378,6 +381,7 @@ Connecteam whose PIN is their kiosk code, the staff sync fills in the length by 
   it** until you unlock it on the **Phones & computers** tab (the activity log says why). This stops
   someone with the device guessing a few PINs at a time, forever.
 - Turning a person off (**Edit → Can sign in**) or changing their PIN signs them out right away.
+  For someone who has left, **Archive** them instead (see [Archiving people](#archiving-people)).
 - Everyone needs their own PIN: a PIN someone else already uses is refused.
 
 **Hide names (PIN only).** Tick **Hide names: people just type their PIN** under **Who uses it**
@@ -442,6 +446,65 @@ Good to know:
   in, wrong-PIN locks, signing out after the idle time, and Connecteam's clocked-in check.
 - **Preview** on the Layout tab can show a role or a person: pick them under **As**.
 
+## Archiving people
+
+When someone leaves, open their row on the **Staff** tab and click **Archive**. Their own access
+ends at once, but nothing of theirs is deleted: their activity, the cards they made and their
+settings stay, and you can bring them back.
+
+The confirmation lists what stops working, and what archiving can't reach (their key cards, any
+Kiosk-mode phone or computer they use, and their Home Assistant user):
+
+- They're signed out on every phone and computer, and their PIN no longer signs them in anywhere
+  (by name, PIN only or role-based). They're left out of every name list, and out of the people
+  you can pick for a phone or computer.
+- They can't make wristbands, contractor badges or key cards, whatever their role or their own
+  wristband rules allow (a card job of theirs that's still running stops), and no key card can
+  be made for them: not with **Make key card**, not as a replacement for a lost card, and not in
+  the staff app (a staff card for their exact name is refused). A key card for them that was
+  still being made (by anyone, from the dashboard or the staff app) stops too, and can't be tried
+  again; revoking one of their cards, or a lost card notice, carries on. Wristbands and contractor
+  badges they made before keep working until they end.
+- Staff Access keeps their Home Assistant user link but never uses it. The Home Assistant user
+  itself can still sign in to Home Assistant: turn it off there, under **Settings → People**.
+- The Connecteam sync leaves them archived, even if they're still active in Connecteam (see
+  [Add everyone from Connecteam](#add-everyone-from-connecteam)).
+
+**Kiosk-mode phones and computers keep working.** One in **Kiosk** mode has its own PIN and isn't
+tied to anyone, so archiving someone doesn't sign it out. The confirmation lists the Kiosk-mode
+phones and computers that look like theirs (named after them, or using their Home Assistant user),
+each with **Revoke**; revoke any other that's theirs under **Phones & computers**.
+
+**Their key cards keep working.** TT Hotel locks check cards on their own, offline, so archiving
+can't switch a key card off: it opens its doors until it expires. The confirmation lists their key
+cards that still open doors, and once they're archived the **Key cards** list opens on them. For
+each one:
+
+- If you have the card, click **Revoke** and put it on the encoder: it's cleared and opens nothing.
+- If you don't, click **Report lost**, then write a lost card notice and tap it on each door (or,
+  where remote lock-out is on, lock it out remotely on doors with a gateway). See
+  [Lost cards](#lost-cards). A replacement card isn't offered for someone archived.
+
+Until that's done, [Door activity](#door-activity) flags the card if it's tried at a door with a
+gateway ("Archived person's card tried at Staff Office").
+
+Archived people are hidden from the Staff tab's list. Click **Show archived** under it to see
+them (a search shows the archived people it matches too). Each one has:
+
+- **Restore**: back as they were, with their PIN, role, department, devices and own settings.
+  They sign in with their PIN again (someone who was turned off before they were archived comes
+  back turned off). Their PIN stays theirs while they're archived: nobody else can be given it.
+- **Delete for good**: removes them completely (it asks first). Only archived people can be
+  deleted, and only once none of their key cards still opens doors: revoke them or report them
+  lost first (a lost card goes on alerting at doors as lost), or wait until they expire. Their
+  past activity and the cards they made stay in the logs.
+
+Archiving, restoring and deleting are in **Activity** ("Archived Ana Lopez"). Archived people are
+in backups and migration files (and stay archived when restored), and staff exports mark them.
+Restoring a backup made before someone was archived keeps them archived (the restore warning
+names them, and so does Activity): bring them back with **Restore** if you want them. Copying
+staff in from a file skips anyone archived here.
+
 ## Connections: TT Hotel and Connecteam
 
 **Settings → Connections** holds the two outside services Staff Access can sign in to: **TT
@@ -482,7 +545,10 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
 - **Overnight guests:** a guest name, party size, their room or rooms and a checkout date. Each
   wristband opens the rooms plus the shared doors you chose (such as the main entrance) until
   checkout time on the checkout date (11:00 AM unless you change it). Rooms are picked from the
-  doors marked as guest rooms (see **Public doors and guest rooms** below).
+  doors marked as guest rooms (see **Public doors, guest rooms and staff doors** below).
+- **Contractor badges:** a contractor's name (and their company, if you like), how many badges,
+  the doors they need and when the badges stop working, at most 7 days ahead (see **Contractor
+  badges** below).
 - **Staff cards:** a staff member's name, how many cards, what they open (every door, whole
   buildings, whole floors or single doors) and the last day they work (until 11:59 PM that day).
 - **Look up a wristband:** put it on the encoder to see what's on it first (its card number,
@@ -521,10 +587,11 @@ offered on shared or role-based computers where each person signs in with their 
 2. Under **Day passes**, tick the doors every day pass opens and set **Day passes stop working
    at**. Under **Overnight guests**, tick the shared doors and set the **Checkout time**. Both
    times can be changed at any time; cards already made keep the time they were made with.
-   Both door lists show only public doors (and doors not marked yet).
+   Both door lists show only public doors (and doors not marked yet). Under **Contractor
+   badges**, set **Most badges at once**.
 3. Under **Doors**, rename doors to what staff call them (TT Hotel keeps its own names) and hide
    any staff should never pick. A hidden door can still be one of the day-pass or overnight
-   doors. Mark each door as a **Public door** or a **Guest room** (see below).
+   doors. Mark each door as a **Public door**, a **Guest room** or a **Staff door** (see below).
 4. In **Phones & computers**, click **Edit** on the front-desk computer and check its **Card
    encoder**. New computers start on **This computer (USB)**, the one to use for a desk with the
    encoder plugged into it. The computer must be **Shared** or **Role-based**. **Test encoder**
@@ -598,14 +665,14 @@ offered on shared or role-based computers where each person signs in with their 
    needs **Shared** or **Role-based**), or a shared computer whose role can't make wristbands.
    For **This computer (USB)** it also says whether the encoder is connected now.
 5. On the **Roles** tab, under **Wristbands**, choose what each role may make: day passes,
-   overnight wristbands, staff cards (and whether those may open single doors, floors, buildings
-   or every door), which doors they may put on cards (all doors, or chosen buildings, floors and
-   doors), the longest overnight stay and staff card, whether they may change the doors on a
-   day pass or overnight wristband, whether they **may change when day passes stop working**,
-   and whether they see everyone's cards in the card log and look-ups. A role is warned if its
-   doors don't cover the day-pass or overnight doors, because those cards would then be refused.
-   On a role-based computer, a person can have their own wristband rules (click them under their
-   role); otherwise they get their role's.
+   overnight wristbands, contractor badges, staff cards (and whether those may open single
+   doors, floors, buildings or every door), which doors they may put on cards (all doors, or
+   chosen buildings, floors and doors), the longest overnight stay and staff card, whether they
+   may change the doors on a day pass or overnight wristband, whether they **may change when
+   day passes stop working**, and whether they see everyone's cards in the card log and
+   look-ups. A role is warned if its doors don't cover the day-pass or overnight doors, because
+   those cards would then be refused. On a role-based computer, a person can have their own
+   wristband rules (click them under their role); otherwise they get their role's.
 
 Staff then see **Wristbands** in the sidebar under **Tools** (or as a tab on a narrow window).
 Each kind they may make is listed; one they may make but can't right now (a day pass after the
@@ -623,31 +690,63 @@ System → General** in Home Assistant), or the zone you enter under **Time zone
 Wristbands tab. The front-desk computer's Windows time zone must be the same: the encoder works
 out each door's time from that computer's clock.
 
-### Public doors and guest rooms
+### Public doors, guest rooms and staff doors
 
-Each door is either a **public door** (the pool gate, the main entrance, the gym) or a **guest
-room**. On the **Wristbands** tab, under **Doors**:
+Each door is a **public door** (the pool gate, the main entrance, the gym), a **guest room** or a
+**staff door** (the office, the boiler room, the laundry). On the **Wristbands** tab, under
+**Doors**:
 
-- Pick **Public door**, **Guest room** or **Not marked** next to each door. It's saved straight
-  away.
+- Pick **Public door**, **Guest room**, **Staff door** or **Not marked** next to each door. It's
+  saved straight away.
 - **Mark a whole floor or building** marks every door there at once: pick the floor or building,
-  pick what to mark them as and click **Mark**. If some of those doors are marked the other way,
-  it asks first.
-- The line above the list says how many doors aren't marked yet.
+  pick what to mark them as and click **Mark**. If some of those doors are marked another way,
+  or are day-pass or overnight shared doors about to become staff doors, it asks first.
+- The line above the list says how many doors aren't marked yet, and how many there are of each
+  kind.
 
 What it changes:
 
 - Overnight guests' rooms are picked from the guest rooms. The shared doors (the doors every day
   pass opens, the shared doors on overnight wristbands, and the doors people who may change
   them can pick from) are the public doors.
-- A door not marked yet shows in both lists, so nothing disappears until you've marked it.
-- The add-on checks it too: a guest room picked as a shared door, or a public door picked as a
-  room, is refused with a message saying so.
+- Staff doors are only for staff cards and contractor badges. They never show as rooms or shared
+  doors, in the staff app or under **Day passes** and **Overnight guests** here.
+- A door not marked yet shows as both a room and a shared door, so nothing disappears until
+  you've marked it.
+- The add-on checks it too: a guest room or a staff door picked as a shared door, or a public
+  door or a staff door picked as a room, is refused with a message saying so. So is a staff door
+  ticked under **Day passes** or **Overnight guests**.
+- **Marking a door as a staff door takes it off Day passes and Overnight guests** (it asks first
+  when it's ticked there, and Activity says so): from then on no day pass or overnight wristband
+  opens it. One still listed there (from a restored backup, say) is left off every card, and
+  unticked when you save.
 - A door already ticked under **Day passes** or **Overnight guests** keeps going on those cards
-  if you later mark it a guest room, as a hidden door does, but the Wristbands tab warns about
-  it under that list. Untick it there, or mark it as a public door.
-- Staff cards can open any door, whatever it's marked as.
+  if you later mark it a guest room, as a hidden door does, but the Wristbands tab warns about it
+  under that list. Untick it there, or mark it as a public door.
+- Staff cards and contractor badges can open any door, whatever it's marked as.
 - Syncing doors from TT Hotel never changes what a door is marked as.
+
+### Contractor badges
+
+A contractor badge lets a plumber or an electrician into the doors they need for a few days.
+
+- **Who may make them:** tick **Contractor badges** for a role on the **Roles** tab (or for one
+  person, on a role-based computer). Nobody may until you do. They then see **Contractor badge**
+  next to **Overnight** on the Wristbands screen.
+- **What it opens:** the doors picked when it's made, from any door the person making it has
+  access to (the **Doors they may put on cards** for their role): public doors, guest rooms,
+  staff doors and doors not marked yet. Hidden doors aren't offered.
+- **How long:** it works from when it's made until the date and time picked, which must be later
+  than now and at most 7 days away (until the same time of day, 7 days from today). A later
+  one is refused with "Contractor badges can last at most 7 days." The form starts at 11:59 PM
+  today.
+- **How many:** up to **Most badges at once** (5 unless you change it, at most 20), set on the
+  **Wristbands** tab under **Contractor badges**, with whether they open doors that are deadbolted
+  from inside (off unless you change it).
+- The card log, **Look up**, the activity log ("Made a contractor badge for Sam Lee (Acme
+  Plumbing)") and [Door activity](#door-activity) show it as a contractor badge, with the
+  contractor's name and company. It isn't a staff key card, so it isn't on the Staff tab's **Key
+  cards** list; wipe one on the encoder with **Look up**, then **Revoke (wipe this card)**.
 
 ### Changing when a day pass stops working
 
@@ -724,7 +823,9 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   one door, or tick **Problems only** for refused tries, alarms (tamper, locked after wrong tries)
   and the lost cards below.
 - **Last used** for each card: in the staff app's card log and Look up ("Pool Gate, today 3:12
-  PM"), and in the dashboard's Key cards list.
+  PM"), and in the dashboard's Key cards list. A contractor badge is listed with the
+  contractor's name and **Contractor badge**, and an alert about one calls it a contractor badge
+  ("Contractor badge 3661413478 (Sam Lee (Acme Plumbing))").
 - **Lost or revoked cards tried at a door.** When a card marked **Lost** or **Revoked** here is
   tried at a door after it was marked, or TT Hotel reports that a card it deleted was tried, the
   row is highlighted, the activity log says so ("Lost card tried at Pool Gate", or "Lost card
@@ -733,6 +834,9 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   most 20 alerts go out a minute in all (Door activity still lists every try).
   Untick **Tell Home Assistant when a lost or revoked card is tried** to keep it to the activity
   log.
+- **An archived person's card tried at a door.** A key card of someone you've
+  [archived](#archiving-people), tried after they were archived and before it expires, alerts the
+  same way ("Archived person's card tried at Staff Office"), until it's revoked or reported lost.
 - **A card that was cleared is done with.** A card revoked on an encoder, found blank by **Look
   up**, or written over goes back in the stack and may be given out again, here or in TT Hotel's
   own program. From then on its number is whoever has it now: those records aren't matched to the
@@ -952,12 +1056,16 @@ If the person already has an active key card, you choose:
 ### The Key cards list
 
 **Key cards** on the Staff tab lists every staff key card, made here or at a front-desk computer
-(cards made in the staff app are matched to the person by name), newest first. Filter by
+(cards made in the staff app are matched to the person by name), newest first. The section is
+folded at first, showing only its title and a count of the cards that still open doors ("Key
+cards: 14 active, 2 lost"; a lost card counts until it expires). Click it to open the list; this
+browser remembers whether it's open. Filter by
 **Active**, **Expired**, **Revoked**, **Lost** or **All**, and search by name or by the start of a
 card number. Each
 row shows who it's for, the card number, what it opens, who made it and when, when it stops
 working, its state and, for a lost card, how many of its doors it's been locked out of, and
-where it was last used (with [Door activity](#door-activity) set up).
+where it was last used (with [Door activity](#door-activity) set up). A card whose holder is
+archived says **Archived** under their name.
 
 - **Revoke** (you have the card): choose the encoder (**This computer** for the one plugged into
   the computer you're using), put that card on it, and it's cleared, so it opens nothing; it can
@@ -984,7 +1092,7 @@ lost card's screen (**Lock out…** in the Key cards list) lists its doors with 
 2. **Replacement card.** **Make a replacement card** makes the person a new key card (their
    department's, or what the lost card opened) that also carries the cancellation. Each door
    refuses the lost card once the new card has been tapped there: tick **Replacement tapped** as
-   that happens.
+   that happens. Not for someone archived: use a notice card.
 3. **Remote lock-out (experimental, off by default).** For doors with a gateway, TT Hotel can tell
    the door to refuse the card number without anyone walking there. See below.
 
@@ -1042,7 +1150,7 @@ API access needs Connecteam's **Expert plan or higher** (with the Operations hub
    connection**. It reports how many users and time clocks it found and how many people are
    clocked in now.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
-   greyed out.
+   greyed out (archived people too: restore them instead).
    - **Use their Connecteam kiosk code as their PIN** is ticked when Connecteam has a kiosk code
      of 4 to 8 digits for them. The add-on reads it straight from Connecteam; it's never shown
      in the dashboard. Otherwise, type a PIN.
@@ -1093,9 +1201,12 @@ then becomes a staff member here:
   stays. Once you change someone's role by hand, the sync leaves their role alone.
 - People archived or removed in Connecteam are turned off (and signed out), never deleted. If they
   come back, they're turned on again. Someone you turn off yourself stays off.
+- Someone you [archive](#archiving-people) here stays archived and is left exactly as they are,
+  whatever Connecteam says, and is never added again. Once restored, the sync keeps them up to
+  date again.
 - People you added by hand are never changed. If you delete someone the sync added, the next sync
-  adds them again: turn them off instead. For the same reason they can't be unlinked from
-  Connecteam while this is ticked.
+  adds them again while they're active in Connecteam: archive them instead. For the same reason
+  they can't be unlinked from Connecteam while this is ticked.
 
 The sync runs about once an hour while this is ticked, soon after you save the settings, and when
 you click **Sync staff now** (on the Staff tab or in Settings; at most once a minute). It uses the
@@ -1294,12 +1405,12 @@ backups from older versions too. Restoring puts the setup back:
 - Phones still waiting for setup get new QR codes, since setup codes are never saved in files.
 - The Connecteam Client Secret, the TT Hotel Client Secret and password, and the Door activity
   address are never in a backup, and a restore never changes them. Wristband settings, door
-  names, whether each door is a public door or a guest room (a backup from before 0.9.0 leaves
-  that as it is), roles' wristband rules, departments, each person's department and Connecteam
-  sync details, and how many digits each PIN has (when that's known) are included, and so are
-  departments' clock-in settings (a backup from before 0.9.0 has none, so each person's own
-  setting counts). Whether remote lock-out was tested is never restored: test it again on the
-  new system.
+  names, whether each door is a public door, a guest room or a staff door (a backup from before
+  0.9.0 leaves that as it is), roles' wristband rules, departments, each person's department
+  and Connecteam sync details, and how many digits each PIN has (when that's known) are
+  included, and so are departments' clock-in settings (a backup from before 0.9.0 has none, so
+  each person's own setting counts). Whether remote lock-out was tested is never restored: test
+  it again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
 - **The activity log and the card history are merged, not replaced.** Entries in the backup that
@@ -1312,7 +1423,11 @@ backups from older versions too. Restoring puts the setup back:
 - Before replacing anything, Staff Access saves a copy of everything here, logs included. It's
   listed under **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a
   restore.
-- A damaged file or one from a newer version is refused, and nothing changes.
+- A damaged file or one from a newer version is refused, and nothing changes. Backups from 0.9.1
+  on (which carry archived people, staff doors and contractor badges) are refused by 0.9.0 and
+  older, rather than read wrongly.
+- People archived here since the backup was made stay archived (see
+  [Archiving people](#archiving-people)).
 - The staff app carries on while a backup is made. A restore holds it up for a moment (about a
   second with years of card history), then everyone signs in again.
 
@@ -1388,7 +1503,8 @@ A few rules keep a migration file safe:
   made before 0.9.0 leaves its rule as it is. Staff files carry whether someone's clock-in setting
   was changed by hand, and people linked to Connecteam who are added from one keep that.
 - Replacing staff uses the file's PINs, roles, pages and own settings, and anyone whose PIN
-  changes is signed out. Someone you've turned off stays off, even if the file has them on. A file
+  changes is signed out. Someone you've turned off stays off, even if the file has them on, and
+  someone you've archived stays archived. People archived in the file are archived here too. A file
   from before 0.7.0 has no roles or own settings for people, so replacing from one leaves theirs as
   they are.
 

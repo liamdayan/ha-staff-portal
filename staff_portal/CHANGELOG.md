@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.9.2
+
+**Roles tab**
+
+- **Individual devices now folds away**, in a role and in a person's own settings. It's folded
+  when you open one, showing how many devices are set; click it to open the list. It stays open
+  while you work on that role or person, including after **Save**.
+
+## 0.9.1
+
+**Archiving people**
+
+- **Staff tab: Archive replaces Delete.** An archived person's own access ends at once: they're
+  signed out, can't sign in with their PIN on any shared or role-based phone or computer, aren't
+  offered in sign-in lists or pickers, can't make wristbands or key cards (a card job of theirs
+  still running stops), no key card can be made for them (one for them still being made, by
+  anyone, stops and can't be tried again), and Staff Access stops using their Home Assistant
+  link. Nothing of theirs is deleted.
+- The archive dialog says what archiving can't reach: Kiosk-mode phones and computers (each has
+  its own PIN): the ones that look like theirs are listed with **Revoke**; and their Home
+  Assistant user, which can still sign in to Home Assistant (turn it off there).
+- Archiving shows the person's key cards that still open doors (locks check cards on their own)
+  and what to do: **Revoke** with the card in hand, or **Report lost** and write a lost card
+  notice (or remote lock-out where it's on). The Key cards list then opens on their cards.
+- Archived people are folded away under **Show archived**, each with **Restore** (back as they
+  were, signing in with their PIN again) and **Delete for good**. Only archived people can be
+  deleted, and only once none of their key cards still opens doors (revoke or report lost first).
+- **Door activity:** an archived person's still-valid key card tried at a door alerts like a lost
+  card ("Archived person's card tried at Staff Office"), in Activity and, if that setting is on,
+  in Home Assistant, at most once per card every 10 minutes.
+- **Add everyone from Connecteam** never brings back or re-adds someone you've archived, even
+  while they're active in Connecteam.
+- Archiving and restoring are in Activity. Backups, migration files and staff exports carry who's
+  archived, and imports keep them archived. Restoring a backup made before someone was archived
+  keeps them archived (the restore warning and Activity name them), and copying staff in from a
+  file skips anyone archived here.
+- Backups are now schema 5, so 0.9.0 and older refuse them ("made by a newer version") instead of
+  bringing archived people back active and staff doors back unmarked.
+- Archived people can't make contractor badges either, whatever their role or their own wristband
+  rules allow.
+
+**Staff tab: Key cards**
+
+- **The Key cards section is now folded at first**, showing "Key cards: 14 active, 2 lost". This
+  browser remembers whether it's open.
+
+**Staff doors**
+
+- **Doors can now be marked as Staff doors**, as well as Public doors and Guest rooms. Staff doors
+  only go on staff key cards and contractor badges. They never show up as guest rooms or as
+  day-pass or overnight doors.
+- Marking a day-pass or overnight shared door as a staff door takes it off those lists in the same
+  step (the dashboard asks first, and Activity says so), so no guest's card opens it from then on.
+  A staff door still listed there (from a restored backup, say) is left off every card.
+- The doors list on the Wristbands tab now counts public doors, guest rooms and staff doors.
+
+**Contractor badges**
+
+- **New: contractor badges.** Tick **Contractor badges** for a role on the Roles tab, and people
+  with that role see a **Contractor badge** button next to **Overnight** on the Wristbands
+  screen. They enter the contractor's name and company, pick the doors (any door they have access
+  to, staff doors included) and choose when the badge stops working, up to 7 days ahead.
+- Wristbands tab: new **Contractor badges** settings for the most badges made at once (5 to start)
+  and whether badges open doors that are deadbolted from inside (off to start).
+- The card log, the activity log and Door activity show contractor badges with the contractor's
+  name and company, and a Door activity alert about one calls it a contractor badge.
+
+**Fixes**
+
+- Staff app, Wristbands: a problem shown after pressing **Make** (under the field it's about) no
+  longer disappears when the check of a change made just before it answers late.
+- Dashboard: a tick box whose label runs onto a second line (such as **Contractor badges** on a
+  phone) keeps its full size.
+
 ## 0.9.0
 
 **Make staff key cards from the dashboard**

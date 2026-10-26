@@ -463,7 +463,7 @@ def test_secrets_never_reach_the_browser_or_backups(tmp_path):
             text = json.dumps(backup)
             for secret in (SECRET, PASSWORD, "tok-123", "ref-456"):
                 assert secret not in text
-            assert backup["schema"] == 4 and backup["settings"]["tthotel_client_id"] == "client-1"
+            assert backup["schema"] == 5 and backup["settings"]["tthotel_client_id"] == "client-1"
             # A backup can't plant or clear secrets either.
             planted = {**backup, "settings": {**backup["settings"], "tthotel_client_secret": "evil",
                                               "tthotel_password_md5": "f" * 32,
@@ -523,7 +523,7 @@ def test_backup_round_trip_and_old_backups(tmp_path):
         p.db.update_settings({"wb_checkout_time": "10:30"})
         async with p:
             status, backup = await p.admin_call("GET", "/api/backup")
-            assert status == 200 and backup["schema"] == 4
+            assert status == 200 and backup["schema"] == 5
             assert {"lock_id": 900, "name": "Pool", "hidden": 1,
                     "kind": None} in backup["wristband_doors"]
             # Change everything, then restore.
@@ -594,7 +594,7 @@ def test_backup_round_trip_and_old_backups(tmp_path):
             assert p.db.role(p.front_desk)["wristbands"]["types"] == []
             # A newer backup is refused.
             status, reply = await p.admin_call("POST", "/api/restore/preview",
-                                               {"backup": {**backup, "schema": 5}})
+                                               {"backup": {**backup, "schema": 6}})
             assert status == 400 and "newer" in reply["error"]
     run(scenario())
 
@@ -1267,7 +1267,7 @@ def test_automatic_encoders_in_backups(tmp_path):
             # This computer (USB) travels in backups too (schema 3 and on); older backups
             # without it restore each computer's mode as before.
             status, backup = await p.admin_call("GET", "/api/backup")
-            assert backup["schema"] == 4
+            assert backup["schema"] == 5
             assert next(d for d in backup["devices"] if d["id"] == desk)["encoder_local"] == 1
             p.db.update_device(desk, encoder_local=0)
             status, reply = await p.admin_call("POST", "/api/restore", {"backup": backup})

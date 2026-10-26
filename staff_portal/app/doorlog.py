@@ -150,15 +150,26 @@ def card_keys(number: str) -> list[str]:
 
 def alert_for(record: dict, card: dict | None) -> str | None:
     """Why a record should alert someone: "lost" or "revoked" (a card made here in that state,
-    tried after it was marked so, not a tap from before that arrived late), "deleted" (TT Hotel
-    says a deleted card was tried), else None. A card that was cleared (cleared_at: revoked on an
-    encoder, say) opens nothing from then on, so only a lost card tried before it was found and
-    cleared alerts: a record matched to it a moment after that is a lock's clock running ahead."""
-    if card and card["state"] in ("lost", "revoked") and (card["state_at"] or 0) <= record["at"]:
-        cleared = card.get("cleared_at")
-        if cleared is None or record["at"] < cleared:
+    tried after it was marked so, not a tap from before that arrived late), "archived" (a staff
+    card still valid when it was tried, whose holder had been archived by then), "deleted" (TT
+    Hotel says a deleted card was tried), else None. A card that was cleared (cleared_at: revoked
+    on an encoder, say) opens nothing from then on, so only a lost card tried before it was found
+    and cleared alerts: a record matched to it a moment after that is a lock's clock running
+    ahead."""
+    if card and (card.get("cleared_at") is None or record["at"] < card["cleared_at"]):
+        if card["state"] in ("lost", "revoked") and (card["state_at"] or 0) <= record["at"]:
             return card["state"]
+        if archived_holder(record, card):
+            return "archived"
     return "deleted" if record["record_type"] == DELETED_CARD else None
+
+
+def archived_holder(record: dict, card: dict) -> bool:
+    """Whether an active card was tried after its holder was archived, before it expired: the
+    card still opens doors (locks check cards offline), but nobody should be using it."""
+    return (card["state"] == "active" and card.get("holder_status") == "archived"
+            and (card.get("holder_archived_at") or 0) <= record["at"]
+            and record["at"] < (card.get("expires_at") or 0))
 
 
 def when_label(at: float, now: float, zone: ZoneInfo) -> str:
