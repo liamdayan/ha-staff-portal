@@ -184,6 +184,7 @@ def test_hr_settings_roles_and_departments(tmp_path):
     async def scenario():
         async with HR(tmp_path) as hr:
             sessions = await setup(hr)
+            hr.enrol("205")   # so "Everyone" below doesn't sign the HR admin out
             hr.hdb.conn.execute("UPDATE sessions SET confirmed_at = ?", (time.time(),))
             hr.hdb.conn.commit()
             admin = sessions["hr"]

@@ -556,9 +556,16 @@ def events_of(db, *, incident_id=None, writeup_id=None) -> list[dict]:
         f"SELECT * FROM discipline_events WHERE {column} = ? ORDER BY id", (value,))]
 
 
+def hr_only_note(e: dict) -> bool:
+    """HR's reasons for changing an incident's points or a write-up's end date are HR's only, as
+    in the points statement: others see what changed, not why."""
+    return e["points"] is not None or e["what"].startswith("HR changed when it stops counting")
+
+
 def history_view(db, rows: list[dict], rel: str) -> list[dict]:
     return [{"when": round(e["ts"]), "what": e["what"], "actor": e["actor"],
-             "note": opened(e["note"], "event.note")} for e in access.visible(rows, rel)]
+             "note": None if rel != "hr" and hr_only_note(e) else opened(e["note"], "event.note")}
+            for e in access.visible(rows, rel)]
 
 
 def incident_points_now(db, inc: dict) -> float:

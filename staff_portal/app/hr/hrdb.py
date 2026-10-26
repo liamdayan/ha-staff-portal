@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS people (
     totp_on INTEGER NOT NULL DEFAULT 0,
     totp_step INTEGER NOT NULL DEFAULT 0,          -- each authenticator code works once
     totp_redo INTEGER NOT NULL DEFAULT 0,          -- 1: used a recovery code, should set up again
+    totp_source TEXT,                    -- who made the setup code: hr, owner, or self (My account)
     failed INTEGER NOT NULL DEFAULT 0,             -- wrong tries in a row
     failed_at REAL,
     locked_until REAL,
@@ -119,6 +120,11 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_security ON audit (security, id);
 CREATE INDEX IF NOT EXISTS audit_target ON audit (target_id, id);
+-- The audit log's last line, keyed with the HR key, so lines removed from the end show up.
+CREATE TABLE IF NOT EXISTS audit_tip (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tip TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     person_id TEXT NOT NULL,
@@ -171,9 +177,9 @@ DEFAULTS = {
 PEOPLE_FIELDS = {"name", "mobile", "email", "signin_hash", "signin_name", "signin_name_hash",
                  "groups", "start_date", "start_estimated", "start_confirmed", "managers",
                  "archived", "archived_at", "synced_at", "kiosk_hash", "totp_secret", "totp_on",
-                 "totp_step", "totp_redo", "failed", "failed_at", "locked_until", "day_failed",
-                 "day_since", "hard_locked", "access_ended", "last_signin_at", "last_signin_ip",
-                 "prev_signin_at", "prev_signin_ip"}
+                 "totp_step", "totp_redo", "totp_source", "failed", "failed_at", "locked_until",
+                 "day_failed", "day_since", "hard_locked", "access_ended", "last_signin_at",
+                 "last_signin_ip", "prev_signin_at", "prev_signin_ip"}
 ROLES = ("hr_admin", "director", "manager")
 
 current = None   # the open HRDatabase while the HR portal runs (service.py sets it)

@@ -330,6 +330,9 @@ class HRService:
     def end_access(self, person_id, actor_id, actor: str, ip: str | None = None) -> None:
         self.db.update_person(person_id, access_ended=1)
         signin.end_sessions(self.db, person_id)
+        # A setup code made earlier mustn't bring the access back.
+        self.db.conn.execute("DELETE FROM setup_tokens WHERE person_id = ?", (str(person_id),))
+        self.db.conn.commit()
         audit.record(self.db, "Ended HR access now", actor_id=actor_id, actor=actor,
                      target_id=person_id, target=self.person_name(person_id), ip=ip, security=True)
 
@@ -357,7 +360,32 @@ class HRService:
             self.db.set_role(pid, access.HR_ADMIN, False)
             audit.record(self.db, "Removed HR admin", actor_id="owner", actor=actor, target_id=pid,
                          target=self.person_name(pid), security=True)
+        self.check_authenticators(wanted - now, "owner", actor)
         return sorted(wanted - now), sorted(now - wanted)
+
+    def check_authenticators(self, person_ids, actor_id, actor: str,
+                             ip: str | None = None) -> list[str]:
+        """After a role or "Who must use an authenticator code" changes (person_ids None: anyone):
+        whoever now needs an authenticator from a setup code but has none loses any phone they
+        added themselves and is signed out, until HR (or the owner) makes them a setup code.
+        Returns their IDs."""
+        roles = self.db.all_roles()
+        chosen = (self.db.people(archived=False) if person_ids is None
+                  else [p for p in map(self.db.person, person_ids) if p])
+        found = []
+        for p in chosen:
+            if not signin.needs_setup_code(self.db, p, roles.get(p["id"], set())):
+                continue
+            had = bool(p["totp_on"])
+            if had:
+                signin.disable_totp(self.db, p["id"])
+            if signin.end_sessions(self.db, p["id"]) or had:
+                audit.record(self.db, "Needs a setup code from HR", actor_id=actor_id, actor=actor,
+                             target_id=p["id"], target=p["name"], ip=ip, security=True,
+                             detail="Their own authenticator was removed, and they were signed "
+                                    "out" if had else "Signed out")
+            found.append(p["id"])
+        return found
 
     async def unlock_key(self, code: str) -> None:
         """The owner typed the recovery key (dashboard): the key comes back and HR starts."""

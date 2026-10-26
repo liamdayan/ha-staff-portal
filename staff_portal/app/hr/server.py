@@ -359,9 +359,11 @@ async def api_signin(request: web.Request):
             return failed(svc, ip, person, why)
         recovery = False
         if person["totp_on"]:
-            # The code first: a wrong one costs no slow PIN check.
+            # The code first. A wrong one still waits as long as a PIN check, so timing doesn't
+            # tell who has an authenticator (staff roles, under the usual setting).
             if not signin.check_totp(db, person, code):
                 if not signin.clean_recovery_code(code):
+                    await signin.pin_matches(pin, None)
                     wrong(svc, person, ip)
                     return failed(svc, ip, person, "Wrong authenticator code")
                 recovery = True
@@ -377,7 +379,7 @@ async def api_signin(request: web.Request):
     if recovery and not signin.use_recovery_code(db, person["id"], code):
         wrong(svc, person, ip)
         return failed(svc, ip, person, "Wrong authenticator code")
-    if not person["totp_on"] and signin.totp_required(db, person):
+    if signin.needs_setup_code(db, person):
         # Their role needs an authenticator, and only a setup code from HR can add one.
         return failed(svc, ip, person, "Needs an authenticator: no setup code used yet")
     if recovery:
@@ -449,7 +451,10 @@ def setup_row(request: web.Request) -> tuple[str, dict, dict] | None:
     token = request.match_info["token"]
     row = signin.setup_token(svc.db, token)
     person = svc.db.person(row["person_id"]) if row else None
-    if not row or not person or person["archived"]:
+    # Ended access needs HR to allow it again (or a new setup code, which does). A code someone
+    # made for themselves in My account is finished there, not here.
+    if (not row or not person or person["archived"] or person["access_ended"]
+            or row["created_by"] == person["id"]):
         svc.throttle.failed(svc.client_ip(request))
         return None
     return token, row, person
@@ -534,8 +539,8 @@ async def api_setup_finish(request: web.Request):
         svc.throttle.failed(ip)
         return error(CODE_WRONG, 403)
     signin.update_setup_token(db, token, used_at=time.time(), pending_secret=None)
-    codes = signin.enable_totp(db, person["id"], secret, step)
-    db.update_person(person["id"], access_ended=0)
+    codes = signin.enable_totp(db, person["id"], secret, step,
+                               "owner" if row["created_by"] == "owner" else "hr")
     signin.end_sessions(db, person["id"])   # the old phone, if any, stops working
     audit.record(db, "Set up an authenticator", actor_id=person["id"], actor=person["name"],
                  ip=ip, security=True)
@@ -713,9 +718,11 @@ async def api_totp_finish(request: web.Request):
     step = totp.check(secret, data.get("code"))
     if step is None:
         return error(CODE_WRONG, 403)
-    had = bool(db.person(v.id)["totp_on"])
+    me = db.person(v.id)
+    had = bool(me["totp_on"])
     signin.update_setup_token(db, token, used_at=time.time(), pending_secret=None)
-    codes = signin.enable_totp(db, v.id, secret, step)
+    # A new phone keeps how the old one was set up (a fresh code from it came first).
+    codes = signin.enable_totp(db, v.id, secret, step, me["totp_source"] if had else "self")
     # Every other device signs in again with the new phone.
     db.conn.execute("DELETE FROM sessions WHERE person_id = ? AND id != ?", (v.id, v.session["id"]))
     db.conn.commit()
@@ -841,8 +848,8 @@ def signin_section(svc: HRService, v: access.Viewer, p: dict, rel: str) -> dict 
     rows = [{"label": "Role", "value": ", ".join(role_words)},
             {"label": "PIN", "value": "Their Connecteam kiosk code" if p["kiosk_hash"]
              else people.NO_KIOSK_CODE},
-            {"label": "Authenticator", "value": "On" if p["totp_on"] else (
-                "Needed, not set up yet" if signin.totp_required(db, p, roles) else "Off")},
+            {"label": "Authenticator", "value": "Needed, not set up yet"
+             if signin.needs_setup_code(db, p, roles) else "On" if p["totp_on"] else "Off"},
             {"label": "Last sign-in", "value": p["last_signin_at"] and time.strftime(
                 "%b %d, %Y %I:%M %p", time.localtime(p["last_signin_at"])) or "Never",
              "time": when_text(p["last_signin_at"])}]
@@ -1095,9 +1102,13 @@ async def api_settings_general(request: web.Request):
         if data["date_order"] not in ("mdy", "dmy"):
             return error("Choose how Connecteam writes dates.")
         values["date_order"] = data["date_order"]
+    policy_changed = "totp_policy" in values and values["totp_policy"] != svc.db.setting(
+        "totp_policy")
     svc.db.set_settings(values)
     audit.record(svc.db, "Changed HR settings", actor_id=v.id, actor=v.name,
                  detail=", ".join(sorted(values)), ip=svc.client_ip(request), security=True)
+    if policy_changed:
+        svc.check_authenticators(None, v.id, v.name, svc.client_ip(request))
     if {"start_field", "manager_field", "date_order"} & set(values):
         svc.sync_soon()
     return web.json_response({"ok": True})
@@ -1125,6 +1136,7 @@ async def api_settings_role(request: web.Request):
         audit.record(db, "Changed role", actor_id=v.id, actor=v.name, target_id=pid,
                      target=person["name"], detail=access.ROLE_WORDS.get(role, "Employee"),
                      ip=svc.client_ip(request), security=True)
+        svc.check_authenticators([pid], v.id, v.name, svc.client_ip(request))
     return web.json_response({"ok": True})
 
 
@@ -1194,9 +1206,9 @@ async def api_audit_check(request: web.Request):
     svc.db.set_settings({"audit_check": "ok" if result["ok"] else "failed",
                          "audit_result": json.dumps(result)})
     audit.record(svc.db, "Checked the audit log", actor_id=v.id, actor=v.name,
-                 detail="No changes found" if result["ok"] else
-                 f"Line {result['first_bad']} doesn't match", ip=svc.client_ip(request),
-                 security=True)
+                 detail="No changes found" if result["ok"] else "Lines are missing from the end"
+                 if result.get("missing_end") else f"Line {result['first_bad']} doesn't match",
+                 ip=svc.client_ip(request), security=True)
     return web.json_response(result)
 
 

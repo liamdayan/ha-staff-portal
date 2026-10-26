@@ -4,7 +4,8 @@ the person's Connecteam kiosk code as their PIN, and an authenticator code when 
 - Kiosk codes are never stored: only a slow salted hash (scrypt over an HMAC with a secret
   pepper made from the HR key), refreshed when the user list is synced. The scrypt settings are
   kept with each hash so they can be raised later. A sign-in never costs a Connecteam request.
-- The authenticator code is checked before the PIN, so a wrong code costs no scrypt time.
+- The authenticator code is checked before the PIN. A wrong code still waits for a dummy PIN
+  check, so timing doesn't tell which numbers have an authenticator (that is, staff roles).
 - Every failure gets the same message, whichever part was wrong.
 - Per person: 5 wrong tries lock sign-in for 15 minutes; 15 in a day lock it until an HR admin
   unlocks it. A lock never signs out someone already signed in. Counted apart from the staff
@@ -257,6 +258,17 @@ def totp_required(db, person: dict, roles: set[str] | None = None) -> bool:
     return bool(roles & {"hr_admin", "director", "manager"})
 
 
+ISSUED = ("hr", "owner")   # set up with a setup code someone else made
+
+
+def needs_setup_code(db, person: dict, roles: set[str] | None = None) -> bool:
+    """Whether this person must use an authenticator but has none set up with a setup code from
+    HR or the owner. A phone they added themselves in My account doesn't count, so a kiosk code
+    alone never reaches a manager's account."""
+    issued = person["totp_on"] and person["totp_source"] in ISSUED
+    return not issued and totp_required(db, person, roles)
+
+
 def totp_secret(person: dict) -> str | None:
     return crypto.unseal_text(person["totp_secret"], "people.totp") if person["totp_on"] else None
 
@@ -302,15 +314,17 @@ def recovery_codes_left(db, person_id) -> int:
                            "used_at IS NULL", (str(person_id),)).fetchone()[0]
 
 
-def enable_totp(db, person_id, secret: str, step: int) -> list[str]:
-    """Turn the authenticator on (a new phone replaces the old one). Returns new recovery codes."""
+def enable_totp(db, person_id, secret: str, step: int, source: str = "self") -> list[str]:
+    """Turn the authenticator on (a new phone replaces the old one). source: who made the setup
+    code ("hr", "owner", or "self" in My account). Returns new recovery codes."""
     db.update_person(person_id, totp_secret=crypto.seal_text(secret, "people.totp"), totp_on=1,
-                     totp_step=step, totp_redo=0)
+                     totp_step=step, totp_redo=0, totp_source=source)
     return new_recovery_codes(db, person_id)
 
 
 def disable_totp(db, person_id) -> None:
-    db.update_person(person_id, totp_secret=None, totp_on=0, totp_step=0, totp_redo=0)
+    db.update_person(person_id, totp_secret=None, totp_on=0, totp_step=0, totp_redo=0,
+                     totp_source=None)
     db.conn.execute("DELETE FROM recovery_codes WHERE person_id = ?", (str(person_id),))
     db.conn.commit()
 

@@ -204,9 +204,10 @@ class HR:
             self.hdb.set_manager_groups(person_id, groups)
 
     def enrol(self, person_id) -> str:
-        """Turn on an authenticator for someone directly; returns its secret."""
+        """Turn on an authenticator for someone directly, as from HR's setup code; returns its
+        secret."""
         secret = totp.new_secret()
-        signin.enable_totp(self.hdb, person_id, secret, 0)
+        signin.enable_totp(self.hdb, person_id, secret, 0, "hr")
         return secret
 
     # ------------------------------------------------------------ requests
