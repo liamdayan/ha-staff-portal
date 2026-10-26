@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 import doorlog
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
-from hr import gdrive
+from hr import crypto as hr_crypto, gdrive, service as hr_service
 from wristbands import MAC_RE, door_kind
 
 FORMAT = transfer.MIGRATE_FORMAT
@@ -65,7 +65,6 @@ SALT_BYTES, NONCE_BYTES = 16, 12
 SECRET_SETTINGS = (*PRIVATE_SETTINGS, "wb_remote_lockout_tested")
 TYPED_SECRETS = ("connecteam_client_secret", "tthotel_client_secret", "tthotel_password_md5")
 MAX_SAVED_OBJECT = 16 * 1024   # TT Hotel's sign-in or a request count, as JSON
-MAX_HR_TEXT = 90 * 1024 * 1024  # the HR database as base64 text
 HR_HOST_RE = re.compile(r"^[a-z0-9.-]{0,253}$")
 TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SETUP_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
@@ -266,18 +265,25 @@ def _saved_object(value) -> str:
     return json.dumps(found) if isinstance(found, dict) else "{}"
 
 
+def _sealed(value) -> bool:
+    """An HR setting sealed with the HR key (kept out of backups): it travels as it is, and opens
+    once the HR recovery key is typed on the new install."""
+    return isinstance(value, str) and hr_crypto.SEALED_RE.fullmatch(value) is not None
+
+
 def _google_settings(raw: dict) -> dict:
     """The HR portal's Google Drive connection, checked as the dashboard checks it: the script
     deployed in Google keeps working with the same secret and Web app URL. Nothing from a file
     made before it existed, or one with anything wrong in it."""
     try:
-        url = gdrive.clean_url(raw.get("hr_google_url"))
+        url = raw["hr_google_url"] if _sealed(raw.get("hr_google_url")) else gdrive.clean_url(
+            raw.get("hr_google_url"))
         drive, restricted = (gdrive.clean_drive_id(raw.get(k)) for k in
                              ("hr_google_drive", "hr_google_restricted_drive"))
     except ValueError:
         return {}
     secret = raw.get("hr_google_secret")
-    if not isinstance(secret, str) or not gdrive.SECRET_RE.fullmatch(secret):
+    if not _sealed(secret) and not (isinstance(secret, str) and gdrive.SECRET_RE.fullmatch(secret)):
         return {}
     return {"hr_google_url": url, "hr_google_secret": secret, "hr_google_drive": drive,
             "hr_google_restricted_drive": restricted if restricted != drive else ""}
@@ -393,18 +399,20 @@ def _hr_settings(raw: dict) -> dict:
         found["hr_host"] = host
     for key in ("hr_connecteam_client_id", "hr_connecteam_client_secret"):
         value = raw.get(key)
-        if isinstance(value, str) and len(value) <= 500 and re.fullmatch(r"[\x21-\x7e]*", value):
+        if _sealed(value) or (isinstance(value, str) and len(value) <= 500
+                              and re.fullmatch(r"[\x21-\x7e]*", value)):
             found[key] = value
     return found
 
 
 def _hr_part(hr) -> dict | None:
-    """The HR database and key a migration file carries (service.take_migration checks the
-    database itself), or None when the old install never turned HR on."""
+    """The HR database and key a migration file carries (the database checked as
+    service.take_migration checks it, so a bad one is refused before anything is replaced), or
+    None when the old install never turned HR on."""
     if hr is None:
         return None
-    if (not isinstance(hr, dict) or not isinstance(hr.get("db"), str)
-            or len(hr["db"]) > MAX_HR_TEXT
+    if (not isinstance(hr, dict)
             or not (isinstance(hr.get("key"), str) or isinstance(hr.get("recovery"), str))):
         raise ValueError(DAMAGED)
+    hr_service.migrated_db(hr)   # checked before anything here is replaced (ValueError)
     return {k: hr[k] for k in ("db", "key", "recovery") if isinstance(hr.get(k), str)}

@@ -6917,11 +6917,11 @@
       submit.disabled = cancel.disabled = true;
       submit.textContent = "Restoring…";
       try {
-        await api("POST", "api/migrate/restore", { file: chosen, code: groupCode(code) });
+        const done = await api("POST", "api/migrate/restore", { file: chosen, code: groupCode(code) });
         busy = false;
         close();
         await reloadEverything();
-        showMigrated();
+        showMigrated(done.summary && done.summary.hr_problem);
       } catch (err) {
         error.textContent = err.message;
       } finally {
@@ -6939,10 +6939,11 @@
   }
 
   // What's left to do once everything has arrived here.
-  function showMigrated() {
+  function showMigrated(hrProblem) {
     const box = $("#migration-done");
     box.replaceChildren(
       h("div", { class: "pick-head" }, "Migration finished"),
+      ...(hrProblem ? [h("p", { class: "form-error" }, hrProblem)] : []),
       h("p", { class: "hint" }, "Everything from the other install is here, and phones and computers stay " +
         "signed in. Staff sign in again with their PINs."),
       h("ol", { class: "migrate-steps" },

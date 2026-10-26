@@ -162,7 +162,7 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
         if err.code == "too_big":
             return _stuck(svc, row, err.message, err.code, row["tries"] + 1)
         if err.code in ("not_allowed", "bad_reply"):
-            await _heal(svc)
+            await _heal(svc, row, err.code)
         return _failed(svc, row, err.message, err.code, now)
     except ctapi.CTError as err:
         if err.budget:
@@ -229,21 +229,25 @@ def _stuck(svc, row: dict, message: str, code: str, tries: int) -> str:
     return "attention"
 
 
-async def _heal(svc) -> None:
-    """Drive refused a folder or file: the script may have been deployed afresh (it forgets which
-    drives it may use), or a folder was deleted or moved by hand. Tell the script the drives
-    again, and find the folders again next time."""
+async def _heal(svc, row: dict, code: str) -> None:
+    """Drive refused a folder or file, or answered oddly: the script may have been deployed
+    afresh (it forgets which drives it may use), or a folder was deleted or moved by hand. Tell
+    the script the drives again if it lost them; otherwise, after a refusal, find this person's
+    folders (and the top ones) again next time. Nothing else is forgotten on one bad answer."""
     bridge = svc.google()
     wanted = gdrive.drive_ids(svc.main_settings())
-    folders.forget(svc.db)
     if bridge is None or not wanted:
         return
     try:
         info = await bridge.ping()
         if info["allowed"] != wanted:
             await bridge.setup(wanted)
+            return   # the script had lost its drives: the folders are still there
     except gdrive.BridgeError as err:
         log.info("HR portal: checking the Google Drive script: %s", err)
+        return
+    if code == "not_allowed":
+        folders.forget(svc.db, row["person_id"] or "")
 
 
 def _bridge(svc):

@@ -732,7 +732,8 @@ async def add_card(svc, person: dict, t: dict, data: bytes, mime: str, viewer: a
         db.conn.execute("UPDATE certificates SET status = 'withdrawn', read_text = NULL, "
                         "replaced_by = ?, replaced_at = ? WHERE id = ?", (card_id, now, old["id"]))
         db.conn.commit()
-        _drop(db, svc.folder, old)
+        if not documents.on_hold(db, person["id"]):   # a legal hold keeps every photo
+            _drop(db, svc.folder, old)
     audit.record(db, "Added a certificate", actor_id=viewer.id, actor=viewer.name,
                  target_id=person["id"], target=person["name"], detail=t["name"])
     if rel != "hr":
@@ -1086,14 +1087,17 @@ def _in_connecteam(db, card_id) -> bool:
 
 
 def tidy(svc, now: float | None = None) -> dict:
-    """Photos of rejected or withdrawn cards go after 30 days, and so does the text read from a
-    card still waiting; files no card points to go after a day. Returns counts."""
+    """Photos of rejected or withdrawn cards go after 30 days (not while the person is under a
+    legal hold), and so does the text read from a card still waiting; files no card points to go
+    after a day. Returns counts."""
     db, folder = svc.db, svc.folder
     now = time.time() if now is None else now
     counts = {"photos": 0, "texts": 0, "strays": 0}
     for card in [dict(r) for r in db.conn.execute(
             "SELECT * FROM certificates WHERE status IN ('rejected', 'withdrawn') AND stored = 1 AND "
             "COALESCE(decided_at, replaced_at, added_at) < ?", (now - KEEP_DAYS * DAY,))]:
+        if documents.on_hold(db, card["person_id"]):
+            continue   # kept while a legal hold is on, and tidied once it's lifted
         _drop(db, folder, card)
         counts["photos"] += 1
     counts["texts"] = db.conn.execute(

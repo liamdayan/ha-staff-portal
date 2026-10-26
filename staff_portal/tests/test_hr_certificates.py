@@ -473,6 +473,30 @@ def test_heic_pdfs_back_photos_and_a_newer_photo(tmp_path, monkeypatch):
     run(scenario())
 
 
+def test_a_legal_hold_keeps_every_card_photo(tmp_path, monkeypatch):
+    async def scenario():
+        async with HR(tmp_path) as hr, google(hr, monkeypatch):
+            sessions = await setup(hr)
+            documents.set_hold(hr.hdb, "301", True, "OLCC permit dispute", "305", "Hana")
+            status, data = await add(hr, sessions["ana"], "301", "olcc", jpeg())
+            first = data["card"]["id"]
+            # A newer photo replaces the waiting one, but the older photo is kept.
+            status, data = await add(hr, sessions["ana"], "301", "olcc", jpeg((0, 200, 0)))
+            await certificates.settle(hr.svc)
+            older = certificates.get(hr.hdb, first)
+            assert (older["status"], older["stored"]) == ("withdrawn", 1)
+            # Rejected: kept past 30 days while the hold is on...
+            path = f"/api/people/301/certificates/{data['card']['id']}"
+            assert (await hr.call("POST", f"{path}/reject", {"reason": "Blurry."}, sessions["hana"]))[0] == 200
+            later = time.time() + 31 * 86400
+            assert certificates.tidy(hr.svc, later)["photos"] == 0
+            assert certificates.get(hr.hdb, data["card"]["id"])["stored"] == 1
+            # ...and tidied once it's lifted.
+            documents.set_hold(hr.hdb, "301", False, "", "305", "Hana")
+            assert certificates.tidy(hr.svc, later)["photos"] == 2
+    run(scenario())
+
+
 def test_google_busy_is_tried_again_then_hr_types_the_date(tmp_path, monkeypatch):
     async def scenario():
         async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:

@@ -4626,6 +4626,8 @@ async def admin_google(request: web.Request):
 async def admin_google_script(request: web.Request):
     """Copy the script: its text, with this install's secret (made the first time, or anew with
     {"new_secret": true}, after which the script must be pasted and deployed again)."""
+    if refusal := hr_key_locked():
+        return refusal
     data = await optional_json(request)
     s = db.settings()
     secret = s.get("hr_google_secret") or ""
@@ -4647,6 +4649,8 @@ async def admin_google_script(request: web.Request):
 async def admin_save_google(request: web.Request):
     """Save: the Web app URL and the drives. A new address or other drives are checked straight
     away (and the script is told which drives it may use)."""
+    if refusal := hr_key_locked():
+        return refusal
     data = await read_json(request)
     s = db.settings()
     try:
@@ -5791,7 +5795,36 @@ hr_service = HRService(
     departments=hr_departments, group_names=lambda: connecteam.known_group_names(),
     from_tunnel=lambda remote: from_tunnel(remote), client_ip=lambda request: client_ip(request),
     property_name=lambda: db.settings().get("property_name", ""),
-    icon=lambda: branding.icon(192, db.settings()), version=VERSION)
+    icon=lambda: branding.icon(192, db.settings()), version=VERSION,
+    reseal=lambda: db.reseal_settings())
+
+
+class HRSealer:
+    """Database.sealer: the HR portal's key as it is now. While it's kept out of backups, the
+    Google script's Web app URL and secret and the Connecteam for HR secret are stored sealed
+    with it (hr/crypto.py), so a stolen Home Assistant backup alone can't reach HR's files."""
+
+    def open_settings(self, values: dict) -> dict:
+        return hr_service.keyring.open_settings(values)
+
+    def seal_settings(self, values: dict) -> dict:
+        return hr_service.keyring.seal_settings(values)
+
+    def resealed(self, stored: dict) -> dict:
+        return hr_service.keyring.resealed(stored)
+
+
+Database.sealer = HRSealer()
+db.reseal_settings()   # read again, opened (and sealed, if an older version left them plain)
+
+
+def hr_key_locked() -> web.Response | None:
+    """A refusal while the HR key is locked (after a restore, until the recovery key is typed):
+    the HR connections' secrets are sealed with it, so they can't be read or changed yet."""
+    if hr_service.keyring.status() == "locked":
+        return bad_request(hr_crypto.LOCKED, 409)
+    return None
+
 
 HOST_RE = re.compile(r"^(?=.{4,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                      r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -6023,6 +6056,8 @@ async def admin_hr_connecteam(request: web.Request):
         values["hr_connecteam_client_secret"] = secret
     if data.get("hr_connecteam_clear_secret") in (True, "1", "on", "true"):
         values["hr_connecteam_client_secret"] = ""
+    if "hr_connecteam_client_secret" in values and (refusal := hr_key_locked()):
+        return refusal
     for key in ("hr_connecteam_chat", "hr_connecteam_documents"):
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "on", "true") else "0"
@@ -6312,7 +6347,7 @@ async def admin_migrate_create(request: web.Request):
     code = migrate.new_code()
     try:
         file = await asyncio.to_thread(lambda: migrate.seal(read_everything(build), code, VERSION))
-    except ValueError as err:   # the HR key is missing
+    except ValueError as err:   # the HR key is missing, or HR's records are too big to carry
         return bad_request(str(err), 409)
     return web.json_response(
         {"code": code, "file": file, "expires_at": file["expires_at"],
@@ -6333,6 +6368,10 @@ async def migration_from_request(request: web.Request) -> tuple:
     if not file:
         raise ValueError("Choose the migration file.")
     return file, migrate.clean_code(code)
+
+
+HR_NOT_RESTORED = ("The HR portal's records couldn't be written here (is the disk full?), so the HR "
+                   "portal is off. Keep the old install: its HR records are still there.")
 
 
 @one_at_a_time
@@ -6363,11 +6402,16 @@ async def admin_migrate_restore(request: web.Request):
     remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
     await unlink_dropped(dropped_links)
     await hr_service.stop()
+    hr_problem = None
     if snap["migrate"].get("hr"):
         try:
             hr_service.take_migration(snap["migrate"]["hr"])   # the HR database and its key
         except (ValueError, OSError) as err:
+            # Checked already (migrate._hr_part), so only the disk can fail here. HR stays off
+            # rather than starting empty with a new key, and the owner is told.
             log.warning("Couldn't restore the HR portal from the migration file: %s", err)
+            db.update_settings({"hr_enabled": "0"})
+            hr_problem = HR_NOT_RESTORED
     if hr_service.enabled():
         hr_service.start()   # locked until the recovery key is typed, if it was kept out
     for device in snap["devices"]:
@@ -6386,11 +6430,11 @@ async def admin_migrate_restore(request: web.Request):
     db.log(admin_name(request), "Migrated from another install",
            detail=f"Migration file made {made} by Staff Portal {header['app_version'][:20]}. "
                   f"{signed_in} phone(s) and computer(s) stay signed in.{added_note(added)} "
-                  f"What it replaced was saved as {safety}.")
+                  f"What it replaced was saved as {safety}.{' ' + hr_problem if hr_problem else ''}")
     return web.json_response({"ok": True, "summary": {
         **summary, "made_at": header["created_at"], "app_version": header["app_version"][:20],
         "signed_in": signed_in, "needs_setup": snap["needs_setup"], "added": added,
-        "safety_backup": safety}})
+        "safety_backup": safety, "hr_problem": hr_problem}})
 
 
 async def admin_upload_logo(request: web.Request):

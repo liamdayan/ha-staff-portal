@@ -219,6 +219,21 @@ def test_kinds_start_with_the_owners_defaults_and_hr_changes_them(tmp_path):
             status, _, _ = await hr.call("PUT", f"/api/documents/kinds/{training}",
                                          {"connecteam": True, "ct_document": "55"}, s["hr"])
             assert status == 200 and documents.kind(hr.hdb, training)["ct_document"] == 55
+            # Only for kinds the employee can see: a copy in Connecteam is theirs to open.
+            for key, body in (("hiring", {"connecteam": True, "ct_document": "55"}),
+                              ("other", {"connecteam": True, "ct_document": "55"}),
+                              ("training", {"visibility": "managers"})):
+                status, err, _ = await hr.call("PUT", f"/api/documents/kinds/{kid(hr, key)}", body, s["hr"])
+                assert status == 400 and err["error"] == documents.COPY_SEEN, key
+            status, err, _ = await hr.call("POST", "/api/documents/kinds", {
+                "name": "Private notes", "visibility": "directors", "connecteam": True, "ct_document": "55"},
+                s["hr"])
+            assert status == 400 and err["error"] == documents.COPY_SEEN
+            assert documents.kind(hr.hdb, training)["visibility"] == "employee"
+            # A kind set up that way before this was checked is never copied.
+            hiring = documents.kind(hr.hdb, kid(hr, "hiring"))
+            assert not documents.goes_to_connecteam({**hiring, "connecteam": 1})
+            assert documents.goes_to_connecteam(documents.kind(hr.hdb, training))
             # Only HR admins, and only with a fresh code.
             for role in ("self", "manager", "director"):
                 status, _, _ = await hr.call("POST", "/api/documents/kinds", {"name": "Mine"}, s[role])
@@ -625,6 +640,38 @@ def test_a_script_deployed_afresh_is_told_its_drives_again(tmp_path, monkeypatch
             assert drive_path(fake, doc["drive_id"])[:4] == ["HR Employee Files", "Employees",
                                                              "Diaz, Bo (CT 202)", "Documents"]
             assert len([f for f in fake.files.values() if f["name"] == "Diaz, Bo (CT 202)"]) == 1
+    run(scenario())
+
+
+def test_a_refusal_never_forgets_folders_moved_to_former_employees(tmp_path, monkeypatch):
+    async def scenario():
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
+            s = await people(hr)
+            await upload(hr, s["hr"], "202", kid(hr, "other"), PDF, title="First")
+            await delivery.settle(hr.svc)
+            hr.hdb.update_person("202", archived=1, archived_at=time.time())
+            assert (await hr.call("POST", "/api/people/202/drive-folder/former", {}, s["hr"]))[0] == 200
+            await delivery.settle(hr.svc)
+            bo_folders = lambda: [drive_path(fake, f["id"]) for f in fake.files.values()  # noqa: E731
+                                  if f["appProperties"] == {"staff_access": "person", "ct_user": "202"}]
+            former = [["HR Employee Files", "Former employees", "Diaz, Bo (CT 202)"]]
+            assert bo_folders() == former
+            # Someone else's upload is refused once (the script lost its drives), then one of Bo's
+            # (a folder moved by hand, say): neither puts his file back under Employees.
+            fake.allowed = []
+            await upload(hr, s["hr"], "201", kid(hr, "other"), PDF, title="Ana's")
+            await delivery.settle(hr.svc)
+            fake.fail_next(code="not_allowed", message="Not in the HR drives.", op="upload")
+            status, r = await upload(hr, s["hr"], "202", kid(hr, "other"), PDF, title="After leaving")
+            await delivery.settle(hr.svc)
+            [row] = deliveries(hr, r["document"]["id"])
+            assert (row["status"], row["code"]) == ("waiting", "not_allowed")
+            await delivery.run_due(hr.svc, now=row["due_at"])
+            doc = documents.get(hr.hdb, r["document"]["id"])
+            assert drive_path(fake, doc["drive_id"])[:3] == former[0]
+            assert bo_folders() == former
+            status, page, _ = await hr.call("GET", "/api/people/202", cookie=s["hr"])
+            assert section(page)["hr"]["can_move_folder"] is False
     run(scenario())
 
 

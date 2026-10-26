@@ -482,3 +482,36 @@ def test_files_are_checked_by_content_and_cleaned():
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     resp = files.file_response(cleaned, "image/jpeg", "card")
     assert resp.headers["Content-Disposition"].startswith("inline")
+
+
+def png_header(width: int, height: int) -> bytes:
+    """Just enough of a PNG for Pillow to read its size (it says how big it is before any
+    pixels)."""
+    import struct
+    import zlib
+    chunk = lambda kind, body: (struct.pack(">I", len(body)) + kind + body
+                                + struct.pack(">I", zlib.crc32(kind + body)))
+    size = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", size)
+            + chunk(b"IDAT", zlib.compress(b"\x00" * 64)) + chunk(b"IEND", b""))
+
+
+def test_big_photos_are_shrunk_while_read_and_huge_ones_called_too_large(monkeypatch):
+    from PIL import Image, JpegImagePlugin
+    # A sideways phone photo: decoded at an eighth of its size, never whole, and still upright.
+    img = Image.new("L", (4000, 3000), 128)
+    exif = Image.Exif()
+    exif[0x0112] = 6                                     # orientation: turn 90 degrees
+    out = io.BytesIO()
+    img.save(out, "JPEG", exif=exif)
+    decoded = []
+    load = JpegImagePlugin.JpegImageFile.load
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "load",
+                        lambda self: decoded.append(self.size) or load(self))
+    cleaned, mime = files.clean_image(out.getvalue(), max_side=500)
+    assert Image.open(io.BytesIO(cleaned)).size == (375, 500) and mime == "image/jpeg"
+    assert decoded and max(w * h for w, h in decoded) <= 500 * 375
+    # Bigger than the limits: a plain "too large", whether over ours or Pillow's own.
+    for width, height in ((6000, 5000), (30000, 20000)):
+        with pytest.raises(files.FileRefused, match="too large"):
+            files.clean_image(png_header(width, height))

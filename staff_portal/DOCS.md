@@ -1911,8 +1911,8 @@ or waiting for HR.
 
 **Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
 turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
-HR), and only where "latest file only, and the employee sees it there" is fine. Restricted files
-never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
+HR), and only for kinds the employee can see ("The employee, their managers, directors and HR"),
+since the employee sees it there; it keeps the latest file only. Restricted files never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
 can fix ("not assigned this document's pack in Connecteam") go on **Needs attention** at once,
 with **Retry** and **Don't copy to Connecteam**.
 
@@ -1923,8 +1923,8 @@ files for Staff Access, so a deleted file that was copied there becomes a to-do 
 attention**: remove it in Connecteam, then press **Done**. The audit log keeps the line.
 
 **Legal hold.** On a person's page, HR can **Put on legal hold** (with a reason, and a fresh
-code). Nothing in that file can then be deleted, the recycle bin isn't emptied for them, and
-they're left off the retention list, until HR lifts it.
+code). Nothing in that file can then be deleted (certificate photos included), the recycle bin
+isn't emptied for them, and they're left off the retention list, until HR lifts it.
 
 **After someone leaves.** Records are kept 5 years after they leave (HR settings → Records).
 After that the person is listed on **Needs attention** under **Past the time records are kept**,
@@ -2012,7 +2012,8 @@ certificate rather than the permit, a temporary permit, someone under 21). HR th
   date if that copy is on. The old card is marked replaced, reminders start again, and the
   person is told.
 - **Don't accept**, with a reason the person sees ("The photo is blurry. Retake it."). The upload
-  never reaches their folder and is deleted after 30 days.
+  never reaches their folder and is deleted after 30 days (kept while the person is under a
+  legal hold).
 
 **Statuses.** Each card someone needs shows one of: **Valid**, **Expiring** (inside the first
 heads-up), **Expired**, **Due** (a new hire still inside their days), **Missing**, **Waiting for
@@ -2483,10 +2484,16 @@ folder (`/data/hr`), apart from Staff Access's own.
   restore just works. Turn on Home Assistant's backup encryption.
 - **Keep the HR key out of backups** (HR settings → HR key) is off by default. Turning it on
   shows an **HR recovery key** once: 20 letters and numbers. **Print it and keep it in the
-  safe.** The key itself is then left out of Home Assistant's backups, so a stolen backup on its
-  own reveals nothing. After a restore, the HR portal stays locked until you type the recovery
-  key on the dashboard's HR portal tab (**Unlock with the HR recovery key**). Turning the setting
-  off puts the key back in backups.
+  safe.** The key itself is then left out of Home Assistant's backups, and the secrets that reach
+  HR's files and Connecteam (the Google script's Web app URL and secret, and the Connecteam for
+  HR Client Secret) are kept locked with it. A stolen backup on its own can't open the encrypted
+  details or reach the files in Google Drive. After a restore, the HR portal (and those two
+  connections) stays locked until you type the recovery key on the dashboard's HR portal tab
+  (**Unlock with the HR recovery key**). Turning the setting off puts the key back in backups,
+  and the secrets with it.
+- **Backups made before you turned the setting on still hold the HR key.** Turning it on only
+  protects later backups: delete the older ones (or keep them as safely as before) once a new
+  backup has been made.
 - If the key is kept out of backups and both the computer and the recovery key are lost, the HR
   records on the computer can't be opened. Files kept in Google Drive survive.
 - Anyone who is a Home Assistant administrator, or who has the running computer in hand, could
@@ -2499,7 +2506,10 @@ backups, only the locked copy travels, and the new install asks for the HR recov
 migration file can't be made while files are still waiting to reach Google Drive or Connecteam,
 or uploads and certificate photos are waiting for HR (they're only on this computer): the
 dashboard says which, so wait for them or check them, then try again. PDFs still to be made
-travel with the records and are made on the new computer.
+travel with the records and are made on the new computer. HR's records can be up to 64 MB in a
+migration file; a bigger one is refused when the file is made, in plain words. If HR's records
+can't be put in place on the new computer, the HR portal stays off there (it never starts empty),
+and the dashboard says so: keep the old install.
 
 ### Keeping records
 
