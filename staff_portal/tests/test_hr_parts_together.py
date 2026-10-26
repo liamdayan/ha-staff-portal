@@ -199,10 +199,10 @@ def test_an_end_of_probation_review_reaches_hrs_decision_and_its_pdf_reaches_dri
             s = await setup(hr)
             db = hr.hdb
             day = today(hr)
-            # Ana started 70 days ago: her 90-day introductory period ends in 20 days, its review is
-            # due 14 days before. The nightly run (every part's job) starts the period and opens
-            # the review for Max, her department's primary manager.
-            db.update_person("201", start_date=(day - timedelta(days=70)).isoformat())
+            # Ana started 69 days ago: the last day of her 90-day introductory period is in 20 days,
+            # its review is due 14 days before. The nightly run (every part's job) starts the
+            # period and opens the review for Max, her department's primary manager.
+            db.update_person("201", start_date=(day - timedelta(days=69)).isoformat())
             await hr.svc.nightly()
             prob = probation.current(db, "201", day)
             end = date.fromisoformat(prob["end"])

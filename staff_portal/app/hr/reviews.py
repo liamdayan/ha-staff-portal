@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     cancelled_at REAL,
     cancel_reason TEXT,                  -- encrypted
     recommendation_sent_at REAL,         -- end of probation: passed to the probation part
+    recommendation_problem TEXT,         -- ...or why it never can be (it isn't tried again)
     pdf_doc_id INTEGER,                  -- the final PDF (documents; made through its queue)
     created_by TEXT,
     created_at REAL NOT NULL
@@ -256,7 +257,8 @@ for _kind, _title in (
         ("review_returned", "A review was sent back to you."),
         ("review_shared", "You have a review to read."),
         ("review_acknowledged", "A review was acknowledged."),
-        ("review_moved", "A review's due date moved.")):
+        ("review_moved", "A review's due date moved."),
+        ("review_not_passed", "An end-of-probation recommendation couldn't reach HR's decision.")):
     notify.register_kind(_kind, _title)
 
 
@@ -268,6 +270,29 @@ def other(name: str):
         return importlib.import_module(f"{__package__}.{name}")
     except ImportError:
         return None
+
+
+def _disciplinary(db, review: dict) -> bool:
+    """An end-of-probation review for a disciplinary probation, not a new hire's introductory
+    period (its probation row says which)."""
+    if review.get("kind") != "probation" or review.get("probation_id") is None:
+        return False
+    try:
+        row = getattr(other("probation"), "get", lambda *_: None)(db, review["probation_id"])
+    except Exception:  # noqa: BLE001 - read as an introductory one
+        return False
+    return bool(row) and row.get("kind") == "disciplinary"
+
+
+def kind_word(db, review: dict) -> str:
+    """The review's name: KINDS, or "End of disciplinary probation"."""
+    return "End of disciplinary probation" if _disciplinary(db, review) else KINDS[review["kind"]]
+
+
+def noun(db, review: dict) -> str:
+    """The same inside a sentence: NOUNS, or "end-of-disciplinary-probation review"."""
+    return ("end-of-disciplinary-probation review" if _disciplinary(db, review)
+            else NOUNS[review["kind"]])
 
 
 # ---------------------------------------------------------------- small helpers
@@ -641,7 +666,7 @@ def create(db, person: dict, kind: str, due: date, *, source: str | None = None,
     audit.record(db, "Opened a review", actor_id=actor_id, actor=actor, target_id=person["id"],
                  target=person["name"], detail=f"{KINDS[kind]}, due {due.isoformat()}")
     tell_writer(db, review, person, "review_due",
-                f"{person['name']}'s {NOUNS[kind]} is yours to write, due {nice(due)}.",
+                f"{person['name']}'s {noun(db, review)} is yours to write, due {nice(due)}.",
                 f"review:{review['id']}:open", but=[actor_id] if actor_id else ())
     if review["self_status"] == "waiting":
         notify.notify(person["id"], "review_self", link=f"#/reviews/{review['id']}",
@@ -667,7 +692,10 @@ def open_scheduled(db, person: dict, kind: str, due: date, source: str, period: 
                        (person["id"], source)).fetchone():
         return None
     gap = number(db, "reviews_gap_days")
-    others = near(db, person["id"], due, gap) if gap else []
+    # An earlier review of the same probation never holds back the one for its new end date (HR
+    # extended it after that review closed).
+    others = [r for r in (near(db, person["id"], due, gap) if gap else [])
+              if probation_id is None or r["probation_id"] != probation_id]
     if any(PRIORITY[r["kind"]] >= PRIORITY[kind] for r in others):
         return None
     ahead = (coming or {}).get(person["id"])
@@ -704,7 +732,7 @@ def move(db, review: dict, due: date, end: date | None) -> None:
                  detail=f"Due {review['due']} -> {due.isoformat()}")
     if person:
         tell_writer(db, get(db, review["id"]), person, "review_moved",
-                    f"{person['name']}'s {NOUNS[review['kind']]} is now due "
+                    f"{person['name']}'s {noun(db, review)} is now due "
                     f"{nice(due)}.", f"review:{review['id']}:moved:{due.isoformat()}")
 
 
@@ -726,7 +754,7 @@ def probation_rows(db, until: date) -> list[dict]:
             due, end = _date(row["due"]), _date(row.get("end"))
             if due:
                 found.append({"person_id": str(row["person_id"]), "probation_id": row["probation_id"],
-                              "due": due, "end": end})
+                              "due": due, "end": end, "start": _date(row.get("start"))})
         except (KeyError, TypeError, AttributeError):
             continue
     return found
@@ -769,7 +797,8 @@ def follow_probation(db, today: date) -> int:
             source = f"{source}:{end}"   # HR extended it after its review closed
         if row["due"] > today + timedelta(days=open_days):
             continue
-        start = _date(person["start_date"]) or (row["end"] or row["due"]) - timedelta(days=90)
+        # It covers the probation itself (a disciplinary one starts long after they were hired).
+        start = row["start"] or _date(person["start_date"]) or (row["end"] or row["due"]) - timedelta(days=90)
         if open_scheduled(db, person, "probation", row["due"], source,
                           (start.isoformat(), (row["end"] or row["due"]).isoformat()),
                           probation_id=row["probation_id"]):
@@ -840,6 +869,21 @@ def pass_recommendation(db, review: dict, actor_id) -> bool:
         fn(db, review["probation_id"], review["recommendation"],
            _date(review["extend_to"]) if review["recommendation"] == "extend" else None,
            review["id"], actor_id)
+    except ValueError as err:
+        # It never will (HR decided the probation already, or moved its end past the date
+        # recommended): kept on the review for HR to see, the writer and HR are told, and it isn't
+        # tried again. HR decides on the person's page.
+        db.conn.execute("UPDATE reviews SET recommendation_problem = ? WHERE id = ?",
+                        (str(err)[:300], review["id"]))
+        db.conn.commit()
+        person = db.person(review["person_id"]) or {"id": review["person_id"], "name": ""}
+        title = (f"{person['name']}'s end-of-probation recommendation couldn't reach HR's "
+                 f"decision: {err}")
+        for pid in dict.fromkeys(hr_admins(db, but=[person["id"]]) + [review["submitted_by"]]):
+            if pid and pid != person["id"]:
+                notify.notify(pid, "review_not_passed", link=f"#/reviews/{review['id']}", db=db,
+                              title=title, once=f"review:{review['id']}:not-passed")
+        return False
     except Exception as err:  # noqa: BLE001 - kept, and tried again
         log.warning("HR reviews: passing a probation recommendation failed: %r", err)
         return False
@@ -852,7 +896,7 @@ def pass_recommendation(db, review: dict, actor_id) -> bool:
 def pass_waiting(db) -> int:
     rows = [dict(r) for r in db.conn.execute(
         "SELECT * FROM reviews WHERE kind = 'probation' AND status IN ('ready', 'shared', 'closed') "
-        "AND recommendation_sent_at IS NULL")]
+        "AND recommendation_sent_at IS NULL AND recommendation_problem IS NULL")]
     return sum(1 for r in rows if r["recommendation"] in PROBATION_CHOICES
                and pass_recommendation(db, r, r["submitted_by"] or r["approved_by"]))
 
@@ -872,7 +916,7 @@ def remind(db, today: date, now: float | None = None) -> int:
         if not person or person["archived"] or not due:
             continue
         days, rid, name = (due - today).days, r["id"], person["name"]
-        what, link = NOUNS[r["kind"]], f"#/reviews/{r['id']}"
+        what, link = noun(db, r), f"#/reviews/{r['id']}"
         late = -days
         if r["status"] in ("writing", "ready"):
             title, key = None, None
@@ -919,11 +963,11 @@ async def nightly(svc) -> dict:
 
 # ---------------------------------------------------------------- the final PDF
 
-def pdf_title(review: dict) -> str:
+def pdf_title(db, review: dict) -> str:
     """Its name in Drive (after the date): "Annual review 2026"."""
     if review["kind"] == "annual":
         return f"Annual review {review['due'][:4]}"
-    return KINDS[review["kind"]] + (" review" if review["kind"] == "probation" else "")
+    return kind_word(db, review) + (" review" if review["kind"] == "probation" else "")
 
 
 def pdf_blocks(db, review: dict, person: dict, names: dict) -> list[tuple]:
@@ -935,7 +979,7 @@ def pdf_blocks(db, review: dict, person: dict, names: dict) -> list[tuple]:
     scale = body["scale"]
     blocks = [("row", "Name", person["name"]),
               ("row", "Department", names.get(review["dept"] or "", "") or "None"),
-              ("row", "Review", KINDS[review["kind"]]),
+              ("row", "Review", kind_word(db, review)),
               ("row", "Covers", f"{nice(review['period_start'])} to {nice(review['period_end'])}"),
               ("row", "Written by", _name(db, review["submitted_by"])),
               ("row", "Meeting", nice(review["meeting_date"]) or "Not recorded")]
@@ -985,7 +1029,7 @@ def pdf_page(svc, row: dict):
     person = review and db.person(review["person_id"])
     if not review or not person or review["status"] != "closed" or review["pdf_doc_id"]:
         return None
-    title = pdf_title(review)
+    title = pdf_title(db, review)
     blocks = pdf_blocks(db, review, person, group_names(svc))
     page = pdfdoc.page(f"{title}: {person['name']}", blocks, subtitle=svc.property_name() or None)
     return person, title, page, notify.local_day(db, review["closed_at"])
@@ -1002,7 +1046,7 @@ def pdf_saved(svc, row: dict, doc: dict) -> None:
     db.conn.commit()
     person = db.person(review["person_id"])
     audit.record(db, "Saved a review's PDF", target_id=review["person_id"],
-                 target=person["name"] if person else None, detail=pdf_title(review))
+                 target=person["name"] if person else None, detail=pdf_title(db, review))
 
 
 # ---------------------------------------------------------------- what each viewer sees
@@ -1065,7 +1109,7 @@ def summary(db, review: dict, person: dict, rel: str, today: date) -> dict:
         word = {"shared": "Ready for you to read", "closed": "Closed"}.get(
             status, SELF_WORDS[review["self_status"]] or "Being written")
     found = {"id": review["id"], "person": {"id": person["id"], "name": person["name"]},
-             "kind": review["kind"], "kind_word": KINDS[review["kind"]], "status": status,
+             "kind": review["kind"], "kind_word": kind_word(db, review), "status": status,
              "status_word": word, "due": review["due"],
              "overdue": status in MOVABLE and review["due"] < today.isoformat(),
              "self_status": review["self_status"], "self_word": SELF_WORDS[review["self_status"]],
@@ -1197,6 +1241,7 @@ def view(svc, viewer, review: dict, person: dict, rel: str) -> dict:
         out["writers"] = writer_choices(db, person)
         out["assigned"] = review["assigned"] or "auto"
         out["recommendation_sent"] = bool(review["recommendation_sent_at"])
+        out["recommendation_problem"] = review["recommendation_problem"]
     if shared:
         out["pdf"] = pdf_state(db, viewer, review, rel)
     return out
@@ -1259,7 +1304,7 @@ def listing(db, viewer) -> dict:
                 if can["acknowledge"] else "Approve it" if can["approve"] else "Write it"
                 if can["write"] else "Share it" if can["share"] else None)
         item = {"id": r["id"], "person": person["name"], "person_id": person["id"],
-                "kind_word": KINDS[r["kind"]], "due": r["due"], "what": what,
+                "kind_word": kind_word(db, r), "due": r["due"], "what": what,
                 "status_word": summary(db, r, person, rel, day)["status_word"],
                 "overdue": r["status"] in MOVABLE and r["due"] < today}
         if what:
@@ -1292,12 +1337,23 @@ def review_todos(svc, v) -> list[dict]:
             found.append({"text": "You have a review to read and acknowledge.", "link": "#/reviews"})
     if v.is_hr:   # (a final PDF that keeps failing is on Needs attention, with the documents')
         unsent = db.conn.execute("SELECT COUNT(*) FROM reviews WHERE kind = 'probation' AND status IN "
-                                 "('ready', 'shared', 'closed') AND recommendation_sent_at IS NULL"
-                                 ).fetchone()[0]
+                                 "('ready', 'shared', 'closed') AND recommendation_sent_at IS NULL "
+                                 "AND recommendation_problem IS NULL").fetchone()[0]
         if unsent:
             found.append({"text": f"{unsent} end-of-probation recommendation"
                                   f"{'s' if unsent != 1 else ''} couldn't reach the introductory "
                                   "period records yet.", "link": "#/reviews"})
+        # Ones that never can, while their probation is still waiting for HR's decision.
+        get_probation = getattr(other("probation"), "get", None)
+        stuck = [r for r in db.conn.execute(
+            "SELECT id, person_id, probation_id FROM reviews WHERE recommendation_problem IS NOT NULL "
+            "AND recommendation_sent_at IS NULL AND person_id != ?", (v.id,))
+            if get_probation and (get_probation(db, r["probation_id"]) or {}).get("status") == "open"]
+        if stuck:
+            found.append({"text": f"{len(stuck)} end-of-probation recommendation"
+                                  f"{'s' if len(stuck) != 1 else ''} couldn't reach HR's decision: "
+                                  "decide on the person's page.",
+                          "link": f"#/reviews/{stuck[0]['id']}"})
     return found
 
 
@@ -1625,7 +1681,7 @@ async def api_submit(request: web.Request):
     if approval:
         for pid in hr_admins(db, but=[person["id"], v.id]):
             notify.notify(pid, "review_approval", link=f"#/reviews/{review['id']}", db=db,
-                          title=f"{person['name']}'s {NOUNS[review['kind']]} needs your "
+                          title=f"{person['name']}'s {noun(db, review)} needs your "
                                 "approval.", once=f"review:{review['id']}:submitted:{round(now)}")
     else:
         pass_recommendation(db, review, v.id)
@@ -1753,7 +1809,7 @@ async def api_writer(request: web.Request):
     review = _save(db, review, {"assigned": None if who == "auto" else who})
     changed(svc, request, v, review, person, "Handed over a review", writer_name(db, review, person))
     tell_writer(db, review, person, "review_due",
-                f"{person['name']}'s {NOUNS[review['kind']]} is yours to write, due "
+                f"{person['name']}'s {noun(db, review)} is yours to write, due "
                 f"{nice(review['due'])}.",
                 f"review:{review['id']}:to:{who}:{round(time.time())}", but=[v.id])
     return web.json_response({"ok": True})

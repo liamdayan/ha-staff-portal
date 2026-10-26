@@ -130,7 +130,7 @@
         [day(i.happened), plural(i.points, "point"), i.protected ? "protected leave" : null].filter(Boolean).join(" · "),
         badge(i.status_word, STATE_CLASS[i.status] || ""))), "No incidents."));
     }
-    if (s.lines && s.lines.length) put(box, pointLines(s.lines));
+    if (s.lines && s.lines.length) put(box, pointLines(s.lines, p, again));
     const buttons = [];
     if (!self && s.can && s.can.record) buttons.push(link("Record an incident", `#/record/${encodeURIComponent(p.id)}`, "button primary"));
     if (!self && s.can && s.can.as_of) {
@@ -148,12 +148,37 @@
       w.under_appeal ? badge("Under appeal", "warn") : null);
   }
 
-  function pointLines(lines) {
-    return h("details", null, h("summary", null, "Points history"), h("ul", { class: "list" }, lines.map((l) => item(
-      l.incident_id ? `#/incident/${l.incident_id}` : null, `${l.points > 0 ? "+" : ""}${pts(l.points)} · ${l.label}`,
-      [day(l.date), l.ends && l.state === "counts" ? `counts until ${day(l.ends)}` : null, l.reason].filter(Boolean).join(" · "),
-      l.state === "expired" ? badge(`Expired${l.ends ? ` ${day(l.ends)}` : ""}: no longer counts`, "dim")
-        : l.state === "voided" ? badge("Voided", "bad") : null))));
+  // The points statement. For HR (today's view), each line it can undo has its own actions.
+  function pointLines(lines, p = null, again = null) {
+    return h("details", null, h("summary", null, "Points history"), h("ul", { class: "list" }, lines.map((l) => {
+      const li = item(l.incident_id ? `#/incident/${l.incident_id}` : null, `${l.points > 0 ? "+" : ""}${pts(l.points)} · ${l.label}`,
+        [day(l.date), l.ends && l.state === "counts" ? `counts until ${day(l.ends)}` : null, l.reason].filter(Boolean).join(" · "),
+        l.state === "expired" ? badge(`Expired${l.ends ? ` ${day(l.ends)}` : ""}: no longer counts`, "dim")
+          : l.state === "voided" ? badge("Voided", "bad") : null);
+      const actions = p && l.can ? lineActions(l, p, again) : [];
+      if (actions.length) put(li, h("div", { class: "actions" }, actions));
+      return li;
+    })));
+  }
+
+  function lineActions(l, p, again) {
+    const url = `/api/people/${encodeURIComponent(p.id)}/points/${encodeURIComponent(l.id)}`;
+    const found = [];
+    if (l.can.end) {
+      found.push(button("Change when it stops", async () => {
+        const values = await formDialog("When it stops counting", [textField("ends", "First day it no longer counts", { type: "date", value: l.ends || "" }), reasonField()],
+          "Save", { intro: "This always wins over the point system's expiry rules." });
+        if (values && await act(() => api("POST", `${url}/ends`, values))) await again();
+      }));
+    }
+    if (l.can.void) {
+      found.push(button("Void", async () => {
+        const values = await formDialog("Void this line", [reasonField()], "Void",
+          { danger: true, intro: "It stops counting from today and stays on the statement as voided. Later write-ups are checked again." });
+        if (values && await act(() => api("POST", `${url}/void`, values))) await again();
+      }, "danger"));
+    }
+    return found;
   }
 
   async function adjustPoints(p, s, again) {
@@ -412,6 +437,15 @@
 
   H.registerPage("incident", { who: (me) => me.staff, render: renderIncident });
 
+  // What approving counts now: a repeat counts the incidents HR approved since it was recorded.
+  function approveIntro(i) {
+    const now = i.points_if_approved ?? i.final_points;
+    let text = `It counts from today at ${plural(now, "point")}, and expires counting from ${day(i.happened)}.`;
+    if (now !== i.final_points) text += ` It was ${plural(i.final_points, "point")} when recorded: the rules give ${pts(now)} now.`;
+    if (i.earlier_waiting) text += ` ${i.earlier_waiting} earlier incident${i.earlier_waiting === 1 ? " is" : "s are"} still waiting for HR: approving ${i.earlier_waiting === 1 ? "it" : "them"} first can make this a repeat.`;
+    return text;
+  }
+
   async function renderIncident(main, parts) {
     const id = encodeURIComponent(parts[0] || "");
     const i = await api("GET", `/api/incidents/${id}`);
@@ -422,7 +456,7 @@
       buttons.push(button("Approve", async () => {
         const values = await formDialog("Approve the incident", [textField("points", "Points (leave blank to keep them)", { type: "number", attrs: { step: "0.25", min: "0", max: "100", inputmode: "decimal" } }),
           textField("reason", "Why other points?", { area: true, hint: "Only when you change the points." })], "Approve",
-        { intro: `It counts from today at ${plural(i.final_points, "point")}, and expires counting from ${day(i.happened)}.` });
+        { intro: approveIntro(i) });
         if (values && await act(() => api("POST", `/api/incidents/${id}/approve`, values))) await H.route();
       }, "primary"));
     }
@@ -449,7 +483,8 @@
     show(card(h("h1", null, i.offence), h("p", null, link(i.person.name, `#/people/${encodeURIComponent(i.person.id)}`, "")),
       badge(i.status_word, STATE_CLASS[i.status] || ""), i.on_probation ? badge("During probation", "warn") : null,
       i.return_note ? h("p", { class: "warn plain" }, `HR's note: ${i.return_note}`) : null,
-      rows([["Happened", day(i.happened)], ["Protected leave", i.protected], ["Points", pointsText], ["Default points", pts(i.default_points)],
+      rows([["Happened", day(i.happened)], ["Protected leave", i.protected], ["Points", pointsText],
+        ["If approved now", i.points_if_approved != null && i.points_if_approved !== i.final_points ? pts(i.points_if_approved) : null], ["Default points", pts(i.default_points)],
         ["Manager's points", i.manager_points != null ? pts(i.manager_points) : null], ["Why", i.manager_reason], ["HR's points", i.hr_points != null ? pts(i.hr_points) : null],
         ["HR's reason", i.hr_reason], ["Recorded by", i.recorded_by_name], ["Approved", i.approved_on ? `${day(i.approved_on)} by ${i.decided_by_name}` : null],
         ["Step", i.step ? `${i.step}${i.step_reason ? ` (${i.step_reason})` : ""}` : null], ["Void reason", i.void_reason]]),

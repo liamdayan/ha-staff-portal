@@ -66,9 +66,9 @@ CREATE TABLE IF NOT EXISTS probations (
     person_id TEXT NOT NULL,             -- Connecteam user ID
     kind TEXT NOT NULL,                  -- introductory or disciplinary
     policy_key TEXT NOT NULL,            -- the probation policy whose rules apply
-    starts TEXT NOT NULL,                -- YYYY-MM-DD
+    starts TEXT NOT NULL,                -- YYYY-MM-DD: its first day
     first_ends TEXT NOT NULL,            -- the end it started with
-    ends TEXT NOT NULL,                  -- the end now, after extensions
+    ends TEXT NOT NULL,                  -- its last day now, after extensions
     status TEXT NOT NULL DEFAULT 'open', -- open, passed, ended (employment ending), waived
     extensions INTEGER NOT NULL DEFAULT 0,   -- extensions used (a leave doesn't count)
     reason TEXT,                         -- sealed: why HR placed them on it (HR only)
@@ -292,7 +292,7 @@ def current(db, person_id, on: date) -> dict | None:
 
 def end_review_due(db, on: date) -> list[dict]:
     """Open probations whose end-of-probation review is due by that day (or overdue):
-    [{person_id, probation_id, end, due}], dates as YYYY-MM-DD."""
+    [{person_id, probation_id, kind, start, end, due}], dates as YYYY-MM-DD."""
     day = as_date(on) or today_of(db)
     found = []
     for row in db.conn.execute("SELECT * FROM probations WHERE status = 'open' ORDER BY ends"):
@@ -300,7 +300,8 @@ def end_review_due(db, on: date) -> list[dict]:
         due = date.fromisoformat(row["ends"]) - timedelta(days=_int(pol["review_lead_days"], 14))
         if due <= day:
             found.append({"person_id": row["person_id"], "probation_id": row["id"],
-                          "end": row["ends"], "due": due.isoformat()})
+                          "kind": row["kind"], "start": row["starts"], "end": row["ends"],
+                          "due": due.isoformat()})
     return found
 
 
@@ -327,7 +328,7 @@ def ensure_introductory(db, person: dict, today: date | None = None) -> dict | N
     if person.get("archived") or start is None or start > today + timedelta(days=366):
         return None
     pol = policy_for(db, INTRODUCTORY, groups=access.groups_of(person))
-    ends = start + timedelta(days=days_for(pol, person))
+    ends = start + timedelta(days=days_for(pol, person) - 1)    # its last day: 90 days in all
     mine = [r for r in of_person(db, person["id"]) if r["kind"] == INTRODUCTORY]
     if any(r["starts"] == start.isoformat() for r in mine):
         return next(r for r in mine if r["starts"] == start.isoformat())
@@ -420,13 +421,19 @@ def change_end(db, row: dict, new_end: date, reason: str, actor_id, actor: str, 
                              "except for a leave of absence.")
         if (new_end - old).days > _int(ext.get("days"), 30):
             raise ValueError(f"An extension is at most {_int(ext.get('days'), 30)} days.")
-        if (new_end - starts).days > _int(ext.get("max_days"), 120):
+        if (new_end - starts).days + 1 > _int(ext.get("max_days"), 120):     # both days count
             raise ValueError(f"It can't run longer than {_int(ext.get('max_days'), 120)} days in all.")
     if not longer and new_end < today:
         raise ValueError("Choose today or a later day. To end it now, decide it instead.")
+    # Extending is HR's answer to any recommendation waiting: it leaves HR's queue (the
+    # recommendation stays in the probation's history).
     db.conn.execute("UPDATE probations SET ends = ?, extensions = extensions + ?, "
                     "acknowledged_at = NULL WHERE id = ?",
                     (new_end.isoformat(), 1 if longer and not leave else 0, row["id"]))
+    if longer:
+        db.conn.execute("UPDATE probations SET recommendation = NULL, recommend_to = NULL, "
+                        "recommend_review = NULL, recommend_note = NULL, recommended_by = NULL, "
+                        "recommended_at = NULL WHERE id = ?", (row["id"],))
     what = ("Extended for a leave of absence" if leave else "Extended") if longer else "Shortened"
     _event(db, row, what, actor_id, actor, old=row["ends"], new=new_end.isoformat(), note=reason)
     db.conn.commit()
@@ -568,7 +575,8 @@ def daily(db, today: date) -> dict:
         staff = team_managers(db, person) + hr_admins(db, exclude=(person["id"],))
         link = f"#/people/{person['id']}"
         if today > ends:
-            if pol.get("when_end_passes") == "pass":
+            # Passing by itself never overrules a recommendation HR hasn't confirmed (7.8).
+            if pol.get("when_end_passes") == "pass" and row["recommendation"] in (None, "pass"):
                 decide(db, row["id"], "pass", actor_id="policy", actor="HR portal",
                        reason="The end date passed with no decision; the policy passes it.",
                        today=today)
