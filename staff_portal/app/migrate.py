@@ -8,7 +8,10 @@ carries, so nothing has to be set up or typed again on the new install:
   computer stays signed in, and the setup codes of phones still waiting to be set up;
 - the Connecteam and TT Hotel secrets, TT Hotel's sign-in and both request counts, whether
   remote lock-out was tested, and the Door activity address's secret;
-- the whole door list, and Home Assistant user links.
+- the whole door list, and Home Assistant user links;
+- the HR portal (hr/): its settings, its database (private fields already encrypted with its
+  key), and its key. When "Keep the HR key out of backups" is on, only the key locked with the
+  HR recovery key travels, so the new install asks for the recovery key before HR opens.
 
 All of it is encrypted with AES-256-GCM under a key made (scrypt) from a one-time code: 20
 characters from a 32-character alphabet (100 bits), made with `secrets`, shown to the admin once
@@ -59,6 +62,8 @@ SALT_BYTES, NONCE_BYTES = 16, 12
 SECRET_SETTINGS = (*PRIVATE_SETTINGS, "wb_remote_lockout_tested")
 TYPED_SECRETS = ("connecteam_client_secret", "tthotel_client_secret", "tthotel_password_md5")
 MAX_SAVED_OBJECT = 16 * 1024   # TT Hotel's sign-in or a request count, as JSON
+MAX_HR_TEXT = 90 * 1024 * 1024  # the HR database as base64 text
+HR_HOST_RE = re.compile(r"^[a-z0-9.-]{0,253}$")
 TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SETUP_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 REFRESH_TOKEN_RE = re.compile(r"^[\x21-\x7e]{1,2000}$")
@@ -294,6 +299,7 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
     callback = raw.get("tthotel_callback_token")
     if isinstance(callback, str) and doorlog.TOKEN_RE.match(callback):
         secret_values["tthotel_callback_token"] = callback
+    secret_values.update(_hr_settings(raw))
 
     # The door list, every column (a backup only has names and hiding, for doors already here).
     doors, lock_ids = None, set()
@@ -349,5 +355,36 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
 
     snap["migrate"] = {
         "device_tokens": [t for t in tokens if t[1] in devices],
-        "secrets": secret_values, "doors": doors, "links": links, "setup_codes": setup_codes}
+        "secrets": secret_values, "doors": doors, "links": links, "setup_codes": setup_codes,
+        "hr": _hr_part(extra.get("hr"))}
     return snap
+
+
+def _hr_settings(raw: dict) -> dict:
+    """The HR portal's settings in a migration file, checked (anything odd is left out)."""
+    found = {}
+    for key in ("hr_enabled", "hr_connecteam_chat"):
+        if raw.get(key) in ("0", "1"):
+            found[key] = raw[key]
+    host = raw.get("hr_host")
+    if isinstance(host, str) and HR_HOST_RE.match(host):
+        found["hr_host"] = host
+    for key in ("hr_connecteam_client_id", "hr_connecteam_client_secret"):
+        value = raw.get(key)
+        if isinstance(value, str) and len(value) <= 500 and re.fullmatch(r"[\x21-\x7e]*", value):
+            found[key] = value
+    if "hr_connecteam_usage" in raw:
+        found["hr_connecteam_usage"] = _saved_object(raw.get("hr_connecteam_usage"))
+    return found
+
+
+def _hr_part(hr) -> dict | None:
+    """The HR database and key a migration file carries (service.take_migration checks the
+    database itself), or None when the old install never turned HR on."""
+    if hr is None:
+        return None
+    if (not isinstance(hr, dict) or not isinstance(hr.get("db"), str)
+            or len(hr["db"]) > MAX_HR_TEXT
+            or not (isinstance(hr.get("key"), str) or isinstance(hr.get("recovery"), str))):
+        raise ValueError(DAMAGED)
+    return {k: hr[k] for k in ("db", "key", "recovery") if isinstance(hr.get(k), str)}

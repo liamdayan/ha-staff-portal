@@ -429,6 +429,15 @@ DEFAULT_SETTINGS = {
     # Home Assistant notification (it's always in the activity log).
     "tthotel_callback_token": "",
     "wb_lost_card_alert": "1",
+    # The HR portal (hr/): off until the owner turns it on, the address it answers on, and the
+    # optional HR Connecteam connection (a second Connecteam app, for chat messages and
+    # documents) with its request count. All private: never in Staff Access's own backups.
+    "hr_enabled": "0",
+    "hr_host": "",
+    "hr_connecteam_client_id": "",
+    "hr_connecteam_client_secret": "",
+    "hr_connecteam_chat": "0",
+    "hr_connecteam_usage": "{}",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -436,7 +445,8 @@ DEFAULT_SETTINGS = {
 # (migrate.py), to another install of the add-on.
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
-                    "tthotel_callback_token")
+                    "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_client_id",
+                    "hr_connecteam_client_secret", "hr_connecteam_chat", "hr_connecteam_usage")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180

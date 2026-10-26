@@ -31,6 +31,13 @@ as it can:
 
 If Connecteam can't be asked, the last answer is kept until STALE_MARGIN after the next check
 was due, after which clocked-in-only people can't sign in or use controls until it answers.
+
+The HR portal (hr/) asks through its own smaller lane inside these caps (hr_spend): at most
+HR_MINUTE_CAP a minute and HR_DAILY_CAP a day, and nothing once Staff Access has used
+HR_STOP_SHARE of its daily share, so clock checks always have room. Its people come from the
+same cached user list (users(), which also carries mobile numbers, emails and profile fields).
+A refusal of an HR request raises HRRefused and never stops Staff Access's own requests: the
+clock checks that let clocked-in-only staff use controls keep running.
 """
 
 import asyncio
@@ -65,6 +72,11 @@ FORCED_SHARE = 0.75          # on-demand checks stop at this share of the daily 
                              # rest for the scheduled ones
 MAX_RETRY_AFTER = 24 * 3600  # never wait longer than this when Connecteam asks us to slow down
 MAX_SHIFT_HOURS = 24         # an open shift older than this doesn't count (a forgotten clock-out)
+HR_MINUTE_CAP = 6            # the HR portal's lane: requests a minute...
+HR_DAILY_CAP = 500           # ...and a day...
+HR_STOP_SHARE = 0.5          # ...and none once Staff Access has used this share of its daily cap
+FIELDS_TTL = 24 * 3600       # how long the list of profile fields (custom fields) is reused
+MAX_FIELDS = 100             # profile fields kept for one user (in memory only, never stored)
 
 
 class ConnecteamError(Exception):
@@ -75,12 +87,29 @@ class Halt(ConnecteamError):
     """Credentials or scopes rejected: don't retry on our own."""
 
 
+class HRRefused(ConnecteamError):
+    """Connecteam refused an HR portal request (a missing permission or plan feature). Only the HR
+    side stops what it was doing; Staff Access's own requests carry on."""
+
+
+class HRBusy(ConnecteamError):
+    """The HR portal's lane is used up for now (this minute, today, or Staff Access needs the rest)."""
+
+
 class Connecteam:
-    def __init__(self, get_settings, wanted, usage_store, user_agent: str):
+    def __init__(self, get_settings, wanted, usage_store, user_agent: str, hr_usage_store=None):
         # get_settings() -> (enabled, client_id, client_secret, region, poll_minutes)
         self._get_settings = get_settings
         self._wanted = wanted                  # () -> whether anyone needs the clock checked
         self._load_usage, self._save_usage = usage_store
+        # The HR portal's own count for today (kept in memory if no store is given).
+        held = {}
+        self._load_hr_usage, self._save_hr_usage = hr_usage_store or (
+            lambda: held.get("u", {}), lambda u: held.update(u=u))
+        self._hr_recent = collections.deque()   # times of HR requests in the last minute
+        self._hr_tokens: dict[tuple, tuple[str, float]] = {}   # the HR connection's tokens
+        self._hr_token_tries: dict[tuple, float] = {}
+        self._fields: tuple[list[dict], float] | None = None
         self._user_agent = user_agent
         self.session: aiohttp.ClientSession | None = None
         self._token: tuple[str, float] | None = None
@@ -150,6 +179,37 @@ class Connecteam:
         u["count"] += 1
         self._save_usage(u)
 
+    def hr_usage(self) -> dict:
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        u = self._load_hr_usage()
+        return u if isinstance(u, dict) and u.get("day") == today and isinstance(
+            u.get("count"), int) else {"day": today, "count": 0}
+
+    def hr_spend(self) -> None:
+        """Count an HR portal request against its own lane and then Staff Access's caps (so it
+        counts there too), or refuse it with HRBusy. Pauses for Connecteam's limits hold for HR
+        as well, and a halt (Staff Access's keys refused) stops HR too: it uses the same keys."""
+        now = time.time()
+        if self.halted:
+            raise ConnecteamError(self.halted)
+        if now < self.paused_until:
+            raise HRBusy(self.pause_reason or "Waiting before asking Connecteam again.")
+        while self._hr_recent and now - self._hr_recent[0] > 60:
+            self._hr_recent.popleft()
+        if len(self._hr_recent) >= HR_MINUTE_CAP:
+            raise HRBusy("The HR portal has made enough Connecteam requests for this minute.")
+        u = self.hr_usage()
+        if u["count"] >= HR_DAILY_CAP:
+            raise HRBusy(f"The HR portal used its {HR_DAILY_CAP} Connecteam requests for today. "
+                         "It continues after midnight UTC.")
+        if self.usage()["count"] >= self.daily_cap() * HR_STOP_SHARE:
+            raise HRBusy("Staff Access has used half of its Connecteam requests for today, so the "
+                         "HR portal waits until after midnight UTC. Clock checks keep the rest.")
+        self._spend()
+        self._hr_recent.append(now)
+        u["count"] += 1
+        self._save_hr_usage(u)
+
     def _pause(self, until: float, reason: str) -> None:
         if until > self.paused_until:
             self.paused_until = until
@@ -210,20 +270,21 @@ class Connecteam:
             raise ConnecteamError("Enter the Connecteam Client ID and Client Secret in Settings.")
         return client_id, secret, region
 
-    async def _access_token(self) -> str:
+    async def _access_token(self, hr: bool = False) -> str:
         # One at a time: a time clock check and the staff sync starting together must share one
         # new token, not have the second turned away by the minute's wait between token requests.
+        # hr: the HR portal needs it, so a new one is counted in its lane.
         async with self._token_lock:
-            return await self._new_access_token()
+            return await self._new_access_token(hr)
 
-    async def _new_access_token(self) -> str:
+    async def _new_access_token(self, hr: bool = False) -> str:
         creds = self._credentials()
         if self._token and self._token_for == creds and self._token[1] > time.time():
             return self._token[0]
         if time.time() - self._last_token_try < 60:
             raise ConnecteamError("Waiting a minute before asking Connecteam for a new access token.")
         self._last_token_try = time.time()
-        self._spend()
+        self.hr_spend() if hr else self._spend()
         try:
             async with self.session.post(
                 f"{self._api()}/oauth/v1/token", data={"grant_type": "client_credentials"},
@@ -234,8 +295,9 @@ class Connecteam:
                     raise self._too_many(resp)
                 body = await resp.json(content_type=None)
                 if resp.status in (400, 401, 403):
-                    raise Halt("Connecteam didn't accept the Client ID and Secret "
-                               f"(HTTP {resp.status}). Check them in Settings.")
+                    raise (HRRefused if hr else Halt)(
+                        "Connecteam didn't accept the Client ID and Secret "
+                        f"(HTTP {resp.status}). Check them in Settings.")
                 if resp.status >= 400 or not isinstance(body, dict) or not body.get("access_token"):
                     raise ConnecteamError(f"Connecteam couldn't issue an access token (HTTP {resp.status}).")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
@@ -246,10 +308,11 @@ class Connecteam:
         self._token_for = creds
         return self._token[0]
 
-    async def _get(self, path: str, params: dict | None = None) -> dict:
+    async def _get(self, path: str, params: dict | None = None, hr: bool = False) -> dict:
+        """hr: an HR portal request (its lane; a refusal raises HRRefused, never Halt)."""
         for attempt in (1, 2):
-            token = await self._access_token()
-            self._spend()
+            token = await self._access_token(hr)
+            self.hr_spend() if hr else self._spend()
             try:
                 async with self.session.get(f"{self._api()}{path}", params=params,
                                             headers={"Authorization": f"Bearer {token}",
@@ -261,6 +324,9 @@ class Connecteam:
                         self._token = None   # expired or revoked: get a new one and retry once
                         self._last_token_try = 0.0
                         continue
+                    if resp.status in (401, 403) and hr:
+                        raise HRRefused(f"Connecteam refused {path} for the HR portal (HTTP "
+                                        f"{resp.status}). Check the app's permissions and your plan.")
                     if resp.status in (401, 403):
                         raise Halt(f"Connecteam refused {path} (HTTP {resp.status}). Check that the "
                                    "OAuth app has the users.read and time_clock.read scopes, and that "
@@ -274,7 +340,7 @@ class Connecteam:
                 raise ConnecteamError("Connecteam sent an unexpected reply.")
             data = body.get("data", body)
             return data if isinstance(data, dict) else {"items": data}
-        raise Halt("Connecteam didn't accept the access token.")
+        raise (HRRefused if hr else Halt)("Connecteam didn't accept the access token.")
 
     async def _call(self, coro_fn, *args):
         """An admin-initiated request: same caps, and a halt is recorded."""
@@ -295,21 +361,34 @@ class Connecteam:
             log.warning("Connecteam: %s Automatic checks stopped.", reason)
         self.halted = reason
 
-    async def users(self, max_age: float = USERS_TTL) -> list[dict]:
-        """Active Connecteam users as [{"id", "name", "kiosk_code", "groups"}], sorted by name.
-        kiosk_code is None unless it's usable as a PIN (4 to 8 digits); groups are the IDs (as
-        text) of the smart groups they're in."""
+    async def users(self, max_age: float = USERS_TTL, hr: bool = False) -> list[dict]:
+        """Active Connecteam users as [{"id", "name", "kiosk_code", "groups", "mobile", "email",
+        "created_at", "fields"}], sorted by name. kiosk_code is None unless it's usable as a PIN
+        (4 to 8 digits); groups are the IDs (as text) of the smart groups they're in; fields are
+        their profile fields {field ID: value} (kept in memory only). hr: the HR portal is asking
+        (its lane, and a refusal never stops Staff Access's own requests)."""
         if self._users and time.time() - self._users[1] < max_age:
             return self._users[0]
+        if hr:
+            return await self._fetch_users(hr=True)
         return await self._call(self._fetch_users)
 
-    async def _fetch_users(self) -> list[dict]:
+    async def archived_users(self) -> list[dict]:
+        """Archived Connecteam users (as users() lists them), for the HR portal's daily check.
+        Through the HR lane, never cached."""
+        return await self._fetch_users(hr=True, archived=True)
+
+    async def _fetch_users(self, hr: bool = False, archived: bool = False) -> list[dict]:
         found, offset = [], 0
         while True:
-            data = await self._get("/users/v1/users", {"limit": 500, "offset": offset})
+            params = {"limit": 500, "offset": offset}
+            if archived:
+                params["userStatus"] = "archived"
+            data = await self._get("/users/v1/users", params, hr=hr)
             page = _first_list(data, "users")
             for u in page:
-                if not isinstance(u, dict) or u.get("userId") is None or u.get("isArchived"):
+                if (not isinstance(u, dict) or u.get("userId") is None
+                        or bool(u.get("isArchived")) != archived):
                     continue
                 name = " ".join(str(u.get(k) or "").strip() for k in ("firstName", "lastName")).strip()
                 code = str(u.get("kioskCode") or "").strip()
@@ -318,13 +397,104 @@ class Connecteam:
                               "kiosk_code": code if code.isdigit() and 4 <= len(code) <= 8 else None,
                               "groups": [str(g) for g in groups[:MAX_GROUPS]
                                          if isinstance(g, int) and not isinstance(g, bool)]
-                              if isinstance(groups, list) else []})
+                              if isinstance(groups, list) else [],
+                              "mobile": _short_text(u.get("phoneNumber"), 40),
+                              "email": _short_text(u.get("email"), 200),
+                              "created_at": _timestamp(u.get("createdAt")),
+                              "fields": _profile_fields(u.get("customFields"))})
             if len(page) < 500 or offset >= 500 * (MAX_USER_PAGES - 1):
                 break
             offset += 500
         found.sort(key=lambda u: u["name"].lower())
-        self._users = (found, time.time())
+        if not archived:
+            self._users = (found, time.time())
         return found
+
+    async def profile_fields(self, max_age: float = FIELDS_TTL) -> list[dict]:
+        """Connecteam's profile fields (custom fields) as [{"id", "name", "type"}], for the HR
+        portal: which one holds the start date, and the direct manager. Through the HR lane,
+        reused for a day."""
+        if self._fields and time.time() - self._fields[1] < max_age:
+            return self._fields[0]
+        data = await self._get("/users/v1/custom-fields", hr=True)
+        found = []
+        for f in _first_list(data, "customFields")[:MAX_FIELDS * 5]:
+            fid = f.get("id", f.get("customFieldId")) if isinstance(f, dict) else None
+            if isinstance(fid, bool) or not isinstance(fid, (int, str)) or not str(fid).strip():
+                continue
+            found.append({"id": str(fid)[:40], "name": _short_text(f.get("name"), 80) or f"Field {fid}",
+                          "type": _short_text(f.get("type"), 40) or ""})
+        self._fields = (found, time.time())
+        return found
+
+    async def hr_request(self, method: str, path: str, *, params: dict | None = None,
+                         json: dict | list | None = None,
+                         credentials: tuple[str, str] | None = None) -> dict:
+        """One request for the HR portal, through its lane. credentials: the HR connection's own
+        Client ID and Secret (a second Connecteam app, for chat and documents); None uses Staff
+        Access's. Returns the reply's data. A refusal raises HRRefused (with Connecteam's own
+        message when it gives one), a used-up lane HRBusy; neither ever stops Staff Access's own
+        requests."""
+        if credentials is None:
+            token = await self._access_token(hr=True)
+        else:
+            token = await self._hr_token(credentials)
+        self.hr_spend()
+        try:
+            async with self.session.request(method, f"{self._api()}{path}", params=params, json=json,
+                                            headers={"Authorization": f"Bearer {token}",
+                                                     "Accept": "application/json"}) as resp:
+                self._read_limits(resp)
+                if resp.status == 429:
+                    raise self._too_many(resp)
+                body = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+            raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
+        message = _reply_message(body)
+        if resp.status in (401, 403):
+            if credentials is not None and resp.status == 401:
+                self._hr_tokens.pop(tuple(credentials), None)
+            raise HRRefused(f"Connecteam refused this for the HR portal (HTTP {resp.status})"
+                            + (f": {message}" if message else ". Check the app's permissions and your plan."))
+        if resp.status >= 400:
+            raise ConnecteamError(f"Connecteam couldn't do this for the HR portal (HTTP {resp.status})"
+                                  + (f": {message}" if message else "."))
+        if not isinstance(body, dict):
+            raise ConnecteamError("Connecteam sent an unexpected reply.")
+        data = body.get("data", body)
+        return data if isinstance(data, dict) else {"items": data}
+
+    async def _hr_token(self, credentials: tuple[str, str]) -> str:
+        """An access token for the HR connection's own app (one at a time, like Staff Access's)."""
+        key = tuple(credentials)
+        async with self._token_lock:
+            held = self._hr_tokens.get(key)
+            if held and held[1] > time.time():
+                return held[0]
+            if time.time() - self._hr_token_tries.get(key, 0.0) < 60:
+                raise ConnecteamError("Waiting a minute before asking Connecteam for a new access token.")
+            self._hr_token_tries[key] = time.time()
+            self.hr_spend()
+            try:
+                async with self.session.post(
+                    f"{self._api()}/oauth/v1/token", data={"grant_type": "client_credentials"},
+                    headers={"Authorization": aiohttp.encode_basic_auth(key[0], key[1])},
+                ) as resp:
+                    self._read_limits(resp)
+                    if resp.status == 429:
+                        raise self._too_many(resp)
+                    body = await resp.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+                raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
+            if resp.status in (400, 401, 403):
+                raise HRRefused("Connecteam didn't accept the HR connection's Client ID and Secret "
+                                f"(HTTP {resp.status}). Check them in Settings.")
+            if resp.status >= 400 or not isinstance(body, dict) or not body.get("access_token"):
+                raise ConnecteamError(f"Connecteam couldn't issue an access token (HTTP {resp.status}).")
+            ttl = body.get("expires_in") if isinstance(body.get("expires_in"), (int, float)) else 86400
+            ttl = min(max(ttl, 360), 86400) if ttl == ttl else 86400
+            self._hr_tokens[key] = (str(body["access_token"]), time.time() + ttl - 300)
+            return self._hr_tokens[key][0]
 
     async def smart_groups(self, max_age: float = SMART_GROUPS_TTL) -> list[dict]:
         """Connecteam's smart groups as [{"id", "name", "users"}], sorted by name (cached)."""
@@ -448,6 +618,9 @@ class Connecteam:
         self._clocks = None
         self._users = None
         self._groups = None
+        self._fields = None
+        self._hr_tokens.clear()
+        self._hr_token_tries.clear()
         self.clocked_in = set()
         self.checked_at = None
         self.last_error = None
@@ -498,6 +671,61 @@ def _first_list(data: dict, preferred: str) -> list:
         if isinstance(value, list):
             return value
     return []
+
+
+def _short_text(value, limit: int) -> str | None:
+    """A plain one-line text value from a reply (None when there's none)."""
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    text = " ".join(str(value).split())[:limit]
+    return text or None
+
+
+def _timestamp(value) -> float | None:
+    """A time in a reply (seconds or milliseconds since 1970), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+        return None
+    value = value / 1000 if value > 1e11 else value
+    return float(value) if 0 < value < 1e11 else None
+
+
+def _profile_fields(raw) -> dict[str, object]:
+    """A user's profile fields as {field ID: value}: text, numbers and short lists of them (a
+    direct manager can be a list of users), at most MAX_FIELDS. Kept in memory only."""
+    found: dict[str, object] = {}
+    for f in raw[:MAX_FIELDS * 5] if isinstance(raw, list) else []:
+        fid = f.get("customFieldId", f.get("id")) if isinstance(f, dict) else None
+        if isinstance(fid, bool) or not isinstance(fid, (int, str)) or len(found) >= MAX_FIELDS:
+            continue
+        value = f.get("value")
+        if isinstance(value, list):
+            value = [v if isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                     else v.get("userId", v.get("id", v.get("value"))) if isinstance(v, dict) else None
+                     for v in value[:20]]
+            value = [str(v)[:200] for v in value if v is not None and not isinstance(v, bool)]
+        elif isinstance(value, dict):
+            value = value.get("userId", value.get("id", value.get("value")))
+            value = None if isinstance(value, (bool, dict, list)) else value
+        elif isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            value = None
+        if isinstance(value, str):
+            value = value[:200]
+        if value not in (None, "", []):
+            found[str(fid)[:40]] = value
+    return found
+
+
+def _reply_message(body) -> str | None:
+    """Connecteam's own explanation in an error reply, if it gave one."""
+    if not isinstance(body, dict):
+        return None
+    for key in ("detail", "message", "error"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            value = value.get("message")
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:200]
+    return None
 
 
 def _is_open(shift: dict, now: float) -> bool:
