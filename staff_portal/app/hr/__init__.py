@@ -27,6 +27,7 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   certificates.py  certificate types, cards and their dates, statuses, boards, reminders
   probation.py  introductory and disciplinary probation: dates, extensions, the decision
   discipline.py incidents, write-ups, signatures, appeals, voids, adjustments, step tasks
+  reviews.py  performance reviews: forms, schedules, the review flow, final PDFs
 
 Nothing here imports main.py: main.py hands the service what it needs.
 """

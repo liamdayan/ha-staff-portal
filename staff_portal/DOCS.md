@@ -2098,6 +2098,94 @@ portal." Tell staff to add their cards in the HR portal.
 
 A migration file can't be made while cards are waiting for HR (their photos are only on this
 computer): check them first.
+### Performance reviews
+
+Managers write reviews in the HR portal, on a phone or a computer, under **Reviews**. Every rule
+below is an HR setting (**HR settings → Reviews**); the defaults are the ones recommended in the
+design.
+
+**Kinds of review**
+
+- **End of introductory period**, from each person's introductory period (probation). It opens
+  when that review is due, and if the end date moves (an extension), the review moves with it.
+- **Annual**, on each person's work anniversary (or, if you prefer, in one month for everyone:
+  it opens on the 1st and is due at the end of the month; people who started in the last six
+  months wait until next year).
+- **30- and 60-day check-ins**: off unless you turn them on.
+- **Extra reviews**: a manager, director or HR can start one from a person's page (**Start a
+  review**).
+
+Scheduled reviews appear 14 days before they're due (the nightly run opens them; one missed for
+up to a week still opens). When another review for the same person is due within 3 weeks, the
+less important one is skipped: an end-of-introductory-period review wins over a check-in, and a
+check-in nobody has started is cancelled to make way for it.
+
+**Forms.** HR builds them under **Reviews → Review forms**. The starter form rates Guest service;
+Teamwork; Reliability and attendance; Job knowledge and quality; Cleanliness and safety;
+Communication; and Follows policy (including alcohol and food safety) on a 1-to-5 scale, then
+asks for goals, an overall rating and a recommendation. HR can change the scale (2 to 10 points,
+named), which low ratings need a comment, the sections (rated, comment only, or goals), the
+recommendations, and add extra sections for a department. Saving a form makes a new version:
+reviews already open keep the version they started with. Choose which form each kind of review
+uses in HR settings.
+
+**Who writes it.** The primary manager of the person's main department. Their main department is
+the first of theirs with a primary manager, unless HR picks one on their page. HR writes it when
+there's no such manager, when that manager is the person themselves, or when the manager can't
+see them (a manager's own review, say). HR can hand any review to another manager, a director,
+or HR. If someone moves department in Connecteam, their review goes to the new department's
+manager at once (unless HR handed it to someone). Nobody reviews themselves.
+
+**Everyone else who sees the person** (a second department's manager, a director, HR) can read
+it and add comments, choosing who may see each one. Everyone working on a review can keep a
+**private note**: only they and HR admins see it, and it's never part of the review.
+
+**The steps**
+
+1. **Self-review** (annual reviews only, by default): the employee rates themselves and adds
+   anything they'd like. The writer can carry on without it if it doesn't come.
+2. **The writer fills in the form.** Tap a number to rate; everything saves as you go. A
+   read-only **Background** panel shows the points and write-ups in the period, certificate
+   status, and the goals from the last review. Anything not set up yet says "Not available".
+   The overall rating is worked out from the ratings (their average); the writer can choose
+   another, with a reason. **Finish** lists anything still missing.
+3. **HR's approval** (end-of-introductory-period reviews only, by default). HR approves it or
+   sends it back with a note. Nobody approves a review they wrote.
+4. **Share**: the writer goes through it with the employee and shares it, with the meeting date.
+5. **The employee reads it**, can comment, and **acknowledges** it. The page says plainly that
+   acknowledging means they received it, not that they agree. They can also refuse. For someone
+   who can't use the HR portal, the writer can record that they acknowledged on paper, refused
+   in the meeting, or didn't answer.
+6. **Closed.** The final PDF goes to the person's **Reviews** folder in Google Drive. Until Google
+   Drive is connected it waits, and HR sees a to-do if it keeps failing.
+
+An end-of-introductory-period review recommends **pass**, **extend** (with a new end date) or
+**end employment**. Once it's final (approved), the recommendation goes to the person's
+introductory period, where HR confirms the outcome. The employee doesn't see that
+recommendation, in the portal or in the PDF.
+
+**What the employee sees:** nothing until it's shared (except their self-review), then the
+ratings, comments, goals and overall rating, and only the comments marked for them. Never the
+private notes, comments for managers or HR, or the Background panel. A shared review is never
+changed afterwards.
+
+**Reminders**
+
+| When | Who |
+|---|---|
+| A review opens | The writer |
+| 7 days before it's due, on the day, then every 7 days late | The writer |
+| 14 days late | Every HR admin |
+| A self-review is asked for, 7 days before it's due, and on the day | The employee |
+| Waiting for approval | HR admins (again every 7 days once it's late) |
+| Shared | The employee, then every 7 days without an answer (the writer is told once) |
+| Acknowledged or closed | The writer and HR |
+
+**Review settings** (HR settings → Reviews): which kinds of review, annual on anniversaries or in
+one month, self-reviews (annual only, every review, or none), HR's approval (end of introductory
+period only, every review, or none), how many days before the due date reviews open (14), the
+gap that skips a review (21 days), the reminder timing above, and which form each kind uses.
+Reviews aren't linked to pay, and Connecteam's own "Performance" feature isn't used.
 
 ### HR settings
 

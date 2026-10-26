@@ -1,0 +1,56 @@
+/* HR portal: reviews (loaded by hr-reviews.js). It uses hr.css's colours, so light and dark mode
+   follow, and stays inside a 390 px phone without sideways scrolling. */
+.rv-section { border-top: 1px solid var(--line); padding: 14px 0 4px; }
+.card > h2 + .muted + .rv-section, .card > h2 + .rv-section { border-top: none; padding-top: 4px; }
+.rv-section h3 { margin-top: 0; }
+.rv-text { white-space: pre-wrap; }
+.rv-rating { font-weight: 600; }
+
+/* Tap to rate: big buttons that wrap on a narrow phone. */
+.rv-rates { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 2px; }
+.rv-rates .rv-rate { flex: 1 1 44px; max-width: 72px; min-width: 44px; padding: 8px 0; font-size: 1.05rem; }
+.rv-rate[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.rv-word { display: block; min-height: 1.4em; margin-bottom: 8px; color: var(--muted); font-size: 0.875rem; }
+
+.rv-box { min-height: 80px; resize: vertical; }
+.rv-goals { display: grid; gap: 6px; margin-bottom: 8px; }
+.rv-goal { display: flex; align-items: center; gap: 8px; }
+.rv-goal input { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+.rv-goal button { flex: none; }
+
+/* Whether everything is saved, kept in view at the bottom while filling in a form. */
+.rv-savebar { position: sticky; bottom: 0; z-index: 3; margin: -6px 0 14px; padding: 8px 12px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom)); border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line); }
+.rv-status { margin: 0; color: var(--muted); }
+.rv-status.bad { color: var(--danger); font-weight: 500; }
+.rv-problems { margin: 0 0 8px; padding-left: 20px; color: var(--warn); }
+
+.rv-side summary { cursor: pointer; list-style: none; }
+.rv-side summary::-webkit-details-marker { display: none; }
+.rv-side summary h2 { display: inline; }
+.rv-side summary::after { content: " ▾"; color: var(--muted); }
+.rv-side details[open] summary::after { content: " ▴"; }
+.rv-side h4 { font-size: 0.95rem; margin: 10px 0 4px; }
+.rv-side ul, .rv-section ul, .rv-closed ul { margin: 0 0 8px; padding-left: 20px; }
+
+.rv-note { border-top: 1px solid var(--line); padding: 8px 0; }
+.rv-note:first-child { border-top: none; }
+.rv-note .badge { margin-left: 6px; }
+.rv-choices { border: none; margin: 0 0 8px; padding: 0; min-width: 0; }
+.rv-choices legend { font-weight: 500; margin-bottom: 6px; padding: 0; }
+
+/* The forms editor. */
+.rv-edit { display: grid; gap: 10px; margin-bottom: 10px; }
+.rv-edit-row { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; }
+.rv-edit-row input, .rv-edit-row select { margin-top: 0; }
+.rv-edit-row .actions { margin-top: 2px; }
+.rv-edit-row .actions button { flex: 1 1 0; min-width: 0; padding: 8px; }
+.rv-dept { border-top: 1px solid var(--line); padding: 8px 0; }
+.rv-dept summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.rv-side summary, .rv-dept summary, .rv-more summary { min-height: 32px; }
+@media (min-width: 560px) {
+  .rv-edit-row { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .rv-edit-row > :nth-child(n + 3) { grid-column: 1 / -1; }
+  .rv-edit-row .actions button { flex: 0 0 auto; padding: 6px 14px; min-height: 36px; }
+}
