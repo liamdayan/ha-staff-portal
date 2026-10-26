@@ -652,7 +652,7 @@
     } },
     h("p", { class: chat.on && chat.ready ? "muted small" : "warn" }, chat.on && chat.ready
       ? "Connecteam chat messages are on. They never say what it's about, only that something is waiting here."
-      : chat.on ? "Connecteam chat is on in Home Assistant, but the part that sends messages isn't ready. Only the portal inbox is used."
+      : chat.on ? `Connecteam chat is on in Home Assistant, but Connecteam refused it, so only the portal inbox is used and messages wait. ${chat.why || ""} The owner can fix it there (Settings, Connections, Connecteam for HR) and press Test.`
         : "Only the portal inbox is used. The owner can turn on Connecteam chat messages in Home Assistant (Settings, Connections, Connecteam for HR)."),
     chat.last_error ? h("p", { class: "warn" }, `Last problem sending a message: ${chat.last_error}`) : null,
     h("p", { class: "muted small" }, "Employees' messages wait until quiet hours end."),

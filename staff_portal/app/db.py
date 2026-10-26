@@ -429,14 +429,26 @@ DEFAULT_SETTINGS = {
     # Home Assistant notification (it's always in the activity log).
     "tthotel_callback_token": "",
     "wb_lost_card_alert": "1",
-    # The HR portal (hr/): off until the owner turns it on, the address it answers on, and the
-    # optional HR Connecteam connection (a second Connecteam app, for chat messages and
-    # documents) with its request count. All private: never in Staff Access's own backups.
+    # The HR portal (hr/): off until the owner turns it on, and the address it answers on.
     "hr_enabled": "0",
     "hr_host": "",
+    # The optional HR Connecteam connection (hr/ctapi.py): a second Connecteam app ("" uses the
+    # one above), whether Connecteam chat messages are sent, and whether confirmed certificates
+    # are copied to Connecteam (HR & Skills hub on Expert; off until turned on).
     "hr_connecteam_client_id": "",
     "hr_connecteam_client_secret": "",
     "hr_connecteam_chat": "0",
+    "hr_connecteam_documents": "0",
+    # HR portal: Google Drive through the owner's Apps Script (hr/gdrive.py). The Web app URL, the
+    # secret written into the script, the HR shared drive and the restricted one ("": a folder in
+    # the HR drive), and what the last check found (internal).
+    "hr_google_url": "",
+    "hr_google_secret": "",
+    "hr_google_drive": "",
+    "hr_google_restricted_drive": "",
+    "hr_google_status": "{}",
+    # The HR portal's Connecteam requests today, in its own lane (internal: connecteam.hr_spend).
+    # All the hr_ settings are private: never in Staff Access's own backups or /api/state.
     "hr_connecteam_usage": "{}",
 }
 
@@ -446,7 +458,9 @@ DEFAULT_SETTINGS = {
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
                     "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_client_id",
-                    "hr_connecteam_client_secret", "hr_connecteam_chat", "hr_connecteam_usage")
+                    "hr_connecteam_client_secret", "hr_connecteam_chat", "hr_connecteam_documents",
+                    "hr_connecteam_usage", "hr_google_url", "hr_google_secret", "hr_google_drive",
+                    "hr_google_restricted_drive", "hr_google_status")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180

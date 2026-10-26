@@ -1052,7 +1052,7 @@ async def api_settings(request: web.Request):
         "departments": departments_list(svc), "people": people_choices(svc),
         "key": {"kept_out": svc.keyring.kept_out()},
         "chat": {"on": svc.chat_wanted(), "ready": svc.chat_sender() is not None,
-                 "last_error": last_error[0] if last_error else None, "stuck": stuck},
+                 "why": svc.chat_problem(), "last_error": last_error[0] if last_error else None, "stuck": stuck},
         "sections": extra, "me": v.id})
 
 

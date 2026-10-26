@@ -32,12 +32,15 @@ as it can:
 If Connecteam can't be asked, the last answer is kept until STALE_MARGIN after the next check
 was due, after which clocked-in-only people can't sign in or use controls until it answers.
 
-The HR portal (hr/) asks through its own smaller lane inside these caps (hr_spend): at most
-HR_MINUTE_CAP a minute and HR_DAILY_CAP a day, and nothing once Staff Access has used
-HR_STOP_SHARE of its daily share, so clock checks always have room. Its people come from the
-same cached user list (users(), which also carries mobile numbers, emails and profile fields).
-A refusal of an HR request raises HRRefused and never stops Staff Access's own requests: the
-clock checks that let clocked-in-only staff use controls keep running.
+The HR portal (hr/) asks through one smaller lane of its own inside these caps (hr_room and
+hr_spend): at most HR_MINUTE_CAP a minute and HR_DAILY_CAP a day, and nothing once Staff Access
+has used HR_STOP_SHARE of its daily share, so clock checks always have room. Its people come
+from the same cached user list (users(), which also carries mobile numbers, emails and profile
+fields); its chat messages and certificate copies (hr/ctapi.py) count in the same lane. A
+refusal of an HR request raises HRRefused, and a "too many requests" pauses only HR's lane
+(hr_too_many): neither ever stops or pauses Staff Access's own requests, so the clock checks
+that let clocked-in-only staff use controls keep running. Only the account itself running low
+(its rate-limit headers) pauses everyone, as it always has.
 """
 
 import asyncio
@@ -93,7 +96,9 @@ class HRRefused(ConnecteamError):
 
 
 class HRBusy(ConnecteamError):
-    """The HR portal's lane is used up for now (this minute, today, or Staff Access needs the rest)."""
+    """The HR portal's lane is used up for now (this minute, today, or Staff Access needs the
+    rest), or paused: try again later. budget: the outbox waits without counting a try."""
+    budget = True
 
 
 class Connecteam:
@@ -107,8 +112,9 @@ class Connecteam:
         self._load_hr_usage, self._save_hr_usage = hr_usage_store or (
             lambda: held.get("u", {}), lambda u: held.update(u=u))
         self._hr_recent = collections.deque()   # times of HR requests in the last minute
-        self._hr_tokens: dict[tuple, tuple[str, float]] = {}   # the HR connection's tokens
-        self._hr_token_tries: dict[tuple, float] = {}
+        self.hr_paused_until = 0.0              # no HR requests before this (HR's own 429s)
+        self.hr_pause_reason: str | None = None
+        self.hr_failures = 0
         self._fields: tuple[list[dict], float] | None = None
         self._user_agent = user_agent
         self.session: aiohttp.ClientSession | None = None
@@ -185,30 +191,59 @@ class Connecteam:
         return u if isinstance(u, dict) and u.get("day") == today and isinstance(
             u.get("count"), int) else {"day": today, "count": 0}
 
-    def hr_spend(self) -> None:
-        """Count an HR portal request against its own lane and then Staff Access's caps (so it
-        counts there too), or refuse it with HRBusy. Pauses for Connecteam's limits hold for HR
-        as well, and a halt (Staff Access's keys refused) stops HR too: it uses the same keys."""
+    def hr_room(self, n: int = 1) -> None:
+        """Whether n more HR portal requests fit right now, in its lane and in Staff Access's
+        caps; raises HRBusy if not. Spends nothing (a flow of several requests checks first, so
+        it's never left half done). Pauses for Connecteam's limits hold for HR as well."""
         now = time.time()
-        if self.halted:
-            raise ConnecteamError(self.halted)
+        for recent in (self._hr_recent, self._recent):
+            while recent and now - recent[0] > 60:
+                recent.popleft()
+        if now < self.hr_paused_until:
+            raise HRBusy(self.hr_pause_reason or "Waiting before asking Connecteam again.")
         if now < self.paused_until:
-            raise HRBusy(self.pause_reason or "Waiting before asking Connecteam again.")
-        while self._hr_recent and now - self._hr_recent[0] > 60:
-            self._hr_recent.popleft()
-        if len(self._hr_recent) >= HR_MINUTE_CAP:
-            raise HRBusy("The HR portal has made enough Connecteam requests for this minute.")
-        u = self.hr_usage()
-        if u["count"] >= HR_DAILY_CAP:
+            raise HRBusy(f"Connecteam requests are paused: {self.pause_reason}")
+        if len(self._hr_recent) + n > HR_MINUTE_CAP:
+            raise HRBusy("The HR portal has made enough Connecteam requests for this minute. It "
+                         "tries again shortly.")
+        if self.hr_usage()["count"] + n > HR_DAILY_CAP:
             raise HRBusy(f"The HR portal used its {HR_DAILY_CAP} Connecteam requests for today. "
                          "It continues after midnight UTC.")
-        if self.usage()["count"] >= self.daily_cap() * HR_STOP_SHARE:
+        if self.usage()["count"] + n > self.daily_cap() * HR_STOP_SHARE:
             raise HRBusy("Staff Access has used half of its Connecteam requests for today, so the "
-                         "HR portal waits until after midnight UTC. Clock checks keep the rest.")
+                         "HR portal waits until after midnight UTC and leaves the rest for the "
+                         "time clock.")
+        if len(self._recent) + n > MINUTE_CAP:
+            raise HRBusy("Staff Access has made enough Connecteam requests for this minute. The "
+                         "HR portal tries again shortly.")
+
+    def hr_spend(self, own_keys: bool = False) -> None:
+        """Count an HR portal request against its own lane and then Staff Access's caps (so it
+        counts there too), or refuse it with HRBusy. A halt (Staff Access's keys refused) stops
+        HR's requests with those keys too; own_keys: it uses the HR connection's own app."""
+        if self.halted and not own_keys:
+            raise ConnecteamError(self.halted)
+        self.hr_room(1)
         self._spend()
-        self._hr_recent.append(now)
+        self._hr_recent.append(time.time())
+        u = self.hr_usage()
         u["count"] += 1
         self._save_hr_usage(u)
+
+    def hr_too_many(self, resp: aiohttp.ClientResponse) -> HRBusy:
+        """A 429 to an HR request: only HR's lane waits (backing off), never Staff Access's clock
+        checks. The account's own rate-limit headers still pause everyone when it runs low."""
+        self.hr_failures += 1
+        wait = min(3600, 60 * 2 ** min(self.hr_failures - 1, 6))
+        try:
+            wait = max(wait, min(MAX_RETRY_AFTER, int(float(resp.headers.get("Retry-After", 0)))))
+        except (ValueError, OverflowError):
+            pass
+        self.hr_paused_until = max(self.hr_paused_until, time.time() + wait)
+        self.hr_pause_reason = ("Connecteam asked for fewer requests, so the HR portal waits "
+                                f"{max(1, round(wait / 60))} min before asking again.")
+        log.info("Connecteam: %s", self.hr_pause_reason)
+        return HRBusy(self.hr_pause_reason)
 
     def _pause(self, until: float, reason: str) -> None:
         if until > self.paused_until:
@@ -282,9 +317,10 @@ class Connecteam:
         if self._token and self._token_for == creds and self._token[1] > time.time():
             return self._token[0]
         if time.time() - self._last_token_try < 60:
-            raise ConnecteamError("Waiting a minute before asking Connecteam for a new access token.")
+            raise (HRBusy if hr else ConnecteamError)(
+                "Waiting a minute before asking Connecteam for a new access token.")
+        self.hr_spend() if hr else self._spend()   # refused: nothing was asked, so no wait
         self._last_token_try = time.time()
-        self.hr_spend() if hr else self._spend()
         try:
             async with self.session.post(
                 f"{self._api()}/oauth/v1/token", data={"grant_type": "client_credentials"},
@@ -292,7 +328,7 @@ class Connecteam:
             ) as resp:
                 self._read_limits(resp)
                 if resp.status == 429:
-                    raise self._too_many(resp)
+                    raise self.hr_too_many(resp) if hr else self._too_many(resp)
                 body = await resp.json(content_type=None)
                 if resp.status in (400, 401, 403):
                     raise (HRRefused if hr else Halt)(
@@ -319,7 +355,7 @@ class Connecteam:
                                                      "Accept": "application/json"}) as resp:
                     self._read_limits(resp)
                     if resp.status == 429:
-                        raise self._too_many(resp)
+                        raise self.hr_too_many(resp) if hr else self._too_many(resp)
                     if resp.status == 401 and attempt == 1:
                         self._token = None   # expired or revoked: get a new one and retry once
                         self._last_token_try = 0.0
@@ -338,6 +374,8 @@ class Connecteam:
                 raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
             if not isinstance(body, dict):
                 raise ConnecteamError("Connecteam sent an unexpected reply.")
+            if hr:
+                self.hr_failures = 0
             data = body.get("data", body)
             return data if isinstance(data, dict) else {"items": data}
         raise (HRRefused if hr else Halt)("Connecteam didn't accept the access token.")
@@ -426,75 +464,6 @@ class Connecteam:
                           "type": _short_text(f.get("type"), 40) or ""})
         self._fields = (found, time.time())
         return found
-
-    async def hr_request(self, method: str, path: str, *, params: dict | None = None,
-                         json: dict | list | None = None,
-                         credentials: tuple[str, str] | None = None) -> dict:
-        """One request for the HR portal, through its lane. credentials: the HR connection's own
-        Client ID and Secret (a second Connecteam app, for chat and documents); None uses Staff
-        Access's. Returns the reply's data. A refusal raises HRRefused (with Connecteam's own
-        message when it gives one), a used-up lane HRBusy; neither ever stops Staff Access's own
-        requests."""
-        if credentials is None:
-            token = await self._access_token(hr=True)
-        else:
-            token = await self._hr_token(credentials)
-        self.hr_spend()
-        try:
-            async with self.session.request(method, f"{self._api()}{path}", params=params, json=json,
-                                            headers={"Authorization": f"Bearer {token}",
-                                                     "Accept": "application/json"}) as resp:
-                self._read_limits(resp)
-                if resp.status == 429:
-                    raise self._too_many(resp)
-                body = await resp.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-            raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
-        message = _reply_message(body)
-        if resp.status in (401, 403):
-            if credentials is not None and resp.status == 401:
-                self._hr_tokens.pop(tuple(credentials), None)
-            raise HRRefused(f"Connecteam refused this for the HR portal (HTTP {resp.status})"
-                            + (f": {message}" if message else ". Check the app's permissions and your plan."))
-        if resp.status >= 400:
-            raise ConnecteamError(f"Connecteam couldn't do this for the HR portal (HTTP {resp.status})"
-                                  + (f": {message}" if message else "."))
-        if not isinstance(body, dict):
-            raise ConnecteamError("Connecteam sent an unexpected reply.")
-        data = body.get("data", body)
-        return data if isinstance(data, dict) else {"items": data}
-
-    async def _hr_token(self, credentials: tuple[str, str]) -> str:
-        """An access token for the HR connection's own app (one at a time, like Staff Access's)."""
-        key = tuple(credentials)
-        async with self._token_lock:
-            held = self._hr_tokens.get(key)
-            if held and held[1] > time.time():
-                return held[0]
-            if time.time() - self._hr_token_tries.get(key, 0.0) < 60:
-                raise ConnecteamError("Waiting a minute before asking Connecteam for a new access token.")
-            self._hr_token_tries[key] = time.time()
-            self.hr_spend()
-            try:
-                async with self.session.post(
-                    f"{self._api()}/oauth/v1/token", data={"grant_type": "client_credentials"},
-                    headers={"Authorization": aiohttp.encode_basic_auth(key[0], key[1])},
-                ) as resp:
-                    self._read_limits(resp)
-                    if resp.status == 429:
-                        raise self._too_many(resp)
-                    body = await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-                raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
-            if resp.status in (400, 401, 403):
-                raise HRRefused("Connecteam didn't accept the HR connection's Client ID and Secret "
-                                f"(HTTP {resp.status}). Check them in Settings.")
-            if resp.status >= 400 or not isinstance(body, dict) or not body.get("access_token"):
-                raise ConnecteamError(f"Connecteam couldn't issue an access token (HTTP {resp.status}).")
-            ttl = body.get("expires_in") if isinstance(body.get("expires_in"), (int, float)) else 86400
-            ttl = min(max(ttl, 360), 86400) if ttl == ttl else 86400
-            self._hr_tokens[key] = (str(body["access_token"]), time.time() + ttl - 300)
-            return self._hr_tokens[key][0]
 
     async def smart_groups(self, max_age: float = SMART_GROUPS_TTL, hr: bool = False) -> list[dict]:
         """Connecteam's smart groups as [{"id", "name", "users"}], sorted by name (cached). hr: the
@@ -622,8 +591,6 @@ class Connecteam:
         self._users = None
         self._groups = None
         self._fields = None
-        self._hr_tokens.clear()
-        self._hr_token_tries.clear()
         self.clocked_in = set()
         self.checked_at = None
         self.last_error = None
@@ -716,19 +683,6 @@ def _profile_fields(raw) -> dict[str, object]:
         if value not in (None, "", []):
             found[str(fid)[:40]] = value
     return found
-
-
-def _reply_message(body) -> str | None:
-    """Connecteam's own explanation in an error reply, if it gave one."""
-    if not isinstance(body, dict):
-        return None
-    for key in ("detail", "message", "error"):
-        value = body.get(key)
-        if isinstance(value, dict):
-            value = value.get("message")
-        if isinstance(value, str) and value.strip():
-            return " ".join(value.split())[:200]
-    return None
 
 
 def _is_open(shift: dict, now: float) -> bool:

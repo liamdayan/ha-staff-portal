@@ -17,7 +17,7 @@ from hr_helpers import HR, FakeConnecteam, ct_user
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
-from hr import audit, notify, signin  # noqa: E402
+from hr import audit, ctapi, notify, signin  # noqa: E402
 
 FIELDS = [{"id": 11, "name": "Employment Start Date", "type": "date"},
           {"id": 12, "name": "Direct manager", "type": "directManager"},
@@ -112,15 +112,25 @@ def test_hr_connecteam_connection_keeps_its_secret(tmp_path):
                 "hr_connecteam_chat": "1"})
             assert status == 200
             status, state = await hr.admin_call("GET", "/api/state")
-            assert state["hr"]["connecteam"] == {"client_id": "hr-app", "secret_set": True, "chat": True,
-                                                 "used_today": 0, "daily_cap": connecteam.HR_DAILY_CAP}
+            assert state["hr"]["connecteam"] == {
+                "client_id": "hr-app", "secret_set": True, "chat": True, "documents": False,
+                "stopped": {"chat": None, "documents": None}, "paused": None,
+                "used_today": 0, "daily_cap": connecteam.HR_DAILY_CAP}
             assert "hr-secret" not in json.dumps(state) and "hr_host" not in state["settings"]
             await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_id": "hr-app",
                                                               "hr_connecteam_client_secret": ""})
             assert hr.db.settings()["hr_connecteam_client_secret"] == "hr-secret"
             assert hr.svc.chat_wanted()
+            # hr/ctapi.py gets the HR app's keys, and certificate copies only once turned on.
+            assert main.hr_connecteam.get_settings() == {"client_id": "hr-app", "client_secret": "hr-secret",
+                                                         "documents": False}
+            await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_documents": "1"})
+            assert main.hr_connecteam.get_settings()["documents"] is True
+            # Without HR's own keys, Staff Access's Connecteam app is used (if it has the permissions).
             await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_clear_secret": "1"})
-            assert not hr.svc.chat_wanted()
+            assert hr.svc.chat_wanted() and main.hr_connecteam.get_settings()["client_secret"] == ""
+            hr.db.update_settings({"connecteam_enabled": "0"})
+            assert not hr.svc.chat_wanted() and hr.svc.chat_sender() is None
             assert (await hr.admin_call("PUT", "/api/hr/connecteam",
                                         {"hr_connecteam_client_secret": "bad secret"}))[0] == 400
     run(scenario())
@@ -155,12 +165,18 @@ def test_hr_refusals_never_stop_the_clock_checks(tmp_path):
     async def scenario():
         async with FakeConnecteam([ANA], fields=FIELDS, clocked_in=[301]) as ct:
             async with HR(tmp_path) as hr:
-                ct.refuse.update({"/users/v1/custom-fields", "/chat/v1/conversations"})
+                ct.refuse.update({"/users/v1/custom-fields", "/publishers/v1/publishers"})
                 with pytest.raises(connecteam.HRRefused, match="HR portal"):
                     await main.connecteam.profile_fields()
-                with pytest.raises(connecteam.HRRefused, match="Missing scope"):
-                    await main.connecteam.hr_request("POST", "/chat/v1/conversations", json={},
-                                                     credentials=("hr-app", "hr-secret"))
+                # Chat through the HR connection's own app (hr/ctapi.py): refused, so only chat stops.
+                hr.db.update_settings({"hr_connecteam_client_id": "hr-app",
+                                       "hr_connecteam_client_secret": "hr-secret", "hr_connecteam_chat": "1"})
+                assert hr.svc.chat_sender() is ctapi.send_chat
+                with pytest.raises(ctapi.CTError, match="Communications hub") as err:
+                    await ctapi.send_chat(301, "You have something new in the HR portal.")
+                assert err.value.code == "not_allowed" and not err.value.budget
+                assert hr.svc.chat_sender() is None and "chat.write" in hr.svc.chat_problem()
+                main.connecteam._hr_recent.clear()
                 ct.refuse.add("/users/v1/users")
                 main.connecteam._hr_recent.clear()   # this minute's HR requests, aside
                 with pytest.raises(connecteam.HRRefused):
@@ -331,7 +347,8 @@ def test_migration_carries_hr_and_waits_for_uploads(tmp_path):
             status, made = await old.admin_call("POST", "/api/migrate/create")
             assert status == 200
             file, code = made["file"], made["code"]
-            assert b"Ana" not in json.dumps(file).encode()
+            # Only the header is readable (random base64 may spell anything, so it's left out).
+            assert "Ana" not in json.dumps({k: v for k, v in file.items() if k != "data"})
         async with HR(tmp_path / "new", enabled=False, fresh=True) as new:
             status, reply = await new.admin_call("POST", "/api/migrate/restore", {"file": file, "code": code})
             assert status == 200, reply

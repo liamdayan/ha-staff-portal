@@ -484,8 +484,8 @@
         <p class="hint">A private website for employee files, documents and certificates, at its own
           address. Everyone signs in with their mobile number and Connecteam kiosk code (managers and HR
           also with an authenticator code), and sees only what their role allows. Its people come from
-          Connecteam. While it's off, nothing changes for anyone and nothing extra is asked of
-          Connecteam.</p>
+          Connecteam, and keeps files in your Google shared drive. While it's off, nothing changes for
+          anyone and nothing extra is asked of Connecteam or Google.</p>
         <form id="hr-form" class="item-fields">
           <label class="check-row"><input type="checkbox" name="hr_enabled">
             <span>Turn on the HR portal
@@ -497,6 +497,12 @@
           <div class="form-actions"><button class="btn primary" type="submit">Save</button></div>
         </form>
         <p class="hint" id="hr-where"></p>
+        <p class="hint wb-account">Google Drive (HR files): <span class="badge" id="hr-google-state"></span>
+          <button class="linkish" type="button" data-goto="settings"
+            data-open-conn="conn-google">Settings → Connections</button></p>
+        <p class="hint wb-account">Connecteam for HR (optional): <span class="badge" id="hr-ct-state"></span>
+          <button class="linkish" type="button" data-goto="settings"
+            data-open-conn="conn-hr-connecteam">Settings → Connections</button></p>
       </fieldset>
       <fieldset id="hr-unlock" hidden>
         <legend>Unlock with the HR recovery key</legend>
@@ -677,33 +683,103 @@
               <span class="conn-use" data-conn-use></span>
             </summary>
             <form id="hrct-form" class="conn-body">
-              <p class="hint">Optional, for the HR portal only: a second Connecteam app, so HR can send
-                Connecteam chat messages (from a sender called “Hot Lake HR”) and copy certificates to
-                employees' Connecteam profiles. Your time clock connection above stays as it is.</p>
+              <p class="hint">Optional, for the HR portal only: Connecteam chat messages (from a sender called
+                “Hot Lake HR”) and copies of confirmed certificates on employees' Connecteam profiles. It works
+                best with a second Connecteam app of its own, so your time clock connection above stays as it
+                is.</p>
               <p class="hint">In Connecteam, as the account owner, open <b>your name → Integration Center →
                 OAuth 2.0</b>, click <b>Create app</b>, name it “Staff Access HR” and give it
                 <b>users.read</b>, plus <b>chat.write</b> and <b>publishers.read</b> for chat messages
                 (Communications hub), and <b>documents.read</b>, <b>documents.write</b> and
                 <b>attachments.write</b> for certificate copies (HR &amp; Skills hub on the Expert plan).
                 For chat, also add a custom publisher named “Hot Lake HR” under <b>Settings → Feed
-                settings → Custom publishers</b>.</p>
+                settings → Custom publishers</b>. Leave the keys blank to use the Connecteam connection
+                above instead, but only if its app has these permissions too.</p>
               <div class="row">
                 <label>Client ID<input name="hr_connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
                 <label>Client Secret<input name="hr_connecteam_client_secret" type="password" maxlength="500"
                   autocomplete="new-password" spellcheck="false"></label>
               </div>
+              <label class="check-row" id="hrct-clear-row" hidden><input type="checkbox" name="hr_connecteam_clear_secret">
+                <span>Remove the saved Client Secret</span></label>
               <label class="check-row"><input type="checkbox" name="hr_connecteam_chat">
                 <span>Send Connecteam chat messages
                 <small>They only ever say there's something new in the HR portal, with its address, never
                 what. Employees' messages wait out quiet hours, and each person gets at most one a day
                 unless it's urgent. Without this, people see things in the portal's inbox only.</small></span></label>
-              <p class="hint">Each message is one Connecteam request inside the HR portal's own share: at
-                most 6 a minute and 500 a day, and none once Staff Access has used half of its daily
-                share, so clock checks always have room.</p>
-              <label class="check-row" id="hrct-clear-row" hidden><input type="checkbox" name="hr_connecteam_clear_secret">
-                <span>Remove the saved Client Secret</span></label>
-              <p class="hint" id="hrct-status"></p>
+              <label class="check-row"><input type="checkbox" name="hr_connecteam_documents">
+                <span>Copy confirmed certificates to Connecteam
+                <small>Each Food Handler Card or OLCC permit HR confirms also goes onto the person's document
+                in Connecteam, with its expiry date, so Connecteam reminds them before it runs out. Needs
+                Connecteam's HR &amp; Skills hub on the Expert plan. Google Drive keeps every file either
+                way.</small></span></label>
+              <p class="hint">Each message is one Connecteam request, and a one-page certificate three, inside
+                the HR portal's own share: at most 6 a minute and 500 a day, and none once Staff Access has
+                used half of its daily share, so clock checks always have room.</p>
+              <div class="ct-status">
+                <span id="hrct-status" class="hint"></span>
+                <button class="btn" type="button" id="hrct-test">Test connection</button>
+              </div>
+              <ul class="conn-checks" id="hrct-checks" hidden></ul>
               <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam for HR</button></div>
+            </form>
+          </details>
+          <details class="conn" id="conn-google">
+            <summary>
+              <span class="conn-head"><span class="conn-name">Google Drive (HR files)</span>
+                <span class="badge" data-conn-state></span></span>
+              <span class="conn-use" data-conn-use></span>
+            </summary>
+            <form id="gd-form" class="conn-body">
+              <p class="hint">The HR portal keeps employee files in a Google shared drive. A small script in your
+                own Google account does the work, so there's no Google Cloud project, key file or Workspace admin
+                setting to change. The script can only use the shared drives you pick here, and only answers
+                Staff Access.</p>
+              <ol class="gd-steps">
+                <li>In Google Drive, create a shared drive named <b>HR Employee Files</b>. If you like, create a
+                  second one, <b>HR Restricted</b>, for I-9s and accommodation records, with only you and your HR
+                  lead in it.</li>
+                <li>Click <b>Copy the script</b>.</li>
+                <li>Go to <b>script.google.com</b>, signed in as the owner, and click <b>New project</b>. Delete
+                  what's there and paste the script.</li>
+                <li>Next to <b>Services</b>, click <b>+</b>, choose <b>Drive API</b> and click <b>Add</b>.</li>
+                <li>Click <b>Deploy → New deployment</b>. Choose the type <b>Web app</b>, set <b>Execute as: Me</b>
+                  and <b>Who has access: Anyone</b>, then click <b>Deploy</b> and <b>Authorize</b> (Google asks
+                  to allow access to Drive).</li>
+                <li>Copy the <b>Web app URL</b>, paste it below and click <b>Save</b>.</li>
+                <li>Pick the shared drive (and the restricted one), click <b>Save</b>, then <b>Test
+                  connection</b>.</li>
+              </ol>
+              <div class="gd-script">
+                <button class="btn" type="button" id="gd-copy">Copy the script</button>
+                <button class="btn subtle" type="button" id="gd-new-secret" hidden>Make a new secret</button>
+              </div>
+              <p class="wb-warn" id="gd-script-note" hidden></p>
+              <label id="gd-script-box" hidden>The script <small>Your browser didn't allow copying: select all
+                of it here and copy it.</small>
+                <textarea id="gd-script-text" readonly rows="6" spellcheck="false"></textarea></label>
+              <label>Web app URL <small>Shown after Deploy. It starts with https://script.google.com/ and ends
+                in /exec.</small>
+                <input name="url" type="url" maxlength="400" autocomplete="off" spellcheck="false"
+                  placeholder="https://script.google.com/macros/s/…/exec"></label>
+              <div class="row">
+                <label>Shared drive for employee files<select name="drive"></select></label>
+                <label>Restricted files (I-9, accommodation)<select name="restricted_drive"></select></label>
+              </div>
+              <p class="wb-warn" id="gd-restricted-warn" hidden>Restricted files will go in a “Restricted” folder in
+                the HR drive, which every member of that drive can open. A second shared drive keeps them apart.</p>
+              <div class="ct-status">
+                <span id="gd-status" class="hint"></span>
+                <button class="btn" type="button" id="gd-test">Test connection</button>
+              </div>
+              <ul class="conn-checks" id="gd-checks" hidden></ul>
+              <p class="hint" id="gd-hr-off" hidden>The HR portal is off. You can set this up now: it only keeps
+                files in Google Drive once you turn it on (HR portal tab).</p>
+              <p class="hint">If Google doesn't offer <b>Anyone</b> under <b>Who has access</b>, your Google
+                Workspace doesn't allow it: ask whoever manages it to let you share web apps with anyone (see
+                the user guide). Deploy from the owner's account, which isn't going away: the script runs as
+                whoever deployed it.</p>
+              <div class="form-actions"><button class="btn primary" type="submit">Save Google Drive settings</button></div>
             </form>
           </details>
         </div>

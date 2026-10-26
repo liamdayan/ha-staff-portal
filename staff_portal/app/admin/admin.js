@@ -357,6 +357,7 @@
     state.hasLogo = data.has_logo;
     state.tunnelSources = data.tunnel_sources;
     state.connecteam = data.connecteam;
+    state.hrGoogle = data.hr_google || {};
     state.wristbands = data.wristbands || {};
     state.departments = data.departments || [];
     state.staffSync = data.staff_sync || {};
@@ -2094,6 +2095,7 @@
     renderTTStatus();
     renderConnecteam();
     fillHrConnecteam();
+    renderGoogle();
   }
 
   function showConnection(box, connState, requests) {
@@ -2189,7 +2191,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (connDirty.tt || connDirty.ct || hrctDirty) e.preventDefault();
+    if (connDirty.tt || connDirty.ct || hrctDirty || gdDirty) e.preventDefault();
   });
 
   // "Settings → Connections" links elsewhere open that connection (data-goto shows the tab).
@@ -2208,6 +2210,162 @@
         `${r.clocked_in} clocked in now.`);
     } finally {
       await load();
+    }
+  }));
+
+  // ------------------------------------------------ Google Drive (HR files), in Connections
+
+  // The script in the owner's Google account that keeps the HR portal's files. Folded, it says
+  // whether it works; opened, it's checked (who it runs as, its drives, its version: at most every
+  // few seconds) and shows the setup steps. The secret never comes here, only inside the script
+  // text when it's copied.
+  let gdDirty = false;
+  let gdFull = null;   // api/hr-google: also the Web app URL, the drives chosen and the drives seen
+  const GD_PROBLEMS = { auth: "Secret doesn't match", not_allowed: "Access refused",
+    unavailable: "Google not answering", quota: "Google busy", bad_reply: "Unexpected reply",
+    too_big: "File too big", test: "Test failed" };
+
+  const googleNow = () => ({ ...(gdFull || {}), ...(state.hrGoogle || {}) });
+
+  // Whether it works, in a few words, with its badge color.
+  function gdState(g) {
+    if (!g.set_up) return ["Not set up", ""];
+    if (g.code === "outdated") return ["Script out of date", "pending"];
+    if (g.code) return [GD_PROBLEMS[g.code] || "Last try failed", "locked"];
+    if (g.email && !g.drive_set) return ["Pick the shared drive", "pending"];
+    if (g.email) return [`Connected as ${g.email}`, "active"];
+    return ["Not checked yet", "pending"];
+  }
+
+  function renderGoogle() {
+    const g = googleNow();
+    showConnection($("#conn-google"), gdState(g), g.checked_at ? `Checked ${ago(g.checked_at).toLowerCase()}` : "");
+    showState($("#hr-google-state"), gdState(g));
+    $("#gd-new-secret").hidden = !g.script_made;
+    $("#gd-test").disabled = !g.set_up;
+    $("#gd-status").textContent = !g.set_up
+      ? (g.script_made ? "Paste the Web app URL and click Save." : "Start with Copy the script.")
+      : g.error || (g.email
+        ? `Connected as ${g.email}, script version ${g.version}.${g.drive_set ? "" : " Pick the shared drive and click Save."}`
+        : "Not checked yet.");
+    // Set up before or after turning the HR portal on: it only uses Google once it's on.
+    $("#gd-hr-off").hidden = state.hr?.status === "on";
+    if (gdFull && !gdDirty) fillGoogle();
+  }
+
+  // The form, from what's saved: the drive pickers list the shared drives the script saw.
+  function fillGoogle() {
+    const form = $("#gd-form");
+    const g = googleNow();
+    const drives = g.drives || [];
+    form.elements.url.value = g.url || "";
+    const pick = (select, first, chosen) => {
+      const options = [h("option", { value: "" }, first), ...drives.map((d) => h("option", { value: d.id }, d.name))];
+      if (chosen && !drives.some((d) => d.id === chosen)) options.push(h("option", { value: chosen }, "The drive saved before"));
+      select.replaceChildren(...options);
+      select.value = chosen || "";
+    };
+    pick(form.elements.drive, drives.length ? "Choose…"
+      : g.set_up ? "No shared drives found yet" : "Save the Web app URL first", g.drive);
+    pick(form.elements.restricted_drive, "A “Restricted” folder in the HR drive", g.restricted_drive);
+    renderRestrictedWarning();
+  }
+
+  function renderRestrictedWarning() {
+    const f = $("#gd-form").elements;
+    $("#gd-restricted-warn").hidden = !f.drive.value || !!f.restricted_drive.value;
+  }
+
+  // Opened: check it (the server answers from its last check if that was a moment ago).
+  $("#conn-google").addEventListener("toggle", (e) => {
+    if (e.target.open) refreshGoogle();
+  });
+
+  async function refreshGoogle() {
+    try {
+      const r = googleNow().set_up ? await api("POST", "api/hr-google/check")
+        : { google: await api("GET", "api/hr-google") };
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+    } catch (err) {
+      toast(err.message, true);
+    }
+    renderGoogle();
+  }
+
+  $("#gd-form").addEventListener("input", () => { gdDirty = true; });
+  $("#gd-form").addEventListener("change", () => {
+    gdDirty = true;
+    renderRestrictedWarning();
+  });
+
+  $("#gd-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    run(async () => {
+      const r = await api("PUT", "api/hr-google", { url: f.url.value, drive: f.drive.value,
+        restricted_drive: f.restricted_drive.value });
+      gdDirty = false;
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+      renderGoogle();
+      if (r.problem) toast(`Saved, but Google says: ${r.problem}`, true);
+      else if (r.google.set_up && !r.google.drive_set && (r.google.drives || []).length) {
+        toast("Saved. Now pick the shared drive and click Save.");
+      } else toast("Google Drive settings saved.");
+    });
+  });
+
+  // Copy the script (the secret is made the first time). Inside Home Assistant's frame the
+  // clipboard can be blocked: then the script is shown, selected, to copy by hand.
+  async function copyScript(newSecret) {
+    const r = await api("POST", "api/hr-google/script", newSecret ? { new_secret: true } : undefined);
+    const box = $("#gd-script-box");
+    const text = $("#gd-script-text");
+    text.value = r.script;
+    let copied = true;
+    try {
+      await navigator.clipboard.writeText(r.script);
+    } catch {
+      box.hidden = false;
+      text.focus();
+      text.select();
+      copied = document.execCommand("copy");
+    }
+    box.hidden = copied;
+    const note = $("#gd-script-note");
+    note.hidden = !newSecret;
+    note.textContent = "Paste the new script in script.google.com over the old one, then click Deploy → " +
+      "Manage deployments → Edit (the pencil) → Version: New version → Deploy. Until then, the script there " +
+      "doesn't answer Staff Access.";
+    await load();
+    renderGoogle();
+    toast(copied ? "Script copied. Paste it in script.google.com." : "Select the script in the box and copy it.");
+  }
+
+  $("#gd-copy").addEventListener("click", () => run(() => copyScript(false)));
+  $("#gd-new-secret").addEventListener("click", () => run(async () => {
+    if (!await askConfirm("Make a new secret? The script in Google stops working until you paste the new " +
+      "script there and deploy a new version.", "Make a new secret")) return false;
+    await copyScript(true);
+  }));
+
+  // Test connection: each check with a plain result.
+  $("#gd-test").addEventListener("click", () => run(async () => {
+    if (gdDirty) throw new Error("Click Save Google Drive settings first: the test uses what's saved.");
+    const button = $("#gd-test");
+    button.disabled = true;
+    button.textContent = "Testing…";
+    try {
+      const r = await api("POST", "api/hr-google/test");
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+      showChecks($("#gd-checks"), r.checks);
+      toast(r.checks.every((c) => c.ok) ? "Google Drive works." : "Google Drive has a problem: see the list.",
+        !r.checks.every((c) => c.ok));
+    } finally {
+      button.textContent = "Test connection";
+      renderGoogle();
     }
   }));
 
@@ -6536,6 +6694,10 @@
     const d = hr.data;
     if (!d) return;
     showState($("#hr-badge"), HR_STATES[d.status] || ["", ""]);
+    // The two HR connections (Settings → Connections) say whether the HR portal is on.
+    state.hr = { ...state.hr, status: d.status, connecteam: d.connecteam };
+    fillHrConnecteam();
+    renderGoogle();
     const form = $("#hr-form");
     if (!form.dataset.dirty) {
       form.elements.hr_enabled.checked = d.enabled;
@@ -6709,23 +6871,41 @@
   let hrctDirty = false;
   hrctForm.addEventListener("input", () => { hrctDirty = true; });
 
+  // Whether it works, in a few words, with its badge color (the HR tab shows the same).
+  function hrctState(c) {
+    const on = c.chat || c.documents;
+    const stopped = [c.chat && c.stopped?.chat, c.documents && c.stopped?.documents].find(Boolean);
+    if (!state.connecteam?.enabled) return [on ? "Connecteam is off" : "Not set up", on ? "locked" : ""];
+    if (stopped) return ["Refused by Connecteam", "locked"];
+    if (!on) return [c.client_id && c.secret_set ? "Saved; nothing turned on" : "Not set up", ""];
+    if (c.paused) return ["Waiting", "pending"];
+    const what = [c.chat ? "Chat" : null, c.documents ? "certificate copies" : null].filter(Boolean).join(" and ");
+    return [`${what.charAt(0).toUpperCase()}${what.slice(1)} on`, state.hr?.status === "on" ? "active" : ""];
+  }
+
   function fillHrConnecteam() {
     const c = state.hr?.connecteam || {};
+    const f = hrctForm.elements;
     if (!hrctDirty) {
-      hrctForm.elements.hr_connecteam_client_id.value = c.client_id || "";
-      const secret = hrctForm.elements.hr_connecteam_client_secret;
-      secret.value = "";
-      secret.placeholder = c.secret_set ? "Saved — leave blank to keep" : "";
-      hrctForm.elements.hr_connecteam_chat.checked = !!c.chat;
-      hrctForm.elements.hr_connecteam_clear_secret.checked = false;
+      f.hr_connecteam_client_id.value = c.client_id || "";
+      f.hr_connecteam_client_secret.value = "";
+      f.hr_connecteam_client_secret.placeholder = c.secret_set ? "Saved — leave blank to keep" : "Blank: the connection above";
+      f.hr_connecteam_chat.checked = !!c.chat;
+      f.hr_connecteam_documents.checked = !!c.documents;
+      f.hr_connecteam_clear_secret.checked = false;
       $("#hrct-clear-row").hidden = !c.secret_set;
     }
-    const setUp = !!(c.client_id && c.secret_set);
-    showConnection($("#conn-hr-connecteam"), !setUp ? ["Not set up", ""] : !c.chat ? ["Saved; chat off", ""]
-      : state.hr?.status !== "on" ? ["HR portal off", ""] : ["Chat on", "active"],
-    requestsText(c.used_today, "today", c.daily_cap));
-    $("#hrct-status").textContent = state.hr?.status === "on" ? ""
-      : "The HR portal is off, so nothing is sent. Turn it on in the HR portal tab.";
+    const connState = hrctState(c);
+    showConnection($("#conn-hr-connecteam"), connState, requestsText(c.used_today, "today", c.daily_cap));
+    showState($("#hr-ct-state"), connState);
+    const stopped = [c.chat && c.stopped?.chat, c.documents && c.stopped?.documents].filter(Boolean);
+    $("#hrct-status").textContent = !state.connecteam?.enabled
+      ? "Turn on Connecteam above first: the HR portal uses it."
+      : stopped.length ? `${[...new Set(stopped)].join(" ")} Fix it, save, then click Test connection.`
+        : c.paused ? c.paused
+          : state.hr?.status !== "on" ? "The HR portal is off, so nothing is sent until you turn it on (HR portal tab)."
+            : "";
+    $("#hrct-test").disabled = !state.connecteam?.enabled;
   }
 
   hrctForm.addEventListener("submit", (e) => {
@@ -6735,12 +6915,40 @@
       await api("PUT", "api/hr/connecteam", { hr_connecteam_client_id: f.hr_connecteam_client_id.value,
         hr_connecteam_client_secret: f.hr_connecteam_client_secret.value,
         hr_connecteam_clear_secret: f.hr_connecteam_clear_secret.checked ? "1" : "0",
-        hr_connecteam_chat: f.hr_connecteam_chat.checked ? "1" : "0" });
+        hr_connecteam_chat: f.hr_connecteam_chat.checked ? "1" : "0",
+        hr_connecteam_documents: f.hr_connecteam_documents.checked ? "1" : "0" });
       hrctDirty = false;
       await load();
       fillHrConnecteam();
     }, "Connecteam for HR saved.");
   });
+
+  // Each check with a plain result (Test connection for both HR connections).
+  function showChecks(list, checks) {
+    list.replaceChildren(...checks.map((c) => h("li", { class: c.ok ? "ok" : "bad" },
+      h("span", { class: "conn-mark", role: "img", "aria-label": c.ok ? "OK" : "Problem" }, c.ok ? "\u2713" : "\u2715"),
+      h("span", null, h("b", null, c.check), ` ${c.detail}`))));
+    list.hidden = false;
+  }
+
+  // Tests what's saved: whether chat can be sent as "Hot Lake HR", and whether Connecteam's
+  // documents can be read (the HR & Skills hub). It lifts a stop.
+  $("#hrct-test").addEventListener("click", () => run(async () => {
+    if (hrctDirty) throw new Error("Click Save Connecteam for HR first: the test uses what's saved.");
+    const button = $("#hrct-test");
+    button.disabled = true;
+    button.textContent = "Testing…";
+    try {
+      const r = await api("POST", "api/hr/connecteam/test");
+      state.hr = r.hr;
+      showChecks($("#hrct-checks"), r.checks);
+      const ok = r.checks.every((c) => c.ok);
+      toast(ok ? "Connecteam for HR works." : "Connecteam for HR has a problem: see the list.", !ok);
+    } finally {
+      button.textContent = "Test connection";
+      fillHrConnecteam();
+    }
+  }));
 
   // ---------------------------------------------------------------- start
 

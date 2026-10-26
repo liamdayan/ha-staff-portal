@@ -7,6 +7,7 @@ Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant: Con
 address points at the fake (or at a closed local port when no fake is running).
 """
 
+import base64
 import json
 import time
 from datetime import datetime
@@ -41,7 +42,9 @@ def ct_user(user_id, first, last="", code=None, groups=(), mobile=None, email=No
 
 
 class FakeConnecteam:
-    """Connecteam as the HR portal uses it. refuse: paths answered with 403."""
+    """Connecteam as the HR portal uses it (and hr/ctapi.py's chat). refuse: paths answered with
+    403; too_many: paths answered with 429. tokens: the client IDs that asked for a token;
+    messages: the chat messages sent, as (user ID, body)."""
 
     def __init__(self, users=(), archived=(), fields=(), clocked_in=()):
         self.users = list(users)
@@ -49,7 +52,10 @@ class FakeConnecteam:
         self.fields = list(fields)
         self.clocked_in = list(clocked_in)
         self.refuse: set[str] = set()
+        self.too_many: set[str] = set()
         self.calls: list[str] = []
+        self.tokens: list[str] = []
+        self.messages: list[tuple[int, dict]] = []
         self.port = free_port()
         self.app = web.Application()
         self.app.router.add_route("*", "/{tail:.*}", self.handle)
@@ -60,8 +66,20 @@ class FakeConnecteam:
         self.calls.append(path + ("?archived" if request.query.get("userStatus") == "archived" else ""))
         if path in self.refuse:
             return web.json_response({"detail": "Missing scope"}, status=403)
+        if path in self.too_many:
+            return web.json_response({"detail": "Too many requests"}, status=429,
+                                     headers={"Retry-After": "120"})
         if path == "/oauth/v1/token":
+            auth = request.headers.get("Authorization", "").split()[-1]
+            self.tokens.append(base64.b64decode(auth).decode().split(":")[0])
             return web.json_response({"access_token": "fake", "expires_in": 3600})
+        if path == "/publishers/v1/publishers":
+            return web.json_response({"data": {"publishers": [{"id": 77, "name": "Hot Lake HR"}]}})
+        if path.startswith("/chat/v1/conversations/privateMessage/"):
+            self.messages.append((int(path.rsplit("/", 1)[1]), await request.json()))
+            return web.json_response({"data": {}})
+        if path.startswith("/documents/"):   # no HR & Skills hub on Expert
+            return web.json_response({"detail": "Forbidden"}, status=403)
         if path == "/users/v1/users":
             source = self.archived if request.query.get("userStatus") == "archived" else self.users
             offset = int(request.query.get("offset", 0))
@@ -104,7 +122,12 @@ def fresh_connecteam() -> None:
     c.pause_reason = None
     c._recent.clear()
     c._hr_recent.clear()
+    c.hr_paused_until = 0.0
+    c.hr_pause_reason = None
+    c.hr_failures = 0
     c.limits.clear()
+    main.hr_connecteam.forget()
+    main.hr_connecteam_tested["at"] = 0.0
 
 
 class HR:

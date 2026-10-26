@@ -3,7 +3,8 @@ when they turn it off. While it's off, nothing here runs: no requests, no backgr
 nothing kept (its web server just says it's turned off).
 
 Background work, every half minute while it runs:
-- people from Connecteam hourly (and, around sign-ins, at most every 5 minutes for someone new);
+- people from Connecteam hourly (and, around sign-ins, at most every 5 minutes for someone new;
+  and soon again when HR's request lane had no room);
 - Connecteam chat messages that are due;
 - once a day at 2:15 AM (HR's time zone): Connecteam's profile field names, its archived users,
   and the daily jobs other parts of the HR portal add (daily_jobs);
@@ -27,7 +28,7 @@ from datetime import datetime
 
 from connecteam import ConnecteamError
 
-from . import access, audit, crypto, hrdb, notify, people, signin
+from . import access, audit, crypto, ctapi, gdrive, hrdb, notify, people, signin
 
 log = logging.getLogger("staff_portal")
 
@@ -36,6 +37,7 @@ SYNC_EVERY = 3600
 SYNC_SOON_GAP = 5 * 60          # a sync for someone new signing in, at most this often...
 SOON_A_DAY = 48                 # ...and this many a day, so strangers typing numbers can't use up
                                 # HR's Connecteam requests
+BUSY_RETRY = 90                 # a sync HR's lane had no room for is tried again this soon
 DAILY_AT = (2, 15)              # the nightly run, in HR's time zone
 MAX_MIGRATED_DB = 64 * 1024 * 1024
 NO_CONNECTEAM = ("Connecteam is turned off in Settings → Connections, so the HR portal can't "
@@ -61,7 +63,7 @@ class HRService:
         self.db: hrdb.HRDatabase | None = None
         self.throttle = signin.Throttle()
         self.sync_state = {"at": None, "error": None, "tried": 0.0, "result": None, "soon": False,
-                           "soon_day": "", "soon_count": 0}
+                           "soon_day": "", "soon_count": 0, "retry_at": None}
         self.daily_state = {"day": None, "summary_day": None, "hourly": 0.0}
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -95,20 +97,34 @@ class HRService:
         return state if state in ("locked", "lost") else "off"
 
     def chat_wanted(self) -> bool:
+        """Whether the owner turned on Connecteam chat messages (Settings → Connections →
+        Connecteam for HR) with keys to send them: the HR connection's own app, or else Staff
+        Access's (hr/ctapi.py uses that when HR has none)."""
         s = self.main_settings()
-        return (s.get("hr_connecteam_chat") == "1" and bool(s.get("hr_connecteam_client_id"))
-                and bool(s.get("hr_connecteam_client_secret")))
+        own = s.get("hr_connecteam_client_id") and s.get("hr_connecteam_client_secret")
+        main = s.get("connecteam_client_id") and s.get("connecteam_client_secret")
+        return (s.get("hr_connecteam_chat") == "1" and s.get("connecteam_enabled") == "1"
+                and bool(own or main))
+
+    def chat_problem(self) -> str | None:
+        """Why chat messages aren't going out although they're on: Connecteam refused them (a
+        missing permission or plan feature, or the keys), until the owner saves the connection
+        again or presses its Test."""
+        lane = ctapi.default
+        return lane.stopped["chat"] if self.chat_wanted() and lane is not None else None
 
     def chat_sender(self):
-        """ctapi.send_chat, when chat is set up and hr/ctapi.py is here; else None."""
-        if not self.chat_wanted():
+        """ctapi.send_chat while chat is on and Connecteam hasn't refused it; else None (the
+        portal inbox only, and queued messages wait)."""
+        if not self.chat_wanted() or ctapi.default is None or self.chat_problem():
             return None
-        try:
-            from . import ctapi
-        except ImportError:
-            return None
-        send = getattr(ctapi, "send_chat", None)
-        return send if callable(send) else None
+        return ctapi.send_chat
+
+    def google(self):
+        """The Google Drive bridge for HR files (hr/gdrive.py), or None while HR isn't running or
+        the owner hasn't set it up (Settings → Connections → Google Drive (HR files)). Its
+        drives: gdrive.drive_ids(main_settings()), the HR drive first."""
+        return gdrive.bridge_from_settings(self.main_settings()) if self.running else None
 
     def refresh_chat(self) -> None:
         notify.chat = self.chat_sender() if self.running else None
@@ -129,7 +145,7 @@ class HRService:
             hook(self)
         notify.url = self.url
         self.refresh_chat()
-        self.sync_state.update(tried=0.0, soon=False)
+        self.sync_state.update(tried=0.0, soon=False, retry_at=None)
         if background:
             self._task = asyncio.create_task(self.run())
         return "on"
@@ -192,9 +208,10 @@ class HRService:
         await notify.send_due(self.db, now)
 
     def sync_due(self, now: float) -> bool:
-        gap = SYNC_SOON_GAP if self.sync_state["soon"] else SYNC_EVERY
-        return self.main_settings().get("connecteam_enabled") == "1" and \
-            now - self.sync_state["tried"] >= gap
+        state = self.sync_state
+        gap = SYNC_SOON_GAP if state["soon"] else SYNC_EVERY
+        return self.main_settings().get("connecteam_enabled") == "1" and (
+            now - state["tried"] >= gap or (state["retry_at"] is not None and now >= state["retry_at"]))
 
     def sync_soon(self) -> None:
         """Someone unknown is signing in: they may have just been added in Connecteam."""
@@ -211,7 +228,7 @@ class HRService:
     async def sync_people(self, fresh: bool = False, max_age: float = SYNC_EVERY) -> dict | None:
         """People from Connecteam: its cached list when it's at most max_age old (a minute, when
         fresh). Never raises: problems are kept in sync_state for the dashboard and HR."""
-        self.sync_state.update(tried=time.time(), soon=False)
+        self.sync_state.update(tried=time.time(), soon=False, retry_at=None)
         if self.main_settings().get("connecteam_enabled") != "1":
             self.sync_state["error"] = NO_CONNECTEAM
             return None
@@ -233,6 +250,11 @@ class HRService:
             result = await people.apply_users(self.db, users, group_name=lambda g: names.get(g, g))
         except ConnecteamError as err:
             self.sync_state["error"] = str(err)
+            if getattr(err, "budget", False):
+                # HR's lane was full (say, just after testing the HR connection): soon, not in an
+                # hour, so turning HR on still brings its people in straight away.
+                paused = getattr(self.connecteam, "hr_paused_until", 0.0)
+                self.sync_state["retry_at"] = max(time.time() + BUSY_RETRY, paused + 1)
             return None
         except Exception as err:  # noqa: BLE001 - a bad reply mustn't stop the background work
             log.warning("HR portal: reading people from Connecteam failed: %r", err)
@@ -358,8 +380,9 @@ class HRService:
             data = conn.serialize()
         finally:
             conn.close()
-        return {"db": base64.b64encode(data).decode(), **ring.export(),
-                "enabled": self.enabled(), "host": self.host()}
+        # Nothing from Staff Access's settings here: they travel with its other secrets, and
+        # its database connection belongs to the event loop.
+        return {"db": base64.b64encode(data).decode(), **ring.export()}
 
     def take_migration(self, carried: dict) -> None:
         """Put a migration file's HR in place, on the new computer, while HR is stopped. Anything
