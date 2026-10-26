@@ -162,16 +162,17 @@ function fail(code, message) {
 function errorOf(err) {
   if (err && err.code && typeof err.code === "string") return {code: err.code, message: err.message};
   var text = String(err && err.message || err);
+  var said = " (Google said: \"" + text.slice(0, 160) + "\")";
   if (/not found/i.test(text)) {
-    return {code: "not_allowed", message: "Google Drive has no such file or folder in the HR drives."};
+    return {code: "not_allowed", message: "Google Drive has no such file or folder in the HR drives." + said};
   }
   if (/rate limit|quota|too many times|limit exceeded|try again later/i.test(text)) {
     return {code: "quota", message: "Google is busy (a usage limit was reached). Staff Access will " +
                                     "try again later."};
   }
   if (/insufficient|permission|forbidden|access denied/i.test(text)) {
-    return {code: "not_allowed", message: "Google Drive refused. The Google account that deployed " +
-                                          "the script must be a Manager of the HR shared drive."};
+    return {code: "not_allowed", message: "Google Drive refused" + said + ". Check that the Google " +
+                                          "account that deployed the script is a Manager of the HR shared drive."};
   }
   return {code: "unavailable", message: "Google Drive had a problem: " + text.slice(0, 200)};
 }
@@ -488,7 +489,14 @@ function selfTest() {
     var top = inDrives(drives[0], true);
     var folder = Drive.Files.create({name: "Staff Access test (safe to delete)", mimeType: FOLDER,
                                      parents: [top.id]}, null, {supportsAllDrives: true, fields: "id"});
-    removeForGood(folder.id);
+    // Staff Access never deletes folders, so a drive that won't let this one go still works:
+    // say so rather than fail.
+    try {
+      removeForGood(folder.id);
+    } catch (err) {
+      return "Made a test folder, but Google wouldn't remove it (Google said: \"" +
+        String(err && err.message || err).slice(0, 160) + "\"). Delete \"Staff Access test (safe to delete)\" by hand.";
+    }
     return "Made and removed a test folder.";
   });
   check("Read text from a test image", function () {

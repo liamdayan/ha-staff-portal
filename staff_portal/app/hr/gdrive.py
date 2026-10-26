@@ -38,7 +38,7 @@ import weakref
 import aiohttp
 
 PROTOCOL = 1          # the request format (bridge.gs's PROTOCOL)
-SCRIPT_VERSION = 2    # the script written by script_source(); ping says which one is deployed
+SCRIPT_VERSION = 3    # the script written by script_source(); ping says which one is deployed
 MIN_SCRIPT_VERSION = 1   # the oldest deployed script file operations still work with
 PDF_VERSION = 2       # the oldest deployed script that makes PDFs (the pdf op)
 MAX_BYTES = 25 * 1024 * 1024          # a file uploaded, downloaded or read

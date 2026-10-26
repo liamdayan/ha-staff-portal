@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1
+
+**HR portal: Google Drive**
+
+- When Google Drive refuses something, the message now includes Google's own words, so the cause
+  is clear.
+- **Test connection** no longer fails only because Google won't delete its test folder (Staff
+  Access never deletes folders); it says so and asks you to delete it by hand.
+- This is Google script version 3: paste the new script and deploy a new version (Deploy, Manage
+  deployments, edit, New version). The address stays the same.
+
 ## 0.10.0
 
 This version adds the **HR portal**: a second, private website inside Staff Access for employee

@@ -179,6 +179,7 @@ function makeServices(world) {
         const f = world.files.get(id);
         if (!visible(f, opts)) throw new Error(`File not found: ${id}.`);
         if (meta.name !== undefined) f.name = meta.name;
+        if (world.trashDenied && meta.trashed) throw new Error("The user does not have sufficient permissions for this file.");
         if (meta.trashed !== undefined) f.trashed = meta.trashed;
         if (opts.addParents) {
           const removed = String(opts.removeParents || "").split(",").filter(Boolean);
@@ -345,7 +346,7 @@ test("ping: version, account and shared drives", () => {
   const ctx = load(world);
   const reply = post(ctx, request("ping"));
   assert.ok(reply.ok);
-  assert.strictEqual(reply.version, 2);
+  assert.strictEqual(reply.version, 3);
   assert.strictEqual(reply.result.email, world.email);
   assert.deepStrictEqual(reply.result.drives.map((d) => d.name).sort(),
     ["HR Employee Files", "HR Restricted", "Marketing"]);
@@ -689,6 +690,13 @@ test("selfTest: sign-in, the drive, a test folder and reading a test image", () 
   const second = ok(ctx2, "selfTest", {}).checks;
   assert.deepStrictEqual(second.map((c) => c.ok), [true, false, false, false]);
   assert.match(second[1].detail, /No shared drive/);
+  // A drive that won't let the test folder go still passes (Staff Access never deletes folders),
+  // and Google's own words are shown.
+  world.removeDenied = world.trashDenied = true;
+  const kept = ok(ctx, "selfTest", {}).checks[2];
+  assert.ok(kept.ok, JSON.stringify(kept));
+  assert.match(kept.detail, /wouldn't remove it \(Google said: "The user does not have sufficient permissions/);
+  world.removeDenied = world.trashDenied = false;
   world.ocrRead = () => "something else";
   const third = ok(ctx, "selfTest", {}).checks;
   assert.strictEqual(third[3].ok, false);

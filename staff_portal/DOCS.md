@@ -1667,7 +1667,9 @@ anyone else.
 
 After an update, Staff Access may need a newer script. The connection then says **Script out of
 date**. (Script version 2 adds making PDFs of write-ups and reviews. Files keep going to Drive
-with version 1 meanwhile; PDFs wait until the new version is deployed.) To update it (the Web app
+with version 1 meanwhile; PDFs wait until the new version is deployed. Version 3 shows Google's own
+words when Drive refuses something, and Test connection no longer fails just because Google won't
+delete its test folder.) To update it (the Web app
 URL stays the same):
 
 1. Click **Copy the script**.
