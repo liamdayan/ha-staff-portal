@@ -1749,8 +1749,8 @@ lists them, with **Sign out** for each and **Sign out everywhere**. The home pag
 from where they last signed in, so misuse gets noticed.
 
 **Sensitive actions** (resetting or unlocking someone, ending access, changing roles,
-departments or HR settings, turning off an authenticator) ask for a fresh authenticator code
-first, or the PIN for someone without an authenticator.
+departments or HR settings, turning off an authenticator, and changing anyone's points) ask for a
+fresh authenticator code first, or the PIN for someone without an authenticator.
 
 ### Setting up an authenticator
 
@@ -1825,8 +1825,9 @@ Kiosk codes, birthdays and other profile fields are never stored.
 
 **When someone leaves.** Archived in Connecteam (or gone from its list), their HR access ends
 within the hour, and their records stay. For same-day departures, HR has **End HR access now**
-on their page; any setup code or link made for them before stops working too. Coming back isn't automatic: if someone is restored in Connecteam, HR clicks
-**Allow sign-in again** (or makes them a new setup code).
+on their page; any setup code or link made for them before stops working too. Coming back isn't
+automatic: if someone is restored in Connecteam, HR clicks **Allow sign-in again** (or makes them
+a new setup code).
 
 **Safety catch.** If Connecteam suddenly lists far fewer people (nobody, or more than a quarter
 fewer), nobody is cut off: HR and the dashboard get a warning instead, and the next sync tries
@@ -1912,9 +1913,10 @@ or waiting for HR.
 **Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
 turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
 HR), and only for kinds the employee can see ("The employee, their managers, directors and HR"),
-since the employee sees it there; it keeps the latest file only. Restricted files never go. While HR's share of Connecteam requests is used up, copies wait. Problems only a person
-can fix ("not assigned this document's pack in Connecteam") go on **Needs attention** at once,
-with **Retry** and **Don't copy to Connecteam**.
+since the employee sees it there; it keeps the latest file only. Restricted files never go. While
+HR's share of Connecteam requests is used up, copies wait. Problems only a person can fix ("not
+assigned this document's pack in Connecteam") go on **Needs attention** at once, with **Retry**
+and **Don't copy to Connecteam**.
 
 **Deleting.** HR deletes a file with a fresh 6-digit code (or PIN). It stays in the person's
 **Recycle bin** for 30 days and can be **Restored**; then it's removed from the computer and
@@ -2183,8 +2185,9 @@ HR admins find everything waiting under **Discipline**: incidents and write-ups 
 appeals, tasks, probation decisions, write-ups not signed yet, and signed write-ups whose PDF
 couldn't be made (also on **Needs attention**).
 
-- **Approve** an incident, or set other points with a reason, or **return it** to the manager with a
-  note; they change it and send it again. The approval shows the points it counts now when they
+- **Approve** an incident, or set other points with a reason (other points than the rules give
+  ask for a fresh 6-digit code, or PIN), or **return it** to the manager with a note; they change
+  it and send it again. The approval shows the points it counts now when they
   differ from when it was recorded (a repeat of incidents approved since), and whether earlier
   incidents of theirs are still waiting. Nobody approves their own work, and an HR admin's own file
   is handled by another HR admin.
@@ -2249,6 +2252,9 @@ stop counting). The HR admin who wrote or approved the write-up doesn't decide i
 | Expired write-ups and points | If the switches allow | Yes | Yes |
 | Suspensions and termination reviews | Nothing until HR acts | Nothing until HR acts | Yes |
 | Voided write-ups | "Withdrawn on [date]" if it was delivered | The same | Everything |
+
+HR's reasons for changing an incident's points, or when something stops counting, are HR's only:
+managers and directors see in its history that it changed, not why.
 
 Each manager's **My team** lists everyone whose file they see, with points, current step,
 probation, and what needs doing (steps due, drafts, write-ups to deliver or not signed yet).
@@ -2344,8 +2350,8 @@ it and add comments, choosing who may see each one. Everyone working on a review
 2. **The writer fills in the form.** Tap a number to rate; everything saves as you go. A
    read-only **Background** panel shows the points and write-ups in the period, certificate
    status (with flags such as "May not serve alcohol"), and the goals from the last review: points
-as they are today, write-ups delivered in the review's period. Anything not set up yet, or that
-can't be read just then, says "Not available".
+   as they are today, write-ups delivered in the review's period. Anything not set up yet, or that
+   can't be read just then, says "Not available".
    The overall rating is worked out from the ratings (their average); the writer can choose
    another, with a reason. **Finish** lists anything still missing.
 3. **HR's approval** (end-of-introductory-period reviews only, by default). HR approves it or
@@ -2362,8 +2368,8 @@ An end-of-introductory-period review recommends **pass**, **extend** (with a new
 **end employment**. Once it's final (approved by HR), the writer's recommendation goes to the
 person's introductory period, where HR decides the outcome (see [Probation](#probation)). If it
 can't (HR decided already, or moved the end past the date recommended), the review says why, HR
-and the writer are told, HR has a to-do while the period is undecided, and it isn't tried again. The
-employee doesn't see that recommendation, in the portal or in the PDF.
+and the writer are told, HR has a to-do while the period is undecided, and it isn't tried again.
+The employee doesn't see that recommendation, in the portal or in the PDF.
 
 **What the employee sees:** nothing until it's shared (except their self-review), then the
 ratings, comments, goals and overall rating, and only the comments marked for them. Never the
@@ -2456,7 +2462,8 @@ Changing settings asks for a fresh code (or PIN), and each change is in the audi
 Every sign-in, failure, lock, reset, look at a file and change goes into the HR portal's audit
 log: who did it, what, to whose file, when and from where. It never holds PINs, codes or what
 records say. Lines can't be changed: each one is chained to the one before, so **Check audit
-log** (HR admins, **Audit log** page) shows if any line was changed or removed.
+log** (HR admins, **Audit log** page) shows if any line was changed or removed, including lines
+cut off the end.
 
 HR events never go to Staff Access's **Activity** tab or the Home Assistant logbook, which other
 Home Assistant users can see. On the dashboard's HR portal tab you see **Security events** only

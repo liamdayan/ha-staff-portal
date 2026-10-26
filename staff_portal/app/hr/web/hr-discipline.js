@@ -455,7 +455,7 @@
     if (i.can.approve) {
       buttons.push(button("Approve", async () => {
         const values = await formDialog("Approve the incident", [textField("points", "Points (leave blank to keep them)", { type: "number", attrs: { step: "0.25", min: "0", max: "100", inputmode: "decimal" } }),
-          textField("reason", "Why other points?", { area: true, hint: "Only when you change the points." })], "Approve",
+          textField("reason", "Why other points?", { area: true, hint: "Only when you change the points. Changing them asks for a fresh code." })], "Approve",
         { intro: approveIntro(i) });
         if (values && await act(() => api("POST", `/api/incidents/${id}/approve`, values))) await H.route();
       }, "primary"));

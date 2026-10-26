@@ -30,8 +30,9 @@ The flow:
 - Appeals within 7 days (an HR setting): upheld, amended (through adjustment lines) or voided.
   After any void or reduction, later write-ups are checked again, and HR gets a "check this"
   task where a later step would now be lower. Nothing is undone by itself.
-- HR's adjustments (a person's points, one incident's points), voids, and changes to when a
-  write-up stops counting each need a reason and a fresh code, and are audited.
+- HR's adjustments (a person's points, one incident's points, or other points than the rules
+  give when approving), voids, and changes to when a write-up stops counting each need a reason
+  and a fresh code, and are audited.
 
 Who sees what: HR everything; managers and directors their people's records without HR-only
 notes, and nothing of suspensions or termination reviews until HR acts; employees their own
@@ -586,7 +587,8 @@ def events_of(db, *, incident_id=None, writeup_id=None) -> list[dict]:
 def hr_only_note(e: dict) -> bool:
     """HR's reasons for changing an incident's points or a write-up's end date are HR's only, as
     in the points statement: others see what changed, not why."""
-    return e["points"] is not None or e["what"].startswith("HR changed when it stops counting")
+    return e["points"] is not None or e["what"].startswith(
+        ("HR changed when it stops counting", "HR changed when its points stop counting"))
 
 
 def history_view(db, rows: list[dict], rel: str) -> list[dict]:
@@ -876,6 +878,15 @@ def edit_incident(db, inc: dict, person: dict, viewer, data: dict, today: date) 
     return get_incident(db, inc["id"])
 
 
+def approval_score(db, body: dict, inc: dict) -> tuple[dict, float]:
+    """An incident waiting for HR, scored as approving it now would: against the incidents
+    counting, so a repeat counts the incidents HR approved since it was recorded. Returns the
+    score and the points it gives (its recorded points when it can't be scored)."""
+    s = score(db, body, inc["person_id"], inc["offence_key"], date.fromisoformat(inc["happened"]),
+              inc["protected"], inc["manager_points"])
+    return s, (inc["final_points"] if s["errors"] else s["final"])
+
+
 def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_reason: str = "",
                      today: date, auto: bool = False) -> dict:
     """HR's approval: the points count from today (expiring from the day it happened), and the
@@ -891,10 +902,8 @@ def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_
     # (so a re-score can work it out again) and for the step it makes due. What counts is this
     # score, not the one from when it was recorded: incidents HR approved since then can make it
     # a repeat.
-    s = score(db, body, inc["person_id"], inc["offence_key"], happened, inc["protected"],
-              inc["manager_points"])
+    s, scored = approval_score(db, body, inc)
     recorded = inc["final_points"]
-    scored = recorded if s["errors"] else s["final"]
     final = scored
     if hr_points is not None and hr_points != scored:
         if inc["protected"] != "no":
@@ -1745,9 +1754,7 @@ def incident_view(db, inc: dict, rel: str, viewer, person: dict, today: date) ->
         if inc["status"] == "with_hr" and body:
             # What approving it now counts (a repeat counts the incidents HR approved since it
             # was recorded), and earlier ones still waiting, which approving first would count.
-            s = score(db, body, inc["person_id"], inc["offence_key"],
-                      date.fromisoformat(inc["happened"]), inc["protected"], inc["manager_points"])
-            found["points_if_approved"] = inc["final_points"] if s["errors"] else s["final"]
+            found["points_if_approved"] = approval_score(db, body, inc)[1]
             found["earlier_waiting"] = db.conn.execute(
                 "SELECT COUNT(*) FROM incidents WHERE person_id = ? AND status = 'with_hr' AND "
                 "id != ? AND happened <= ?", (inc["person_id"], inc["id"], inc["happened"])).fetchone()[0]
@@ -2261,6 +2268,12 @@ async def api_approve_incident(request):
     access.not_own_work(v, inc["recorded_by"])
     data = await read_json(request)
     hr_points = clean_points(data.get("points"))
+    if hr_points is not None and not signin.confirmed(v.session):
+        # Other points than the rules give is a change of points: a fresh code, as for /adjust.
+        body = body_of(svc.db, inc["version_id"], date.fromisoformat(inc["happened"]))
+        if body and hr_points != approval_score(svc.db, body, inc)[1]:
+            return error("reconfirm", 401,
+                         method="code" if svc.db.person(v.id)["totp_on"] else "pin")
     result = approve_incident(svc.db, inc, v.id, v.name, hr_points=hr_points,
                               hr_reason=clean_text(data.get("reason"), 1000), today=today_of(svc.db))
     final = get_incident(svc.db, inc["id"])["final_points"]

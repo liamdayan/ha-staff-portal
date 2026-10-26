@@ -298,6 +298,12 @@ def test_hr_voids_an_adjustment_or_a_credit_and_sets_when_one_entry_stops_counti
             assert status == 200, r
             assert (total(db, t + timedelta(days=9)), total(db, t + timedelta(days=10))) == (2.0, 0.0)
             assert any("stop counting" in e["what"] for e in discipline.events_of(db, incident_id=rude))
+            # The manager sees that it changed, not HR's reason.
+            for who, sees in (("max", False), ("hana", True)):
+                _, inc, _ = await hr.call("GET", f"/api/incidents/{rude}", cookie=s[who])
+                assert any("stop counting" in h["what"] for h in inc["history"]), who
+                notes = [h["note"] for h in inc["history"]]
+                assert ("Settled at the grievance meeting." in notes) is sees, (who, notes)
             # Points taken off can't be given an end here, and an incident is voided on its page.
             minus = points.adjust(db, "401", "discipline", -1, t, "405", "Fewer.")
             assert (await hr.call("POST", f"/api/people/401/points/{minus}/ends",

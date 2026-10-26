@@ -1,5 +1,226 @@
 # Changelog
 
+## 0.10.0
+
+This version adds the **HR portal**: a second, private website inside Staff Access for employee
+files (documents, certificates, discipline and probation, and performance reviews). **It's off
+until you turn it on** on the dashboard's new **HR portal** tab. While it's off, nothing changes
+for anyone, nothing extra is asked of Connecteam or Google, and its address only says it's turned
+off. The full guide is the new **HR portal** chapter of the Documentation tab.
+
+**HR portal and sign-in**
+
+- **Its own address.** Add an address such as `hr.yourdomain.com` to your Cloudflare Tunnel,
+  pointing at the new port **8788**. The HR portal only answers through your tunnel, at that
+  address.
+- **People come from Connecteam**: everyone in the user list Staff Access already reads, checked
+  every hour (usually at no extra request), with their departments, start date and direct
+  manager. Someone archived in Connecteam loses HR access within the hour, and their records
+  stay. If Connecteam suddenly lists far fewer people, nobody is cut off: you get a warning
+  instead.
+- **Roles.** You make HR admins (on the HR portal tab); HR admins make directors and managers
+  and pick each manager's departments. Managers see their departments' people, directors see
+  everyone but HR admins and other directors, employees see only their own file. Nobody acts on
+  their own file or approves their own work.
+- **Signing in** is with a mobile number, the person's **Connecteam kiosk code** as their PIN,
+  and a 6-digit **authenticator code** for HR admins, directors and managers (an HR setting
+  decides who). People who must use an authenticator set it up with a one-time setup code from
+  HR (or from you, for HR admins), so knowing someone's kiosk code is never enough to reach a
+  manager's account. Others can add one themselves in **My account**.
+- **Locks and time-outs:** 5 wrong tries lock someone's HR sign-in for 15 minutes, 15 in a day
+  until HR unlocks it. People are signed out after 15 minutes without use and after 8 hours.
+  **My account** lists their devices, with **Sign out** for each.
+- **Sensitive actions** (resetting someone, ending access, changing roles or settings, deleting
+  files, changing anyone's points) ask for a fresh authenticator code, or the PIN.
+- **Each person's page** shows, in order: Details, Documents, Certificates, Probation,
+  Discipline, Reviews and, for HR, Sign-in. Each part shows only what the person looking may see.
+- **Audit log.** Every sign-in, look at a file and change is written to a log only HR admins see,
+  never to Staff Access's Activity tab or Home Assistant's logbook. **Check audit log** shows if
+  any line was changed or removed. You see **Security events** on the HR portal tab.
+- **Emergency controls** on the HR portal tab: unlock or reset anyone's sign-in (HR admins
+  included), sign everyone out, or turn the portal off.
+- **The HR key and backups.** Private details and files are encrypted on the Home Assistant
+  computer. Home Assistant's backups include the HR portal, so turn on backup encryption.
+  **Keep the HR key out of backups** (HR settings) leaves the key out of them and shows a
+  **recovery key** once: print it and keep it in the safe.
+- **Moving to new hardware:** a migration file carries the HR portal too (its settings, records
+  and key). With the key kept out of backups, the new install asks for the recovery key.
+- **Connecteam for HR** (Settings → Connections, optional): a second Connecteam app's keys for
+  HR, **Send Connecteam chat messages**, **Copy confirmed certificates to Connecteam**, and
+  **Test connection**. If Connecteam refuses chat or copies, only that part stops and the reason
+  is shown. The HR portal has its own small share of Connecteam requests (6 a minute, 500 a day),
+  so your time clock checks always have room.
+
+**Google Drive**
+
+- **Employee files go to a Google shared drive**, one folder per employee with Documents,
+  Certificates, Discipline and Reviews folders. Staff Access reaches it through a small script
+  you paste into script.google.com under your own Google account: no Google Cloud project or key
+  file. Set it up under **Settings → Connections → Google Drive (HR files)**; **Test
+  connection** runs four plain checks.
+- The script only works inside the shared drives you pick, only answers Staff Access (every
+  request is signed with a secret only your install has), and never deletes a file for good.
+- **Restricted records** (I-9s, reasonable accommodation) can go in a second shared drive,
+  **HR Restricted**.
+- **If you set up the Google Drive script before this version, paste it and deploy it again.**
+  The script is now version 2, which also makes PDFs of signed write-ups and final reviews. Click
+  **Copy the script**, paste it over the old one in script.google.com, then **Deploy → Manage
+  deployments → Edit → New version → Deploy**. Files keep going to Drive on the old version
+  meanwhile; PDFs wait until the new one is deployed.
+
+**Documents**
+
+- **A Documents section on each person's page** to open and add files. Photos open in the portal;
+  PDFs are always downloaded. Files added by anyone but HR wait for HR to accept them (or not,
+  with a reason).
+- **Kinds of document** (HR settings): signed policies, training records, hiring paperwork and
+  other to start with. HR can rename them, add more, and choose who sees each one, its Drive
+  folder and who may add one.
+- **Restricted I-9 and reasonable accommodation files** are for HR admins only. Nobody else
+  learns one exists, every look is logged, and they're never copied to Connecteam.
+- Every file goes to the person's Drive folder with the date first in its name. Photos are saved
+  without their location or camera details, and big phone photos (up to 200 megapixels) are
+  shrunk as they're read. Files are kept encrypted on the computer until they're in Drive, then
+  30 more days.
+- **Reliable uploads:** tried again after 1 minute, 5, 30, 2 hours, 6 hours, then daily. After 8
+  tries a file goes on HR's new **Needs attention** page with **Retry**, which never makes a
+  second copy. Signed write-ups and closed reviews become PDFs through the same queue.
+- **Deleting** needs a fresh code and keeps the file in a 30-day recycle bin. A **legal hold**
+  stops all deletion in someone's file, certificate photos included. Records of people who left
+  are listed for HR 5 years after they leave and are never deleted by themselves.
+- A copy to Connecteam can only be turned on for kinds of document the employee can see.
+
+**Certificates**
+
+- **Oregon Food Handler Cards, OLCC Service Permits and food manager certificates** are tracked,
+  and HR can add other kinds (such as CPR and First Aid). HR chooses which departments and
+  people need each one; the Pub and Front Desk are suggested, and nothing is required until HR
+  confirms.
+- **Staff add or renew a card from their phone** with the camera button, or the course's PDF.
+  Managers can add one for their team, and HR for anyone.
+- **Google Drive reads the date** from the photo ("We read: expires 6/14/2029. HR will confirm.").
+  HR checks every card next to the text read, corrects the date if needed, and confirms it or
+  turns it down with a reason. Without Google, HR types the date.
+- A confirmed card goes to the person's **Certificates** folder in Drive, named with its expiry
+  date, and to Connecteam when that copy is on. A turned-down photo never reaches the folder.
+- **Statuses:** Valid, Expiring, Expired, Due, Missing, Waiting for HR or Waived. A lapsed OLCC
+  permit flags the person "May not serve alcohol" on every board. HR gets a certificate board with
+  filters and a spreadsheet download, managers their team's board, everyone **My certificates**.
+- **Reminders:** expired or missing cards every 2 days (a setting) to the person, their managers
+  and HR; heads-ups before a card runs out; new hires are told what they need and by when.
+
+**The point system**
+
+- **The point system ships as a sample marked "not in use".** Nothing counts points, and nobody
+  can record an incident, until HR loads your written point system and publishes it. HR sets it up
+  under **Point system** in the portal (offences and their points, steps and thresholds, when
+  points stop counting, probation rules), or imports it from a spreadsheet, which lists anything
+  it had to guess as questions.
+- **A simulator** shows what made-up incidents would do: a chart of points over time and every
+  step due, without touching anyone's file.
+- **Published versions never change.** Each incident keeps the version it was scored under, and
+  HR can re-score chosen people under a new version after a preview. Points HR set for an incident
+  are kept.
+- **Points are kept like a bank statement**, with totals for any day and exact half and quarter
+  points. They stop counting on the write-up's end date or after 12 months, whichever comes first
+  (a setting). A write-up's end date stops all the points that led to its step, as the simulator
+  shows. An optional clean-period reset, earning points back, and HR's adjustments and voids
+  (with reasons) are there too.
+- Everyone can read the point system in force under **Point system**.
+
+**Discipline and probation**
+
+- **Managers record an incident on one phone-friendly form** with a live preview ("Maria: 4 → 6
+  points. Reaches Written warning. A write-up is needed."), the Oregon protected-leave question
+  for attendance offences, and points within each offence's range.
+- **HR approves every incident before it counts.** An incident counts the points the rules give
+  when HR approves it, so a repeat counts the incidents approved since it was recorded; the
+  approval shows any difference, and whether earlier incidents are still waiting. Setting other
+  points than the rules give asks for a fresh code.
+- **Reaching a step** gives the manager and HR a task with a write-up already filled in.
+  Suspensions and termination reviews go to HR only, and a termination review is never
+  automatic: HR chooses terminate, a last-chance agreement or no action. Escalation ("a new
+  incident while on Final written") counts only a write-up delivered by the day it happened.
+- **Write-ups are signed** in person on the manager's phone (with the employee's PIN), in the
+  portal, on paper with a photo, or recorded as refused with a witness. Signing confirms receipt,
+  not agreement. The signed PDF goes to the person's **Discipline** folder in Drive.
+- **Appeals** within 7 days: HR upholds, amends or voids. After any void or reduction, later
+  write-ups are checked against what they were worked out from, and a real drop makes a "check
+  this" task. Nothing is undone by itself.
+- **HR's corrections:** adjust someone's points, change one incident's points, void incidents and
+  write-ups, change when a write-up stops counting, and, from the points history, void an
+  adjustment or a credit or set when one entry stops counting. Each needs a reason and a fresh
+  code, and is logged. **As of a date** shows anyone's points on any past day.
+- **Probation:** introductory periods from the Connecteam start date (90 days, or by department;
+  the end date is the last day), disciplinary probation placed by HR, extensions (up to 30 days
+  each, 120 in all; a leave of absence doesn't count), employee acknowledgements, and HR's
+  decision at the end. It never passes by itself while a recommendation to extend or end
+  employment is waiting. Clearing points on passing ends the probation's own incidents and leaves
+  older points alone. Probation works before the point system is published.
+- **My team** for managers, and a **Discipline** page for HR with everything waiting. HR settings
+  gain **Write-ups and probation** (days to appeal, reminders, "introductory period" or
+  "probation", whether employees see their end date).
+
+**Reviews**
+
+- **Performance reviews** on a one-page, phone-friendly form: tap a number to rate, and it saves
+  as you go.
+- **Reviews open by themselves:** at the end of the introductory period (moving with an
+  extension, and a new one if it's extended after the review closed), on each work anniversary
+  (or in one month for everyone), and optional 30- and 60-day check-ins. A disciplinary
+  probation gets an **End of disciplinary probation** review. A review is skipped when another
+  for the same person is due within 3 weeks. Managers and HR can start an extra one.
+- **HR builds the forms** (rating scale, sections, goals, recommendations, extra sections per
+  department). Saving a form makes a new version; open reviews keep theirs.
+- **Who writes it:** the primary manager of the person's main department (HR when there's none).
+  HR can hand it to someone else, others who see the person can comment, choosing who sees each
+  comment, and everyone can keep a private note only they and HR see.
+- **The steps:** self-review (annual reviews), the writer fills it in with a read-only
+  Background panel (points, write-ups, certificates, last goals), HR approves
+  end-of-introductory-period reviews, the writer shares it, and the employee acknowledges it
+  (received, not agreeing) or refuses. The final PDF goes to the person's **Reviews** folder.
+- **An end-of-introductory-period review's recommendation** (pass, extend or end employment) goes
+  to the introductory period for HR to decide; the employee doesn't see it. One that can't reach
+  HR's decision is shown on the review, HR and the writer are told, and it isn't retried.
+
+**Notifications**
+
+- **The portal's inbox** always works, and the home page lists to-dos.
+- **Connecteam chat messages** (optional) from a "Hot Lake HR" publisher. They never say what
+  it's about, only that something is waiting, with the portal's address.
+- Employees' messages wait out **quiet hours** (9 PM to 7 AM), at most one a day unless urgent.
+  Managers, directors and HR get urgent things at once and the rest in one **daily summary**
+  (8 AM). Messages that can't be sent are tried again, then shown to HR with **Retry**.
+- The guide has one table of who is told what.
+
+**Safety and fixes**
+
+- **With "Keep the HR key out of backups" on, the Google script's Web app URL and secret and the
+  Connecteam for HR Client Secret are locked with the HR key too**, so a Home Assistant backup on
+  its own can't reach HR files in Google Drive. After a restore, both connections come back once
+  the recovery key is typed.
+- **Backups made before you turned "Keep the HR key out of backups" on still hold the HR key.**
+  Delete them, or keep them as safely as before, once a new backup has been made.
+- **An authenticator someone added for themselves never carries into a staff role.** When HR
+  makes someone a manager or director, you make them an HR admin, or HR's setting comes to cover
+  them, a phone they added themselves is removed and they're signed out until they get a setup
+  code.
+- **End HR access now** also cancels any setup code or link made for that person earlier, and
+  using a setup code never re-allows access by itself.
+- **Sign-in doesn't show, by how fast it answers, which numbers have an authenticator.**
+- **Check audit log** also notices lines removed from the end of the log.
+- **HR's reasons for changing points, or when something stops counting, stay with HR.** Managers
+  and directors see that it changed, not why.
+- **Migration files:** HR's records can be up to 64 MB, and a bigger one is refused when the file
+  is made. A restore refuses a damaged HR part before changing anything. If HR's records still
+  can't be written, the HR portal stays off (it never starts empty with a new key), and the
+  dashboard says so. A migration file waits while files are on their way to Drive or Connecteam,
+  or uploads and certificate photos are waiting for HR, and lists every reason at once.
+- A one-off refusal from the Google Drive script never makes it forget where former employees'
+  folders are.
+- A legal hold keeps certificate photos too (replaced, turned-down and withdrawn ones), and
+  they're tidied once the hold is lifted.
+
 ## 0.9.3
 
 **Staff app**

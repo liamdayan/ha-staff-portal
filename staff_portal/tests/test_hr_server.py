@@ -446,3 +446,48 @@ def test_hrs_reasons_for_changing_points_and_end_dates_stay_with_hr(tmp_path, mo
                 assert ("HRSECRET-ADJ medical" in notes) is hr_sees, (who, notes)
                 assert ("HRSECRET-ENDS" in notes) is hr_sees, (who, notes)
     run(scenario())
+
+
+def test_approving_with_other_points_than_the_rules_give_needs_a_fresh_code(tmp_path, monkeypatch):
+    import point_system
+    from test_hr_discipline import record, setup
+    from hr import discipline
+    pol, _ = point_system.install(monkeypatch)
+    pol.publish()
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr, confirmed=False)
+            first = (await record(hr, s))["incident"]
+            second = (await record(hr, s))["incident"]
+            _, view, _ = await hr.call("GET", f"/api/incidents/{first}", cookie=s["hana"])
+            computed = view["points_if_approved"]
+            other = computed + 1
+            # Other points, with a reason: a fresh code (a PIN without an authenticator) first.
+            status, r, _ = await hr.call("POST", f"/api/incidents/{first}/approve",
+                                         {"points": other, "reason": "Witnesses disagree."}, s["hana"])
+            assert (status, r["error"], r["method"]) == (401, "reconfirm", "pin")
+            assert discipline.get_incident(hr.hdb, first)["status"] == "with_hr"
+            hr.enrol("405")
+            status, r, _ = await hr.call("POST", f"/api/incidents/{first}/approve",
+                                         {"points": other, "reason": "Witnesses disagree."}, s["hana"])
+            assert (status, r["method"]) == (401, "code")
+            # The rules' own points, typed or left blank, need none.
+            status, r, _ = await hr.call("POST", f"/api/incidents/{first}/approve",
+                                         {"points": computed}, s["hana"])
+            assert status == 200, r
+            assert discipline.get_incident(hr.hdb, first)["final_points"] == computed
+            _, view, _ = await hr.call("GET", f"/api/incidents/{second}", cookie=s["hana"])
+            computed = view["points_if_approved"]
+            # Once confirmed, other points go through.
+            hr.hdb.conn.execute("UPDATE sessions SET confirmed_at = ? WHERE person_id = '405'",
+                                (time.time(),))
+            hr.hdb.conn.commit()
+            status, r, _ = await hr.call("POST", f"/api/incidents/{second}/approve",
+                                         {"points": computed + 1, "reason": "Witnesses disagree."},
+                                         s["hana"])
+            assert status == 200, r
+            inc = discipline.get_incident(hr.hdb, second)
+            assert (inc["status"], inc["final_points"], inc["hr_points"]) == \
+                ("approved", computed + 1, computed + 1)
+    run(scenario())

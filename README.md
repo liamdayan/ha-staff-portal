@@ -120,6 +120,36 @@ encoder, without opening TT Hotel's own software.
   doors synced every few hours, a monthly cap far below TT Hotel's limit, and requests stop at
   once if TT Hotel says to.
 
+### HR portal (optional, off until you turn it on)
+
+A second, private website at its own address (port 8788, through your Cloudflare Tunnel) for
+employee files. People and departments come from Connecteam, files go to a Google shared drive,
+and each person sees only what their role allows.
+
+- **Sign-in:** mobile number, Connecteam kiosk code and, for HR admins, directors and managers,
+  an authenticator code set up with a one-time code from HR. Locks, short sessions and a fresh
+  code for sensitive actions.
+- **Roles:** HR admins (chosen by you), directors, managers (with the departments HR assigns) and
+  employees, who see only their own file.
+- **Documents:** kinds of document with who may see and add each, restricted I-9 and
+  accommodation files for HR only, HR's check of uploads, a 30-day recycle bin and legal holds.
+  Every file reaches the person's folder in Google Drive, retried until it does.
+- **Certificates:** Oregon Food Handler Cards, OLCC Service Permits and any kind HR adds. Staff
+  photograph their card, Google Drive reads the date, HR confirms it, and reminders go out before
+  and after it runs out. Lapsed permits are flagged ("May not serve alcohol").
+- **Point system:** your written discipline policy as settings, with a spreadsheet import, a
+  simulator and published versions. It ships as a sample marked "not in use" until HR publishes
+  yours.
+- **Discipline and probation:** incidents on one phone-friendly form with a live preview, HR's
+  approval, write-ups signed in person, in the portal or on paper, appeals, HR's adjustments with
+  reasons, introductory periods and disciplinary probation.
+- **Performance reviews:** scheduled and extra reviews on forms HR builds, with self-reviews, HR's
+  approval, the employee's acknowledgement and a PDF in Google Drive.
+- **Notifications** in the portal's inbox and, optionally, as Connecteam chat messages that never
+  say what they're about, with quiet hours and a daily summary.
+- **Audit log** of every sign-in, look at a file and change, for HR admins only. Private details
+  and files are encrypted, and the HR key can be kept out of Home Assistant's backups.
+
 ### Admin dashboard (Home Assistant sidebar → Staff Access)
 
 - **Phones & computers:** add, revoke, re-pair, unlock, link to a Home Assistant user, and choose
@@ -146,7 +176,10 @@ encoder, without opening TT Hotel's own software.
   rooms or staff doors), day-pass and overnight doors, the end and checkout times, contractor
   badge and staff card defaults, Door activity, and every card made.
 - **Settings → Connections:** TT Hotel and Connecteam, each folded to one line saying whether it
-  works and how many requests Staff Access has used against its limit, with its own Save button.
+  works and how many requests Staff Access has used against its limit, with its own Save button;
+  plus Google Drive (HR files) and Connecteam for HR for the HR portal.
+- **HR portal tab:** turn the HR portal on, choose HR admins, and emergency controls (unlock,
+  reset sign-in, sign everyone out).
 - **Branding:** property name (shown in the staff app instead of "Staff Portal"), home-screen
   name, brand color and logo.
 - **Backup tab:**
@@ -224,10 +257,13 @@ recommended.
    front-desk computer the card encoder is plugged into, turn on **Wristbands**, enter your TT
    Hotel integration details under **Settings → Connections**, and give your front-desk role
    wristband permissions.
+6. For the HR portal (optional): add a second tunnel address pointing at port **8788**, connect
+   Google Drive under **Settings → Connections**, then turn it on in the **HR portal** tab.
 
 The full guide is in [staff_portal/DOCS.md](staff_portal/DOCS.md), which is also shown on the
 add-on's **Documentation** tab. It covers tunnels, roles, areas, layouts, shared devices, locked
-controls, wristbands, linking Home Assistant users, security settings and backups.
+controls, wristbands, linking Home Assistant users, security settings, backups and the HR
+portal.
 
 ## How it works
 
@@ -236,13 +272,18 @@ Phones / computers ──https──▶ Cloudflare Tunnel ──▶ Staff Portal
                                                          │  checks role, PIN, limits
                                                          ▼
 Home Assistant sidebar ──ingress──▶ Staff Access :8099 ──▶ Home Assistant API
+
+HR portal users ──https──▶ Cloudflare Tunnel ──▶ HR portal :8788 ──▶ Google Drive script,
+                           (its own address)     (when it's on)      Connecteam
 ```
 
-The add-on runs two small web servers in one process. The staff app talks only to the add-on,
-never to Home Assistant directly. The add-on holds the Home Assistant connection, decides what
-each device may see and do, and sends allowed actions on. Everything is stored in SQLite (with a
+The add-on runs three small web servers in one process: the staff app, the dashboard and the HR
+portal (which only says it's turned off until you turn it on). The staff app talks only to the
+add-on, never to Home Assistant directly. The add-on holds the Home Assistant connection, decides
+what each device may see and do, and sends allowed actions on. Everything is stored in SQLite (with a
 write-ahead log, so a busy shift never waits on the disk) in the add-on's `/data` folder, which
-Home Assistant includes in its backups.
+Home Assistant includes in its backups. The HR portal keeps its own encrypted database in
+`/data/hr`.
 
 ## Repository layout
 
@@ -250,7 +291,8 @@ Home Assistant includes in its backups.
 repository.yaml              Home Assistant add-on repository manifest
 docs/screenshots/            Images used in this README
 staff_portal/
-  config.yaml                Add-on manifest (ingress for the dashboard, port 8787 for staff)
+  config.yaml                Add-on manifest (ingress for the dashboard, port 8787 for staff,
+                             8788 for the HR portal)
   Dockerfile
   DOCS.md                    Setup guide (shown in the add-on's Documentation tab)
   CHANGELOG.md               What changed in each version
@@ -268,6 +310,29 @@ staff_portal/
     branding.py              Logo handling and home-screen icons
     admin/                   Admin dashboard (plain HTML, JS and CSS; no build step)
     staff/                   Staff app (plain HTML, JS and CSS; no build step)
+    hr/                      HR portal (off until turned on):
+      service.py               Starting and stopping it, people sync, nightly run, migration
+      server.py                Its web server, the guard on every request, sign-in pages
+      access.py                Roles, who sees what, and a rule on every route
+      signin.py, totp.py       PINs, authenticator codes, sessions and fresh codes
+      hrdb.py, crypto.py       Its own SQLite database, and encryption with the HR key
+      audit.py                 The HR audit log, chained so changes show up
+      people.py                People and departments from Connecteam
+      notify.py                Inbox, Connecteam chat messages, quiet hours, daily summary
+      ctapi.py                 HR's own Connecteam requests (chat, certificate copies)
+      gdrive.py, bridge.gs     Google Drive through the script the owner deploys
+      documents.py, docroutes.py, files.py, folders.py, delivery.py
+                               Documents, safe uploads, Drive folders, the retry queue
+      certificates.py, ocr_dates.py
+                               Certificates, and the dates read off a card
+      policy.py, points.py     The point system's versions, and the points ledger
+      discipline.py            Incidents, write-ups, appeals, HR's corrections
+      probation.py             Introductory periods and disciplinary probation
+      reviews.py               Performance reviews and their forms
+      pdfdoc.py                Pages for the PDFs Google Drive makes
+      parts.py                 Plugs each part into the portal
+      web/                     The HR portal's pages (plain HTML, JS and CSS; no build step)
+  tests/                     pytest suite, with fakes for Connecteam and the Google script
 ```
 
 ## Local development
