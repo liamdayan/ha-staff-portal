@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>{{TITLE}}</title>
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/static/hr.css?v={{VERSION}}">
+{{SCRIPTS}}
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#/" id="brand"><img src="/icon.png" alt="" width="28" height="28"><span>{{TITLE}}</span></a>
+  <button type="button" class="menu-btn" id="menu-btn" aria-expanded="false" aria-controls="nav" hidden>Menu</button>
+</header>
+<nav id="nav" class="nav" aria-label="HR portal" hidden></nav>
+<main id="main" tabindex="-1"><p class="muted center">Loading…</p></main>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="dialog"></dialog>
+<noscript><p class="center">The HR portal needs JavaScript turned on.</p></noscript>
+</body>
+</html>

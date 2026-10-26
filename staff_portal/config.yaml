@@ -11,6 +11,11 @@ boot: auto
 # Just before Home Assistant backs the add-on up: put the database's write-ahead log back
 # into the file (app/checkpoint.py).
 backup_pre: python /app/checkpoint.py
+# "Keep the HR key out of backups" (HR portal) keeps the HR key in this folder, which backups
+# leave out; a locked copy that only the HR recovery key opens stays in the backup.
+backup_exclude:
+  - hr/outside-backups
+  - hr/outside-backups/*
 homeassistant_api: true
 ingress: true
 ingress_port: 8099
@@ -19,5 +24,7 @@ panel_title: Staff Access
 panel_admin: true
 ports:
   8787/tcp: 8787
+  8788/tcp: 8788
 ports_description:
   8787/tcp: Staff app (point your Cloudflare Tunnel at this port)
+  8788/tcp: HR portal (point its own Cloudflare Tunnel hostname at this port)

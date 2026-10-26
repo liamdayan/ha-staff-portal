@@ -461,6 +461,10 @@ how its requests are kept low. Each has its own **Save** button, which saves onl
 connection's settings, so saving one never changes the other or the rest of Settings. Secrets
 stay hidden: leave the box blank to keep the saved one.
 
+**Connecteam for HR** is a third, optional one, used only by the [HR portal](#hr-portal): a
+second Connecteam app for its chat messages and certificate copies. It counts its requests
+against the HR portal's own small share (500 a day).
+
 TT Hotel's **Callback URL**, which sends Staff Access each unlock at doors with a gateway, isn't
 one of these details: its address is under **Door activity** on the Wristbands tab (see [Door
 activity](#door-activity)).
@@ -1384,3 +1388,254 @@ A few rules keep a migration file safe:
 Keep these files private. Staff and phone PINs are included only in scrambled form (they can't
 be read back directly), but PINs are short, so someone with the file could work them out by
 trying every combination offline.
+
+## HR portal
+
+The HR portal is a second, private website built into Staff Access, at its own address, for
+employee files, documents and certificates. It takes its people and departments from
+Connecteam. What each person sees depends on their role, and everything they do is written to
+an audit log only HR admins see.
+
+It's **off until you turn it on**. While it's off, nothing changes for anyone, nothing extra is
+asked of Connecteam, and its address only says "The HR portal is turned off."
+
+### Before you start
+
+1. **Turn on Connecteam** in **Settings → Connections**. The HR portal reads its people from the
+   same user list Staff Access already uses.
+2. **Add an address for it in your Cloudflare Tunnel**, such as `hr.yourdomain.com`, pointing at
+   port **8788**. With the Cloudflared add-on, add to its configuration:
+
+   ```yaml
+   additional_hosts:
+     - hostname: hr.yourdomain.com
+       service: http://172.30.32.1:8788
+   ```
+
+   It must be its own address, not the staff app's. The HR portal refuses anything that doesn't
+   come through your tunnel (there's no setting to turn that off), and anything sent to another
+   address.
+3. **In the Cloudflare dashboard, for the HR address only:**
+   - add a Cache Rule **Bypass cache**;
+   - turn off **Rocket Loader** and **Email Obfuscation** (they would break the pages);
+   - optionally, block countries other than the US, and add a rate limit on the sign-in page.
+   Don't put Cloudflare Access in front of it: most staff have no company account to sign in
+   with.
+4. **Turn on Home Assistant's backup encryption** for every backup location. HR records are in
+   Home Assistant's backups (see [The HR key and backups](#the-hr-key-and-backups)).
+
+### Turning it on
+
+Open the **HR portal** tab, tick **Turn on the HR portal**, type the HR address and click
+**Save**. The tab then shows:
+
+- **HR admins.** Click **Add HR admin** and choose yourself (people come from Connecteam). Two is
+  best, you and your HR lead, so neither depends on the other. Only you can make someone an HR
+  admin, and only here.
+- **Setup QR code**, next to each HR admin. Scan it with that person's phone: it opens the HR
+  portal's setup page (see [Setting up an authenticator](#setting-up-an-authenticator)). It works
+  once, for 15 minutes.
+- **Sync people now**, and when people were last read from Connecteam.
+- **Emergency controls** and **Security events** (below).
+
+Turning it off signs everyone out of it. Nothing in it is deleted, and turning it on again
+brings it all back.
+
+### Signing in
+
+Everyone signs in on one page with:
+
+1. **Mobile number**, as it is in Connecteam. HR can set a **sign-in name** for the few people
+   without one.
+2. **PIN**: their **Connecteam kiosk code**. The HR portal only keeps a scrambled copy of it
+   (never the code itself), refreshed every hour from Connecteam. When someone's kiosk code
+   changes, they're signed out of the HR portal. Someone without a kiosk code can't sign in, and
+   HR sees "No kiosk code in Connecteam" on their file.
+3. **Authenticator code**: the 6-digit code from an authenticator app (Google Authenticator,
+   Microsoft Authenticator or similar), for those who use one. Each code works once.
+
+A failed sign-in always says the same thing, "That didn't work. Check your number, PIN and
+code.", whichever part was wrong, and the page never lists names.
+
+**Who must use an authenticator code** is an HR setting: everyone; **HR admins, directors and
+managers** (the default); HR admins only; or nobody. Anyone else can turn one on for themselves
+in **My account**.
+
+**Locks.** 5 wrong tries in a row lock someone's HR sign-in for 15 minutes; 15 in a day lock it
+until an HR admin unlocks it. A lock never signs out someone already signed in, and it's counted
+apart from the staff app's PIN locks. Too many failures from one internet address, or from
+everywhere at once, pause new sign-ins for a few minutes.
+
+**Staying signed in.** People are signed out after **15 minutes** without use (HR can set 5 to
+30) and after **8 hours** whatever happens. There's no "remember this device", because
+front-desk computers are shared. Each person can be signed in on up to 5 devices; **My account**
+lists them, with **Sign out** for each and **Sign out everywhere**. The home page shows when and
+from where they last signed in, so misuse gets noticed.
+
+**Sensitive actions** (resetting or unlocking someone, ending access, changing roles,
+departments or HR settings, turning off an authenticator) ask for a fresh authenticator code
+first, or the PIN for someone without an authenticator.
+
+### Setting up an authenticator
+
+**People who must use one** set it up with a one-time setup code from an HR admin (or, for HR
+admins, from you on the dashboard), so someone who only knows a kiosk code can't add their own
+phone to a manager's account. On the person's page, HR clicks **Setup QR code** (works once, for
+15 minutes, on HR's screen) or **Setup link** (works once, for 72 hours; send it by hand in a
+Connecteam chat). Setup takes about two minutes:
+
+1. Confirm the name.
+2. Type the PIN (the kiosk code).
+3. Scan the QR code into the authenticator app (or type the key shown under it).
+4. Type the code the app shows.
+5. Save the 8 **recovery codes**. Each works once instead of a 6-digit code, if the phone is
+   lost.
+
+**Everyone else** can turn one on in **My account → Turn on**, re-typing their PIN.
+
+**New phone.** In **My account**, **Set up a new phone** (after a fresh code from the old one).
+The old phone stops working. Someone who lost their phone signs in with a recovery code: it's
+logged, HR admins are told in their inbox, and the person is asked to set up their
+authenticator again.
+
+**Reset by HR.** **Reset sign-in** on someone's page removes their authenticator and recovery
+codes and signs them out everywhere. They then sign in with their kiosk code, or set up again
+with a new setup code if their role needs one.
+
+### Roles
+
+| Role | Who gives it | Who they see |
+|---|---|---|
+| **HR admin** | You, on the HR portal tab | Everyone, including former employees, HR settings and sign-ins |
+| **Director** | An HR admin | Everyone except HR admins and other directors (unless they're the director's direct reports in Connecteam) |
+| **Manager** | An HR admin, with the departments HR assigns | The people in those departments, but not other managers, directors or HR admins unless they're their direct reports |
+| **Employee** | Automatic | Only their own file |
+
+Rules over every role:
+
+- Nobody acts on their own file except as an employee. Another HR admin, or you, handles an HR
+  admin's own file.
+- Access follows the person: when someone moves department in Connecteam, their old manager loses
+  access at once and the new one gains it. A role change counts from the person's next click.
+- Every piece of text has a level saying who can see it, and text someone can't see never leaves
+  Home Assistant.
+- Records, once issued, are never rewritten: corrections are added as new entries, with a reason.
+- Nobody approves their own work.
+
+Being a manager in Connecteam doesn't make someone a manager here: HR chooses, in **HR settings
+→ Roles**, then ticks each manager's departments (one manager per department can be the
+**primary** one).
+
+### People from Connecteam
+
+Every hour the HR portal reads Connecteam's user list, the same one Staff Access already reads,
+so it usually costs no extra request. Around sign-ins it reads it at most every 5 minutes, so a
+new hire can sign in soon after being added. Once a day it reads Connecteam's archived users and
+the names of its profile fields. For each person it keeps:
+
+- name, mobile number and email (the last two encrypted);
+- departments: the Staff Access departments, which follow your Connecteam smart groups;
+- **start date**, from the profile field HR picks in **HR settings → Connecteam profile fields**
+  (until then, a field called "Employment Start Date"). If it's empty, the day they were added
+  to Connecteam is used, marked **estimated**, and HR gets a to-do to confirm it. Check that
+  dates are read the right way round (month/day or day/month) with one test employee;
+- **direct manager**, from the "Direct manager" profile field, shown as a hint;
+- whether they're archived.
+
+Kiosk codes, birthdays and other profile fields are never stored.
+
+**When someone leaves.** Archived in Connecteam (or gone from its list), their HR access ends
+within the hour, and their records stay. For same-day departures, HR has **End HR access now**
+on their page. Coming back isn't automatic: if someone is restored in Connecteam, HR clicks
+**Allow sign-in again** (or makes them a new setup code).
+
+**Safety catch.** If Connecteam suddenly lists far fewer people (nobody, or more than a quarter
+fewer), nobody is cut off: HR and the dashboard get a warning instead, and the next sync tries
+again.
+
+**Connecteam's request limits.** The HR portal has its own small share inside Staff Access's:
+at most 6 requests a minute and 500 a day, and none once Staff Access has used half of its
+daily share, so clock checks always have room. Normal use is a few requests a day. If
+Connecteam refuses an HR request (a missing permission or plan feature), only that HR task
+stops: Staff Access's own time clock checks keep running.
+
+### Notifications
+
+- **The portal's inbox** always works, for everyone, and the home page lists to-dos.
+- **Connecteam chat messages** are optional. They need a second Connecteam app: in **Settings →
+  Connections → Connecteam for HR**, paste its Client ID and Client Secret and tick **Send
+  Connecteam chat messages**. The app needs **chat.write** and **publishers.read** (Connecteam's
+  Communications hub), and a custom publisher named "Hot Lake HR" under **Settings → Feed
+  settings → Custom publishers** in Connecteam. Without it, people see things in the inbox
+  only.
+- Messages never say what it's about, only that there's something new in the HR portal, with its
+  address.
+- Employees' messages wait out **quiet hours** (9 PM to 7 AM by default), and each person gets at
+  most one message a day unless it's urgent. Managers, directors and HR get urgent things straight
+  away and everything else in one **daily summary** (8 AM by default). HR sets these times in
+  **HR settings → Notifications**, in Pacific time.
+- Each message is one Connecteam request. A message that can't be sent is tried again after 1
+  minute, 5, 30, 2 hours and 6 hours, then daily; after 8 tries HR sees it in **HR settings →
+  Notifications** with a **Retry** button, and on their to-do list.
+
+### HR settings
+
+HR admins find these in the HR portal under **HR settings**: roles, managers' departments, who
+must use an authenticator code, how soon people are signed out, notifications, which
+Connecteam profile fields hold the start date and direct manager, and the HR key (below).
+
+### The audit log
+
+Every sign-in, failure, lock, reset, look at a file and change goes into the HR portal's audit
+log: who did it, what, to whose file, when and from where. It never holds PINs, codes or what
+records say. Lines can't be changed: each one is chained to the one before, so **Check audit
+log** (HR admins, **Audit log** page) shows if any line was changed or removed.
+
+HR events never go to Staff Access's **Activity** tab or the Home Assistant logbook, which other
+Home Assistant users can see. On the dashboard's HR portal tab you see **Security events** only
+(sign-ins, locks, resets and settings changes), never who looked at which file.
+
+### Emergency controls
+
+On the dashboard's **HR portal** tab:
+
+- **Find someone** to **Unlock** them or **Reset sign-in** (their authenticator and recovery codes
+  go, and they're signed out everywhere). This works for anyone, HR admins included.
+- **Sign everyone out** of the HR portal.
+- **Turn the HR portal off** (untick it and save).
+
+### The HR key and backups
+
+Private details are encrypted on the Home Assistant computer: mobile numbers, emails,
+authenticator secrets, sign-in names, and the files and texts the HR portal keeps. Names, dates
+and statuses stay readable so lists can be sorted. The HR records live in the add-on's `/data`
+folder (`/data/hr`), apart from Staff Access's own.
+
+- **Staff Access's own Download backup never holds anything from the HR portal**, and restoring
+  one never touches it.
+- **Home Assistant's backups include the HR portal.** By default its key is included too, so a
+  restore just works. Turn on Home Assistant's backup encryption.
+- **Keep the HR key out of backups** (HR settings → HR key) is off by default. Turning it on
+  shows an **HR recovery key** once: 20 letters and numbers. **Print it and keep it in the
+  safe.** The key itself is then left out of Home Assistant's backups, so a stolen backup on its
+  own reveals nothing. After a restore, the HR portal stays locked until you type the recovery
+  key on the dashboard's HR portal tab (**Unlock with the HR recovery key**). Turning the setting
+  off puts the key back in backups.
+- If the key is kept out of backups and both the computer and the recovery key are lost, the HR
+  records on the computer can't be opened. Files kept in Google Drive survive.
+- Anyone who is a Home Assistant administrator, or who has the running computer in hand, could
+  get at everything. Keep that list short.
+
+**Moving to new hardware.** A migration file (Backup tab → Migrate) carries the HR portal too:
+its settings, its records and its key. With the key kept out of backups, only the locked copy
+travels, and the new install asks for the HR recovery key. A migration file can't be made while
+uploads are still waiting to reach Google Drive or Connecteam: wait for them to go, then try
+again.
+
+### Keeping records
+
+Records of people who have left are kept for 5 years after they leave (an HR setting), then
+listed for HR to review and delete; nothing is ever deleted automatically, and a legal hold
+stops it. Your employment lawyer should confirm the period. For reference, an I-9 must be kept
+for 3 years after hire or 1 year after leaving, whichever is later; 5 years after leaving covers
+that.

@@ -24,6 +24,7 @@
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
   <button role="tab" data-tab="backup">Backup</button>
+  <button role="tab" data-tab="hr">HR portal</button>
 </nav>
 
 <main>
@@ -475,6 +476,74 @@
     <input type="file" id="import-file" accept=".json,.gz,application/json,application/gzip" hidden>
   </section>
 
+  <section id="tab-hr" class="tab" hidden>
+    <div class="section-head"><h2>HR portal</h2><span class="badge" id="hr-badge"></span></div>
+    <div class="settings">
+      <fieldset>
+        <legend>Turn on</legend>
+        <p class="hint">A private website for employee files, documents and certificates, at its own
+          address. Everyone signs in with their mobile number and Connecteam kiosk code (managers and HR
+          also with an authenticator code), and sees only what their role allows. Its people come from
+          Connecteam. While it's off, nothing changes for anyone and nothing extra is asked of
+          Connecteam.</p>
+        <form id="hr-form" class="item-fields">
+          <label class="check-row"><input type="checkbox" name="hr_enabled">
+            <span>Turn on the HR portal
+            <small>Needs Connecteam turned on (Settings → Connections) and the HR address below.</small></span></label>
+          <label>HR address <small>Its own hostname in your Cloudflare Tunnel, pointing at port 8788
+            (with the Cloudflared add-on: <code>http://172.30.32.1:8788</code>). Not the staff app's
+            address.</small>
+            <input name="hr_host" placeholder="hr.yourdomain.com" autocomplete="off" spellcheck="false" maxlength="253"></label>
+          <div class="form-actions"><button class="btn primary" type="submit">Save</button></div>
+        </form>
+        <p class="hint" id="hr-where"></p>
+      </fieldset>
+      <fieldset id="hr-unlock" hidden>
+        <legend>Unlock with the HR recovery key</legend>
+        <p class="hint">The HR key was kept out of Home Assistant backups, so after a restore or a move
+          the HR portal stays locked until you type the HR recovery key you printed when it was turned
+          on.</p>
+        <form id="hr-unlock-form" class="copy-row">
+          <input name="recovery_key" placeholder="ABCD-EFGH-JKLM-NPQR-STUV" autocomplete="off"
+            spellcheck="false" aria-label="HR recovery key">
+          <button class="btn primary" type="submit">Unlock</button>
+        </form>
+      </fieldset>
+      <fieldset id="hr-admins-box" hidden>
+        <legend>HR admins</legend>
+        <p class="hint">HR admins see everyone and run the HR portal: roles, sign-ins and HR settings. Only
+          you choose them, here. Two is best (you and your HR lead), so neither depends on the other.
+          Each one scans their own setup QR code with their phone to set up their authenticator.</p>
+        <div id="hr-admins" class="item-list"></div>
+        <div class="backup-actions">
+          <button class="btn" type="button" id="hr-add-admin">Add HR admin</button>
+          <button class="btn" type="button" id="hr-sync">Sync people now</button>
+        </div>
+        <p class="hint" id="hr-sync-status"></p>
+      </fieldset>
+      <fieldset id="hr-emergency" hidden>
+        <legend>Emergency controls</legend>
+        <p class="hint">For when HR can't: unlock someone, reset their HR sign-in (their authenticator
+          and recovery codes go, and they're signed out everywhere), or sign everyone out. Turning the
+          HR portal off is above.</p>
+        <input type="search" id="hr-find" placeholder="Find someone by name" autocomplete="off" aria-label="Find someone">
+        <div id="hr-found" class="item-list"></div>
+        <div class="backup-actions"><button class="btn danger" type="button" id="hr-sign-out-all">Sign everyone out</button></div>
+      </fieldset>
+      <fieldset id="hr-events-box" hidden>
+        <legend>Security events</legend>
+        <p class="hint">Sign-ins, locks, resets and changes to settings. Who looked at which file is only
+          in the HR portal's own audit log, which HR admins see.</p>
+        <div class="table-wrap">
+          <table class="activity">
+            <thead><tr><th>When</th><th>What</th><th>Who</th></tr></thead>
+            <tbody id="hr-events"></tbody>
+          </table>
+        </div>
+      </fieldset>
+    </div>
+  </section>
+
   <section id="tab-settings" class="tab" hidden>
     <div class="settings">
       <fieldset>
@@ -599,6 +668,42 @@
                 <button class="btn" type="button" id="ct-sync">Sync staff now</button>
               </div>
               <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam settings</button></div>
+            </form>
+          </details>
+          <details class="conn" id="conn-hr-connecteam">
+            <summary>
+              <span class="conn-head"><span class="conn-name">Connecteam for HR</span>
+                <span class="badge" data-conn-state></span></span>
+              <span class="conn-use" data-conn-use></span>
+            </summary>
+            <form id="hrct-form" class="conn-body">
+              <p class="hint">Optional, for the HR portal only: a second Connecteam app, so HR can send
+                Connecteam chat messages (from a sender called “Hot Lake HR”) and copy certificates to
+                employees' Connecteam profiles. Your time clock connection above stays as it is.</p>
+              <p class="hint">In Connecteam, as the account owner, open <b>your name → Integration Center →
+                OAuth 2.0</b>, click <b>Create app</b>, name it “Staff Access HR” and give it
+                <b>users.read</b>, plus <b>chat.write</b> and <b>publishers.read</b> for chat messages
+                (Communications hub), and <b>documents.read</b>, <b>documents.write</b> and
+                <b>attachments.write</b> for certificate copies (HR &amp; Skills hub on the Expert plan).
+                For chat, also add a custom publisher named “Hot Lake HR” under <b>Settings → Feed
+                settings → Custom publishers</b>.</p>
+              <div class="row">
+                <label>Client ID<input name="hr_connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
+                <label>Client Secret<input name="hr_connecteam_client_secret" type="password" maxlength="500"
+                  autocomplete="new-password" spellcheck="false"></label>
+              </div>
+              <label class="check-row"><input type="checkbox" name="hr_connecteam_chat">
+                <span>Send Connecteam chat messages
+                <small>They only ever say there's something new in the HR portal, with its address, never
+                what. Employees' messages wait out quiet hours, and each person gets at most one a day
+                unless it's urgent. Without this, people see things in the portal's inbox only.</small></span></label>
+              <p class="hint">Each message is one Connecteam request inside the HR portal's own share: at
+                most 6 a minute and 500 a day, and none once Staff Access has used half of its daily
+                share, so clock checks always have room.</p>
+              <label class="check-row" id="hrct-clear-row" hidden><input type="checkbox" name="hr_connecteam_clear_secret">
+                <span>Remove the saved Client Secret</span></label>
+              <p class="hint" id="hrct-status"></p>
+              <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam for HR</button></div>
             </form>
           </details>
         </div>
@@ -976,6 +1081,8 @@
     </div>
   </form>
 </dialog>
+
+<dialog id="hr-dialog" class="wide"></dialog>
 
 <dialog id="qr-dialog">
   <h2>Set up <span data-name></span></h2>

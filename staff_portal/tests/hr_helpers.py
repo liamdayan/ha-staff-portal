@@ -1,0 +1,238 @@
+"""Shared setup for the HR portal's tests: a fake Connecteam with what HR reads (users with
+mobile numbers, emails and profile fields; archived users; profile field names; the time clock),
+and an HR harness: a fresh Staff Access database, a fresh HR folder, the HR web app and the
+dashboard as test clients.
+
+Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant: Connecteam's
+address points at the fake (or at a closed local port when no fake is running).
+"""
+
+import json
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
+from test_wristbands_server import Portal, free_port
+
+import connecteam  # noqa: E402
+import main  # noqa: E402
+import transfer  # noqa: E402
+from hr import crypto, hrdb, notify, people, server as hr_server, signin, totp  # noqa: E402
+from hr.service import HRService  # noqa: E402
+
+HOST = "hr.example.com"
+ORIGIN = f"https://{HOST}"
+CHANGE = {"Host": HOST, "Origin": ORIGIN, "X-Requested-With": "hr-portal",
+          "Sec-Fetch-Site": "same-origin"}
+READ = {"Host": HOST, "Sec-Fetch-Site": "same-origin"}
+NOWHERE = f"http://127.0.0.1:{free_port()}"   # nothing listens: a stray request fails here
+connecteam.API_OVERRIDE = NOWHERE
+
+
+def ct_user(user_id, first, last="", code=None, groups=(), mobile=None, email=None, fields=None,
+            created=1_700_000_000, archived=False):
+    return {"userId": user_id, "firstName": first, "lastName": last, "kioskCode": code,
+            "smartGroupsIds": list(groups), "isArchived": archived, "phoneNumber": mobile,
+            "email": email, "createdAt": created,
+            "customFields": [{"customFieldId": k, "value": v} for k, v in (fields or {}).items()]}
+
+
+class FakeConnecteam:
+    """Connecteam as the HR portal uses it. refuse: paths answered with 403."""
+
+    def __init__(self, users=(), archived=(), fields=(), clocked_in=()):
+        self.users = list(users)
+        self.archived = list(archived)
+        self.fields = list(fields)
+        self.clocked_in = list(clocked_in)
+        self.refuse: set[str] = set()
+        self.calls: list[str] = []
+        self.port = free_port()
+        self.app = web.Application()
+        self.app.router.add_route("*", "/{tail:.*}", self.handle)
+        self.runner = None
+
+    async def handle(self, request):
+        path = request.path
+        self.calls.append(path + ("?archived" if request.query.get("userStatus") == "archived" else ""))
+        if path in self.refuse:
+            return web.json_response({"detail": "Missing scope"}, status=403)
+        if path == "/oauth/v1/token":
+            return web.json_response({"access_token": "fake", "expires_in": 3600})
+        if path == "/users/v1/users":
+            source = self.archived if request.query.get("userStatus") == "archived" else self.users
+            offset = int(request.query.get("offset", 0))
+            return web.json_response({"data": {"users": source[offset:offset + 500]}})
+        if path == "/users/v1/custom-fields":
+            return web.json_response({"data": {"customFields": self.fields}})
+        if path == "/users/v1/smart-groups":
+            return web.json_response({"data": {"groups": []}})
+        if path == "/time-clock/v1/time-clocks":
+            return web.json_response({"data": {"timeClocks": [{"id": 1}]}})
+        if path.startswith("/time-clock/v1/time-clocks/"):
+            now = time.time()
+            return web.json_response({"data": {"timeActivitiesByUsers": [
+                {"userId": uid, "shifts": [{"start": {"timestamp": now - 600}}]}
+                for uid in self.clocked_in]}})
+        return web.json_response({"error": "not here"}, status=404)
+
+    async def __aenter__(self):
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
+        await web.TCPSite(self.runner, "127.0.0.1", self.port).start()
+        connecteam.API_OVERRIDE = f"http://127.0.0.1:{self.port}"
+        fresh_connecteam()
+        await main.connecteam.start()
+        return self
+
+    async def __aexit__(self, *exc):
+        await main.connecteam.close()
+        connecteam.API_OVERRIDE = NOWHERE
+        await self.runner.cleanup()
+
+    def count(self, path: str) -> int:
+        return sum(1 for c in self.calls if c == path)
+
+
+def fresh_connecteam() -> None:
+    c = main.connecteam
+    c.forget()
+    c.paused_until = 0.0
+    c.pause_reason = None
+    c._recent.clear()
+    c._hr_recent.clear()
+    c.limits.clear()
+
+
+class HR:
+    """An install with Connecteam on and the HR portal set up. fresh: nothing else set up (no
+    staff, phones or roles), as a migration needs."""
+
+    def __init__(self, tmp_path, enabled=True, fresh=False):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        self.p = Portal(tmp_path)
+        self.db = main.db
+        if fresh:
+            for table in ("staff_devices", "device_tokens", "staff", "devices", "role_entities",
+                          "roles", "wb_jobs"):
+                self.db.conn.execute(f"DELETE FROM {table}")
+            self.db.conn.commit()
+        self.db.update_settings({"connecteam_enabled": "1", "connecteam_client_id": "client",
+                                 "connecteam_client_secret": "secret",
+                                 "hr_enabled": "1" if enabled else "0", "hr_host": HOST,
+                                 "property_name": "Hot Lake"})
+        fresh_connecteam()
+        self.folder = str(tmp_path / "data")
+        self.svc = main.hr_service = HRService(
+            self.folder, main_settings=lambda: main.db.settings(), connecteam=main.connecteam,
+            departments=main.hr_departments, group_names=lambda: {"501": "Pub", "502": "Kitchen"},
+            from_tunnel=lambda remote: main.from_tunnel(remote),
+            client_ip=lambda request: main.client_ip(request),
+            property_name=lambda: "Hot Lake", icon=lambda: b"\x89PNG fake")
+        # Tests drive the background work by hand (svc.tick(), sync_people(), nightly()), and the
+        # nightly run doesn't start by itself whatever the time of day.
+        self.svc.start = lambda background=False, _s=self.svc: HRService.start(_s, False)
+        self.svc.daily_state["day"] = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
+        notify.chat = None
+        self.client = self.admin = None
+        self.pins: dict[str, str] = {}
+
+    async def __aenter__(self):
+        if self.svc.enabled():
+            assert self.svc.start() == "on"
+        self.client = TestClient(TestServer(hr_server.make_app(self.svc)))
+        await self.client.start_server()
+        self.admin = TestClient(TestServer(main.admin_app()))
+        await self.admin.start_server()
+        await main.tthotel.start()
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.client.close()
+        await self.admin.close()
+        await main.encoders.close_all()   # the Front Desk PC's encoder runner (from /api/state)
+        await main.tthotel.close()
+        await self.svc.stop()
+
+    @property
+    def hdb(self) -> hrdb.HRDatabase:
+        return self.svc.db
+
+    # ------------------------------------------------------------ people
+
+    async def add_people(self, *users):
+        """Put people in the HR portal as a sync would ([ct_user(...)]), remembering PINs."""
+        listed = [{"id": str(u["userId"]), "name": f"{u['firstName']} {u['lastName']}".strip(),
+                   "kiosk_code": u["kioskCode"], "groups": [str(g) for g in u["smartGroupsIds"]],
+                   "mobile": u["phoneNumber"], "email": u["email"], "created_at": u["createdAt"],
+                   "fields": {str(f["customFieldId"]): f["value"] for f in u["customFields"]}}
+                  for u in users]
+        for u in listed:
+            if u["kiosk_code"]:
+                self.pins[u["id"]] = u["kiosk_code"]
+        return await people.apply_users(self.hdb, listed)
+
+    def give(self, person_id, role, groups=None):
+        self.hdb.set_role(person_id, role, True, by="test")
+        if groups is not None:
+            self.hdb.set_manager_groups(person_id, groups)
+
+    def enrol(self, person_id) -> str:
+        """Turn on an authenticator for someone directly; returns its secret."""
+        secret = totp.new_secret()
+        signin.enable_totp(self.hdb, person_id, secret, 0)
+        return secret
+
+    # ------------------------------------------------------------ requests
+
+    async def call(self, method, path, body=None, cookie=None, headers=None):
+        hdrs = dict(CHANGE if method not in ("GET", "HEAD") else READ)
+        if cookie:
+            hdrs["Cookie"] = f"{signin.COOKIE}={cookie}"
+        hdrs.update(headers or {})
+        resp = await self.client.request(method, path, json=body, headers=hdrs)
+        text = await resp.text()
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = text
+        return resp.status, data, resp
+
+    async def sign_in(self, person_id, code="", pin=None, mobile=None) -> str:
+        p = self.hdb.person(person_id)
+        status, data, resp = await self.call("POST", "/api/signin", {
+            "mobile": mobile or people.mobile_of(p), "pin": pin or self.pins[person_id],
+            "code": code})
+        assert status == 200, data
+        return resp.cookies[signin.COOKIE].value
+
+    async def confirm(self, cookie, person_id, secret=None):
+        """Re-confirm a session (sensitive actions): with a fresh code, or the PIN."""
+        body = {"code": next_code(self, person_id, secret)} if secret else {"pin": self.pins[person_id]}
+        status, data, _ = await self.call("POST", "/api/reconfirm", body, cookie)
+        assert status == 200, data
+
+    async def admin_call(self, method, path, body=None):
+        resp = await self.admin.request(method, path, headers={"X-Requested-With": "staff-portal"},
+                                        json=body)
+        raw = await resp.read()
+        if raw[:2] == transfer.GZIP_MAGIC:
+            raw = transfer.gunzip(raw)   # a backup download
+        try:
+            return resp.status, json.loads(raw)
+        except ValueError:
+            return resp.status, raw.decode()
+
+
+def next_code(hr: HR, person_id, secret) -> str:
+    """A code for the next time step not used yet (each code works once)."""
+    used = hr.hdb.person(person_id)["totp_step"]
+    step = max(int(time.time() // 30) - 1, used + 1)
+    return totp.code_at(secret, step)
+
+
+def wipe_key(hr: HR) -> None:
+    crypto.use(None)

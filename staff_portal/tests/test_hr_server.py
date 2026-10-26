@@ -1,0 +1,295 @@
+"""The HR portal's web server: what every request must get past (the tunnel, the off and locked
+pages, the address, the change headers), signing in, setting up an authenticator, locks,
+sessions and fresh codes for sensitive actions.
+
+Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
+"""
+
+import asyncio
+import time
+
+from hr_helpers import CHANGE, HOST, HR, READ, ct_user, next_code
+
+import main  # noqa: E402
+from hr import audit, notify, signin, totp  # noqa: E402
+
+ANA = ct_user(101, "Ana", "Lee", code="4821", groups=[501], mobile="+1 541-555-0101")
+BO = ct_user(102, "Bo", "Diaz", code="7302", groups=[501], mobile="541-555-0102")
+MAX = ct_user(103, "Max", "Ray", code="99001", groups=[501], mobile="541-555-0103")
+HANA = ct_user(104, "Hana", "Ito", code="55667788", groups=[502], mobile="541-555-0104")
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def actions(hr: HR) -> list[str]:
+    return [line["action"] for line in audit.lines(hr.hdb, 200)]
+
+
+# ---------------------------------------------------------------- the guard
+
+def test_off_means_a_plain_page_and_nothing_else(tmp_path):
+    async def scenario():
+        async with HR(tmp_path, enabled=False) as hr:
+            for method, path in (("GET", "/"), ("GET", "/api/me"), ("POST", "/api/signin"),
+                                 ("GET", "/static/hr.js")):
+                status, body, resp = await hr.call(method, path, {})
+                assert status == 503 and "turned off" in body
+                assert resp.headers["Cache-Control"] == "no-store"
+            assert hr.svc.db is None and not (tmp_path / "data" / "hr").exists()
+    run(scenario())
+
+
+def test_tunnel_address_and_change_headers(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA)
+            status, body, resp = await hr.call("GET", "/")
+            assert status == 200 and "<title>Hot Lake HR</title>" in body
+            csp = resp.headers["Content-Security-Policy"]
+            assert "script-src 'self'" in csp and "unsafe-inline" not in csp
+            assert "frame-ancestors 'none'" in csp and resp.headers["X-Frame-Options"] == "DENY"
+            assert resp.headers["Referrer-Policy"] == "no-referrer"
+            assert '<script src="/static/hr.js?v=' in body
+            status, body, _ = await hr.call("GET", "/static/hr.js")
+            assert status == 200 and "HRPortal" in body
+            assert (await hr.call("GET", "/static/..%2fserver.py"))[0] == 404
+            # Another address on the same port, such as the staff app's.
+            status, _, _ = await hr.call("GET", "/", headers={"Host": "staff.example.com"})
+            assert status == 421
+            # Not through the tunnel: refused, whatever else it says.
+            hr.svc.from_tunnel = lambda remote: False
+            status, body, _ = await hr.call("GET", "/")
+            assert status == 403 and "secure address" in body
+            hr.svc.from_tunnel = lambda remote: main.from_tunnel(remote)
+            # A change needs the exact Origin, X-Requested-With and Sec-Fetch-Site.
+            body = {"mobile": "5415550101", "pin": "4821"}
+            for missing in ("Origin", "X-Requested-With", "Sec-Fetch-Site"):
+                headers = {k: v for k, v in CHANGE.items() if k != missing}
+                resp = await hr.client.post("/api/signin", json=body, headers=headers)
+                assert resp.status == 403, missing
+            resp = await hr.client.post("/api/signin", json=body,
+                                        headers={**CHANGE, "Origin": "https://evil.example"})
+            assert resp.status == 403
+            resp = await hr.client.get("/api/me", headers={**READ, "Sec-Fetch-Site": "cross-site"})
+            assert resp.status == 403
+            # Unknown routes are just not found.
+            assert (await hr.call("GET", "/api/nothing"))[0] == 404
+    run(scenario())
+
+
+def test_locked_hr_says_so(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            hr.svc.keyring.keep_out(True)
+            await hr.svc.stop()
+            (tmp_path / "data" / "hr" / "outside-backups" / "master.key").unlink()
+            assert hr.svc.start() == "locked" and hr.svc.status() == "locked"
+            status, body, _ = await hr.call("GET", "/")
+            assert status == 503 and "recovery key" in body
+    run(scenario())
+
+
+# ---------------------------------------------------------------- signing in
+
+def test_sign_in_with_mobile_and_kiosk_code(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, BO)
+            # Wrong PIN, unknown number, no PIN: always the same message.
+            for body in ({"mobile": "541 555 0101", "pin": "0000"},
+                         {"mobile": "541 555 0199", "pin": "4821"},
+                         {"mobile": "541 555 0101", "pin": ""}):
+                status, data, _ = await hr.call("POST", "/api/signin", body)
+                assert (status, data["error"]) == (401, signin.FAILED)
+            status, data, resp = await hr.call("POST", "/api/signin",
+                                               {"mobile": "(541) 555-0101", "pin": "4821"})
+            assert status == 200
+            cookie = resp.headers["Set-Cookie"]
+            assert cookie.startswith("__Host-hr=") and "HttpOnly" in cookie and "Secure" in cookie
+            assert "SameSite=Strict" in cookie and "Path=/" in cookie
+            token = resp.cookies[signin.COOKIE].value
+            status, me, _ = await hr.call("GET", "/api/me", cookie=token)
+            assert status == 200 and me["name"] == "Ana Lee" and me["role"] == "employee"
+            assert me["last_signin"]["at"] is None          # the first time
+            assert "Signed in" in actions(hr) and "Sign-in failed" in actions(hr)
+            # The second time, home shows the one before.
+            token = await hr.sign_in("101")
+            status, me, _ = await hr.call("GET", "/api/me", cookie=token)
+            assert me["last_signin"]["at"] and me["last_signin"]["ip"] == "127.0.0.1"
+            # A sign-in name for someone without a mobile number.
+            hr.hdb.update_person("102", signin_hash=None)
+            hr.hdb.update_person("102", signin_name_hash=signin.name_key("bo diaz"))
+            status, _, _ = await hr.call("POST", "/api/signin", {"mobile": "Bo  Diaz", "pin": "7302"})
+            assert status == 200
+            # Signed out: the cookie goes and the session ends.
+            status, _, resp = await hr.call("POST", "/api/signout", {}, cookie=token)
+            assert status == 200 and "Max-Age=0" in resp.headers["Set-Cookie"]
+            assert (await hr.call("GET", "/api/me", cookie=token))[0] == 401
+    run(scenario())
+
+
+def test_people_who_must_use_an_authenticator_set_it_up_with_hrs_code(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, MAX)
+            hr.give("103", "manager", {"501": True})
+            # A manager's kiosk code alone never gets in (the default setting).
+            status, data, _ = await hr.call("POST", "/api/signin", {"mobile": "5415550103", "pin": "99001"})
+            assert (status, data["error"]) == (401, signin.FAILED)
+            # The setup code: confirm the name, the PIN, the QR code, a code, recovery codes.
+            token, _ = signin.new_setup_token(hr.hdb, "103", "qr", "test")
+            status, info, _ = await hr.call("GET", f"/api/setup/{token}")
+            assert status == 200 and info["name"] == "Max Ray" and info["has_code"]
+            assert (await hr.call("POST", f"/api/setup/{token}/finish", {"code": "123456"}))[0] == 409
+            status, data, _ = await hr.call("POST", f"/api/setup/{token}/pin", {"pin": "11111"})
+            assert status == 403
+            status, data, _ = await hr.call("POST", f"/api/setup/{token}/pin", {"pin": "99001"})
+            assert status == 200 and data["qr"].startswith("data:image/svg+xml")
+            secret = data["secret"].replace(" ", "")
+            status, _, _ = await hr.call("POST", f"/api/setup/{token}/finish", {"code": "000000"})
+            assert status == 403
+            code = totp.code_at(secret, int(time.time() // 30))
+            status, done, resp = await hr.call("POST", f"/api/setup/{token}/finish", {"code": code})
+            assert status == 200 and len(done["recovery_codes"]) == 8
+            assert resp.cookies[signin.COOKIE].value
+            assert (await hr.call("GET", f"/api/setup/{token}"))[0] == 404     # used: gone
+            # Now the code is needed, and each code works once.
+            status, _, _ = await hr.call("POST", "/api/signin", {"mobile": "5415550103", "pin": "99001",
+                                                                 "code": code})
+            assert status == 401
+            hr.hdb.update_person("103", failed=0)
+            await hr.sign_in("103", code=next_code(hr, "103", secret))
+            # A recovery code works once, tells HR, and asks for a new phone.
+            hr.give("101", "hr_admin")
+            await hr.sign_in("103", code=done["recovery_codes"][0])
+            assert hr.hdb.person("103")["totp_redo"]
+            assert notify.inbox(hr.hdb, "101")[0]["title"] == "Max Ray signed in with a recovery code."
+            status, _, _ = await hr.call("POST", "/api/signin", {
+                "mobile": "5415550103", "pin": "99001", "code": done["recovery_codes"][0]})
+            assert status == 401
+    run(scenario())
+
+
+def test_locks_after_wrong_tries_and_hr_unlocks(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, BO)
+            hr.give("102", "hr_admin")
+            hr.db.update_settings({})   # nothing else
+            token = await hr.sign_in("101")
+            hr.svc.throttle.clear()
+            for _ in range(5):
+                await hr.call("POST", "/api/signin", {"mobile": "5415550101", "pin": "1111"})
+                hr.svc.throttle.clear()   # per-address limits aside: this is about Ana's lock
+            assert signin.locked(hr.hdb.person("101"))
+            status, _, _ = await hr.call("POST", "/api/signin", {"mobile": "5415550101", "pin": "4821"})
+            assert status == 401                             # right PIN, but locked
+            assert (await hr.call("GET", "/api/me", cookie=token))[0] == 200   # still signed in there
+            assert "Locked for 15 minutes" in actions(hr)
+            # An HR admin unlocks Ana (a sensitive action: a fresh PIN first).
+            hr.db.update_settings({})
+            hr.hdb.set_settings({"totp_policy": "nobody"})
+            admin = await hr.sign_in("102")
+            hr.hdb.conn.execute("UPDATE sessions SET confirmed_at = 0")
+            hr.hdb.conn.commit()
+            status, data, _ = await hr.call("POST", "/api/people/101/unlock", {}, cookie=admin)
+            assert (status, data["error"], data["method"]) == (401, "reconfirm", "pin")
+            await hr.confirm(admin, "102")
+            status, _, _ = await hr.call("POST", "/api/people/101/unlock", {}, cookie=admin)
+            assert status == 200 and not signin.locked(hr.hdb.person("101"))
+            await hr.sign_in("101")
+    run(scenario())
+
+
+def test_too_many_failures_from_one_address_slow_down(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA)
+            for _ in range(signin.ADDRESS_LIMIT):
+                await hr.call("POST", "/api/signin", {"mobile": "5415550199", "pin": "1111"})
+            status, data, _ = await hr.call("POST", "/api/signin", {"mobile": "5415550101", "pin": "4821"})
+            assert status == 429 and data["error"] == signin.SLOW_DOWN
+    run(scenario())
+
+
+def test_sessions_end_with_access_and_kiosk_code_changes(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, BO)
+            tokens = [await hr.sign_in("101") for _ in range(6)]
+            assert (await hr.call("GET", "/api/me", cookie=tokens[0]))[0] == 401   # 5 at most
+            status, acc, _ = await hr.call("GET", "/api/account", cookie=tokens[-1])
+            assert len(acc["sessions"]) == 5 and sum(s["current"] for s in acc["sessions"]) == 1
+            other = next(s for s in acc["sessions"] if not s["current"])
+            assert (await hr.call("DELETE", f"/api/account/sessions/{other['id']}", cookie=tokens[-1]))[0] == 200
+            # Someone else's session can't be ended this way.
+            bo = await hr.sign_in("102")
+            bo_session = hr.hdb.conn.execute("SELECT id FROM sessions WHERE person_id = '102'").fetchone()[0]
+            assert (await hr.call("DELETE", f"/api/account/sessions/{bo_session}", cookie=tokens[-1]))[0] == 404
+            # A new kiosk code in Connecteam ends Ana's sessions.
+            await hr.add_people(ct_user(101, "Ana", "Lee", code="1357", groups=[501],
+                                        mobile="+1 541-555-0101"), BO)
+            assert (await hr.call("GET", "/api/me", cookie=tokens[-1]))[0] == 401
+            assert (await hr.call("GET", "/api/me", cookie=bo))[0] == 200
+            # Sign out everywhere.
+            status, data, _ = await hr.call("POST", "/api/signout-everywhere", {}, cookie=bo)
+            assert status == 200 and data["ended"] == 1
+            assert (await hr.call("GET", "/api/me", cookie=bo))[0] == 401
+    run(scenario())
+
+
+def test_my_authenticator_turn_on_new_phone_off(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA)
+            token = await hr.sign_in("101")
+            status, _, _ = await hr.call("POST", "/api/account/authenticator", {"pin": "0000"}, token)
+            assert status == 403
+            status, r, _ = await hr.call("POST", "/api/account/authenticator", {"pin": "4821"}, token)
+            assert status == 200
+            secret = r["secret"].replace(" ", "")
+            code = totp.code_at(secret, int(time.time() // 30))
+            status, done, _ = await hr.call("POST", "/api/account/authenticator/finish",
+                                            {"token": r["token"], "code": code}, token)
+            assert status == 200 and len(done["recovery_codes"]) == 8
+            # Turning it off is sensitive: a fresh code first.
+            hr.hdb.conn.execute("UPDATE sessions SET confirmed_at = 0")
+            hr.hdb.conn.commit()
+            status, data, _ = await hr.call("DELETE", "/api/account/authenticator", None, token)
+            assert (status, data["method"]) == (401, "code")
+            await hr.confirm(token, "101", secret)
+            assert (await hr.call("DELETE", "/api/account/authenticator", None, token))[0] == 200
+            assert not hr.hdb.person("101")["totp_on"]
+            # Someone whose role needs one can't add their own with only their PIN.
+            hr.give("101", "manager", {})
+            status, data, _ = await hr.call("POST", "/api/account/authenticator", {"pin": "4821"}, token)
+            assert status == 403 and "setup code from HR" in data["error"]
+    run(scenario())
+
+
+def test_hr_admins_end_access_and_reset_sign_in(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(ANA, BO)
+            hr.give("102", "hr_admin")
+            secret = hr.enrol("102")
+            admin = await hr.sign_in("102", code=next_code(hr, "102", secret))
+            ana = await hr.sign_in("101")
+            # Their own file: never (another HR admin or the owner does it).
+            status, data, _ = await hr.call("POST", "/api/people/102/reset-signin", {}, admin)
+            assert status == 403 and "own file" in data["error"]
+            status, data, _ = await hr.call("POST", "/api/people/101/end-access", {}, admin)
+            assert status == 200
+            assert (await hr.call("GET", "/api/me", cookie=ana))[0] == 401
+            assert (await hr.call("POST", "/api/signin", {"mobile": "5415550101", "pin": "4821"}))[0] == 401
+            assert (await hr.call("POST", "/api/people/101/allow-access", {}, admin))[0] == 200
+            await hr.sign_in("101")
+            status, data, _ = await hr.call("POST", "/api/people/101/setup-code", {"kind": "link"}, admin)
+            assert status == 200 and data["url"].startswith(f"https://{HOST}/setup/")
+            assert (await hr.call("POST", "/api/people/101/reset-signin", {}, admin))[0] == 200
+            assert notify.inbox(hr.hdb, "101")[0]["kind"] == "signin_reset"
+            assert {"Ended HR access now", "Allowed HR sign-in again", "Made a setup link",
+                    "Reset HR sign-in"} <= set(actions(hr))
+    run(scenario())

@@ -1,8 +1,10 @@
 """Staff Portal: a locked-down, branded staff web app in front of Home Assistant.
 
-Two web servers run in this process:
+Three web servers run in this process:
   * Admin (port 8099) is only reachable through Home Assistant ingress, so only HA admins see it.
   * Staff (port 8787) is the phone app; expose it through your Cloudflare Tunnel.
+  * HR (port 8788) is the HR portal (hr/), at its own address through the tunnel. It's off until
+    the owner turns it on in the dashboard; until then it only says so.
 Staff phones never receive Home Assistant credentials. Every request is checked against the
 phone's role before it is forwarded.
 
@@ -42,7 +44,7 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import migrate
 import transfer
-from connecteam import USERS_TTL, Connecteam, ConnecteamError
+from connecteam import HR_DAILY_CAP, USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 import doorlog
@@ -53,10 +55,14 @@ from encoder import (DASHBOARD_PREFIX, NO_LINK, NO_REPLY, UNREACHABLE, EncoderEr
                      dashboard_user, local_address, local_device)
 from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, ha_networks,
                        parse_networks)
+from hr import access as hr_access, audit as hr_audit, crypto as hr_crypto, signin as hr_signin
+from hr import server as hr_server
+from hr.service import HRService
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
 STAFF_PORT = int(os.environ.get("STAFF_PORT", "8787"))
+HR_PORT = int(os.environ.get("HR_PORT", "8788"))
 # Supervisor ingress always connects from 172.30.32.2.
 ADMIN_ALLOWED_IPS = set(os.environ.get("ADMIN_ALLOWED_IPS", "172.30.32.2,127.0.0.1").split(","))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -128,10 +134,20 @@ def load_connecteam_usage() -> dict:
 
 
 USER_AGENT = f"HomeAssistant-StaffPortal/{VERSION} (+https://github.com/liamdayan/ha-staff-portal)"
+def load_hr_connecteam_usage() -> dict:
+    try:
+        usage = json.loads(db.settings().get("hr_connecteam_usage") or "{}")
+    except ValueError:
+        return {}
+    return usage if isinstance(usage, dict) and isinstance(usage.get("count"), int) else {}
+
+
 connecteam = Connecteam(
     connecteam_settings, connecteam_wanted,
     (load_connecteam_usage, lambda u: db.update_settings({"connecteam_usage": json.dumps(u)})),
-    USER_AGENT)
+    USER_AGENT,
+    hr_usage_store=(load_hr_connecteam_usage,
+                    lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})))
 
 
 def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
@@ -2802,6 +2818,7 @@ async def admin_state(request: web.Request):
         # Why a migration file would be refused here (None on a fresh install), so the Migrate
         # dialog says so early, by the add-on's own rule.
         "not_fresh": not_fresh(),
+        "hr": hr_brief(),
     })
 
 
@@ -5400,6 +5417,250 @@ async def admin_key_card_job_action(request: web.Request):
     return web.json_response({"job": job_view(db.wb_job(job["id"]), await wristband_zone())})
 
 
+# ---------------------------------------------------------------- HR portal (dashboard)
+# The HR portal (hr/) runs in this process on its own port and address. From the dashboard the
+# owner turns it on or off, sets its address, chooses the HR admins (and shows an HR admin's
+# setup QR code), uses the emergency controls, unlocks it with the recovery key, and sees its
+# security events (never who looked at what). Its events go to its own audit log, never to
+# Staff Access's Activity log or the Home Assistant logbook.
+
+def hr_departments() -> list[dict]:
+    return [{"smart_group_id": d["smart_group_id"], "name": d["name"]} for d in db.departments()]
+
+
+hr_service = HRService(
+    DATA_DIR, main_settings=lambda: db.settings(), connecteam=connecteam,
+    departments=hr_departments, group_names=lambda: connecteam.known_group_names(),
+    from_tunnel=lambda remote: from_tunnel(remote), client_ip=lambda request: client_ip(request),
+    property_name=lambda: db.settings().get("property_name", ""),
+    icon=lambda: branding.icon(192, db.settings()), version=VERSION)
+
+HOST_RE = re.compile(r"^(?=.{4,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                     r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+HR_OFF = "Turn the HR portal on first."
+HR_SYNC_GAP = 60
+MAX_HR_ADMINS = 10
+hr_synced = [0.0]
+
+
+def owner_name(request: web.Request) -> str:
+    return f"Owner ({admin_name(request)})"[:120]
+
+
+def clean_hr_host(value) -> str:
+    """The HR portal's address as typed: a host name like hr.yourdomain.com ("" for none)."""
+    text = re.sub(r"^https?://", "", str(value or "").strip().lower()).rstrip("/")
+    if text and not HOST_RE.match(text):
+        raise ValueError("Type the HR address like hr.yourdomain.com (no https:// and no path).")
+    staff = re.sub(r"^https?://", "", db.settings().get("public_url", "").lower()).split(":")[0]
+    if text and text == staff.rstrip("/"):
+        raise ValueError("The HR portal needs its own address, not the staff app's.")
+    return text
+
+
+def hr_refusal() -> web.Response | None:
+    """None while HR runs; otherwise why the dashboard can't do an HR action now."""
+    status = hr_service.status()
+    if status == "on":
+        return None
+    if status in ("locked", "lost"):
+        return bad_request(hr_crypto.LOCKED if status == "locked" else hr_crypto.LOST, 409)
+    return bad_request(HR_OFF, 409)
+
+
+def hr_person_view(p: dict, roles: set[str]) -> dict:
+    return {"id": p["id"], "name": p["name"], "totp_on": bool(p["totp_on"]),
+            "locked": hr_signin.locked(p), "access_ended": bool(p["access_ended"]),
+            "archived": bool(p["archived"]), "has_code": bool(p["kiosk_hash"]),
+            "last_signin_at": p["last_signin_at"], "roles": sorted(roles)}
+
+
+def hr_brief() -> dict:
+    """What /api/state says about HR: enough for the HR Connecteam connection in Settings."""
+    s = db.settings()
+    return {"status": hr_service.status(), "enabled": s.get("hr_enabled") == "1",
+            "connecteam": {"client_id": s.get("hr_connecteam_client_id", ""),
+                           "secret_set": bool(s.get("hr_connecteam_client_secret")),
+                           "chat": s.get("hr_connecteam_chat") == "1",
+                           "used_today": connecteam.hr_usage()["count"],
+                           "daily_cap": HR_DAILY_CAP}}
+
+
+async def admin_hr(request: web.Request):
+    """The HR portal tab."""
+    s = db.settings()
+    state = {**hr_brief(), "host": s.get("hr_host", ""), "url": hr_service.url(),
+             "port": HR_PORT, "connecteam_on": s.get("connecteam_enabled") == "1",
+             "key": {"kept_out": hr_service.keyring.kept_out(),
+                     "state": hr_service.keyring.status()},
+             "admins": [], "people": 0, "sync": None, "events": [], "chat": None}
+    if hr_service.running:
+        hdb = hr_service.db
+        roles = hdb.all_roles()
+        state["admins"] = [hr_person_view(p, roles.get(p["id"], set()))
+                           for p in map(hdb.person, hdb.with_role(hr_access.HR_ADMIN)) if p]
+        state["people"] = hdb.conn.execute(
+            "SELECT COUNT(*) FROM people WHERE archived = 0").fetchone()[0]
+        sync = hr_service.sync_state
+        state["sync"] = {"at": sync["at"], "error": sync["error"], "result": sync["result"],
+                         "warning": hdb.setting("sync_warning") or None}
+        state["events"] = hr_audit.lines(hdb, 50, security=True)
+        last = hdb.conn.execute("SELECT status, error FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+        state["chat"] = {"on": hr_service.chat_wanted(), "ready": hr_service.chat_sender() is not None,
+                         "last": dict(last) if last else None}
+    return web.json_response(state)
+
+
+async def admin_hr_settings(request: web.Request):
+    """Turn the HR portal on or off, and set its address."""
+    data = await read_json(request)
+    current = db.settings()
+    try:
+        host = clean_hr_host(data["hr_host"]) if "hr_host" in data else current.get("hr_host", "")
+    except ValueError as err:
+        return bad_request(str(err))
+    want = (data.get("hr_enabled") in (True, "1", "on", "true") if "hr_enabled" in data
+            else current.get("hr_enabled") == "1")
+    if want and not host:
+        return bad_request("Type the HR portal's address first (the Cloudflare Tunnel hostname "
+                           "pointing at port 8788).")
+    if want and current.get("connecteam_enabled") != "1":
+        return bad_request("Turn on Connecteam first (Settings → Connections): the HR portal "
+                           "takes its people from it.")
+    host_changed = host != current.get("hr_host", "")
+    db.update_settings({"hr_host": host, "hr_enabled": "1" if want else "0"})
+    who = owner_name(request)
+    if want and not hr_service.running:
+        if hr_service.start() == "on":
+            hr_audit.record(hr_service.db, "Turned the HR portal on", actor_id="owner", actor=who,
+                            detail=host, security=True)
+    elif not want and hr_service.running:
+        hr_audit.record(hr_service.db, "Turned the HR portal off", actor_id="owner", actor=who,
+                        security=True)
+        await hr_service.stop()
+    elif hr_service.running and host_changed:
+        hr_audit.record(hr_service.db, "Changed the HR address", actor_id="owner", actor=who,
+                        detail=host, security=True)
+    return web.json_response({"ok": True, "status": hr_service.status()})
+
+
+async def admin_hr_people(request: web.Request):
+    """People to choose HR admins from (from Connecteam, as HR last synced them)."""
+    if refusal := hr_refusal():
+        return refusal
+    q = " ".join(request.query.get("q", "").split()).casefold()[:60]
+    hdb = hr_service.db
+    roles = hdb.all_roles()
+    return web.json_response({"people": [
+        hr_person_view(p, roles.get(p["id"], set())) for p in hdb.people(archived=False)
+        if not q or q in p["name"].casefold()][:500]})
+
+
+async def admin_hr_admins(request: web.Request):
+    if refusal := hr_refusal():
+        return refusal
+    data = await read_json(request)
+    ids = data.get("person_ids")
+    hdb = hr_service.db
+    if (not isinstance(ids, list) or len(ids) > MAX_HR_ADMINS
+            or not all(isinstance(i, str) and (p := hdb.person(i)) and not p["archived"]
+                       for i in ids)):
+        return bad_request(f"Choose up to {MAX_HR_ADMINS} people from the list.")
+    added, removed = hr_service.set_admins(ids, owner_name(request))
+    return web.json_response({"ok": True, "added": added, "removed": removed})
+
+
+async def admin_hr_setup_code(request: web.Request):
+    """An HR admin's setup QR code, shown on the dashboard (the first HR admin has no one else to
+    make it). It works once, for 15 minutes."""
+    if refusal := hr_refusal():
+        return refusal
+    hdb = hr_service.db
+    pid = request.match_info["pid"]
+    person = hdb.person(pid)
+    if not person or hr_access.HR_ADMIN not in hdb.roles_of(pid) or person["archived"]:
+        return bad_request("Only HR admins get a setup code here.", 404)
+    if not hr_service.url():
+        return bad_request("Save the HR portal's address first.")
+    token, expires = hr_signin.new_setup_token(hdb, pid, "owner", "owner")
+    hdb.update_person(pid, access_ended=0)
+    url = f"{hr_service.url()}/setup/{token}"
+    hr_audit.record(hdb, "Made a setup QR code", actor_id="owner", actor=owner_name(request),
+                    target_id=pid, target=person["name"], security=True)
+    return web.json_response({"url": url, "qr": hr_server.qr_data_uri(url), "expires_at": expires})
+
+
+async def admin_hr_person_action(request: web.Request):
+    """Emergency controls: reset or unlock anyone's HR sign-in."""
+    if refusal := hr_refusal():
+        return refusal
+    pid = request.match_info["pid"]
+    if not hr_service.db.person(pid):
+        return bad_request("That person isn't in the HR portal.", 404)
+    if request.match_info["action"] == "reset":
+        hr_service.reset_signin(pid, "owner", owner_name(request))
+    else:
+        hr_service.unlock_person(pid, "owner", owner_name(request))
+    return web.json_response({"ok": True})
+
+
+async def admin_hr_sign_out_everyone(request: web.Request):
+    if refusal := hr_refusal():
+        return refusal
+    return web.json_response({"ended": hr_service.sign_out_everyone("owner", owner_name(request))})
+
+
+async def admin_hr_unlock_key(request: web.Request):
+    data = await read_json(request)
+    if hr_service.keyring.status() != "locked":
+        return bad_request("The HR portal isn't locked.", 409)
+    try:
+        await hr_service.unlock_key(str(data.get("recovery_key") or ""))
+    except ValueError as err:
+        return bad_request(str(err))
+    return web.json_response({"ok": True, "status": hr_service.status()})
+
+
+async def admin_hr_sync(request: web.Request):
+    if refusal := hr_refusal():
+        return refusal
+    if time.time() - hr_synced[0] < HR_SYNC_GAP:
+        return bad_request("People were synced less than a minute ago. Wait a moment.", 429)
+    hr_synced[0] = time.time()
+    result = await hr_service.sync_people(fresh=True)
+    if result is None:
+        return bad_request(hr_service.sync_state["error"] or "Couldn't sync people.", 502)
+    return web.json_response(result)
+
+
+async def admin_hr_connecteam(request: web.Request):
+    """The HR Connecteam connection (Settings > Connections): a second Connecteam app, for chat
+    messages and documents. The secret is write-only: blank keeps the saved one."""
+    data = await read_json(request)
+    values = {}
+    if "hr_connecteam_client_id" in data:
+        client_id = str(data["hr_connecteam_client_id"] or "").strip()
+        if len(client_id) > 200 or not re.fullmatch(r"[\x21-\x7e]*", client_id):
+            return bad_request("The Client ID doesn't look right.")
+        values["hr_connecteam_client_id"] = client_id
+    secret = str(data.get("hr_connecteam_client_secret") or "").strip()
+    if secret:
+        if len(secret) > 500 or not re.fullmatch(r"[\x21-\x7e]+", secret):
+            return bad_request("The Client Secret doesn't look right.")
+        values["hr_connecteam_client_secret"] = secret
+    if data.get("hr_connecteam_clear_secret") in (True, "1", "on", "true"):
+        values["hr_connecteam_client_secret"] = ""
+    if "hr_connecteam_chat" in data:
+        values["hr_connecteam_chat"] = "1" if data["hr_connecteam_chat"] in (True, "1", "on",
+                                                                              "true") else "0"
+    db.update_settings(values)
+    hr_service.refresh_chat()
+    if hr_service.running and values:
+        hr_audit.record(hr_service.db, "Changed the HR Connecteam connection", actor_id="owner",
+                        actor=owner_name(request), security=True)
+    return web.json_response({"ok": True})
+
+
 # ---------------------------------------------------------------- export, import, backup
 
 def download(data: dict, kind: str) -> web.Response:
@@ -5627,11 +5888,20 @@ async def admin_migrate_create(request: web.Request):
     included, encrypted under a one-time code (migrate.py). The file comes back in this answer
     with the code, for the dashboard to save; the code is never stored, logged or put in an
     address, and nothing of either is kept here."""
+    if refusal := hr_service.migration_blocker():
+        return bad_request(refusal, 409)   # HR uploads still on their way to Google or Connecteam
+
+    def build(database):
+        snap = migrate.make_snapshot(database, branding, VERSION)
+        snap["migrate"]["hr"] = hr_service.export()   # encrypted already; None if HR was never on
+        return snap
     db.log(admin_name(request), "Created a migration file",
            detail="It opens for 24 hours, only with the code shown when it was made.")
     code = migrate.new_code()
-    file = await asyncio.to_thread(lambda: migrate.seal(read_everything(
-        lambda database: migrate.make_snapshot(database, branding, VERSION)), code, VERSION))
+    try:
+        file = await asyncio.to_thread(lambda: migrate.seal(read_everything(build), code, VERSION))
+    except ValueError as err:   # the HR key is missing
+        return bad_request(str(err), 409)
     return web.json_response(
         {"code": code, "file": file, "expires_at": file["expires_at"],
          "filename": f"staff-portal-migration-{time.strftime('%Y-%m-%d-%H%M')}.json"},
@@ -5680,6 +5950,14 @@ async def admin_migrate_restore(request: web.Request):
     dropped_links, added = db.replace_everything(snap)
     remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
     await unlink_dropped(dropped_links)
+    await hr_service.stop()
+    if snap["migrate"].get("hr"):
+        try:
+            hr_service.take_migration(snap["migrate"]["hr"])   # the HR database and its key
+        except (ValueError, OSError) as err:
+            log.warning("Couldn't restore the HR portal from the migration file: %s", err)
+    if hr_service.enabled():
+        hr_service.start()   # locked until the recovery key is typed, if it was kept out
     for device in snap["devices"]:
         if device["status"] == "pending" and device["id"] not in snap["migrate"]["setup_codes"]:
             db.new_enroll_code(device["id"])
@@ -5844,6 +6122,17 @@ def admin_app() -> web.Application:
     app.router.add_put("/api/settings", admin_update_settings)
     app.router.add_post("/api/logo", admin_upload_logo)
     app.router.add_delete("/api/logo", admin_delete_logo)
+    app.router.add_get("/api/hr", admin_hr)
+    app.router.add_put("/api/hr/settings", admin_hr_settings)
+    app.router.add_get("/api/hr/people", admin_hr_people)
+    app.router.add_put("/api/hr/admins", admin_hr_admins)
+    app.router.add_post(r"/api/hr/admins/{pid:[A-Za-z0-9_-]{1,40}}/setup", admin_hr_setup_code)
+    app.router.add_post(r"/api/hr/people/{pid:[A-Za-z0-9_-]{1,40}}/{action:reset|unlock}",
+                        admin_hr_person_action)
+    app.router.add_post("/api/hr/sign-out-everyone", admin_hr_sign_out_everyone)
+    app.router.add_post("/api/hr/unlock-key", admin_hr_unlock_key)
+    app.router.add_post("/api/hr/sync", admin_hr_sync)
+    app.router.add_put("/api/hr/connecteam", admin_hr_connecteam)
     return app
 
 
@@ -5871,14 +6160,19 @@ async def main():
     sync_task = asyncio.create_task(staff_sync_loop())   # only while Add everyone is on
     doors_task = asyncio.create_task(tthotel.run())
     raise_file_limit()
+    if hr_service.enabled():
+        hr_service.start()   # locked until the recovery key is typed, if its key is missing
     runners = []
-    for app, port in ((admin_app(), ADMIN_PORT), (staff_app(), STAFF_PORT)):
+    # The HR server always listens: while HR is off it only says so, so turning it on needs no
+    # restart.
+    for app, port in ((admin_app(), ADMIN_PORT), (staff_app(), STAFF_PORT),
+                      (hr_server.make_app(hr_service), HR_PORT)):
         runner = web.AppRunner(app, access_log=None, keepalive_timeout=IDLE_SECONDS)
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port).start()
         runners.append(runner)
-    log.info("Staff Portal %s: admin on :%s (ingress), staff app on :%s",
-             VERSION, ADMIN_PORT, STAFF_PORT)
+    log.info("Staff Portal %s: admin on :%s (ingress), staff app on :%s, HR portal on :%s (%s)",
+             VERSION, ADMIN_PORT, STAFF_PORT, HR_PORT, hr_service.status())
     # Home Assistant stops the add-on with SIGTERM (on update, restart or shutdown): treat it as a
     # normal exit so the cleanup below runs, which also lets go of every card encoder.
     stop = asyncio.Event()
@@ -5894,6 +6188,7 @@ async def main():
         doors_task.cancel()
         for runner in runners:
             await runner.cleanup()
+        await hr_service.stop()
         await discovery.close()
         await encoders.close_all()   # lets go of every encoder
         await tthotel.close()
