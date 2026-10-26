@@ -260,6 +260,12 @@ def test_the_end_of_probation_review_and_hrs_decision(tmp_path, engine):
             probation.decide(hr.hdb, bo["id"], "pass", actor_id="405", actor="Hana Ito", reason="Great start.")
             assert probation.get(hr.hdb, bo["id"])["status"] == "passed"
             assert ("probation_changed", "You passed your introductory period.", 0) in inbox(hr, "bo")
+            # That message opens Bo's file, which says so; Maria's ending isn't shown to her.
+            status, page, _ = await hr.call("GET", "/api/people/402", cookie=s["bo"])
+            mine = section(page, "probation")["probations"]
+            assert status == 200 and [(x["status_word"], x["needs_ack"]) for x in mine] == [("Passed", False)]
+            status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["maria"])
+            assert status == 200 and section(page, "probation") is None
             with pytest.raises(ValueError, match="already decided"):
                 probation.decide(hr.hdb, bo["id"], "pass", actor_id="405", reason="x")
     run(scenario())

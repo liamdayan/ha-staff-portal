@@ -576,7 +576,7 @@ dialog input.code-input {
 /* Hints of different lengths: the boxes in a row still line up along the bottom. */
 #tt-form .row > label { grid-template-rows: auto 1fr auto; }
 #tt-form .row > label > :is(input, select) { align-self: end; }
-.wb-account { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
+.wb-account, .hr-conn-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
 
 /* Google Drive (HR files): the setup steps and the script to copy; both HR connections' Test results */
 .gd-steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; font-size: 14px; }
@@ -590,7 +590,7 @@ dialog input.code-input {
 .conn-checks li.ok .conn-mark { color: var(--ok); }
 .conn-checks li.bad .conn-mark { color: var(--danger); }
 #conn-google .badge, #gd-status, #conn-hr-connecteam .badge, #hrct-status { overflow-wrap: anywhere; }
-.wb-account .linkish { padding: 0; }
+.wb-account .linkish, .hr-conn-line .linkish { padding: 0; }
 
 /* Page groups in the layout's page list */
 .page-group { align-items: flex-start; }

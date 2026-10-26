@@ -232,6 +232,20 @@ def test_hr_lane_limits(tmp_path):
     run(scenario())
 
 
+def test_the_hr_tab_leaves_the_other_tabs_markup_alone():
+    """The HR tab's lines borrow the Wristbands tab's look, not its class: the dashboard's
+    Wristbands account line (and whatever finds it by .wb-account) is the only one there is."""
+    import os
+    import re
+    path = os.path.join(os.path.dirname(main.__file__), "admin", "index.html")
+    with open(path, encoding="utf-8") as f:
+        html = f.read()
+    hr_tab = re.search(r'<section id="tab-hr".*?</section>', html, re.S).group(0)
+    assert not re.search(r'class="[^"]*\bwb-[\w-]+', hr_tab)
+    assert len(re.findall(r'class="[^"]*\bwb-account\b', html)) == 1
+    assert hr_tab.count("hr-conn-line") == 2
+
+
 def test_hr_off_adds_no_requests(tmp_path):
     async def scenario():
         async with FakeConnecteam([ANA, BO], fields=FIELDS, clocked_in=[301]) as ct:

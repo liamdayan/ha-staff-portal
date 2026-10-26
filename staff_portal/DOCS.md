@@ -2289,8 +2289,10 @@ probation, and what needs doing (steps due, drafts, write-ups to deliver or not 
   later.
 
 Screens say **"introductory period"** for new hires (or "probation", a setting), and employees see
-their end date (a setting). Probation doesn't change Oregon at-will employment; have your
-employment lawyer check the wording.
+their end date (a setting). Employees see their probation while it runs, and as **Passed** once HR
+passes it (they're told, and the message opens their file); an ending or a waiver isn't shown to
+them. Probation doesn't change Oregon at-will employment; have your employment lawyer check the
+wording.
 
 #### Settings
 

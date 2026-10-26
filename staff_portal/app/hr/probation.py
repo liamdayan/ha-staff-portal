@@ -646,7 +646,10 @@ def probation_section(svc, v, p: dict, rel: str) -> dict | None:
         log.warning("HR portal: checking probation failed: %r", err)
     rows = of_person(db, p["id"])
     if rel == "self":
-        rows = [r for r in rows if r["status"] == "open"]
+        # Their running probation, and one they passed: they're told "You passed your
+        # introductory period", and that message opens this page. An ending or a waiver isn't
+        # theirs to see here.
+        rows = [r for r in rows if r["status"] in ("open", "passed")]
     if not rows and rel != "hr":
         return None
     shown = [view(db, r, rel) for r in rows[:6]]
