@@ -4805,7 +4805,8 @@ async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
         what, why = DOOR_ALERTS[record["alert"]]
         action = f"{what} {'opened' if record['success'] else 'tried at'} {door}"
         name = card["name"] if card else record["username"]
-        label = f"Card {number}" if number else "A card"
+        noun = alert_noun(card)
+        label = f"{noun} {number}" if number else f"A {noun.lower()}"
         label += f" ({name})" if name else ""
         when = doorlog.when_label(record["at"], now, zone) if zone else ""
         db.log("Door activity", action, ok=False,
@@ -4818,7 +4819,7 @@ async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
         # never TT Hotel's own text, and every mark that could make a link or formatting is
         # escaped.
         shown = number if number and number.isascii() and number.isdigit() else ""
-        named = f"Card {shown}" if shown else "A card"
+        named = f"{noun} {shown}" if shown else f"A {noun.lower()}"
         named += f" ({markdown_text(card['name'])})" if card and card["name"] else ""
         message = (f"{named} {why}. It was tried at {markdown_text(door)}"
                    f"{f' {when}' if when else ''}, and "
@@ -4829,6 +4830,12 @@ async def door_alerts(lock_id: int, added: list[dict], now: float) -> None:
             "title": action, "message": message,
             "notification_id": f"staff_access_card_{tag[:40] or lock_id}"}),
             "tell Home Assistant a lost card was tried")
+
+
+def alert_noun(card: dict | None) -> str:
+    """What a door alert calls the card: "Contractor badge" for a contractor badge made here,
+    else "Card"."""
+    return "Contractor badge" if card and card.get("card_type") == "contractor" else "Card"
 
 
 def markdown_text(text: str) -> str:

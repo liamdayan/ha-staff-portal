@@ -1888,7 +1888,8 @@ class Database:
         for key in doorlog.card_keys(number):
             row = self.conn.execute(
                 """SELECT c.id, c.card_number, c.state, c.state_at, c.cleared_at, j.name,
-                   j.expires_at, s.status AS holder_status, s.archived_at AS holder_archived_at
+                   j.card_type, j.expires_at, s.status AS holder_status,
+                   s.archived_at AS holder_archived_at
                    FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
                    LEFT JOIN staff s ON s.id = j.holder_staff_id
                    WHERE ltrim(c.card_number, '0') = ? AND c.status = 'written' AND j.kind = 'write'

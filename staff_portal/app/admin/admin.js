@@ -1199,7 +1199,7 @@
       h("p", null, "Their access ends everywhere, straight away:"),
       h("ul", null, [
         `They're signed out, and their PIN stops working${phones.length ? ` (${phones.join(", ")})` : ""}.`,
-        "They can't make wristbands or key cards, and no key card can be made for them.",
+        "They can't make wristbands, contractor badges or key cards, and no key card can be made for them.",
         m.ha_user ? `Their Home Assistant user (${m.ha_user}) isn't used.` : null,
         m.connecteam_user_id ? "The Connecteam sync leaves them archived, even while they're active there." : null,
       ].filter(Boolean).map((text) => h("li", null, text))),

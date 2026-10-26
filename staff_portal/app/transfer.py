@@ -23,6 +23,8 @@ record of wristbands and key cards made are in backups from 0.8.6 (schema 4), an
 them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
+Archived people (0.9.1) travel as archived, in backups and migration files with when, by whom
+and the status Restore puts back; staff exports only mark them ("archived": true).
 """
 
 import base64

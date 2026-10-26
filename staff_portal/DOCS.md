@@ -455,9 +455,11 @@ The confirmation lists what stops working:
 - They're signed out on every phone and computer, and their PIN no longer signs them in anywhere
   (by name, PIN only or role-based). They're left out of every name list, and out of the people
   you can pick for a phone or computer.
-- They can't make wristbands or key cards (a card job of theirs that's still running stops), and
-  no key card can be made for them: not with **Make key card**, not as a replacement for a lost
-  card, and not in the staff app (a staff card for their exact name is refused).
+- They can't make wristbands, contractor badges or key cards, whatever their role or their own
+  wristband rules allow (a card job of theirs that's still running stops), and no key card can
+  be made for them: not with **Make key card**, not as a replacement for a lost card, and not in
+  the staff app (a staff card for their exact name is refused). Wristbands and contractor badges
+  they made before keep working until they end.
 - Their Home Assistant user link is kept, but never used.
 - The Connecteam sync leaves them archived, even if they're still active in Connecteam (see
   [Add everyone from Connecteam](#add-everyone-from-connecteam)).
@@ -796,7 +798,8 @@ opened, or a card is refused, as it happens. Staff Access then shows:
   and the lost cards below.
 - **Last used** for each card: in the staff app's card log and Look up ("Pool Gate, today 3:12
   PM"), and in the dashboard's Key cards list. A contractor badge is listed with the
-  contractor's name and **Contractor badge**.
+  contractor's name and **Contractor badge**, and an alert about one calls it a contractor badge
+  ("Contractor badge 3661413478 (Sam Lee (Acme Plumbing))").
 - **Lost or revoked cards tried at a door.** When a card marked **Lost** or **Revoked** here is
   tried at a door after it was marked, or TT Hotel reports that a card it deleted was tried, the
   row is highlighted, the activity log says so ("Lost card tried at Pool Gate", or "Lost card
