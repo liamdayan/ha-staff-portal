@@ -2457,10 +2457,13 @@ folder (`/data/hr`), apart from Staff Access's own.
   restore just works. Turn on Home Assistant's backup encryption.
 - **Keep the HR key out of backups** (HR settings → HR key) is off by default. Turning it on
   shows an **HR recovery key** once: 20 letters and numbers. **Print it and keep it in the
-  safe.** The key itself is then left out of Home Assistant's backups, so a stolen backup on its
-  own reveals nothing. After a restore, the HR portal stays locked until you type the recovery
-  key on the dashboard's HR portal tab (**Unlock with the HR recovery key**). Turning the setting
-  off puts the key back in backups.
+  safe.** The key itself is then left out of Home Assistant's backups, and the secrets that reach
+  HR's files and Connecteam (the Google script's Web app URL and secret, and the Connecteam for
+  HR Client Secret) are kept locked with it. A stolen backup on its own can't open the encrypted
+  details or reach the files in Google Drive. After a restore, the HR portal (and those two
+  connections) stays locked until you type the recovery key on the dashboard's HR portal tab
+  (**Unlock with the HR recovery key**). Turning the setting off puts the key back in backups,
+  and the secrets with it.
 - If the key is kept out of backups and both the computer and the recovery key are lost, the HR
   records on the computer can't be opened. Files kept in Google Drive survive.
 - Anyone who is a Home Assistant administrator, or who has the running computer in hand, could

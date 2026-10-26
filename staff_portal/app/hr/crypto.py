@@ -12,6 +12,10 @@ Where the key lives, in DATA_DIR/hr:
                                   (20 characters, shown once), which is in backups. After a
                                   restore, HR stays locked until the recovery key is typed in.
 
+While it's on, the settings that would reach Google Drive or Connecteam for HR (SEALED_SETTINGS,
+in Staff Access's own database, which backups include) are sealed with the key too, so a stolen
+backup alone can't use them. Staff Access's Database opens them as it reads them.
+
 Small fields are sealed on the event loop (microseconds); files go through seal_async, which
 runs in a worker thread, a few at a time.
 """
@@ -42,6 +46,12 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 20
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**15, 8, 1
 FILE_WORKERS = 2                      # files sealed or opened at once (each in a thread)
+
+# Settings in Staff Access's database that reach HR's files or Connecteam: sealed with the key
+# while it's kept out of backups, plain otherwise. A sealed one is SEALED_PREFIX and base64.
+SEALED_SETTINGS = ("hr_google_url", "hr_google_secret", "hr_connecteam_client_secret")
+SEALED_PREFIX = "hr-sealed:"
+SEALED_RE = re.compile(r"hr-sealed:[A-Za-z0-9+/]{40,4000}={0,2}")
 
 LOCKED = ("The HR portal is locked: its key isn't on this computer. Type the HR recovery key in "
           "Staff Access (HR portal tab) to unlock it.")
@@ -83,6 +93,11 @@ def clean_recovery_key(text) -> str:
     if len(code) != CODE_LENGTH or any(ch not in CODE_ALPHABET for ch in code):
         raise ValueError(BAD_RECOVERY)
     return code
+
+
+def _derive(key: bytes, purpose: str) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"staff-access-hr/" + purpose.encode()).derive(key)
 
 
 def _recovery_cipher(code: str, salt: bytes) -> AESGCM:
@@ -154,10 +169,64 @@ class Keyring:
     def subkey(self, purpose: str) -> bytes:
         found = self._subkeys.get(purpose)
         if found is None:
-            found = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                         info=b"staff-access-hr/" + purpose.encode()).derive(self.key())
-            self._subkeys[purpose] = found
+            found = self._subkeys[purpose] = _derive(self.key(), purpose)
         return found
+
+    # ---------------------------------------------------------------- sealed settings
+
+    def _setting_cipher(self, name: str) -> AESGCM:
+        """For one sealed setting. The key may be on disk only (HR turned off): read it there."""
+        key = self._key if self._key is not None else self._read()
+        if key is None:
+            raise Locked(LOCKED)
+        return AESGCM(_derive(key, f"setting.{name}"))
+
+    def _open_setting(self, name: str, value: str) -> str | None:
+        """A sealed setting's text, or None when it can't be opened (locked, or another key's)."""
+        try:
+            blob = base64.b64decode(value[len(SEALED_PREFIX):], validate=True)
+            return self._setting_cipher(name).decrypt(
+                blob[:NONCE_BYTES], blob[NONCE_BYTES:], name.encode()).decode()
+        except (Locked, InvalidTag, binascii.Error, ValueError):
+            return None
+
+    def open_settings(self, values: dict) -> dict:
+        """Staff Access's settings as read: sealed ones opened ("" while they can't be)."""
+        for name in SEALED_SETTINGS:
+            value = values.get(name) or ""
+            if value.startswith(SEALED_PREFIX):
+                values[name] = self._open_setting(name, value) or ""
+        return values
+
+    def seal_settings(self, values: dict) -> dict:
+        """Settings about to be saved: SEALED_SETTINGS sealed while the key is kept out of
+        backups. Raises Locked when the key isn't here to seal them with (after a restore)."""
+        if not self.kept_out():
+            return values
+        values = dict(values)
+        for name in SEALED_SETTINGS:
+            value = str(values.get(name) or "")
+            if value and not value.startswith(SEALED_PREFIX):
+                nonce = os.urandom(NONCE_BYTES)
+                values[name] = SEALED_PREFIX + base64.b64encode(nonce + self._setting_cipher(
+                    name).encrypt(nonce, value.encode(), name.encode())).decode()
+        return values
+
+    def resealed(self, stored: dict) -> dict:
+        """After the key came, went or moved: SEALED_SETTINGS as they should now be stored
+        (sealed while the key is kept out, plain otherwise). Any that can't be opened, or
+        sealed now, are left out, so they stay as they are."""
+        found = {}
+        for name in SEALED_SETTINGS:
+            value = stored.get(name) or ""
+            if value.startswith(SEALED_PREFIX):
+                value = self._open_setting(name, value)
+            if value is not None:
+                found[name] = value
+        try:
+            return self.seal_settings(found)
+        except Locked:
+            return {}
 
     def keep_out(self, on: bool) -> str | None:
         """Turn "Keep the HR key out of backups" on (returns the recovery key, to show once) or

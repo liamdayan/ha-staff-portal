@@ -602,6 +602,11 @@ def page_choice(raw) -> list[str] | None:
 
 
 class Database:
+    # The HR key (main.py sets it): while it's kept out of backups, a few HR settings are stored
+    # sealed with it (hr/crypto.py SEALED_SETTINGS). settings() opens them; update_settings()
+    # seals them.
+    sealer = None
+
     def __init__(self, data_dir: str):
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, DB_FILE)
@@ -664,6 +669,7 @@ class Database:
         other.conn.row_factory = sqlite3.Row
         other.read_only = True
         other._settings = None
+        other.sealer = None           # as stored: a migration carries sealed settings as they are
         other.conn.execute("BEGIN")   # one moment: from the first read to close()
         return other
 
@@ -673,11 +679,14 @@ class Database:
         # Read on nearly every request, several times: kept, and read again after a change.
         # A copy each time, since callers add to it.
         if self._settings is None:
-            self._settings = {r["key"]: r["value"] for r in self.conn.execute(
+            found = {r["key"]: r["value"] for r in self.conn.execute(
                 "SELECT key, value FROM settings WHERE key != 'layout'")}
+            self._settings = self.sealer.open_settings(found) if self.sealer else found
         return dict(self._settings)
 
     def update_settings(self, values: dict) -> None:
+        if self.sealer:
+            values = self.sealer.seal_settings(values)   # raises Locked if it can't
         self._settings = None
         for key, value in values.items():
             if key in DEFAULT_SETTINGS:
@@ -685,6 +694,17 @@ class Database:
                     "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
                 )
         self.conn.commit()
+
+    def reseal_settings(self) -> None:
+        """The HR key came back, or moved in or out of backups: its sealed settings follow."""
+        self._settings = None
+        if self.sealer:
+            stored = {r["key"]: r["value"]
+                      for r in self.conn.execute("SELECT key, value FROM settings")}
+            for key, value in self.sealer.resealed(stored).items():
+                self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                                  (key, value))
+            self.conn.commit()
 
     def layout(self) -> dict:
         row = self.conn.execute("SELECT value FROM settings WHERE key = 'layout'").fetchone()

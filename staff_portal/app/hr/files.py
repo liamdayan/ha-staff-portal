@@ -20,7 +20,11 @@ from aiohttp import web
 PHOTO_LIMIT = 15 * 1024 * 1024        # photos and employees' uploads
 DOCUMENT_LIMIT = 25 * 1024 * 1024     # HR's documents (scanned paperwork can be larger)
 MAX_SIDE = 3000
-MAX_PIXELS = 50_000_000               # a bigger picture is refused rather than decoded
+# Pictures bigger than these are refused rather than decoded. A JPEG (every phone photo) is
+# decoded at a half, quarter or eighth of its size (draft mode), so even a 200-megapixel photo
+# needs about 100 MB at most; PNG and WebP can't be, so their limit is lower (also about 100 MB).
+MAX_PIXELS = 200_000_000
+MAX_FULL_PIXELS = 25_000_000
 IMAGE_WORKERS = 2
 MIME = {"jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "pdf": "application/pdf"}
 EXTENSION = {"jpeg": "jpg", "png": "png", "webp": "webp", "pdf": "pdf"}
@@ -28,6 +32,8 @@ HEIC = ("That photo is in Apple's HEIC format, which the HR portal can't check. 
         "again with the camera button, or change your iPhone's camera to “Most Compatible”.")
 NOT_ALLOWED = "Only photos (JPEG, PNG or WebP) and PDF files can be added."
 UNREADABLE = "That picture couldn't be read. Take the photo again, or choose another file."
+TOO_LARGE = ("That picture is too large. Take the photo again at a lower resolution (for example "
+             "12 megapixels), or choose a smaller file.")
 
 
 class FileRefused(ValueError):
@@ -72,10 +78,15 @@ def clean_image(data: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
         with Image.open(io.BytesIO(data)) as img:
             if img.format not in ("JPEG", "PNG", "WEBP"):
                 raise FileRefused(NOT_ALLOWED)
-            if img.width * img.height > MAX_PIXELS:
-                raise FileRefused("That picture is too large. Take the photo again.")
-            img = ImageOps.exif_transpose(img)
+            limit = MAX_PIXELS if img.format == "JPEG" else MAX_FULL_PIXELS
+            if img.width * img.height > limit:
+                raise FileRefused(TOO_LARGE)
+            # Shrink first (a JPEG is decoded at a fraction of its size), then turn it upright,
+            # so the full-size picture is never held in memory, let alone copied.
+            scale = min(1, max_side / max(img.size))
+            img.draft(None, (round(img.width * scale), round(img.height * scale)))
             img.thumbnail((max_side, max_side))
+            img = ImageOps.exif_transpose(img)
             alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
             out = io.BytesIO()
             if alpha:
@@ -85,6 +96,8 @@ def clean_image(data: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
             return out.getvalue(), MIME["jpeg"]
     except FileRefused:
         raise
+    except Image.DecompressionBombError:   # far over the limit: Pillow won't even open it
+        raise FileRefused(TOO_LARGE) from None
     except Exception:  # noqa: BLE001 - a broken or hostile file is just refused
         raise FileRefused(UNREADABLE) from None
 

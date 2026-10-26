@@ -9,6 +9,8 @@ fake in hr_helpers.
 
 import asyncio
 import json
+import shutil
+import sqlite3
 import time
 
 import pytest
@@ -17,7 +19,8 @@ from hr_helpers import HR, FakeConnecteam, ct_user
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
-from hr import audit, ctapi, notify, signin  # noqa: E402
+from hr import audit, crypto, ctapi, gdrive, notify, signin  # noqa: E402
+from test_hr_google_dashboard import copy_script, google  # noqa: E402
 
 FIELDS = [{"id": 11, "name": "Employment Start Date", "type": "date"},
           {"id": 12, "name": "Direct manager", "type": "directManager"},
@@ -356,6 +359,110 @@ def test_migration_carries_hr_and_waits_for_uploads(tmp_path):
             assert new.svc.status() == "on"
             assert new.hdb.person("301")["name"] == "Ana Lee" and new.hdb.roles_of("301") == {"hr_admin"}
             assert signin.totp_secret(new.hdb.person("301")) == secret   # the key came too
+    run(scenario())
+
+
+# ---------------------------------------------------------------- HR's secrets and the key
+
+SEALED = crypto.SEALED_SETTINGS   # the Google script's URL and secret, Connecteam for HR's secret
+
+
+def stored(path) -> dict:
+    """Staff Access's settings as a backup holds them (straight from the database file)."""
+    conn = sqlite3.connect(path)
+    try:
+        return dict(conn.execute("SELECT key, value FROM settings"))
+    finally:
+        conn.close()
+
+
+def test_hr_secrets_are_sealed_while_the_key_is_kept_out_of_backups(tmp_path, monkeypatch):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await copy_script(hr)
+            secret = hr.db.settings()["hr_google_secret"]
+            async with google(monkeypatch, secret) as (fake, url):
+                status, _ = await hr.admin_call("PUT", "/api/hr-google", {"url": url, "drive": "0AHRdriveAAAAUk9PVA"})
+                assert status == 200
+                await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_id": "hr-app",
+                                                                  "hr_connecteam_client_secret": "hr-secret"})
+                plain = {"hr_google_url": url, "hr_google_secret": secret,
+                         "hr_connecteam_client_secret": "hr-secret"}
+                assert {k: stored(hr.db.path)[k] for k in SEALED} == plain   # the default: in backups
+                code = await hr.svc.keep_key_out(True, "owner", "Owner")
+                # A backup now holds them only sealed with the key it doesn't have.
+                kept = stored(hr.db.path)
+                for key, value in plain.items():
+                    assert kept[key].startswith(crypto.SEALED_PREFIX) and value not in json.dumps(kept)
+                # The dashboard and the HR portal still read them, and the script still answers.
+                assert {k: hr.db.settings()[k] for k in SEALED} == plain
+                status, reply = await hr.admin_call("POST", "/api/hr-google/check")
+                assert status == 200 and reply["problem"] is None and reply["google"]["url"] == url
+                assert hr.svc.google() is not None and main.hr_connecteam_settings()["client_secret"] == "hr-secret"
+                status, state = await hr.admin_call("GET", "/api/state")
+                assert state["hr"]["connecteam"]["secret_set"] and state["hr_google"]["set_up"]
+                # Changed while it's on: sealed too. HR turned off: still read (the key is on disk).
+                await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_secret": "hr-secret-2"})
+                assert stored(hr.db.path)["hr_connecteam_client_secret"].startswith(crypto.SEALED_PREFIX)
+                await hr.admin_call("PUT", "/api/hr/settings", {"hr_enabled": "0"})
+                assert hr.db.settings()["hr_connecteam_client_secret"] == "hr-secret-2"
+                assert gdrive.bridge_from_settings(hr.db.settings()).url == url
+                await hr.admin_call("PUT", "/api/hr/settings", {"hr_enabled": "1"})
+
+                # What a stolen backup has (everything but outside-backups) can't reach Google...
+                backup = tmp_path / "backup"
+                shutil.copytree(tmp_path / "data" / "hr", backup / "hr",
+                                ignore=shutil.ignore_patterns(crypto.OUTSIDE))
+                ring = crypto.Keyring(str(backup / "hr"))
+                found = ring.open_settings(stored(hr.db.path))
+                assert ring.status() == "locked" and gdrive.bridge_from_settings(found) is None
+                assert all(found[k] == "" for k in SEALED)
+                # ...until the recovery key is typed.
+                ring.unlock(code)
+                assert ring.open_settings(stored(hr.db.path))["hr_google_secret"] == secret
+
+                # Turned off again: plain, and still working.
+                await hr.svc.keep_key_out(False, "owner", "Owner")
+                assert {k: stored(hr.db.path)[k] for k in SEALED} == {**plain,
+                                                                     "hr_connecteam_client_secret": "hr-secret-2"}
+                status, reply = await hr.admin_call("POST", "/api/hr-google/check")
+                assert status == 200 and reply["problem"] is None
+    run(scenario())
+
+
+def test_sealed_hr_secrets_travel_in_a_migration_and_open_with_the_recovery_key(tmp_path):
+    async def scenario():
+        url = "https://script.google.com/macros/s/AKfycb" + "Q" * 40 + "/exec"
+        async with HR(tmp_path / "old") as old:
+            await old.add_people(ANA)
+            await copy_script(old)
+            secret = old.db.settings()["hr_google_secret"]
+            old.db.update_settings({"hr_google_url": url, "hr_google_drive": "0AHRdriveAAAAUk9PVA",
+                                    "hr_connecteam_client_secret": "hr-secret"})   # Google isn't asked
+            recovery = await old.svc.keep_key_out(True, "owner", "Owner")
+            status, made = await old.admin_call("POST", "/api/migrate/create")
+            assert status == 200
+            opened, _ = migrate.open_file(made["file"], made["code"], main.VERSION)
+            carried = opened["migrate"]["secrets"]
+            assert all(carried[k].startswith(crypto.SEALED_PREFIX) for k in SEALED)
+            assert secret not in json.dumps(opened) and url not in json.dumps(opened)
+        async with HR(tmp_path / "new", enabled=False, fresh=True) as new:
+            status, _ = await new.admin_call("POST", "/api/migrate/restore", {"file": made["file"],
+                                                                              "code": made["code"]})
+            assert status == 200 and new.svc.status() == "locked"
+            # Locked: not readable, and not replaced by mistake (a new secret would need the script
+            # pasted into Google again).
+            assert gdrive.bridge_from_settings(new.db.settings()) is None
+            assert (await new.admin_call("POST", "/api/hr-google/script"))[0] == 409
+            assert (await new.admin_call("PUT", "/api/hr-google", {"url": url}))[0] == 409
+            assert (await new.admin_call("PUT", "/api/hr/connecteam",
+                                         {"hr_connecteam_client_secret": "other"}))[0] == 409
+            status, data = await new.admin_call("POST", "/api/hr/unlock-key", {"recovery_key": recovery})
+            assert status == 200 and data["status"] == "on"
+            s = new.db.settings()
+            assert (s["hr_google_url"], s["hr_google_secret"], s["hr_connecteam_client_secret"]) == (
+                url, secret, "hr-secret")
+            assert all(stored(new.db.path)[k].startswith(crypto.SEALED_PREFIX) for k in SEALED)
     run(scenario())
 
 

@@ -4626,6 +4626,8 @@ async def admin_google(request: web.Request):
 async def admin_google_script(request: web.Request):
     """Copy the script: its text, with this install's secret (made the first time, or anew with
     {"new_secret": true}, after which the script must be pasted and deployed again)."""
+    if refusal := hr_key_locked():
+        return refusal
     data = await optional_json(request)
     s = db.settings()
     secret = s.get("hr_google_secret") or ""
@@ -4647,6 +4649,8 @@ async def admin_google_script(request: web.Request):
 async def admin_save_google(request: web.Request):
     """Save: the Web app URL and the drives. A new address or other drives are checked straight
     away (and the script is told which drives it may use)."""
+    if refusal := hr_key_locked():
+        return refusal
     data = await read_json(request)
     s = db.settings()
     try:
@@ -5791,7 +5795,36 @@ hr_service = HRService(
     departments=hr_departments, group_names=lambda: connecteam.known_group_names(),
     from_tunnel=lambda remote: from_tunnel(remote), client_ip=lambda request: client_ip(request),
     property_name=lambda: db.settings().get("property_name", ""),
-    icon=lambda: branding.icon(192, db.settings()), version=VERSION)
+    icon=lambda: branding.icon(192, db.settings()), version=VERSION,
+    reseal=lambda: db.reseal_settings())
+
+
+class HRSealer:
+    """Database.sealer: the HR portal's key as it is now. While it's kept out of backups, the
+    Google script's Web app URL and secret and the Connecteam for HR secret are stored sealed
+    with it (hr/crypto.py), so a stolen Home Assistant backup alone can't reach HR's files."""
+
+    def open_settings(self, values: dict) -> dict:
+        return hr_service.keyring.open_settings(values)
+
+    def seal_settings(self, values: dict) -> dict:
+        return hr_service.keyring.seal_settings(values)
+
+    def resealed(self, stored: dict) -> dict:
+        return hr_service.keyring.resealed(stored)
+
+
+Database.sealer = HRSealer()
+db.reseal_settings()   # read again, opened (and sealed, if an older version left them plain)
+
+
+def hr_key_locked() -> web.Response | None:
+    """A refusal while the HR key is locked (after a restore, until the recovery key is typed):
+    the HR connections' secrets are sealed with it, so they can't be read or changed yet."""
+    if hr_service.keyring.status() == "locked":
+        return bad_request(hr_crypto.LOCKED, 409)
+    return None
+
 
 HOST_RE = re.compile(r"^(?=.{4,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
                      r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
@@ -6023,6 +6056,8 @@ async def admin_hr_connecteam(request: web.Request):
         values["hr_connecteam_client_secret"] = secret
     if data.get("hr_connecteam_clear_secret") in (True, "1", "on", "true"):
         values["hr_connecteam_client_secret"] = ""
+    if "hr_connecteam_client_secret" in values and (refusal := hr_key_locked()):
+        return refusal
     for key in ("hr_connecteam_chat", "hr_connecteam_documents"):
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "on", "true") else "0"

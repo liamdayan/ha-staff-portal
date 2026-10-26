@@ -149,12 +149,14 @@ class HR:
                                  "property_name": "Hot Lake"})
         fresh_connecteam()
         self.folder = str(tmp_path / "data")
+        self.previous = main.hr_service   # put back afterwards: its key seals settings (main.HRSealer)
         self.svc = main.hr_service = HRService(
             self.folder, main_settings=lambda: main.db.settings(), connecteam=main.connecteam,
             departments=main.hr_departments, group_names=lambda: {"501": "Pub", "502": "Kitchen"},
             from_tunnel=lambda remote: main.from_tunnel(remote),
             client_ip=lambda request: main.client_ip(request),
-            property_name=lambda: "Hot Lake", icon=lambda: b"\x89PNG fake")
+            property_name=lambda: "Hot Lake", icon=lambda: b"\x89PNG fake",
+            reseal=lambda: main.db.reseal_settings())
         # Tests drive the background work by hand (svc.tick(), sync_people(), nightly()), and the
         # nightly run doesn't start by itself whatever the time of day.
         self.svc.start = lambda background=False, _s=self.svc: HRService.start(_s, False)
@@ -179,6 +181,7 @@ class HR:
         await main.encoders.close_all()   # the Front Desk PC's encoder runner (from /api/state)
         await main.tthotel.close()
         await self.svc.stop()
+        main.hr_service = self.previous
 
     @property
     def hdb(self) -> hrdb.HRDatabase:

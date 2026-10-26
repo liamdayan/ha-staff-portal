@@ -54,9 +54,10 @@ class HRService:
     def __init__(self, data_dir: str, *, main_settings, connecteam, departments=lambda: [],
                  group_names=lambda: {}, from_tunnel=lambda remote: False,
                  client_ip=lambda request: request.remote or "", property_name=lambda: "",
-                 icon=lambda: None, version: str = "dev"):
+                 icon=lambda: None, version: str = "dev", reseal=lambda: None):
         self.folder = os.path.join(data_dir, "hr")
         self.main_settings = main_settings        # () -> Staff Access's settings
+        self.reseal = reseal                      # () -> HR's sealed settings follow the key
         self.connecteam = connecteam
         self.departments = departments            # () -> Staff Access's departments
         self.group_names = group_names            # () -> {smart group ID: name}, never asks
@@ -150,6 +151,7 @@ class HRService:
         if self.keyring.load(create=True) != "ready":
             return self.status()
         crypto.use(self.keyring)
+        self.reseal()
         self.db = hrdb.current = hrdb.HRDatabase(self.folder)
         for hook in self.on_start:
             hook(self)
@@ -363,6 +365,7 @@ class HRService:
         """The owner typed the recovery key (dashboard): the key comes back and HR starts."""
         crypto.clean_recovery_key(code)
         await asyncio.to_thread(self.keyring.unlock, code)
+        self.reseal()
         if self.enabled():
             self.start()
             audit.record(self.db, "Unlocked HR with the recovery key", actor_id="owner",
@@ -370,6 +373,7 @@ class HRService:
 
     async def keep_key_out(self, on: bool, actor_id, actor: str) -> str | None:
         code = await asyncio.to_thread(self.keyring.keep_out, on)
+        self.reseal()   # the Google and Connecteam secrets: sealed with the key, or plain again
         audit.record(self.db, "Kept the HR key out of backups" if on else
                      "Put the HR key back in backups", actor_id=actor_id, actor=actor, security=True)
         return code

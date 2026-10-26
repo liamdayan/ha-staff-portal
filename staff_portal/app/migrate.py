@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 import doorlog
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
-from hr import gdrive
+from hr import crypto as hr_crypto, gdrive
 from wristbands import MAC_RE, door_kind
 
 FORMAT = transfer.MIGRATE_FORMAT
@@ -266,18 +266,25 @@ def _saved_object(value) -> str:
     return json.dumps(found) if isinstance(found, dict) else "{}"
 
 
+def _sealed(value) -> bool:
+    """An HR setting sealed with the HR key (kept out of backups): it travels as it is, and opens
+    once the HR recovery key is typed on the new install."""
+    return isinstance(value, str) and hr_crypto.SEALED_RE.fullmatch(value) is not None
+
+
 def _google_settings(raw: dict) -> dict:
     """The HR portal's Google Drive connection, checked as the dashboard checks it: the script
     deployed in Google keeps working with the same secret and Web app URL. Nothing from a file
     made before it existed, or one with anything wrong in it."""
     try:
-        url = gdrive.clean_url(raw.get("hr_google_url"))
+        url = raw["hr_google_url"] if _sealed(raw.get("hr_google_url")) else gdrive.clean_url(
+            raw.get("hr_google_url"))
         drive, restricted = (gdrive.clean_drive_id(raw.get(k)) for k in
                              ("hr_google_drive", "hr_google_restricted_drive"))
     except ValueError:
         return {}
     secret = raw.get("hr_google_secret")
-    if not isinstance(secret, str) or not gdrive.SECRET_RE.fullmatch(secret):
+    if not _sealed(secret) and not (isinstance(secret, str) and gdrive.SECRET_RE.fullmatch(secret)):
         return {}
     return {"hr_google_url": url, "hr_google_secret": secret, "hr_google_drive": drive,
             "hr_google_restricted_drive": restricted if restricted != drive else ""}
@@ -393,7 +400,8 @@ def _hr_settings(raw: dict) -> dict:
         found["hr_host"] = host
     for key in ("hr_connecteam_client_id", "hr_connecteam_client_secret"):
         value = raw.get(key)
-        if isinstance(value, str) and len(value) <= 500 and re.fullmatch(r"[\x21-\x7e]*", value):
+        if _sealed(value) or (isinstance(value, str) and len(value) <= 500
+                              and re.fullmatch(r"[\x21-\x7e]*", value)):
             found[key] = value
     return found
 
