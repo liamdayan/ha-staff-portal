@@ -446,11 +446,12 @@ Good to know:
 
 ## Archiving people
 
-When someone leaves, open their row on the **Staff** tab and click **Archive**. Their access ends
-everywhere at once, but nothing of theirs is deleted: their activity, the cards they made and
-their settings stay, and you can bring them back.
+When someone leaves, open their row on the **Staff** tab and click **Archive**. Their own access
+ends at once, but nothing of theirs is deleted: their activity, the cards they made and their
+settings stay, and you can bring them back.
 
-The confirmation lists what stops working:
+The confirmation lists what stops working, and what archiving can't reach (their key cards, any
+Kiosk-mode phone or computer they use, and their Home Assistant user):
 
 - They're signed out on every phone and computer, and their PIN no longer signs them in anywhere
   (by name, PIN only or role-based). They're left out of every name list, and out of the people
@@ -458,11 +459,19 @@ The confirmation lists what stops working:
 - They can't make wristbands, contractor badges or key cards, whatever their role or their own
   wristband rules allow (a card job of theirs that's still running stops), and no key card can
   be made for them: not with **Make key card**, not as a replacement for a lost card, and not in
-  the staff app (a staff card for their exact name is refused). Wristbands and contractor badges
-  they made before keep working until they end.
-- Their Home Assistant user link is kept, but never used.
+  the staff app (a staff card for their exact name is refused). A key card for them that was
+  still being made (by anyone, from the dashboard or the staff app) stops too, and can't be tried
+  again; revoking one of their cards, or a lost card notice, carries on. Wristbands and contractor
+  badges they made before keep working until they end.
+- Staff Access keeps their Home Assistant user link but never uses it. The Home Assistant user
+  itself can still sign in to Home Assistant: turn it off there, under **Settings → People**.
 - The Connecteam sync leaves them archived, even if they're still active in Connecteam (see
   [Add everyone from Connecteam](#add-everyone-from-connecteam)).
+
+**Kiosk-mode phones and computers keep working.** One in **Kiosk** mode has its own PIN and isn't
+tied to anyone, so archiving someone doesn't sign it out. The confirmation lists the Kiosk-mode
+phones and computers that look like theirs (named after them, or using their Home Assistant user),
+each with **Revoke**; revoke any other that's theirs under **Phones & computers**.
 
 **Their key cards keep working.** TT Hotel locks check cards on their own, offline, so archiving
 can't switch a key card off: it opens its doors until it expires. The confirmation lists their key
@@ -484,10 +493,15 @@ them (a search shows the archived people it matches too). Each one has:
   They sign in with their PIN again (someone who was turned off before they were archived comes
   back turned off). Their PIN stays theirs while they're archived: nobody else can be given it.
 - **Delete for good**: removes them completely (it asks first). Only archived people can be
-  deleted. Their past activity and the cards they made stay in the logs.
+  deleted, and only once none of their key cards still opens doors: revoke them or report them
+  lost first (a lost card goes on alerting at doors as lost), or wait until they expire. Their
+  past activity and the cards they made stay in the logs.
 
 Archiving, restoring and deleting are in **Activity** ("Archived Ana Lopez"). Archived people are
 in backups and migration files (and stay archived when restored), and staff exports mark them.
+Restoring a backup made before someone was archived keeps them archived (the restore warning
+names them, and so does Activity): bring them back with **Restore** if you want them. Copying
+staff in from a file skips anyone archived here.
 
 ## Connections: TT Hotel and Connecteam
 
@@ -678,7 +692,7 @@ Each door is a **public door** (the pool gate, the main entrance, the gym), a **
   saved straight away.
 - **Mark a whole floor or building** marks every door there at once: pick the floor or building,
   pick what to mark them as and click **Mark**. If some of those doors are marked another way,
-  it asks first.
+  or are day-pass or overnight shared doors about to become staff doors, it asks first.
 - The line above the list says how many doors aren't marked yet, and how many there are of each
   kind.
 
@@ -693,10 +707,14 @@ What it changes:
   you've marked it.
 - The add-on checks it too: a guest room or a staff door picked as a shared door, or a public
   door or a staff door picked as a room, is refused with a message saying so. So is a staff door
-  newly ticked under **Day passes** or **Overnight guests**.
+  ticked under **Day passes** or **Overnight guests**.
+- **Marking a door as a staff door takes it off Day passes and Overnight guests** (it asks first
+  when it's ticked there, and Activity says so): from then on no day pass or overnight wristband
+  opens it. One still listed there (from a restored backup, say) is left off every card, and
+  unticked when you save.
 - A door already ticked under **Day passes** or **Overnight guests** keeps going on those cards
-  if you later mark it a guest room or a staff door, as a hidden door does, but the Wristbands
-  tab warns about it under that list. Untick it there, or mark it as a public door.
+  if you later mark it a guest room, as a hidden door does, but the Wristbands tab warns about it
+  under that list. Untick it there, or mark it as a public door.
 - Staff cards and contractor badges can open any door, whatever it's marked as.
 - Syncing doors from TT Hotel never changes what a door is marked as.
 
@@ -1392,7 +1410,11 @@ backups from older versions too. Restoring puts the setup back:
 - Before replacing anything, Staff Access saves a copy of everything here, logs included. It's
   listed under **Saved before restoring** (the last 5 are kept), so **Restore this** undoes a
   restore.
-- A damaged file or one from a newer version is refused, and nothing changes.
+- A damaged file or one from a newer version is refused, and nothing changes. Backups from 0.9.1
+  on (which carry archived people, staff doors and contractor badges) are refused by 0.9.0 and
+  older, rather than read wrongly.
+- People archived here since the backup was made stay archived (see
+  [Archiving people](#archiving-people)).
 - The staff app carries on while a backup is made. A restore holds it up for a moment (about a
   second with years of card history), then everyone signs in again.
 

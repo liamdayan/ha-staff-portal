@@ -405,6 +405,15 @@ def setting_doors(settings: dict, key: str) -> tuple[int, ...]:
     return tuple(dict.fromkeys(v for v in ids if v is not None and v >= 1))
 
 
+def shared_doors(settings: dict, key: str, doors: dict) -> tuple[int, ...]:
+    """The day-pass (wb_daypass_doors) or overnight (wb_overnight_doors) shared doors, leaving
+    out staff doors: those never go on a guest's card, even while still listed in the setting
+    (from a backup made before the door was marked, say). doors: by lock ID, as plan() and
+    options() have them."""
+    return tuple(i for i in setting_doors(settings, key)
+                 if not (i in doors and doors[i].kind == "staff"))
+
+
 def clean_hhmm(value) -> str:
     """A 24-hour time setting such as "20:00". Raises ValueError for the admin."""
     if isinstance(value, str) and HHMM_RE.match(value.strip()):
@@ -617,9 +626,11 @@ def _resolve(doors: dict[int, _Door], perm: dict, ids: tuple[int, ...],
     rooms): a door marked as anything else (a staff door, say) is refused, and one not marked
     yet counts as either. None: any kind (staff cards and contractor badges).
 
-    A hidden door, or one of the wrong kind, is allowed only when it comes from the configured
-    defaults (a manager may hide the pool gate from pickers and still put it on every day pass,
-    and marking a door later never stops cards that are set up to open it)."""
+    A hidden door, or a guest room as a shared door (or a public door as a room), is allowed
+    only when it comes from the configured defaults (a manager may hide the pool gate from
+    pickers and still put it on every day pass, and marking a door later never stops cards that
+    are set up to open it). A staff door never is: making a door a staff door takes it off the
+    shared doors (db.Database.set_wb_door), and shared_doors() leaves out any still listed."""
     found = []
     for lock_id in ids:
         from_settings = lock_id in configured
@@ -632,7 +643,8 @@ def _resolve(doors: dict[int, _Door], perm: dict, ids: tuple[int, ...],
             raise PlanError(f"{door.name} is no longer listed in TT Hotel." + fix, field)
         if door.hidden and not from_settings:
             raise PlanError(f"{door.name} isn't available for cards. Pick a different door.", field)
-        if wanted and door.kind not in (None, wanted) and not from_settings:
+        if wanted and door.kind not in (None, wanted) and (door.kind == "staff"
+                                                            or not from_settings):
             raise PlanError(f"{door.name} is {KIND_WORDS[door.kind]}, not {KIND_WORDS[wanted]}. "
                             f"Pick {KIND_WORDS[wanted]}.", field)
         if not door_in_scope(perm, {"lock_id": door.id, "building_number": door.building,
@@ -713,7 +725,7 @@ def _day_pass_end(request: _Request, perm: dict, settings: dict, now: float,
 
 
 def _plan_day_pass(request, perm, doors, settings, now, tz) -> Plan:
-    defaults = setting_doors(settings, "wb_daypass_doors")
+    defaults = shared_doors(settings, "wb_daypass_doors", doors)
     if not defaults:
         raise PlanError(NO_DAY_PASS_DOORS)
     expiry = _day_pass_end(request, perm, settings, now, tz)
@@ -748,7 +760,7 @@ def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
         raise PlanError("You can make overnight wristbands for up to "
                         f"{_plural(max_nights, 'night')}.", "checkout")
     rooms = _resolve(doors, perm, request.room_ids, (), "room_ids", "room")
-    shared_defaults = setting_doors(settings, "wb_overnight_doors")
+    shared_defaults = shared_doors(settings, "wb_overnight_doors", doors)
     shared_ids = _chosen_doors(perm, request.door_ids, shared_defaults,
                                "You can't change the shared doors on overnight wristbands.")
     shared = _resolve(doors, perm, shared_ids, shared_defaults, "door_ids", "public")
@@ -950,7 +962,7 @@ def options(perm: dict | None, doors: dict, settings: dict, now: float, tz: Zone
         return reason is None and card_type in types
 
     day_expiry = _day_pass_expiry(settings, now, tz)
-    day_defaults = setting_doors(settings, "wb_daypass_doors")
+    day_defaults = shared_doors(settings, "wb_daypass_doors", door_map)
     day_passed = now >= day_expiry.timestamp()
     # Someone who may change the end time can still pick a later one after the usual time.
     edit_end = _perm_flag(perm, "edit_end_time")
@@ -1005,7 +1017,7 @@ def options(perm: dict | None, doors: dict, settings: dict, now: float, tz: Zone
                 "permitted": permitted("overnight"),
                 "checkout_time": setting_time(settings, "wb_checkout_time"),
                 "default_checkout": (today + timedelta(days=1)).isoformat(),
-                "door_ids": list(setting_doors(settings, "wb_overnight_doors")),
+                "door_ids": list(shared_doors(settings, "wb_overnight_doors", door_map)),
                 "can_edit_doors": edit, "max_nights": _perm_number(perm, "max_nights"),
                 "max": setting_number(settings, "wb_overnight_max"),
             },

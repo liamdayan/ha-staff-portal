@@ -20,7 +20,8 @@ import encoder  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
 from db import Database  # noqa: E402
-from wristbands import (CONTRACTOR_TOO_LONG, NO_ACCESS, NO_CONTRACTOR_DOORS, TURNED_OFF,
+from wristbands import (CONTRACTOR_TOO_LONG, NO_ACCESS, NO_CONTRACTOR_DOORS, NO_DAY_PASS_DOORS,
+                        TURNED_OFF,
                         clean_permissions, contractor_latest, door_kind, options,
                         permission_choice)
 
@@ -73,16 +74,35 @@ def test_staff_doors_are_never_shared_doors_or_rooms():
     assert [r.door for r in result.records] == [2201, 2]
 
 
-def test_staff_doors_already_in_the_settings_keep_working():
-    # The Gym is a day-pass door and the overnight shared door, then marked a staff door.
+def test_staff_doors_still_in_the_settings_go_on_no_guest_card():
+    # The Gym is a day-pass door and the overnight shared door, and is a staff door now (marking
+    # it takes it off both, but a restored backup can bring the settings back): it's left off.
     gym = {**KINDS, 2: {**KINDS[2], "kind": "staff"}}
-    assert [r.door for r in make(perm(), doors=gym, type="day_pass", name="A").records] == [1, 2]
-    assert [r.door for r in make(perm(), doors=gym, type="overnight", name="Smith",
-                                 room_ids=[201], checkout="2025-10-16").records] == [201, 2]
-    # Kept by someone who changes the doors too; only a staff door they add is refused.
-    result = make(EDITOR, doors=gym, type="day_pass", name="A", door_ids=[2, 2201])
-    assert [r.door for r in result.records] == [2, 2201]
-    refused(EDITOR, field="door_ids", doors=gym, type="day_pass", name="A", door_ids=[2, 2101])
+    assert [r.door for r in make(perm(), doors=gym, type="day_pass", name="A").records] == [1]
+    result = make(perm(), doors=gym, type="overnight", name="Smith", room_ids=[201],
+                  checkout="2025-10-16")
+    assert [r.door for r in result.records] == [201]
+    # The staff app is offered the doors without it, and sending those back is no change.
+    types = options(perm(), gym, SETTINGS, NOW, LA)["types"]
+    assert (types["day_pass"]["door_ids"], types["overnight"]["door_ids"]) == ([1], [])
+    assert [r.door for r in make(perm(), doors=gym, type="day_pass", name="A",
+                                 door_ids=[1]).records] == [1]
+    # Nobody can put it back on, not even someone who may change the doors.
+    message = "Gym is a staff door, not a public door. Pick a public door."
+    refused(EDITOR, field="door_ids", message=message, doors=gym, type="day_pass", name="A",
+            door_ids=[1, 2])
+    refused(perm(), status=403, field="door_ids", doors=gym, type="day_pass", name="A",
+            door_ids=[1, 2], message="You can't change which doors a day pass opens.")
+    refused(EDITOR, field="door_ids", message=message, doors=gym, type="overnight",
+            name="Smith", room_ids=[201], checkout="2025-10-16", door_ids=[2])
+    # Only staff doors left: no day passes at all, as with none chosen.
+    both = {**gym, 1: {**gym[1], "kind": "staff"}}
+    refused(perm(), message=NO_DAY_PASS_DOORS, doors=both, type="day_pass", name="A")
+    assert options(perm(), both, SETTINGS, NOW, LA)["types"]["day_pass"]["reason"] == (
+        NO_DAY_PASS_DOORS)
+    # A guest room still listed as a shared door keeps working, as before.
+    room = {**KINDS, 2: {**KINDS[2], "kind": "room"}}
+    assert [r.door for r in make(perm(), doors=room, type="day_pass", name="A").records] == [1, 2]
 
 
 def test_staff_cards_and_contractor_badges_open_staff_doors():
@@ -282,11 +302,18 @@ def test_staff_doors_can_not_be_ticked_as_day_pass_or_overnight_doors(tmp_path):
     async def scenario():
         p = Portal(tmp_path)
         async with p:
-            # Pool Gate and Spa are the day-pass doors; marking them staff doors keeps them.
-            p.db.set_wb_door_kinds([900, 901, 101], "staff")
+            # Pool Gate and Spa are the day-pass doors, and still listed as such (a restored
+            # backup can do that): saving the settings drops them.
+            p.db.set_wb_door_kinds([101], "staff")
+            p.db.conn.execute("UPDATE wb_doors SET kind = 'staff' WHERE lock_id IN (900, 901)")
+            p.db.conn.commit()
+            p.db.update_settings({"wb_daypass_doors": "[900, 901]", "wb_overnight_doors": "[900]"})
             status, reply = await p.admin_call("PUT", "/api/settings", {
                 "wb_daypass_doors": [900, 901], "wb_overnight_doors": [900]})
             assert status == 200, reply
+            assert [json.loads(p.db.settings()[k]) for k in ("wb_daypass_doors",
+                                                             "wb_overnight_doors")] == [[], []]
+            p.db.update_settings({"wb_daypass_doors": "[900, 901]", "wb_overnight_doors": "[900]"})
             # A staff door newly ticked is refused, and nothing is saved.
             for key, value in (("wb_daypass_doors", [900, 901, 101]),
                                ("wb_overnight_doors", [101])):
@@ -326,11 +353,63 @@ def test_staff_app_keeps_staff_doors_off_guest_cards(tmp_path):
             status, reply = await p.call("POST", preview, bob,
                                          staff_card([{"level": "door", "door": 201}]))
             assert status == 200 and reply["plan"]["summary"] == "Room 201"
-            # Day-pass doors marked staff doors after they were chosen keep working.
-            p.db.set_wb_door_kinds([900, 901], "staff")
-            assert (await p.call("POST", preview, ana, day_pass()))[0] == 200
-            assert (await p.call("POST", preview, ana, overnight([101])))[0] == 200
+            # A day-pass door made a staff door comes off day passes and overnight wristbands.
+            p.db.set_wb_door_kinds([900], "staff")
+            status, opts = await p.call("GET", "/api/wristbands", ana)
+            assert opts["types"]["day_pass"]["door_ids"] == [901]
+            assert opts["types"]["overnight"]["door_ids"] == []
+            status, reply = await p.call("POST", preview, ana, day_pass())
+            assert status == 200 and reply["plan"]["summary"] == "Spa"
+            status, reply = await p.call("POST", preview, ana, overnight([101]))
+            assert status == 200 and reply["plan"]["summary"] == "Room 101"
+            # A forged request putting it back is refused.
+            status, reply = await p.call("POST", "/api/wristbands/jobs", bob,
+                                         day_pass(door_ids=[900, 901]))
+            assert status == 400 and reply["error"] == (
+                "Pool Gate is a staff door, not a public door. Pick a public door.")
             assert not p.jobs()
+    run(scenario())
+
+
+def test_a_new_staff_door_comes_off_the_shared_doors(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            p.db.update_settings({"wb_daypass_doors": "[900, 901, 102]",
+                                  "wb_overnight_doors": "[900, 102]"})
+            shared = lambda: [json.loads(p.db.settings()[k])
+                              for k in ("wb_daypass_doors", "wb_overnight_doors")]
+            # One door at a time: taken off both, in the same save, and Activity says so.
+            status, reply = await p.admin_call("PATCH", "/api/wristbands/doors/900",
+                                               {"kind": "staff"})
+            assert (status, reply) == (200, {"ok": True, "unshared": {
+                "wb_daypass_doors": [900], "wb_overnight_doors": [900]}})
+            assert shared() == [[901, 102], [102]]
+            entry = next(a for a in p.db.activity(10) if a["action"] == "Updated door Pool Gate")
+            assert entry["detail"] == ("marked as a staff door, taken off the day-pass doors and "
+                                       "the overnight shared doors")
+            # Marking it again, or as another kind, changes no settings.
+            for kind in ("staff", "public"):
+                status, reply = await p.admin_call("PATCH", "/api/wristbands/doors/900",
+                                                   {"kind": kind})
+                assert (status, reply) == (200, {"ok": True})
+            # A whole floor at once.
+            status, reply = await p.admin_call("POST", "/api/wristbands/doors/kind",
+                                               {"door_ids": [101, 102], "kind": "staff"})
+            assert (status, reply) == (200, {"changed": 2, "unshared": {
+                "wb_daypass_doors": [102], "wb_overnight_doors": [102]}})
+            assert shared() == [[901], []]
+            entry = next(a for a in p.db.activity(10)
+                         if a["action"] == "Marked 2 doors as staff doors")
+            assert entry["detail"] == ("Room 102 taken off the day-pass doors and the overnight "
+                                       "shared doors")
+            status, reply = await p.admin_call("POST", "/api/wristbands/doors/kind",
+                                               {"door_ids": [201], "kind": "room"})
+            assert (status, reply) == (200, {"changed": 1})
+            # The staff app is offered what's left.
+            ana = await p.sign_in(p.ana)
+            status, opts = await p.call("GET", "/api/wristbands", ana)
+            assert opts["types"]["day_pass"]["door_ids"] == [901]
     run(scenario())
 
 

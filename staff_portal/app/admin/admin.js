@@ -1185,24 +1185,61 @@
           h("button", { class: "btn danger", onclick: () => run(() => deleteForGood(m)) }, "Delete for good"))));
   }
 
-  // Archive: their access ends everywhere at once, and nothing is deleted. Their key cards keep
-  // opening doors (locks check cards on their own), so the dialog lists the ones still valid and
-  // says what to do; afterwards the Key cards list opens on them.
+  // Kiosk-mode phones and computers have their own token and PIN, and belong to no one in
+  // particular, so archiving someone leaves them signed in. The ones that look like this person's
+  // (named after them, or using their Home Assistant user) are offered for revoking.
+  function kioskDevicesOf(m) {
+    const words = [m.name, m.name.split(/\s+/)[0]].filter((w) => w && w.length > 1)
+      .map((w) => new RegExp(`(^|[^\\p{L}\\p{N}])${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}\\p{N}])`, "iu"));
+    const kiosks = state.devices.filter((d) => d.signin_mode === "phone" && d.status !== "revoked");
+    const theirs = kiosks.filter((d) => words.some((re) => re.test(d.name)) || (m.ha_user && d.ha_user === m.ha_user));
+    return { theirs, others: kiosks.length - theirs.length };
+  }
+
+  function kioskRevokeRow(d) {
+    const role = state.roles.find((r) => r.id === d.role_id)?.name;
+    const done = h("span", { class: "hint", hidden: true }, "Revoked");
+    const button = h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
+      await api("POST", `api/devices/${d.id}/revoke`);
+      d.status = "revoked";
+      button.hidden = true;
+      done.hidden = false;
+    }, `${d.name} is revoked and signed out.`) }, "Revoke");
+    return h("li", { class: "archive-kiosk-row" },
+      h("span", null, d.name, h("small", null, ` \u00b7 ${d.kind === "computer" ? "computer" : "phone"}` +
+        `${role ? ` \u00b7 ${role}` : ""}${d.ha_user ? ` \u00b7 HA user ${d.ha_user}` : ""}`)), button, done);
+  }
+
+  // Archive: their own access ends at once, and nothing is deleted. Their key cards keep opening
+  // doors (locks check cards on their own), so the dialog lists the ones still valid and says
+  // what to do; afterwards the Key cards list opens on them. Kiosk-mode devices that look like
+  // theirs can be revoked from the dialog, and their Home Assistant user is theirs to turn off.
   async function archiveStaff(m) {
     const cards = wristbandsOn() || m.key_cards
       ? (await api("GET", `api/keycards?state=active&holder=${m.id}`)).cards || [] : [];
     const dialog = $("#archive-dialog");
     const phones = phonesFor(m);
+    const kiosk = kioskDevicesOf(m);
     const remote = remoteInfo();
     $("[data-title]", dialog).textContent = `Archive ${m.name}?`;
     fill($("[data-body]", dialog),
-      h("p", null, "Their access ends everywhere, straight away:"),
+      h("p", null, "Their own access ends straight away:"),
       h("ul", null, [
-        `They're signed out, and their PIN stops working${phones.length ? ` (${phones.join(", ")})` : ""}.`,
+        `They're signed out, and their PIN stops working on shared and role-based phones and computers` +
+          `${phones.length ? ` (${phones.join(", ")})` : ""}.`,
         "They can't make wristbands, contractor badges or key cards, and no key card can be made for them.",
-        m.ha_user ? `Their Home Assistant user (${m.ha_user}) isn't used.` : null,
+        m.ha_user ? `Staff Access stops using their Home Assistant user (${m.ha_user}). It can still sign in to ` +
+          "Home Assistant itself: turn it off there, under Settings > People." : null,
         m.connecteam_user_id ? "The Connecteam sync leaves them archived, even while they're active there." : null,
       ].filter(Boolean).map((text) => h("li", null, text))),
+      kiosk.theirs.length ? h("div", { class: "archive-cards" },
+        h("p", { class: "wb-warn" }, "Kiosk-mode phones and computers have their own PIN and aren't tied to " +
+          "anyone, so archiving doesn't sign them out. If one of these is theirs, revoke it:"),
+        h("ul", { class: "archive-kiosk" }, kiosk.theirs.map(kioskRevokeRow)),
+        kiosk.others ? h("p", { class: "hint" }, `If another of the ${plural(kiosk.others, "Kiosk-mode device")} ` +
+          "is theirs, revoke it under Phones & computers.") : null)
+        : kiosk.others ? h("p", { class: "hint" }, "Kiosk-mode phones and computers have their own PIN and aren't " +
+          "tied to anyone, so archiving doesn't sign them out: if one is theirs, revoke it under Phones & computers.") : null,
       h("p", { class: "hint" }, "Nothing is deleted: their activity and the cards they made stay. Restore them " +
         "any time from Show archived, under the list."),
       cards.length ? h("div", { class: "archive-cards" },
@@ -1244,6 +1281,16 @@
   }
 
   async function deleteForGood(m) {
+    // Their key cards still open doors: once they're deleted, Door activity can't tell whose
+    // they are, so those are dealt with first.
+    const cards = m.key_cards || 0;
+    if (cards) {
+      if (await askConfirm(`${m.name} still has ${plural(cards, "key card")} that open${cards === 1 ? "s" : ""} doors. ` +
+        `Revoke ${cards === 1 ? "it" : "them"} or report ${cards === 1 ? "it" : "them"} lost first, or delete ` +
+        `${m.name} once ${cards === 1 ? "it has" : "they have"} expired.`, wristbandsOn() ? "Show key cards" : "OK")
+        && wristbandsOn()) showKeyCardsFor(m);
+      return false;
+    }
     const again = m.connecteam_auto && state.staffSync?.enabled
       ? " Add everyone from Connecteam adds them again if they're still active in Connecteam." : "";
     if (!await askConfirm(`Delete ${m.name} for good? They're removed from Staff Access and can't be restored. ` +
@@ -2634,7 +2681,7 @@
       const out = [];
       const v = scopeValue();
       const outside = (key) => lockIds(state.settings[key]).map((id) => wbDoors?.find((d) => d.id === id))
-        .filter((d) => d && d.active && !scopeHas(v, d)).map(doorName);
+        .filter((d) => d && d.active && d.kind !== "staff" && !scopeHas(v, d)).map(doorName);
       if (types.has("day_pass")) {
         const missing = outside("wb_daypass_doors");
         if (!lockIds(state.settings.wb_daypass_doors).length) {
@@ -2821,16 +2868,55 @@
       $("#wb-overnight-rooms"), "every overnight wristband opens");
   }
 
-  // Guest rooms and staff doors ticked as shared doors (marked after they were chosen) still go
-  // on the cards, so say so.
+  // Guest rooms ticked as shared doors (marked after they were chosen) still go on the cards, so
+  // say so. Staff doors never do: marking one takes it off these lists, and one still ticked
+  // (from a restored backup, say) is left off every card and dropped when the settings are saved.
   function sharedRoomsWarning(warnEl, picked, opens) {
-    const marked = (wbDoors || []).filter((d) => picked.has(d.id) && (d.kind === "room" || d.kind === "staff"));
-    const one = marked.length === 1;
-    const kinds = [...new Set(marked.map((d) => d.kind))].map((k) => (one ? `a ${KIND_WORDS[k]}` : KIND_PLURALS[k]));
-    warnEl.textContent = marked.length ? `${listNames(marked.map(doorName))} ${one ? "is" : "are"} marked as ` +
-      `${kinds.join(" or ")}, but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. ` +
-      `Untick ${one ? "it" : "them"}, or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.` : "";
-    warnEl.hidden = !marked.length;
+    const rooms = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "room");
+    const staff = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "staff");
+    const lines = [];
+    if (rooms.length) {
+      const one = rooms.length === 1;
+      lines.push(`${listNames(rooms.map(doorName))} ${one ? "is" : "are"} marked as ${one ? "a guest room" : "guest rooms"}, ` +
+        `but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. ` +
+        `Untick ${one ? "it" : "them"}, or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.`);
+    }
+    if (staff.length) {
+      const one = staff.length === 1;
+      lines.push(`${listNames(staff.map(doorName))} ${one ? "is a staff door" : "are staff doors"}, so ` +
+        `${one ? "it's" : "they're"} left off these cards, and unticked when you save.`);
+    }
+    warnEl.textContent = lines.join(" ");
+    warnEl.hidden = !lines.length;
+  }
+
+  // The shared doors (day passes, every overnight wristband) the add-on took a new staff door
+  // off ({setting: [lock ID]}): off the saved settings and the ticks here too.
+  // newStaff: the doors just made staff doors, unticked here too (saved or not).
+  function applyUnshared(unshared, newStaff = []) {
+    for (const [key, ids] of Object.entries(unshared || {})) {
+      if (!wbPicks[key]) continue;
+      state.settings[key] = JSON.stringify(lockIds(state.settings[key]).filter((id) => !ids.includes(id)));
+    }
+    for (const picked of Object.values(wbPicks)) {
+      for (const id of [...Object.values(unshared || {}).flat(), ...newStaff.map((d) => d.id)]) picked.delete(id);
+    }
+  }
+
+  // Which of these doors are day-pass or overnight shared doors (ticked, saved or not), as
+  // "the day-pass doors and the overnight shared doors".
+  function sharedPlaces(doors) {
+    const ids = new Set(doors.map((d) => d.id));
+    const where = [["wb_daypass_doors", "the day-pass doors"], ["wb_overnight_doors", "the overnight shared doors"]]
+      .filter(([key]) => [...wbPicks[key]].some((id) => ids.has(id)) ||
+        lockIds(state.settings[key]).some((id) => ids.has(id)))
+      .map(([, words]) => words);
+    return where.join(" and ");
+  }
+
+  function sharedDoorsOf(doors) {
+    return doors.filter((d) => ["wb_daypass_doors", "wb_overnight_doors"].some((key) =>
+      wbPicks[key].has(d.id) || lockIds(state.settings[key]).includes(d.id)));
   }
 
   function drawDoorChecks(box, countEl, picked, warnEl, opens) {
@@ -3316,20 +3402,34 @@
       if (!target) return;
       const value = kind.value || null;
       markChoice = { where: where.value, kind: kind.value };
-      // Doors already marked the other way are only changed once the owner says so.
+      // Doors already marked the other way are only changed once the owner says so, and so are
+      // shared doors about to become staff doors (that takes them off day passes and overnight
+      // wristbands).
       const other = target.doors.filter((d) => d.kind && d.kind !== value);
+      const shared = value === "staff" ? sharedDoorsOf(target.doors.filter((d) => d.kind !== "staff")) : [];
       const doors = plural(target.doors.length, "door");
+      const parts = [];
+      if (other.length) {
+        parts.push(`${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked another way now.`);
+      }
+      if (shared.length) {
+        parts.push(`${listNames(shared.map(doorName))} ${shared.length === 1 ? "is one of" : "are among"} ` +
+          `${sharedPlaces(shared)}. Staff doors never go on day passes or overnight wristbands, so ` +
+          `${shared.length === 1 ? "it's" : "they're"} taken off ${shared.length === 1 ? "that list" : "those lists"}.`);
+      }
       const question = value
-        ? `${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked another ` +
-          `way now. Mark all ${doors} as ${KIND_PLURALS[value]}?`
+        ? `${parts.join(" ")} Mark all ${doors} as ${KIND_PLURALS[value]}?`
         : `Unmark all ${doors} on ${target.label}? Staff then see them both as guest rooms and as shared doors.`;
-      if (other.length && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
-      await api("POST", "api/wristbands/doors/kind", { door_ids: target.doors.map((d) => d.id), kind: value });
+      if ((other.length || shared.length) && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
+      const reply = await api("POST", "api/wristbands/doors/kind", { door_ids: target.doors.map((d) => d.id), kind: value });
       for (const d of target.doors) d.kind = value;
+      applyUnshared(reply.unshared, value === "staff" ? target.doors : []);
       renderDoors();
       renderDefaultDoors();
       $("#wb-doors .wb-mark button")?.focus();
-      toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` : `${target.label}: ${doors} unmarked.`);
+      toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` +
+        (shared.length ? ` ${listNames(shared.map(doorName))} ${shared.length === 1 ? "is" : "are"} no longer on day passes or overnight wristbands.` : "")
+        : `${target.label}: ${doors} unmarked.`);
     }));
     return h("div", { class: "wb-mark" }, h("span", null, "Mark a whole floor or building:"), where,
       h("span", null, "as"), kind, go);
@@ -3343,18 +3443,29 @@
     pick.value = d.kind || "";
     pick.addEventListener("change", () => run(async () => {
       const value = pick.value || null;
+      // A shared door made a staff door comes off day passes and overnight wristbands: ask first.
+      const places = value === "staff" && d.kind !== "staff" ? sharedPlaces([d]) : "";
+      if (places && !(await askConfirm(`${doorName(d)} is one of ${places}. Staff doors never go on day passes ` +
+        "or overnight wristbands, so it's taken off. Mark it as a staff door?", "Mark it"))) {
+        pick.value = d.kind || "";
+        return;
+      }
+      let reply;
       try {
-        await api("PATCH", `api/wristbands/doors/${d.id}`, { kind: value });
+        reply = await api("PATCH", `api/wristbands/doors/${d.id}`, { kind: value });
       } catch (err) {
         pick.value = d.kind || "";
         throw err;
       }
       d.kind = value;
+      applyUnshared(reply.unshared, value === "staff" ? [d] : []);
       pick.classList.toggle("wb-unmarked", !value);
       renderKindStatus();
       renderDefaultDoors();
       const shared = ["wb_daypass_doors", "wb_overnight_doors"].some((key) => wbPicks[key].has(d.id));
-      toast(value && value !== "public" && shared ? `${doorName(d)} is a ${KIND_WORDS[value]} now, but it's still ` +
+      toast(value === "staff" && places ? `${doorName(d)} is a staff door now, and no longer on day passes ` +
+        "or overnight wristbands: only staff cards and contractor badges open it."
+        : value && value !== "public" && shared ? `${doorName(d)} is a ${KIND_WORDS[value]} now, but it's still ` +
         "one of the shared doors above: untick it there."
         : value === "staff" ? `${doorName(d)} is a staff door now: only staff cards and contractor badges open it.`
         : value ? `${doorName(d)} is a ${KIND_WORDS[value]} now.`
@@ -6407,17 +6518,25 @@
         `to be set up again after this restore${setup.length === 1 ? "" : ` (${setup.slice(0, 8).join(", ")}` +
         `${setup.length > 8 ? ", \u2026" : ""})`}, because ${setup.length === 1 ? "it wasn't" : "they weren't"} ` +
         "signed in on this system.";
+    // People archived here since the backup was made stay archived (Restore brings them back).
+    const kept = info.kept_archived || [];
+    const keptNote = !kept.length ? ""
+      : `\n\n${listNames(kept)} ${kept.length === 1 ? "is" : "are"} archived here but not in the backup, so ` +
+        `${kept.length === 1 ? "stays" : "stay"} archived. Restore ${kept.length === 1 ? "them" : "any of them"} ` +
+        "from Show archived on the Staff tab if you want them back.";
     const ok = await askConfirm(
       `Restore the backup of ${info.property_name || "Staff Access"} from ${fullDate(info.exported_at)}?\n\n` +
       `It has ${counts.join(", ")}. Everything in Staff Access now (settings, roles, layout, phones and staff) ` +
       "is replaced. The activity log and card history are kept, and any entries in the backup that aren't " +
       "here yet are added. A copy of the current setup is saved first, so you can undo this." +
-      setupNote,
+      setupNote + keptNote,
       "Replace and restore");
     if (!ok) return false;
-    await api("POST", "api/restore", body);
+    const result = await api("POST", "api/restore", body);
     await reloadEverything();
-    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring.");
+    const stayed = result.kept_archived || [];
+    toast("Backup restored. Your previous setup was saved first; to undo, restore it from Saved before restoring." +
+      (stayed.length ? ` ${listNames(stayed)} stayed archived.` : ""));
     return false;
   }
 

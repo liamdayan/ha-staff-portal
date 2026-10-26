@@ -880,4 +880,7 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .archive-body .wb-warn { font-size: 14px; }
 .archive-cards { background: var(--card-2); border-radius: 12px; padding: 10px 12px; display: grid; gap: 6px; }
 .archive-cards li { overflow-wrap: anywhere; }
+.archive-body ul.archive-kiosk { list-style: none; padding-left: 0; gap: 6px; }
+.archive-kiosk-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.archive-kiosk-row small { color: var(--muted); }
 .badge.archived { color: var(--muted); }

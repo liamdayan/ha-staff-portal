@@ -219,6 +219,128 @@ def test_only_archived_people_can_be_deleted(tmp_path):
     run(scenario())
 
 
+def test_not_deleted_while_their_key_cards_open_doors(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            # Once deleted, nothing would tie their cards to them, so Door activity could no
+            # longer flag them: they're dealt with first.
+            first, second = key_card(p, p.cy, "445566", days=90), key_card(p, p.cy, "445567")
+            key_card(p, p.cy, "445568", days=-1)                    # expired: opens nothing
+            await archive(p, p.cy)
+            status, reply = await p.admin_call("DELETE", f"/api/staff/{p.cy}")
+            assert (status, reply["key_cards"]) == (409, 2)
+            assert reply["error"] == ("Cy still has 2 key cards that open doors. Revoke them or "
+                                      "report them lost under Key cards first, or delete Cy once "
+                                      "they have expired.")
+            p.db.set_card_state(first, "revoked", "Admin")
+            status, reply = await p.admin_call("DELETE", f"/api/staff/{p.cy}")
+            assert status == 409 and reply["error"].startswith("Cy still has 1 key card that opens")
+            assert p.db.staff(p.cy)
+            p.db.set_card_state(second, "lost", "Admin")   # a lost card goes on alerting as lost
+            assert (await p.admin_call("DELETE", f"/api/staff/{p.cy}"))[0] == 200
+    run(scenario())
+
+
+def test_archiving_stops_key_cards_being_made_for_them(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            def job(kind="write", staff_id=None, holder=p.bob, status="needs_attention"):
+                job_id = p.db.add_wb_job(
+                    card_type="staff", name="Bob", count=2, records=[], summary="Pool Gate",
+                    expires_at=time.time() + 86400, allow_lockout=False, staff_id=staff_id,
+                    device_id=p.device, actor="Admin", role=None, ip=None,
+                    encoder_url="ws://127.0.0.1:1", holder_staff_id=holder,
+                    source="staff_app" if staff_id else "dashboard", kind=kind,
+                    target_card="123456" if kind != "write" else None)
+                p.db.update_wb_job(job_id, status=status)
+                return job_id
+
+            made_here = job()                                   # Make key card, nobody tapped
+            colleague = job(staff_id=p.ana, status="running")   # Ana's staff card for him
+            revoke = job(kind="revoke")                         # clearing one of his cards
+            notice = job(kind="notice", status="queued")        # a lost card notice of his
+            other = job(holder=p.dee)                           # someone else's card
+            await archive(p, p.bob)
+            statuses = {j: p.db.wb_job(j)["status"] for j in (made_here, colleague, revoke,
+                                                                notice, other)}
+            assert statuses == {made_here: "cancelled", colleague: "cancelled",
+                                revoke: "needs_attention", notice: "queued",
+                                other: "needs_attention"}
+            # One that slipped through can't be tried again or go on to its next card, from the
+            # dashboard or the staff app; stopping it is always allowed.
+            late = job(staff_id=p.ana)
+            message = "Bob is archived, so no key card can be made for them. Stop this job."
+            for action in ("retry", "skip"):
+                status, reply = await p.admin_call("POST", f"/api/keycards/jobs/{late}/{action}")
+                assert (status, reply["error"]) == (409, message), action
+            ana = await p.sign_in(p.ana)
+            for action in ("retry", "skip"):
+                status, reply = await p.call("POST", f"/api/wristbands/jobs/{late}/{action}", ana)
+                assert (status, reply["error"]) == (409, message), action
+            assert p.db.wb_job(late)["status"] == "needs_attention"
+            # Revokes and notices aren't key cards for them, and others' cards go on.
+            for job_id in (revoke, other):
+                status, reply = await p.admin_call("POST", f"/api/keycards/jobs/{job_id}/retry")
+                assert "archived" not in reply.get("error", ""), reply
+            status, reply = await p.call("POST", f"/api/wristbands/jobs/{late}/cancel", ana)
+            assert status == 200 and p.db.wb_job(late)["status"] == "cancelled"
+    run(scenario())
+
+
+def test_archived_while_a_request_was_on_its_way(tmp_path, monkeypatch):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            # Edit saved for Dee (turned off) while another admin archives her: the save is
+            # refused, rather than turning her back on with archived_at still set.
+            assert (await p.admin_call("PATCH", f"/api/staff/{p.dee}", {"active": False}))[0] == 200
+            real_pin_taken = main.pin_taken
+
+            async def archived_meanwhile(pin, except_id=None):
+                p.db.archive_staff(p.dee, "Other admin")
+                return await real_pin_taken(pin, except_id)
+            monkeypatch.setattr(main, "pin_taken", archived_meanwhile)
+            status, reply = await p.admin_call("PATCH", f"/api/staff/{p.dee}",
+                                               {"active": True, "pin": "4545"})
+            assert status == 409 and reply["error"] == "Dee is archived. Restore them first."
+            dee = p.db.staff(p.dee)
+            assert (dee["status"], dee["archived_from"]) == ("archived", "disabled")
+            assert main.check_pin("4444", dee["pin_hash"])
+            monkeypatch.setattr(main, "pin_taken", real_pin_taken)
+
+            # A wristband request from someone archived while it was being checked starts nothing.
+            ana = await p.sign_in(p.ana)
+            real_zone = main.wristband_zone
+
+            async def zone_then_archive():
+                p.db.archive_staff(p.ana, "Other admin")
+                return await real_zone()
+            monkeypatch.setattr(main, "wristband_zone", zone_then_archive)
+            status, reply = await p.call("POST", "/api/wristbands/jobs", ana,
+                                         {"type": "day_pass", "name": "Smith", "count": 1})
+            assert (status, reply["error"]) == (403, "pin_required")
+            assert not p.db.conn.execute("SELECT COUNT(*) FROM wb_jobs").fetchone()[0]
+            monkeypatch.setattr(main, "wristband_zone", real_zone)
+
+            # Make key card on the Staff tab, archived while the card was being planned.
+            house = department(p, "Housekeeping", card_access=FLOOR_ONE)
+            p.db.update_staff(p.bob, department_id=house)
+            real_plan = main.dashboard_plan
+
+            async def plan_then_archive(*args, **kwargs):
+                result = await real_plan(*args, **kwargs)
+                p.db.archive_staff(p.bob, "Other admin")
+                return result
+            monkeypatch.setattr(main, "dashboard_plan", plan_then_archive)
+            status, reply = await p.admin_call("POST", f"/api/staff/{p.bob}/keycard", {})
+            assert (status, reply["error"]) == (
+                409, "Bob is archived, so no key card can be made for them.")
+            assert not p.db.conn.execute("SELECT COUNT(*) FROM wb_jobs").fetchone()[0]
+    run(scenario())
+
+
 # ---------------------------------------------------------------- Connecteam
 
 def test_the_connecteam_sync_never_brings_them_back(tmp_path):
@@ -388,6 +510,7 @@ def test_backups_exports_and_migrations_carry_it(tmp_path):
             await archive(p, p.dee)
             await archive(p, p.cy)
             dee = p.db.staff(p.dee)
+            cy_at = p.db.staff(p.cy)["archived_at"]
             status, backup = await p.admin_call("GET", "/api/backup")
             row = next(m for m in backup["staff"] if m["id"] == p.dee)
             assert (row["status"], row["archived_at"], row["archived_from"]) == (
@@ -402,14 +525,28 @@ def test_backups_exports_and_migrations_carry_it(tmp_path):
                 "archived", "disabled", row["archived_by"])
             assert p.db.staff(p.cy)["status"] == "archived"
             assert p.db.staff(p.ana)["archived_at"] is None
-            # A backup from before archiving: everyone as they are in it.
+            # A backup from before they were archived: the people archived here stay archived
+            # (the preview and the Activity line say so), everyone else as they are in it.
             old = json.loads(json.dumps(backup))
             for m in old["staff"]:
                 for key in ("archived_at", "archived_by", "archived_from"):
                     m.pop(key)
                 if m["status"] == "archived":
                     m["status"] = "active"
-            assert (await p.admin_call("POST", "/api/restore", {"backup": old}))[0] == 200
+            status, info = await p.admin_call("POST", "/api/restore/preview", {"backup": old})
+            assert status == 200 and sorted(info["kept_archived"]) == ["Cy", "Dee"]
+            assert p.db.staff(p.cy)["status"] == "archived"   # nothing changed by a preview
+            status, reply = await p.admin_call("POST", "/api/restore", {"backup": old})
+            assert status == 200 and sorted(reply["kept_archived"]) == ["Cy", "Dee"]
+            assert {m["name"]: m["status"] for m in p.db.staff_list()} == {
+                "Ana": "active", "Bob": "active", "Cy": "archived", "Dee": "archived"}
+            assert p.db.staff(p.cy)["archived_at"] == cy_at and p.db.staff(p.cy)["archived_by"] == "Admin"
+            entry = next(a for a in p.db.activity(20) if a["action"] == "Restored a backup")
+            assert "Kept archived: " in entry["detail"]
+            # Restore on the Staff tab brings them back, and then a restore has them as it says.
+            p.db.restore_staff(p.cy)
+            p.db.restore_staff(p.dee)
+            assert (await p.admin_call("POST", "/api/restore", {"backup": old}))[1]["kept_archived"] == []
             assert {m["status"] for m in p.db.staff_list()} == {"active"}
             # A damaged one: archived, with a time and the status Restore puts back.
             bad = json.loads(json.dumps(backup))
@@ -446,7 +583,35 @@ def test_backups_exports_and_migrations_carry_it(tmp_path):
             people["Cy"]["enabled"] = True
             result = transfer.import_staff(q.db, exported, "replace")
             assert result["kept_archived"] == ["Cy"] and q.db.staff(q.cy)["status"] == "archived"
+            # Copying them in would be them again under another name, signing in with their PIN.
+            count = len(q.db.staff_list())
+            result = transfer.import_staff(q.db, exported, "copy")
+            assert sorted(result["kept_archived"]) == ["Cy", "Dee"] and result["skipped"] == 2
+            assert len(q.db.staff_list()) == count + 2      # Ana and Bob (imported)
+            assert not [m for m in q.db.staff_list() if m["name"].startswith(("Cy", "Dee"))
+                        and m["id"] not in (q.cy, q.dee)]
             q.db.restore_staff(q.cy)
             assert q.db.staff(q.cy)["status"] == "active"
             q.db.conn.close()
+    run(scenario())
+
+
+def test_older_versions_refuse_these_backups(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        async with p:
+            await archive(p, p.cy)
+            status, backup = await p.admin_call("GET", "/api/backup")
+            # Schema 5 (0.9.1): 0.9.0 reads 1 to 4, so it refuses the file as a newer version's
+            # instead of reading archived people as active and staff doors as not marked.
+            assert status == 200 and backup["schema"] == 5
+            assert transfer.READABLE_SCHEMAS == (1, 2, 3, 4, 5)
+            status, reply = await p.admin_call("POST", "/api/restore/preview",
+                                               {"backup": {**backup, "schema": 6}})
+            assert status == 400 and reply["error"] == (
+                "That backup was made by a newer version of Staff Portal. Update the add-on first.")
+            for schema in (4, 5):
+                status, _ = await p.admin_call("POST", "/api/restore/preview",
+                                               {"backup": {**backup, "schema": schema}})
+                assert status == 200
     run(scenario())

@@ -127,10 +127,10 @@ encoder, without opening TT Hotel's own software.
 - **Staff:** people with personal PINs for shared devices, each with a role and department, a
   clock-in switch, and **Make key card**; plus the **Key cards** list (folded to a count of
   active and lost cards), with where each card was last used.
-- **Archive** someone who has left: their access ends everywhere at once (signed out, PIN
-  refused, no cards made by or for them), their still-valid key cards are listed with what to
-  do, and nothing of theirs is deleted. **Show archived** has **Restore** and **Delete for
-  good**.
+- **Archive** someone who has left: their own access ends at once (signed out, PIN refused, no
+  cards made by or for them), their still-valid key cards and any Kiosk-mode phone that looks
+  like theirs are listed with what to do, and nothing of theirs is deleted. **Show archived** has
+  **Restore** and **Delete for good**.
 - **Departments:** linked to Connecteam Smart Groups, each with a role, a clock-in rule and a key
   card template.
 - **Roles:** each role's access and pages, with its people listed under it; click a person to
@@ -164,8 +164,8 @@ encoder, without opening TT Hotel's own software.
 - **PINs** are scrambled with scrypt and a salt, and never stored readable.
 - **Wrong PINs** lock a person temporarily, or the device after repeated failures, including a
   daily limit that slow, paced guessing can't get around.
-- **Archived people** have no access anywhere: every sign-in, session, Home Assistant command
-  and card request checks it again, so archiving takes effect at once.
+- **Archived people** can't sign in or act as themselves anywhere: every sign-in, session, Home
+  Assistant command and card request checks it again, so archiving takes effect at once.
 - **Speed limits** apply to sign-ins, actions, failed setup codes and error reports, and idle or
   slow connections are closed.
 - **Strict security headers:** a Content Security Policy and protection against cross-site

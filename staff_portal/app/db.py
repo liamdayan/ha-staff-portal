@@ -456,6 +456,8 @@ LOCK_RECORDS_MAX_ROWS = 50_000
 WB_ACTIVE = ("queued", "running", "needs_attention")   # card jobs that haven't finished
 # The same as SQL, spelled out: SQLite only uses the partial index below for a query that spells
 # out the same statuses (not one that passes them as parameters).
+# The day-pass and overnight shared doors: never staff doors (see _unshare_doors).
+SHARED_DOOR_SETTINGS = ("wb_daypass_doors", "wb_overnight_doors")
 UNFINISHED = f"status IN ({', '.join(repr(status) for status in WB_ACTIVE)})"
 WB_JOB_STATUSES = (*WB_ACTIVE, "done", "cancelled")
 WB_CARD_STATUSES = ("pending", "written", "failed", "skipped", "cancelled")
@@ -1470,26 +1472,70 @@ class Database:
         row = self.conn.execute("SELECT * FROM wb_doors WHERE lock_id = ?", (lock_id,)).fetchone()
         return dict(row) if row else None
 
-    def set_wb_door(self, lock_id: int, **fields) -> None:
+    def set_wb_door(self, lock_id: int, **fields) -> dict[str, list[int]]:
         """The name staff see for a door ('' = TT Hotel's), whether it's hidden from them, and
-        its kind ('public', 'room', 'staff' or None)."""
+        its kind ('public', 'room', 'staff' or None). A door made a staff door is taken off the
+        day-pass and overnight shared doors in the same transaction: returns what was taken off
+        ({setting key: [lock ID]}, see _unshare_doors)."""
         sets = {k: v for k, v in fields.items() if k in ("name", "hidden", "kind")}
         if "kind" in sets:
             sets["kind"] = door_kind(sets["kind"])
         if not sets:
-            return
+            return {}
         cols = ", ".join(f"{k} = ?" for k in sets)
-        self.conn.execute(f"UPDATE wb_doors SET {cols} WHERE lock_id = ?", (*sets.values(), lock_id))
-        self.conn.commit()
+        try:
+            self.conn.execute(f"UPDATE wb_doors SET {cols} WHERE lock_id = ?",
+                              (*sets.values(), lock_id))
+            unshared = self._unshare_doors([lock_id]) if sets.get("kind") == "staff" else {}
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._settings = None   # read again, whichever way it went
+        return unshared
 
     def set_wb_door_kinds(self, lock_ids: list[int], kind: str | None) -> int:
         """Mark many doors at once (a whole floor or building) as 'public', 'room', 'staff' or
-        None.
-        Returns how many doors there were."""
+        None. Returns how many doors there were."""
+        return self.mark_wb_doors(lock_ids, kind)[0]
+
+    def mark_wb_doors(self, lock_ids: list[int], kind: str | None) -> tuple[int, dict]:
+        """set_wb_door_kinds, also returning the staff doors taken off the day-pass and
+        overnight shared doors in the same transaction ({setting key: [lock ID]})."""
         rows = [(door_kind(kind), lock_id) for lock_id in lock_ids]
-        changed = self.conn.executemany("UPDATE wb_doors SET kind = ? WHERE lock_id = ?", rows)
-        self.conn.commit()
-        return changed.rowcount
+        try:
+            changed = self.conn.executemany("UPDATE wb_doors SET kind = ? WHERE lock_id = ?", rows)
+            unshared = self._unshare_doors(lock_ids) if door_kind(kind) == "staff" else {}
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self._settings = None   # read again, whichever way it went
+        return changed.rowcount, unshared
+
+    def _unshare_doors(self, lock_ids: list[int]) -> dict[str, list[int]]:
+        """Take doors (just made staff doors) off the day-pass and overnight shared-door
+        settings, without committing: staff doors never go on a guest's card. Returns
+        {setting key: [lock IDs taken off]} for the settings that had any."""
+        drop, taken = set(lock_ids), {}
+        number = lambda v: (int(v) if isinstance(v, str) and v.isdigit() else v
+                            if isinstance(v, int) and not isinstance(v, bool) else None)
+        for key in SHARED_DOOR_SETTINGS:
+            row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            try:
+                ids = json.loads(row[0]) if row else []
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(ids, list):
+                continue
+            gone = [number(v) for v in ids if number(v) in drop]
+            if gone:
+                self.conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                                  (key, json.dumps([v for v in ids if number(v) not in drop])))
+                taken[key] = gone
+        return taken
 
     def wb_last_sync(self) -> tuple[float | None, int]:
         """(when TT Hotel's door list was last synced, how many doors it listed then)."""
@@ -1678,6 +1724,13 @@ class Database:
         """The card jobs this person started that haven't finished."""
         return [r[0] for r in self.conn.execute(
             f"SELECT id FROM wb_jobs WHERE staff_id = ? AND {UNFINISHED}", (staff_id,))]
+
+    def unfinished_key_card_ids_for(self, staff_id: int) -> list[int]:
+        """The unfinished card jobs writing a key card for this person (whoever started them,
+        from the dashboard or the staff app). Revokes and lost card notices aren't among them."""
+        return [r[0] for r in self.conn.execute(
+            f"""SELECT id FROM wb_jobs WHERE holder_staff_id = ? AND kind = 'write'
+                AND {UNFINISHED}""", (staff_id,))]
 
     def update_wb_job(self, job_id: int, **fields) -> None:
         sets = {k: v for k, v in fields.items() if k in WB_JOB_FIELDS}

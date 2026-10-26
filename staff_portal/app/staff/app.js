@@ -2987,7 +2987,8 @@
 
   // The doors every card of this kind opens, chosen by a manager. Someone allowed to change
   // them can, for this card only, from the public doors (and doors not marked yet). Doors
-  // hidden from the lists, or marked as rooms or staff doors since, stay on it either way.
+  // hidden from the lists, or marked as rooms since, stay on it either way. Staff doors never
+  // do: the add-on leaves them out of t.door_ids.
   function wbDoorsField(f, label, hint) {
     const listed = f.doorById;
     const usual = new Set(f.t.door_ids || []);

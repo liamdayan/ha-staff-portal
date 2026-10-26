@@ -50,10 +50,13 @@ from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean
 
 FORMAT = "staff-portal"
 MIGRATE_FORMAT = "staff-portal-migrate"   # a migration file's header (migrate.py)
-BACKUP_SCHEMA = 4          # 4: the activity log and card records (0.8.6)
+BACKUP_SCHEMA = 5          # 5: archived people, staff doors, contractor badges (0.9.1): an
+                           #    older version would read them as active people, doors not
+                           #    marked and unknown card jobs, so it refuses the file
+                           # 4: the activity log and card records (0.8.6)
                            # 3: wristbands and card encoders (0.8.0)
                            # 2: role pages, people's roles, pages and own changes (0.7.0)
-READABLE_SCHEMAS = (1, 2, 3, 4)
+READABLE_SCHEMAS = (1, 2, 3, 4, 5)
 KINDS = {"layout": "a layout", "roles": "roles", "staff": "staff members",
          "departments": "departments", "backup": "a full backup"}
 PIN_HASH_RE = re.compile(r"^[0-9a-f]{32}\$[0-9a-f]{128}$")
@@ -591,6 +594,11 @@ def _import_staff(db, rows: list, mode: str) -> dict:
         if staff_id and mode == "skip":
             result["skipped"] += 1
             continue
+        if staff_id and mode == "copy" and current[staff_id]["status"] == "archived":
+            # A copy would be them again, active with their PIN: Restore them instead.
+            result["skipped"] += 1
+            result["kept_archived"].append(name)
+            continue
         if staff_id and mode == "replace":
             old = current[staff_id]
             if old["status"] == "archived" and status != "archived":
@@ -663,6 +671,24 @@ def _import_staff(db, rows: list, mode: str) -> dict:
                 "missing_departments"):
         result[key] = sorted(result[key])
     return result
+
+
+def keep_archived(snap: dict, archived_here: list[dict]) -> list[str]:
+    """People archived here whom a backup (made before they were archived) has as not archived,
+    matched by name: they stay archived, as a staff import keeps them (Restore, under Show
+    archived on the Staff tab, brings them back). archived_here: their name, archived_at and
+    archived_by. Changes snap's staff rows (clean_backup's); returns their names."""
+    here = {m["name"].casefold(): m for m in archived_here}
+    kept = []
+    for row in snap["staff"]:
+        old = here.get(row["name"].casefold())
+        if old is None or row["status"] == "archived":
+            continue
+        row.update(status="archived", archived_at=_time(old.get("archived_at"), time.time()),
+                   archived_by=old.get("archived_by"),
+                   archived_from="disabled" if row["status"] == "disabled" else "active")
+        kept.append(row["name"])
+    return kept
 
 
 def import_departments(db, data, mode: str) -> dict:
