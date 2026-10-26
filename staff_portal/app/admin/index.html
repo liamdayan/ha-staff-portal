@@ -756,18 +756,26 @@
                   second one, <b>HR Restricted</b>, for I-9s and accommodation records, with only you and your HR
                   lead in it.</li>
                 <li>Click <b>Copy the script</b>.</li>
-                <li>Go to <b>script.google.com</b>, signed in as the owner, and click <b>New project</b>. Delete
-                  what's there and paste the script.</li>
-                <li>Next to <b>Services</b>, click <b>+</b>, choose <b>Drive API</b> and click <b>Add</b>.</li>
+                <li>Go to <b>script.google.com</b>, signed in as the owner only (sign out of other Google
+                  accounts, or use a private window), and click <b>New project</b>. Delete what's there, paste the
+                  script and save it (Ctrl+S). If the editor doesn't respond, refresh the page.</li>
+                <li>Click the gear (<b>Project Settings</b>) and tick <b>Show "appsscript.json" manifest file in
+                  editor</b>. Back in the editor, open <b>appsscript.json</b>, replace everything in it with the
+                  settings from <b>Copy the settings file</b>, and save. This turns on Google Drive for the
+                  script and asks for full Drive access.</li>
+                <li>Choose <b>authorize</b> in the list at the top and click <b>Run</b>. When Google asks, tick
+                  <b>Select all</b> (or every box, including Google Drive) and click <b>Continue</b>. If it says
+                  the app isn't verified, click <b>Advanced</b>, then <b>Go to</b> your project. The log should
+                  end with lines starting <b>OK</b>.</li>
                 <li>Click <b>Deploy → New deployment</b>. Choose the type <b>Web app</b>, set <b>Execute as: Me</b>
-                  and <b>Who has access: Anyone</b>, then click <b>Deploy</b> and <b>Authorize</b> (Google asks
-                  to allow access to Drive).</li>
+                  and <b>Who has access: Anyone</b>, then click <b>Deploy</b>.</li>
                 <li>Copy the <b>Web app URL</b>, paste it below and click <b>Save</b>.</li>
                 <li>Pick the shared drive (and the restricted one), click <b>Save</b>, then <b>Test
                   connection</b>.</li>
               </ol>
               <div class="gd-script">
                 <button class="btn" type="button" id="gd-copy">Copy the script</button>
+                <button class="btn" type="button" id="gd-copy-manifest">Copy the settings file</button>
                 <button class="btn subtle" type="button" id="gd-new-secret" hidden>Make a new secret</button>
               </div>
               <p class="wb-warn" id="gd-script-note" hidden></p>

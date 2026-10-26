@@ -155,6 +155,19 @@ def test_web_app_url_drives_and_test_connection(tmp_path, monkeypatch):
                 logged = p.db.activity(5)[0]
                 assert (logged["action"], logged["detail"]) == (
                     "Tested the Google Drive connection (HR files)", "Every check passed.")
+
+                # The settings file to paste in appsscript.json asks for full Drive access.
+                status, view = await p.admin_call("GET", "/api/hr-google")
+                assert status == 200 and '"https://www.googleapis.com/auth/drive"' in view["manifest"]
+                assert '"serviceId": "drive"' in view["manifest"]
+                # Every failed check is in the activity log, not only the first.
+                fake.write_refused = "The script doesn't have full Google Drive access."
+                google_asked = __import__("main").google_asked
+                google_asked["test"] = google_asked["check"] = 0
+                status, reply = await p.admin_call("POST", "/api/hr-google/test")
+                assert status == 200 and [c["ok"] for c in reply["checks"]] == [True, True, False, False]
+                detail = p.db.activity(1)[0]["detail"]
+                assert "Make and remove a test folder:" in detail and "Read text from a test image:" in detail
     run(scenario())
 
 

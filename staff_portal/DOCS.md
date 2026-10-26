@@ -1589,14 +1589,24 @@ save or test this connection, or when the HR portal works with files.
    second one, **HR Restricted**, for restricted records (see [The drives](#the-drives)).
 2. In Staff Access, open **Settings → Connections → Google Drive (HR files)** and click **Copy
    the script**. The script has a secret made for your Staff Access written into it.
-3. Go to **script.google.com**, signed in as the owner, and click **New project**. Delete what's
-   there and paste the script. You can name the project, for example "Staff Access HR".
-4. Next to **Services**, click **+**, choose **Drive API** (keep version v3) and click **Add**.
-5. Click **Deploy → New deployment**. Choose the type **Web app**, set **Execute as: Me** and
-   **Who has access: Anyone**, then click **Deploy**. Click **Authorize** and allow access: Google
-   asks for your Drive, your Google Docs (to read the text on cards) and your email address (to
-   show which account it is). If Google says it hasn't verified the app, that's because you made
-   it yourself: click **Advanced**, then **Go to** your project.
+3. Go to **script.google.com**, signed in **only** as the owner (sign out of other Google accounts,
+   or use a private window: the editor otherwise opens as whichever account signed in first), and
+   click **New project**. Delete what's there, paste the script and save it (Ctrl+S). You can name
+   the project, for example "Staff Access HR". If the editor doesn't respond, refresh the page.
+4. Click the gear (**Project Settings**) and tick **Show "appsscript.json" manifest file in
+   editor**. Back in the editor (`< >`), open **appsscript.json**, replace everything in it with
+   what **Copy the settings file** copies, and save. This turns on Google Drive for the script and
+   asks for full Drive access. (Don't use **Services → +** instead: Google then guesses the access
+   from the code and may give the script read-only access.)
+5. Choose **authorize** in the list of functions at the top and click **Run**. Google asks you to
+   allow the script your Drive, your Google Docs (to read the text on cards) and your email
+   address (to show which account it is). **Tick Select all**, or every box including Google
+   Drive, then **Continue**. If Google says it hasn't verified the app, that's because you made it
+   yourself: click **Advanced**, then **Go to** your project. The log at the bottom then lists the
+   checks; lines starting **OK** mean that part works (the drive checks pass once you've picked the
+   drives in step 7).
+   Then click **Deploy → New deployment**. Choose the type **Web app**, set **Execute as: Me** and
+   **Who has access: Anyone**, then click **Deploy**.
 6. Copy the **Web app URL** (it ends in `/exec`), paste it into Staff Access and click **Save**.
    Staff Access checks it straight away and lists your shared drives.
 7. Pick **HR Employee Files** (and the restricted drive, if you made one), click **Save**, then
@@ -1654,6 +1664,27 @@ match**, **Access refused**, **Google not answering**, **Google busy**, **Unexpe
 - An I-9 must be kept for 3 years after hire or 1 year after someone leaves, whichever is later.
   Keeping records 5 years after leaving covers that.
 
+#### If Test connection fails
+
+- **"The script doesn't have full Google Drive access"** (or Google saying "You do not have
+  permission to call drive.files.create"): the script was allowed less than it needs, usually
+  because a box was left unticked on Google's permission screen, or the settings file wasn't
+  pasted before it was first allowed. Fix:
+  1. Check **appsscript.json** holds the settings from **Copy the settings file**.
+  2. Go to **myaccount.google.com/connections** (Google Account → Security → Third-party apps &
+     services), open your script project and choose **Delete all connections** (or **Remove
+     access**).
+  3. In the script editor, choose **authorize**, click **Run**, and tick **Select all** when
+     Google asks.
+  4. **Deploy → Manage deployments → Edit (the pencil) → Version: New version → Deploy**.
+  5. **Test connection** again.
+- **Signed in to Google as someone else**: the Sign-in check names the account the script runs
+  as. If it isn't the owner's, open script.google.com signed in only as the owner, paste and deploy
+  the script there, and paste its new Web app URL into Staff Access.
+- **Google Drive refused** with Google's own words in brackets: those words say why. The account
+  that deployed the script must be a **Manager** (or Content manager) of the HR shared drive.
+- The **Activity** tab lists every check that failed, not only the first.
+
 #### If "Anyone" isn't offered
 
 On Google Workspace, the **Who has access** choices follow your Drive sharing settings: **Anyone**
@@ -1669,12 +1700,12 @@ After an update, Staff Access may need a newer script. The connection then says 
 date**. (Script version 2 adds making PDFs of write-ups and reviews. Files keep going to Drive
 with version 1 meanwhile; PDFs wait until the new version is deployed. Version 3 shows Google's own
 words when Drive refuses something, and Test connection no longer fails just because Google won't
-delete its test folder.) To update it (the Web app
-URL stays the same):
+delete its test folder. Version 4 adds the **authorize** function and a plainer message when the
+script is missing Drive access.) To update it (the Web app URL stays the same):
 
 1. Click **Copy the script**.
-2. In script.google.com, open the project, select everything in the editor, paste over it and
-   save.
+2. In script.google.com, open the project, select everything in **Code.gs**, paste over it and
+   save. Leave **appsscript.json** as it is.
 3. Click **Deploy → Manage deployments**, then **Edit** (the pencil). Under **Version**, choose
    **New version**, then click **Deploy**.
 

@@ -38,9 +38,29 @@ import weakref
 import aiohttp
 
 PROTOCOL = 1          # the request format (bridge.gs's PROTOCOL)
-SCRIPT_VERSION = 3    # the script written by script_source(); ping says which one is deployed
+SCRIPT_VERSION = 4    # the script written by script_source(); ping says which one is deployed
 MIN_SCRIPT_VERSION = 1   # the oldest deployed script file operations still work with
 PDF_VERSION = 2       # the oldest deployed script that makes PDFs (the pdf op)
+# The script project's settings file (appsscript.json), pasted by the owner: it turns on the Drive
+# service and asks Google for full Drive access up front. Without it Google may guess too narrowly
+# from the code and give read-only access ("You do not have permission to call drive.files.create").
+MANIFEST = """{
+  "timeZone": "America/Los_Angeles",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      { "userSymbol": "Drive", "serviceId": "drive", "version": "v3" }
+    ]
+  },
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "webapp": { "executeAs": "USER_DEPLOYING", "access": "ANYONE_ANONYMOUS" }
+}
+"""
 MAX_BYTES = 25 * 1024 * 1024          # a file uploaded, downloaded or read
 MAX_HTML = 2 * 1024 * 1024            # characters of HTML a PDF is made from
 MAX_REPLY = 36 * 1024 * 1024          # a reply: a 25 MB file as base64 is about 33.4 MB

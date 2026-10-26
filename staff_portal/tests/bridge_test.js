@@ -346,7 +346,7 @@ test("ping: version, account and shared drives", () => {
   const ctx = load(world);
   const reply = post(ctx, request("ping"));
   assert.ok(reply.ok);
-  assert.strictEqual(reply.version, 3);
+  assert.strictEqual(reply.version, 4);
   assert.strictEqual(reply.result.email, world.email);
   assert.deepStrictEqual(reply.result.drives.map((d) => d.name).sort(),
     ["HR Employee Files", "HR Restricted", "Marketing"]);
@@ -626,6 +626,28 @@ test("Google's own errors come back in plain words", () => {
   world.failNext = { method: "Files.list", message: "Internal Error" };
   const err = refused(ctx, "ensureFolder", { parent: HR, name: "x", props: { a: "1" } }, "unavailable");
   assert.match(err.message, /Internal Error/);
+  // The script allowed read-only Drive access: say how to fix it, with Google's words.
+  world.failNext = { method: "Files.list", message: "You do not have permission to call drive.files.list. " +
+    "Required permissions: https://www.googleapis.com/auth/drive" };
+  const scope = refused(ctx, "ensureFolder", { parent: HR, name: "x", props: { a: "1" } }, "not_allowed");
+  assert.match(scope.message, /doesn't have full Google Drive access.*authorize.*Select all/);
+  assert.match(scope.message, /Google said: "You do not have permission/);
+});
+
+test("authorize: asks for every permission and logs each check", () => {
+  const { world } = ready();
+  const logged = [];
+  let asked = null;
+  const ctx = vm.createContext({ ...makeServices(world), console,
+    Logger: { log: (line) => logged.push(line) },
+    ScriptApp: { AuthMode: { FULL: "FULL" }, requireAllScopes: (mode) => { asked = mode; } } });
+  vm.runInContext(SOURCE, ctx, { filename: "bridge.gs" });
+  world.ocrRead = () => "EXPIRES 06/14/2029";
+  ctx.PropertiesService.getScriptProperties().setProperty("drives", JSON.stringify([HR]));
+  const checks = ctx.authorize();
+  assert.strictEqual(asked, "FULL");
+  assert.strictEqual(logged.length, checks.length);
+  assert.ok(logged.every((line) => line.startsWith("OK ")), logged.join("\n"));
 });
 
 test("pdf: a Google Doc from the HTML in _OCR scratch, saved as a PDF, then deleted", () => {

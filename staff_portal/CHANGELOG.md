@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.2
+
+**HR portal: Google Drive setup**
+
+- **Copy the settings file**: a new button next to **Copy the script**, for the script's
+  appsscript.json. It turns on Google Drive and asks for full Drive access up front, so Google
+  can't give the script read-only access by guessing from its code.
+- The script has an **authorize** function to run once in script.google.com: Google then asks
+  for every permission, and the log shows each check.
+- When the script has too little Drive access, Test connection says so and how to fix it.
+- The Activity tab lists every failed check of a test, not only the first.
+- Setup steps on the dashboard and in the guide follow what works, with a new "If Test
+  connection fails" section. Script version 4 (paste it into Code.gs and deploy a new version).
+
 ## 0.10.1
 
 **HR portal: Google Drive**

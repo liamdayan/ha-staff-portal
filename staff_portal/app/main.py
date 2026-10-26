@@ -4590,7 +4590,7 @@ def google_view(full: bool = False) -> dict:
             "script_version": gdrive.SCRIPT_VERSION,
             **{k: status.get(k) for k in ("checked_at", "email", "version", "code", "error")}}
     if full:
-        view.update(url=s.get("hr_google_url", ""), drive=s.get("hr_google_drive", ""),
+        view.update(url=s.get("hr_google_url", ""), drive=s.get("hr_google_drive", ""), manifest=gdrive.MANIFEST,
                     restricted_drive=s.get("hr_google_restricted_drive", ""),
                     drives=status.get("drives") or [])
     return view
@@ -4716,7 +4716,7 @@ async def admin_test_google(request: web.Request):
         save_google_status(code=None, error=None, tested_at=time.time())
     hr_connection_log(request, "Tested the Google Drive connection (HR files)",
                       detail="Every check passed." if not failed else
-                      f"{failed[0]['check']}: {failed[0]['detail']}", ok=not failed)
+                      " ".join(f"{c['check']}: {c['detail']}" for c in failed), ok=not failed)
     return web.json_response({"checks": checks, "google": google_view(full=True)})
 
 

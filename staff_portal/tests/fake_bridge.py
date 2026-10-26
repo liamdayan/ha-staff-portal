@@ -405,6 +405,10 @@ class FakeBridge:
                 "Shared drive", "Make and remove a test folder", "Read text from a test image")]}
         names = " and ".join(self.drives[d] for d in self.allowed)
         checks.append({"check": "Shared drive", "ok": True, "detail": f"Can use {names}."})
+        refused = getattr(self, "write_refused", None)   # a script allowed read-only Drive access
+        if refused:
+            return {"checks": checks + [{"check": c, "ok": False, "detail": refused} for c in (
+                "Make and remove a test folder", "Read text from a test image")]}
         checks.append({"check": "Make and remove a test folder", "ok": True,
                        "detail": "Made and removed a test folder."})
         checks.append({"check": "Read text from a test image", "ok": True,

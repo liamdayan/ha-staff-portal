@@ -170,6 +170,11 @@ function errorOf(err) {
     return {code: "quota", message: "Google is busy (a usage limit was reached). Staff Access will " +
                                     "try again later."};
   }
+  if (/required permissions|insufficient authentication scopes|auth\/drive/i.test(text)) {
+    return {code: "not_allowed", message: "The script doesn't have full Google Drive access" + said + ". In " +
+                                          "script.google.com choose authorize and click Run, tick every permission " +
+                                          "(Select all), then deploy a new version."};
+  }
   if (/insufficient|permission|forbidden|access denied/i.test(text)) {
     return {code: "not_allowed", message: "Google Drive refused" + said + ". Check that the Google " +
                                           "account that deployed the script is a Manager of the HR shared drive."};
@@ -462,6 +467,19 @@ function clearScratch(folder) {
       // Next time.
     }
   });
+}
+
+// Run this one in script.google.com (choose authorize, then Run) after pasting the script: Google
+// then asks for every permission the script needs, and the log below says whether it all works.
+function authorize() {
+  if (typeof ScriptApp !== "undefined" && ScriptApp.requireAllScopes) {
+    ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  }
+  var checks = selfTest().checks;
+  checks.forEach(function (c) {
+    Logger.log((c.ok ? "OK   " : "NOT OK ") + c.check + ": " + c.detail);
+  });
+  return checks;
 }
 
 // Test connection in Staff Access: each check with a plain result.

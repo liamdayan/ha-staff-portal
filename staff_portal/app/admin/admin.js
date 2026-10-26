@@ -2517,6 +2517,25 @@
   }
 
   $("#gd-copy").addEventListener("click", () => run(() => copyScript(false)));
+  // The script project's settings (appsscript.json): Drive turned on and full Drive access asked
+  // for, so Google can't hand the script read-only access.
+  $("#gd-copy-manifest").addEventListener("click", () => run(async () => {
+    const text = googleNow().manifest || (await api("GET", "api/hr-google")).manifest;
+    const box = $("#gd-script-box");
+    let copied = true;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      $("#gd-script-text").value = text;
+      box.hidden = false;
+      $("#gd-script-text").focus();
+      $("#gd-script-text").select();
+      copied = document.execCommand("copy");
+    }
+    box.hidden = copied;
+    toast(copied ? "Settings copied. Paste them over everything in appsscript.json."
+      : "Select the settings in the box and copy them.");
+  }));
   $("#gd-new-secret").addEventListener("click", () => run(async () => {
     if (!await askConfirm("Make a new secret? The script in Google stops working until you paste the new " +
       "script there and deploy a new version.", "Make a new secret")) return false;
