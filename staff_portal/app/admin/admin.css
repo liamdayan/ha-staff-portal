@@ -369,6 +369,7 @@ dialog.wide { width: min(660px, calc(100vw - 32px)); }
 .pick-box.tall { max-height: 280px; }
 .pick-row small { color: var(--muted); }
 .check span { min-width: 0; overflow-wrap: anywhere; }
+.check > input { flex: none; }   /* a label that wraps doesn't squeeze its box */
 /* Never let a long name or ID push the page sideways. */
 .area-head h4, .entity-name, .role-name { overflow-wrap: anywhere; min-width: 0; }
 .filters select { max-width: 100%; }

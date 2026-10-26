@@ -63,6 +63,8 @@
 
 - Staff app, Wristbands: a problem shown after pressing **Make** (under the field it's about) no
   longer disappears when the check of a change made just before it answers late.
+- Dashboard: a tick box whose label runs onto a second line (such as **Contractor badges** on a
+  phone) keeps its full size.
 
 ## 0.9.0
 
