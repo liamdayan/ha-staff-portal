@@ -20,6 +20,7 @@ import connecteam  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
 from hr import audit, crypto, ctapi, gdrive, notify, signin  # noqa: E402
+from hr import service as hr_service_module  # noqa: E402
 from test_hr_google_dashboard import copy_script, google  # noqa: E402
 
 FIELDS = [{"id": 11, "name": "Employment Start Date", "type": "date"},
@@ -359,6 +360,36 @@ def test_migration_carries_hr_and_waits_for_uploads(tmp_path):
             assert new.svc.status() == "on"
             assert new.hdb.person("301")["name"] == "Ana Lee" and new.hdb.roles_of("301") == {"hr_admin"}
             assert signin.totp_secret(new.hdb.person("301")) == secret   # the key came too
+    run(scenario())
+
+
+def test_hr_too_big_to_migrate_is_refused_and_a_failed_hr_restore_never_starts_empty(tmp_path, monkeypatch):
+    async def scenario():
+        async with HR(tmp_path / "old") as old:
+            await old.add_people(ANA)
+            status, made = await old.admin_call("POST", "/api/migrate/create")
+            assert status == 200
+            size = len(old.hdb.conn.serialize())
+            # Over the one limit: refused when the file is made, in plain words.
+            monkeypatch.setattr(hr_service_module, "MAX_MIGRATED_DB", size - 1)
+            status, data = await old.admin_call("POST", "/api/migrate/create")
+            assert status == 409 and "too big for a migration file" in data["error"]
+        # A file whose HR part is over the limit (made before it was checked) is refused before
+        # anything here is replaced: nothing restored, and no new, empty HR.
+        async with HR(tmp_path / "new", enabled=False, fresh=True) as new:
+            status, reply = await new.admin_call("POST", "/api/migrate/restore", made)
+            assert status == 400 and "HR part" in reply["error"]
+            assert new.db.settings()["hr_enabled"] == "0" and new.svc.keyring.status() == "new"
+        monkeypatch.setattr(hr_service_module, "MAX_MIGRATED_DB", 64 * 1024 * 1024)
+        # The disk fails while HR is put in place: HR stays off (no new key), and the owner is told.
+        async with HR(tmp_path / "other", enabled=False, fresh=True) as other:
+            def no_room(carried):
+                raise OSError(28, "No space left on device")
+            monkeypatch.setattr(other.svc, "take_migration", no_room)
+            status, reply = await other.admin_call("POST", "/api/migrate/restore", made)
+            assert status == 200 and "HR portal is off" in reply["summary"]["hr_problem"]
+            assert other.db.settings()["hr_enabled"] == "0" and other.svc.status() == "off"
+            assert other.svc.keyring.status() == "new"   # no key or database was made
     run(scenario())
 
 

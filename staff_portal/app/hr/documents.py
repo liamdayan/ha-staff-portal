@@ -69,6 +69,9 @@ SHOWN = ("waiting", "active", "rejected")
 HOLD_ON = "A legal hold is on for this person: nothing in their file can be deleted."
 COPIES_OFF = ("Connecteam copies are off. The owner turns them on in Home Assistant: Settings, "
               "Connections, Connecteam for HR, Copy confirmed certificates to Connecteam.")
+COPY_SEEN = ("A Connecteam copy can be seen by the employee (and their managers in Connecteam), "
+             "so only kinds the employee can see are copied there. Choose “The employee, their "
+             "managers, directors and HR”, or turn the copy off.")
 NO_PDF = ("PDFs are made through Google Drive, which isn't set up yet. The owner connects it in "
           "Home Assistant: Settings, Connections, Google Drive (HR files). The PDF is made as "
           "soon as it is.")
@@ -305,10 +308,19 @@ def clean_kind(data: dict, current: dict | None = None, copies: bool = True) -> 
         else:
             raise ValueError("Choose the Connecteam document from the list.")
     copied = values.get("connecteam", current["connecteam"] if current else 0)
+    level = values.get("visibility", (current or {}).get("visibility"))
+    if copied and level != "employee" and ("connecteam" in values or "visibility" in values):
+        raise ValueError(COPY_SEEN)
     target = values["ct_document"] if "ct_document" in values else (current or {}).get("ct_document")
     if copied and not target and "connecteam" not in fixed:
         raise ValueError("Choose the Connecteam document these go to.")
     return values
+
+
+def goes_to_connecteam(k: dict | None) -> bool:
+    """Whether a kind's files go to Connecteam: turned on, and only for a kind the employee can
+    see (a kind set up before that was checked is never copied)."""
+    return bool(k and k["connecteam"] and k["visibility"] == "employee")
 
 
 def add_kind(db, values: dict) -> int:
@@ -611,7 +623,7 @@ def activate(db, doc: dict, settings: dict, actor_id=None, *, ct_document: int |
                     "WHERE id = ?", (actor_id, now, target, ct_expires, doc["id"]))
     db.conn.commit()
     queue(db, doc["person_id"], "drive", doc["id"], now)
-    if k and k["connecteam"] and target and not doc["restricted"] and copies_on(settings):
+    if goes_to_connecteam(k) and target and not doc["restricted"] and copies_on(settings):
         queue(db, doc["person_id"], "connecteam", doc["id"], now)
 
 
@@ -656,7 +668,7 @@ def restore(db, doc: dict, settings: dict, now: float | None = None) -> None:
     if not doc["drive_id"]:
         queue(db, doc["person_id"], "drive", doc["id"], now)
     k = kind(db, doc["kind_id"])
-    if not doc["ct_copied_at"] and doc["ct_document"] and k and k["connecteam"] and \
+    if not doc["ct_copied_at"] and doc["ct_document"] and goes_to_connecteam(k) and \
             not doc["restricted"] and copies_on(settings):
         queue(db, doc["person_id"], "connecteam", doc["id"], now)
 

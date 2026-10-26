@@ -84,13 +84,19 @@ def _remember(db, person_id: str, place: str, sub: str, drive: str, folder_id: s
     db.conn.commit()
 
 
-def forget(db, drive: str | None = None) -> None:
-    """Forget remembered folders (all, or one drive's): they're found again by their tags. For
-    when one was deleted or moved out of the drives by hand."""
-    if drive is None:
-        db.conn.execute("DELETE FROM drive_folders")
-    else:
-        db.conn.execute("DELETE FROM drive_folders WHERE drive = ?", (drive,))
+# A person's own folder already moved to Former employees: forget() keeps its row and mark.
+FORMER_PERSON = "person_id != '' AND sub = '' AND former = 1"
+
+
+def forget(db, person_id: str | None = None) -> None:
+    """Forget remembered folders, so they're found again by their tags: the top folders and one
+    person's (or everyone's). For when one was deleted or moved out of the drives by hand. A
+    folder moved to Former employees keeps that mark (only its ID is forgotten), so it's looked
+    for there again rather than made anew under Employees."""
+    who = "" if person_id is None else "AND person_id IN ('', ?)"
+    args = () if person_id is None else (str(person_id),)
+    db.conn.execute(f"DELETE FROM drive_folders WHERE NOT ({FORMER_PERSON}) {who}", args)
+    db.conn.execute(f"UPDATE drive_folders SET folder_id = '' WHERE {FORMER_PERSON} {who}", args)
     db.conn.commit()
 
 
@@ -142,6 +148,14 @@ async def person_folder(db, bridge, settings: dict, person: dict, place: str) ->
         raise ValueError("No HR shared drive picked.")
     pid, name = str(person["id"]), folder_name(person)
     found = _row(db, pid, place, "", drive)
+    if found and not found["folder_id"]:
+        # Forgotten after a refusal, but already moved: found again (or made) in Former employees.
+        parent = await _root(db, bridge, place, drive, own, "former")
+        folder_id = await bridge.ensure_folder(parent, name, {TAG: "person", "ct_user": pid})
+        db.conn.execute("UPDATE drive_folders SET folder_id = ?, name = ? WHERE person_id = ? AND "
+                        "place = ? AND sub = '' AND drive = ?", (folder_id, name, pid, place, drive))
+        db.conn.commit()
+        return folder_id
     if found:
         if found["name"] != name:
             await bridge.rename(found["folder_id"], name)

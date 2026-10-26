@@ -6347,7 +6347,7 @@ async def admin_migrate_create(request: web.Request):
     code = migrate.new_code()
     try:
         file = await asyncio.to_thread(lambda: migrate.seal(read_everything(build), code, VERSION))
-    except ValueError as err:   # the HR key is missing
+    except ValueError as err:   # the HR key is missing, or HR's records are too big to carry
         return bad_request(str(err), 409)
     return web.json_response(
         {"code": code, "file": file, "expires_at": file["expires_at"],
@@ -6368,6 +6368,10 @@ async def migration_from_request(request: web.Request) -> tuple:
     if not file:
         raise ValueError("Choose the migration file.")
     return file, migrate.clean_code(code)
+
+
+HR_NOT_RESTORED = ("The HR portal's records couldn't be written here (is the disk full?), so the HR "
+                   "portal is off. Keep the old install: its HR records are still there.")
 
 
 @one_at_a_time
@@ -6398,11 +6402,16 @@ async def admin_migrate_restore(request: web.Request):
     remote_test.update(job_id=None, lock_id=None, door={}, locked_out=None)
     await unlink_dropped(dropped_links)
     await hr_service.stop()
+    hr_problem = None
     if snap["migrate"].get("hr"):
         try:
             hr_service.take_migration(snap["migrate"]["hr"])   # the HR database and its key
         except (ValueError, OSError) as err:
+            # Checked already (migrate._hr_part), so only the disk can fail here. HR stays off
+            # rather than starting empty with a new key, and the owner is told.
             log.warning("Couldn't restore the HR portal from the migration file: %s", err)
+            db.update_settings({"hr_enabled": "0"})
+            hr_problem = HR_NOT_RESTORED
     if hr_service.enabled():
         hr_service.start()   # locked until the recovery key is typed, if it was kept out
     for device in snap["devices"]:
@@ -6421,11 +6430,11 @@ async def admin_migrate_restore(request: web.Request):
     db.log(admin_name(request), "Migrated from another install",
            detail=f"Migration file made {made} by Staff Portal {header['app_version'][:20]}. "
                   f"{signed_in} phone(s) and computer(s) stay signed in.{added_note(added)} "
-                  f"What it replaced was saved as {safety}.")
+                  f"What it replaced was saved as {safety}.{' ' + hr_problem if hr_problem else ''}")
     return web.json_response({"ok": True, "summary": {
         **summary, "made_at": header["created_at"], "app_version": header["app_version"][:20],
         "signed_in": signed_in, "needs_setup": snap["needs_setup"], "added": added,
-        "safety_backup": safety}})
+        "safety_backup": safety, "hr_problem": hr_problem}})
 
 
 async def admin_upload_logo(request: web.Request):

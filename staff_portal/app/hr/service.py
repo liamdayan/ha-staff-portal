@@ -40,7 +40,11 @@ SOON_A_DAY = 48                 # ...and this many a day, so strangers typing nu
                                 # HR's Connecteam requests
 BUSY_RETRY = 90                 # a sync HR's lane had no room for is tried again this soon
 DAILY_AT = (2, 15)              # the nightly run, in HR's time zone
-MAX_MIGRATED_DB = 64 * 1024 * 1024
+MAX_MIGRATED_DB = 64 * 1024 * 1024   # the HR database a migration file may carry: checked when
+                                     # the file is made and when it's restored (migrated_db)
+HR_TOO_BIG = ("The HR portal's records are too big for a migration file (more than 64 MB). Keep "
+              "using this install, and ask for help moving them.")
+HR_DAMAGED = "The HR part of that migration file is damaged."
 NO_CONNECTEAM = ("Connecteam is turned off in Settings → Connections, so the HR portal can't "
                  "read its people.")
 
@@ -48,6 +52,20 @@ NO_CONNECTEAM = ("Connecteam is turned off in Settings → Connections, so the H
 # when a service is made, and adds its hooks (on_start, tick_jobs, daily_jobs, ...). A part adds
 # itself here when it's imported.
 PARTS: list = []
+
+
+def migrated_db(carried: dict) -> bytes:
+    """The HR database a migration file carries (export()), checked. Raises ValueError."""
+    text = carried.get("db")
+    if not isinstance(text, str) or len(text) > 4 * -(-MAX_MIGRATED_DB // 3):
+        raise ValueError(HR_DAMAGED)
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except ValueError:
+        raise ValueError(HR_DAMAGED) from None
+    if not raw.startswith(b"SQLite format 3\x00") or len(raw) > MAX_MIGRATED_DB:
+        raise ValueError(HR_DAMAGED)
+    return raw
 
 
 class HRService:
@@ -401,6 +419,8 @@ class HRService:
             data = conn.serialize()
         finally:
             conn.close()
+        if len(data) > MAX_MIGRATED_DB:
+            raise ValueError(HR_TOO_BIG)   # refused now, rather than lost on the new computer
         # Nothing from Staff Access's settings here: they travel with its other secrets, and
         # its database connection belongs to the event loop.
         return {"db": base64.b64encode(data).decode(), **ring.export()}
@@ -410,9 +430,7 @@ class HRService:
         HR already had here is moved aside (never deleted). Raises ValueError."""
         if self.running:
             raise ValueError("Turn the HR portal off before restoring.")
-        raw = base64.b64decode(str(carried.get("db") or ""), validate=True)
-        if not raw.startswith(b"SQLite format 3\x00") or len(raw) > MAX_MIGRATED_DB:
-            raise ValueError("The HR part of that migration file is damaged.")
+        raw = migrated_db(carried)
         if os.path.exists(self.folder):
             shutil.move(self.folder, f"{self.folder}-replaced-{time.strftime('%Y%m%d-%H%M%S')}")
         os.makedirs(self.folder)

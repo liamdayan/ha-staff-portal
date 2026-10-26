@@ -43,7 +43,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 import doorlog
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
-from hr import crypto as hr_crypto, gdrive
+from hr import crypto as hr_crypto, gdrive, service as hr_service
 from wristbands import MAC_RE, door_kind
 
 FORMAT = transfer.MIGRATE_FORMAT
@@ -65,7 +65,6 @@ SALT_BYTES, NONCE_BYTES = 16, 12
 SECRET_SETTINGS = (*PRIVATE_SETTINGS, "wb_remote_lockout_tested")
 TYPED_SECRETS = ("connecteam_client_secret", "tthotel_client_secret", "tthotel_password_md5")
 MAX_SAVED_OBJECT = 16 * 1024   # TT Hotel's sign-in or a request count, as JSON
-MAX_HR_TEXT = 90 * 1024 * 1024  # the HR database as base64 text
 HR_HOST_RE = re.compile(r"^[a-z0-9.-]{0,253}$")
 TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SETUP_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
@@ -407,12 +406,13 @@ def _hr_settings(raw: dict) -> dict:
 
 
 def _hr_part(hr) -> dict | None:
-    """The HR database and key a migration file carries (service.take_migration checks the
-    database itself), or None when the old install never turned HR on."""
+    """The HR database and key a migration file carries (the database checked as
+    service.take_migration checks it, so a bad one is refused before anything is replaced), or
+    None when the old install never turned HR on."""
     if hr is None:
         return None
-    if (not isinstance(hr, dict) or not isinstance(hr.get("db"), str)
-            or len(hr["db"]) > MAX_HR_TEXT
+    if (not isinstance(hr, dict)
             or not (isinstance(hr.get("key"), str) or isinstance(hr.get("recovery"), str))):
         raise ValueError(DAMAGED)
+    hr_service.migrated_db(hr)   # checked before anything here is replaced (ValueError)
     return {k: hr[k] for k in ("db", "key", "recovery") if isinstance(hr.get(k), str)}
