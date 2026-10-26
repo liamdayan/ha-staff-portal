@@ -413,7 +413,12 @@ def test_overnight_night_limit():
 
 
 def test_overnight_rooms():
-    overnight_refused(DESK, field="room_ids", message="Pick at least one room.", room_ids=[])
+    # Rooms are optional (most rooms take keys): then it opens only the shared doors, and it
+    # needs at least one of either.
+    no_rooms = overnight(DESK, room_ids=[])
+    assert [r.door for r in no_rooms.records] == [2] and no_rooms.summary == "Gym"
+    overnight_refused(DESK, settings={"wb_overnight_doors": "[]"}, field="room_ids",
+                      message="Pick a room, or a shared door.", room_ids=[])
     overnight_refused(DESK, field="room_ids", room_ids=[3])     # hidden
     overnight_refused(DESK, field="room_ids", room_ids=[4])     # no longer listed
     overnight_refused(DESK, field="room_ids", room_ids=[999])

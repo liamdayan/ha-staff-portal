@@ -545,7 +545,9 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
 - **Overnight guests:** a guest name, party size, their room or rooms and a checkout date. Each
   wristband opens the rooms plus the shared doors you chose (such as the main entrance) until
   checkout time on the checkout date (11:00 AM unless you change it). Rooms are picked from the
-  doors marked as guest rooms (see **Public doors, guest rooms and staff doors** below).
+  doors marked as guest rooms (see **Public doors, guest rooms and staff doors** below). The room
+  is optional: for rooms that open with a key, leave it empty and the wristband opens only the
+  shared doors.
 - **Contractor badges:** a contractor's name (and their company, if you like), how many badges,
   the doors they need and when the badges stop working, at most 7 days ahead (see **Contractor
   badges** below).
@@ -746,7 +748,10 @@ A contractor badge lets a plumber or an electrician into the doors they need for
 - The card log, **Look up**, the activity log ("Made a contractor badge for Sam Lee (Acme
   Plumbing)") and [Door activity](#door-activity) show it as a contractor badge, with the
   contractor's name and company. It isn't a staff key card, so it isn't on the Staff tab's **Key
-  cards** list; wipe one on the encoder with **Look up**, then **Revoke (wipe this card)**.
+  cards** list; wipe one on the encoder with **Look up**, then **Revoke (wipe this card)**. A wiped
+  card is blank, so you can make a new wristband or card on it straight away, without lifting it
+  off. (A card just *made* still has to come off the encoder before the next one, so it's never
+  written over by mistake.)
 
 ### Changing when a day pass stops working
 

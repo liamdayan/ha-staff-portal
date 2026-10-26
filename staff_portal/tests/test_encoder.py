@@ -807,15 +807,11 @@ def test_revoke_clears_only_the_card_asked_for():
         assert h.sim.cards[target]["records"] == [] and h.sim.cards[other]["records"] == []
         assert h.runner.live(job_id)["kind"] == "revoke"
         await h.released()
-        # The card just cleared isn't written over unseen, but can be made again once lifted
-        # off and put back.
+        # The card just cleared is blank, so a new card can be made on it straight away, still on
+        # the encoder.
         again = h.submit(card_type="staff")
-        await h.live(again, "waiting_for_card", 1, "Take the card you just cleared off the "
-                                                   "encoder")
-        h.sim.remove_card()
-        await h.live(again, "waiting_for_card", 1, "Place the card on the encoder")
-        h.sim.place_card(target)
-        await h.status(again, "done")
+        job = await h.status(again, "done")
+        assert job["cards"][0]["card_number"] == target
     run(scenario)
 
 

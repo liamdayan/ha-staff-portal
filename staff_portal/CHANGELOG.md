@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.3
+
+**Wristbands**
+
+- **The room on an overnight wristband is now optional.** For rooms that open with a key, leave
+  it empty: the wristband opens only the shared doors. It needs a room or at least one shared
+  door.
+- **A card you just wiped can be used again straight away.** After **Revoke (wipe this card)**,
+  making a new wristband or card no longer asks you to take the wiped card off the encoder
+  first: it's blank. A card just made still has to come off first, so it's never written over
+  by mistake.
+
 ## 0.10.2
 
 **HR portal: Google Drive setup**

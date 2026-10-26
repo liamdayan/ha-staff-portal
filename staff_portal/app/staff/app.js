@@ -2875,7 +2875,8 @@
       sections.push(
         h("section", { class: "wb-card" }, wbField(f, "room_ids", "Rooms",
           wbDoorPicker(f.rooms, "rooms", rooms, () => wbChanged(f, "room_ids")),
-          h("p", { class: "wb-hint" }, "Pick every room in the booking."))),
+          h("p", { class: "wb-hint" }, "Pick every room in the booking that opens with a wristband. " +
+            "Leave it empty for rooms with keys."))),
         h("section", { class: "wb-card" },
           wbField(f, "checkout", "Checkout date", checkout, f.els.checkoutHint),
           shared.size || t.can_edit_doors
@@ -3387,7 +3388,7 @@
     const missing = !f.name.trim() ? ["name", staff ? "Enter the staff member's name."
       : contractor ? "Enter the contractor's name." : "Enter the guest's name."]
       : f.type === "day_pass" && f.endTime === "" ? ["end_time", "Pick when these wristbands stop working."]
-      : f.type === "overnight" && !f.rooms.size ? ["room_ids", "Pick at least one room."]
+      : f.type === "overnight" && !f.rooms.size && !f.doors.size ? ["room_ids", "Pick a room, or a shared door."]
       : f.type === "overnight" && !f.checkout ? ["checkout", "Pick a checkout date."]
       : staff && !wbAccessEntries(f.access, f.doorById).length ? ["access", "Choose what this card opens."]
       : staff && !f.expiresOn ? ["expires_on", "Pick the last day it works."]

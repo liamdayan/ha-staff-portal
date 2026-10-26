@@ -745,8 +745,6 @@ def _plan_day_pass(request, perm, doors, settings, now, tz) -> Plan:
 def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
     name = _clean_name(request)
     count = _check_count(request, setting_number(settings, "wb_overnight_max"))
-    if not request.room_ids:
-        raise PlanError("Pick at least one room.", "room_ids")
     checkout = request.checkout
     if checkout is None:
         raise PlanError("Pick a checkout date.", "checkout")
@@ -764,8 +762,11 @@ def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
     shared_ids = _chosen_doors(perm, request.door_ids, shared_defaults,
                                "You can't change the shared doors on overnight wristbands.")
     shared = _resolve(doors, perm, shared_ids, shared_defaults, "door_ids", "public")
+    # Rooms are optional: most rooms take keys, so a wristband may open only the shared doors.
     records = ([_door_record(door, "room_ids") for door in rooms]
                + [_door_record(door, "door_ids") for door in shared])
+    if not records:
+        raise PlanError("Pick a room, or a shared door.", "room_ids")
     return _finish(request, name, count, records, expiry,
                    setting_flag(settings, "wb_lockout_overnight"), settings, now, tz,
                    doors_field="room_ids", date_field="checkout")

@@ -1686,7 +1686,9 @@ class EncoderRunner:
             status, verb = "written", "made"
         self._set_card(job, seq, status=status, card_number=number, error=None,
                        written_at=time.time())
-        self._lingering, self._lingering_verb = number, verb
+        # A card just made is held back from the next job, so it's never overwritten unseen. A card
+        # just wiped is blank: making a new one on it straight away is the point.
+        self._lingering, self._lingering_verb = (None, verb) if status == "cleared" else (number, verb)
         if not last:
             await self._wait_for_removal(job, seq, number)
 
