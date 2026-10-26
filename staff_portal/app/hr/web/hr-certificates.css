@@ -1,0 +1,51 @@
+/* HR portal: certificates (hr-certificates.js). Uses hr.css's colours, so it follows dark mode. */
+.cert-item { padding: 12px 2px; }
+.cert-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.cert-head .title { font-weight: 600; color: var(--text); text-decoration: none; min-width: 0; }
+a.title:hover { text-decoration: underline; }
+.cert-item .sub { color: var(--muted); font-size: 0.875rem; }
+.cert-item .actions { margin-top: 8px; }
+
+.cert-badge { flex: none; display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 0.8rem; font-weight: 600; background: var(--accent-soft); color: var(--accent-text); }
+.cert-badge.s-expiring, .cert-badge.s-due, .cert-badge.s-waiting { background: var(--warn-bg); color: var(--warn); }
+.cert-badge.s-expired, .cert-badge.s-missing { background: rgba(198, 40, 40, 0.12); color: var(--danger); }
+.cert-badge.s-waived { background: var(--bg); color: var(--muted); }
+
+.cert-flag { margin: 6px 0 4px; font-weight: 600; color: var(--danger); }
+.cert-banner { background: rgba(198, 40, 40, 0.12); color: var(--danger); font-weight: 600;
+  padding: 10px 12px; border-radius: 10px; }
+.button.primary-link { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.cert-filters label { margin-bottom: 4px; }
+.cert-inline { align-items: flex-end; }
+.cert-inline > .actions { flex: 0 0 auto; margin: 0 0 12px; }
+.cert-tips { margin: 0 0 12px; padding-left: 20px; }
+.cert-tips li { margin: 2px 0; }
+.cert-type { border-top: 1px solid var(--line); padding: 10px 0; }
+.cert-type summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.cert-type h4 { margin: 14px 0 6px; font-size: 0.95rem; }
+
+/* File choosers: a button with the real input laid over it, invisible (so a tap opens the
+   camera or the file list). */
+.cert-file { position: relative; overflow: hidden; }
+.cert-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0;
+  min-height: 0; opacity: 0; cursor: pointer; border: none; }
+.cert-preview img { display: block; max-width: 100%; max-height: 240px; margin: 8px 0;
+  border-radius: 10px; border: 1px solid var(--line); }
+.cert-reading { font-weight: 600; }
+
+/* HR's check screen: the photo next to the text read (one above the other on a phone). */
+.cert-check { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 14px; }
+@media (min-width: 760px) { .cert-check { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.cert-photo { overflow: auto; max-height: 70vh; border-radius: 10px; background: var(--bg);
+  border: 1px solid var(--line); }
+.cert-photo img { display: block; width: 100%; height: auto; }
+.small-photo { max-height: 60vh; }
+.cert-text { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem; background: var(--bg); border-radius: 10px; padding: 10px 12px;
+  max-height: 60vh; overflow: auto; }
+.cert-text mark { background: #ffe58a; color: #111114; border-radius: 3px; padding: 0 2px; }
+.cert-text strong { color: var(--accent-text); }
+.cert-warnings { list-style: none; padding: 0; margin: 10px 0 0; }
+.cert-warnings li { margin-bottom: 6px; }

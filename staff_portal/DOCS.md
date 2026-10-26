@@ -1851,6 +1851,105 @@ the HR portal waits: Staff Access's own time clock checks keep running.
   minute, 5, 30, 2 hours and 6 hours, then daily; after 8 tries HR sees it in **HR settings →
   Notifications** with a **Retry** button, and on their to-do list.
 
+### Certificates
+
+The HR portal keeps track of the cards people's jobs need, such as the **Oregon Food Handler
+Card** and the **OLCC Service Permit**, reads the dates off a photo, and reminds people before
+and after they run out.
+
+**Who needs which card.** HR sets this up in **HR settings → Certificates**. It starts with:
+
+| Certificate | Lasts | Needed within | While it's expired or missing |
+|---|---|---|---|
+| Oregon Food Handler Card | 3 years | 30 days of starting | "May not handle food" |
+| OLCC Service Permit | 5 years | 7 days of starting | "May not serve alcohol", also while it's due |
+| Food manager certificate | As printed | (nobody by default) | Accepted in place of a Food Handler Card |
+
+- The first time, the departments whose names contain "Pub" (both cards) or "Front Desk" (OLCC)
+  are ticked as a suggestion. **Nobody needs a card until HR checks the departments and clicks
+  Save**; until then HR's to-do list says so.
+- For each certificate HR can change how long it lasts, the days a new hire has, the heads-up
+  days before it runs out (for example 60, 30, 14, 7), the message shown while it's lapsed, the
+  departments and individual people who need it, other certificates accepted in its place, and
+  the Connecteam document it's copied to.
+- **Add a kind of certificate** (such as CPR and First Aid) at the bottom of the section. Untick
+  **Track this certificate** to stop tracking one; its cards stay on file.
+- **Waive** a certificate for someone (on their page, HR only): a reason and an end date are
+  needed, and only HR sees the reason.
+- These changes, waivers and the spreadsheet download ask for a fresh code (or PIN).
+
+**Adding or renewing a card.** On a phone, **My certificates → Add my card** (or **Renew**):
+
+1. Choose the card, then **Take a photo** (the camera opens; iPhones are asked for a JPEG). A
+   photo in Apple's HEIC format is refused with "take the photo again with the camera button".
+   **Choose a file** takes a photo or the PDF from an online course.
+2. Add the back too if it has dates on it. Both sides become one picture.
+3. Photo tips on the screen: the card flat on a table, no glare on the lamination, filling the
+   frame about 6 to 8 inches (15 to 20 cm) away.
+4. A few seconds later: "We read: expires 6/14/2029. HR will confirm." The card shows **Waiting
+   for HR**.
+
+A manager or director can add a card for someone on their team (helpful for staff without a
+smartphone), and HR for anyone. HR's own uploads go straight to the check screen. An HR admin's
+own card waits for another HR admin.
+
+**How the date is read.** The photo is cleaned (its location and other details removed) and kept
+on the Home Assistant computer, encrypted. A smaller copy (2 MB or less) goes to Google Drive's
+free reader through the script (see [Google Drive for HR files](#google-drive-for-hr-files)),
+which sends the text back and deletes its copy at once. The text read is kept encrypted until HR
+decides, and for 30 days at most. **While Google Drive isn't set up, HR types the date.**
+
+**HR checks every card.** On **Certificates**, the **to check** button lists them, oldest first
+(HR's to-do list and inbox say when one comes in). The check screen
+shows the photo (zoom in, zoom out, turn) next to the text Google read, with the dates
+highlighted and any warnings (the name isn't on the card, it looks like the OLCC course
+certificate rather than the permit, a temporary permit, someone under 21). HR then:
+
+- **Confirm**, after correcting the date if it's wrong, with the issue date, card or permit
+  number, "temporary permit", "under 21" and **Checked with OLCC** (or the issuer) as needed. The
+  card then goes to the person's **Certificates** folder in Google Drive, named like
+  `2026-10-25 OLCC Service Permit - expires 2031-10-24.jpg`, and to Connecteam with its expiry
+  date if that copy is on. The old card is marked replaced, reminders start again, and the
+  person is told.
+- **Don't accept**, with a reason the person sees ("The photo is blurry. Retake it."). The upload
+  never reaches their folder and is deleted after 30 days.
+
+**Statuses.** Each card someone needs shows one of: **Valid**, **Expiring** (inside the first
+heads-up), **Expired**, **Due** (a new hire still inside their days), **Missing**, **Waiting for
+HR** or **Waived**. A lapsed card's message ("May not serve alcohol") shows on every board and
+the person's page. Nothing else happens automatically: schedules aren't changed.
+
+- **Certificates** (HR): everyone's cards, filtered by department, certificate, status ("Needs
+  attention") or "runs out within 60, 30, 14 or 7 days", and **Download (spreadsheet)** as CSV.
+- **Team certificates** (managers and directors): the same for the people they see, with banners
+  such as "2 OLCC Service Permits expired: may not serve alcohol". Managers see statuses and
+  dates, never the photos or card numbers.
+- **My certificates**: everyone's own cards, photos and what HR said.
+
+**Reminders** are sent in the nightly run (2:15 AM Pacific); running it twice sends nothing more.
+
+- **Expired or missing:** the person, their managers and HR are reminded every 2 days (**Remind
+  about expired or missing cards every**, 1 to 14 days). The person gets one message per card;
+  managers and HR get one message each listing how many.
+- **Heads-ups before a card runs out**, at each heads-up day (by default 6 months, 60, 30, 14
+  and 7 days for OLCC; 60, 30, 14 and 7 days for the others). For a card copied to Connecteam,
+  Connecteam itself reminds the person 30, 7 and 1 day before and on the day, so the portal only
+  sends them the earlier ones. Managers and HR get them in their daily summary.
+- **A new hire** is told once which cards they need and by when.
+
+**Connecteam.** Copies need **Copy confirmed certificates to Connecteam** on in **Settings →
+Connections → Connecteam for HR** (it's off at first; see [Connecteam for HR](#connecteam-for-hr)),
+and each certificate's Connecteam document chosen in HR settings (**Read Connecteam's documents**
+lists them; one with the same name is suggested). A card that has already expired isn't copied:
+Connecteam won't take past dates. While the copy is on, the nightly run also reads Connecteam's
+document list and where each person stands (about 2 requests a day, in HR's own request lane).
+Staff Access can't fetch a card someone added in Connecteam's own app, so HR gets a to-do:
+"Jane uploaded a card in Connecteam: approve or reject it there, and ask her to add it in the HR
+portal." Tell staff to add their cards in the HR portal.
+
+A migration file can't be made while cards are waiting for HR (their photos are only on this
+computer): check them first.
+
 ### HR settings
 
 HR admins find these in the HR portal under **HR settings**: roles, managers' departments, who

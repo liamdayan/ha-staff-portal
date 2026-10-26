@@ -24,6 +24,7 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   delivery.py   the queue of work for Google Drive and Connecteam (retries, Needs attention)
   docroutes.py  the Documents section, opening and adding files, Needs attention, kinds settings
   pdfdoc.py     plain, escaped HTML that Google Drive turns into PDFs (write-ups, reviews)
+  certificates.py  certificate types, cards and their dates, statuses, boards, reminders
 
 Nothing here imports main.py: main.py hands the service what it needs.
 """
