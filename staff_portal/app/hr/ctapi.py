@@ -1,8 +1,10 @@
 """The HR portal's own Connecteam requests: a chat message from the custom publisher "Hot Lake
 HR" (Communications hub; the chat.write and publishers.read permissions), and copying a confirmed
 certificate onto the person's document in Connecteam, with its expiry date (Documents API: the HR
-& Skills hub on the Expert plan; attachments.write and documents.write). Certificate copies are
-off until HR turns them on.
+& Skills hub on the Expert plan; attachments.write and documents.write), and, once a day while
+those copies are on, where each person stands on those documents (documents.read), so a card
+added in Connecteam's own app becomes a to-do for HR. Certificate copies are off until HR turns
+them on.
 
 Every request goes through Staff Access's own Connecteam budget (connecteam.py: its caps, the
 account's rate-limit headers and pauses) and HR's one smaller lane inside it (connecteam.hr_room
@@ -44,6 +46,8 @@ MAX_CHAT = 490            # characters (Connecteam: under 500)
 MAX_FILES = 10            # pages in one Connecteam document entry
 MAX_FILE_BYTES = 25 * 1024 * 1024
 STORAGE_TIMEOUT = 120     # seconds to send a file to Connecteam's storage
+STATUS_PAGE = 200         # rows a page in the daily document status check...
+STATUS_PAGES = 5          # ...and pages at most (1,000 rows)
 FEATURES = ("chat", "documents")
 
 NOT_ALLOWED = {
@@ -297,6 +301,32 @@ class HRConnecteam:
                           "type": d.get("documentType"), "expiration": expiration.get("type")})
         return found
 
+    async def user_documents(self, document_ids) -> list[dict]:
+        """Where each person stands on these Connecteam documents (up to 100), for the daily
+        status check: [{"user_id", "document_id", "status" (pendingUserUpload, pendingApproval,
+        approved, rejected, ...), "uploaded_at", "expires_at" (epoch seconds or None)}]. One
+        request per STATUS_PAGE rows: about one a day for 100 people with two cards each."""
+        self._check_stopped("documents")
+        ids = sorted({d for d in document_ids if isinstance(d, int) and not isinstance(d, bool)
+                      and 0 < d < 2**53})[:100]
+        found = []
+        for page in range(STATUS_PAGES if ids else 0):
+            self.room(self._with_token(1))
+            data = await self._request("GET", "/documents/v1/user-documents", "documents", params=[
+                *(("documentIds", i) for i in ids), ("limit", STATUS_PAGE),
+                ("offset", page * STATUS_PAGE)])
+            rows = _first_list(data, "documents")
+            for r in rows:
+                if not isinstance(r, dict) or not all(_whole(r.get(k)) for k in ("userId", "documentId")):
+                    continue
+                found.append({"user_id": r["userId"], "document_id": r["documentId"],
+                              "status": str(r.get("status") or "")[:40],
+                              "uploaded_at": r["uploadedAt"] if _whole(r.get("uploadedAt")) else None,
+                              "expires_at": r["expiresAt"] if _whole(r.get("expiresAt")) else None})
+            if len(rows) < STATUS_PAGE:
+                break
+        return found
+
     async def upload_certificate(self, user_id, document_id: int, files: list,
                                  expires: date | None) -> dict:
         """Puts a confirmed certificate onto the person's Connecteam document: each file (name,
@@ -432,6 +462,10 @@ def _user_id(value) -> int:
     if not re.fullmatch(r"\d{1,15}", text) or int(text) <= 0:
         raise ValueError("That isn't a Connecteam user ID.")
     return int(text)
+
+
+def _whole(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _storage_url(url: str) -> bool:
