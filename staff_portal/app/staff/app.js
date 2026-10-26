@@ -1,6 +1,15 @@
 (() => {
   "use strict";
 
+  // No pinch zoom on phones (Safari ignores the page's user-scalable=no; double taps are stopped
+  // in app.css).
+  for (const type of ["gesturestart", "gesturechange"]) {
+    document.addEventListener(type, (ev) => ev.preventDefault(), { passive: false });
+  }
+  document.addEventListener("touchmove", (ev) => {
+    if (ev.touches.length > 1) ev.preventDefault();
+  }, { passive: false });
+
   const TOKEN_KEY = "staff_device_token";
   const SESSION_KEY = "staff_pin_session";
   const POLL_MS = 5000;

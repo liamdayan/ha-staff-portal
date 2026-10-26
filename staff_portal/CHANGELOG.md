@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.3
+
+**Staff app**
+
+- **No more zooming on phones.** A quick double tap (typing a PIN, say) no longer zooms the page,
+  and neither does pinching or tapping into a field on an iPhone.
+
 ## 0.9.2
 
 **Roles tab**
