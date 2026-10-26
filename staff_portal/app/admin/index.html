@@ -137,8 +137,8 @@
       <fieldset>
         <label class="check-row"><input type="checkbox" name="wristbands_enabled">
           <span>Make wristbands and key cards
-          <small>People whose role allows it can make day passes, overnight wristbands and staff cards
-          on a front-desk computer with a card encoder.</small></span></label>
+          <small>People whose role allows it can make day passes, overnight wristbands, contractor
+          badges and staff cards on a front-desk computer with a card encoder.</small></span></label>
         <p class="hint wb-account">TT Hotel account: <span class="badge" id="wb-tt-state"></span>
           <button class="linkish" type="button" data-goto="settings"
             data-open-conn="conn-tthotel">Settings → Connections</button></p>
@@ -175,6 +175,18 @@
         <label class="check-row"><input type="checkbox" name="wb_lockout_overnight">
           <span>Overnight wristbands open doors that are deadbolted from inside
           <small>Leave this off for guests, so no one can open a room someone has bolted from inside.</small></span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Contractor badges</legend>
+        <p class="hint">Staff pick the doors (any door they have access to, staff doors too) and when the
+          badge stops working, at most 7 days ahead. Choose who may make them on the
+          <button class="linkish" type="button" data-goto="roles">Roles</button> tab.</p>
+        <div class="row">
+          <label>Most badges at once<input name="wb_contractor_max" type="number" min="1" max="20" required></label>
+        </div>
+        <label class="check-row"><input type="checkbox" name="wb_lockout_contractor">
+          <span>Contractor badges open doors that are deadbolted from inside
+          <small>Usually off, so no one can open a room someone has bolted from inside.</small></span></label>
       </fieldset>
       <fieldset>
         <legend>Staff cards</legend>
@@ -264,9 +276,10 @@
         <p class="hint">The doors TT Hotel lists for your property, by building and floor. Rename a door
           to what staff call it (TT Hotel keeps its own name), or hide it from staff lists. A hidden door
           can still be one of the day-pass or overnight doors above.</p>
-        <p class="hint">Mark each door as a <b>public door</b> (such as the pool gate or the main entrance)
-          or a <b>guest room</b>. Staff pick overnight guests' rooms from the guest rooms, and shared doors
-          from the public doors. A door not marked yet shows in both.</p>
+        <p class="hint">Mark each door as a <b>public door</b> (such as the pool gate or the main entrance),
+          a <b>guest room</b> or a <b>staff door</b> (such as the office or the boiler room). Staff pick
+          overnight guests' rooms from the guest rooms, and shared doors from the public doors. A door not
+          marked yet shows in both. Staff doors only go on staff cards and contractor badges.</p>
         <div class="ct-status">
           <span id="wb-doors-status" class="hint"></span>
           <button class="btn" type="button" id="wb-sync">Sync from TT Hotel</button>

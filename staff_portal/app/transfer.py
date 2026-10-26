@@ -12,9 +12,9 @@ What files never contain:
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
 - The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), and the secret in the Door
   activity address. A restore keeps the ones saved.
-- The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door or
-  guest room) chosen here travel, and land on doors the system already has. A backup from before
-  0.9.0 has no kind, and leaves each door's as it is.
+- The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door,
+  guest room or staff door) chosen here travel, and land on doors the system already has. A
+  backup from before 0.9.0 has no kind, and leaves each door's as it is.
 - Door activity (TT Hotel's lock records): TT Hotel keeps its own six months of them.
 (A migration file, migrate.py, carries all of these but door activity, encrypted.)
 Departments (with their key card templates, and their clock-in rules from 0.9.0) are in backups;

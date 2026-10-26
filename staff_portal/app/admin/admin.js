@@ -2276,8 +2276,14 @@
   // add-on itself talks to TT Hotel and to the encoder; this tab sets up the account, the defaults
   // and the door names, and the Roles tab says who may make which cards (wristbandPicker).
 
-  const WB_TYPES = [["day_pass", "Day passes"], ["overnight", "Overnight wristbands"], ["staff", "Staff cards"]];
-  const WB_TYPE_NAMES = { day_pass: "Day pass", overnight: "Overnight", staff: "Staff card" };
+  const WB_TYPES = [["day_pass", "Day passes"], ["overnight", "Overnight wristbands"],
+    ["contractor", "Contractor badges"], ["staff", "Staff cards"]];
+  const WB_TYPE_NAMES = { day_pass: "Day pass", overnight: "Overnight", contractor: "Contractor badge",
+    staff: "Staff card" };
+  const WB_NOUNS = { staff: "card", contractor: "badge" };   // everything else is a wristband
+  // What a door is marked as (Doors, below): staff doors only go on staff cards and contractor badges.
+  const KIND_WORDS = { public: "public door", room: "guest room", staff: "staff door" };
+  const KIND_PLURALS = { public: "public doors", room: "guest rooms", staff: "staff doors" };
   const WB_LEVELS = [["door", "Single doors"], ["floor", "Whole floors"], ["building", "Whole buildings"],
     ["all", "Every door (a master card)"]];
   const WB_NONE = { types: [], staff_levels: [], doors: { buildings: [], floors: [], doors: [] },
@@ -2287,7 +2293,7 @@
   const WB_SHOWN_NUMBERS = 6; // card numbers listed on one row of Cards made before "+N more"
   // FormData leaves unticked boxes out, so every checkbox in the form is listed here.
   const WB_CHECKBOXES = ["wristbands_enabled", "wb_lockout_daypass",
-    "wb_lockout_overnight", "wb_lockout_staff", "wb_remote_lockout"];
+    "wb_lockout_overnight", "wb_lockout_contractor", "wb_lockout_staff", "wb_remote_lockout"];
   const WB_STATUS = { queued: "Waiting for the encoder", running: "Being made", needs_attention: "Needs attention",
     done: "Done", cancelled: "Stopped" };
   // The day-pass and overnight door lists, ticked but maybe not saved yet. Kept apart from the
@@ -2471,7 +2477,7 @@
     const typeBoxes = WB_TYPES.map(([t, label]) => check(types.has(t), label, (ev) => {
       toggle(types, t, ev.target.checked);
       emit();
-    }));
+    }, t === "contractor" ? " · any of the doors below, for up to 7 days" : null));
     const levelBox = h("div", { class: "wb-indent" },
       h("div", { class: "wb-count" }, "Staff cards they make may open:"),
       WB_LEVELS.map(([l, label]) => check(levels.has(l), label, (ev) => {
@@ -2689,7 +2695,7 @@
   }
 
   // The day-pass and overnight door lists: the public doors (and doors not marked yet), grouped
-  // by building and floor.
+  // by building and floor. Guest rooms and staff doors are left out.
   function renderDefaultDoors() {
     drawDoorChecks($("#wb-daypass-doors"), $("#wb-daypass-count"), wbPicks.wb_daypass_doors,
       $("#wb-daypass-rooms"), "day passes open");
@@ -2697,15 +2703,16 @@
       $("#wb-overnight-rooms"), "every overnight wristband opens");
   }
 
-  // Guest rooms ticked as shared doors (marked after they were chosen) still go on the cards,
-  // so say so.
+  // Guest rooms and staff doors ticked as shared doors (marked after they were chosen) still go
+  // on the cards, so say so.
   function sharedRoomsWarning(warnEl, picked, opens) {
-    const rooms = (wbDoors || []).filter((d) => picked.has(d.id) && d.kind === "room").map(doorName);
-    const one = rooms.length === 1;
-    warnEl.textContent = rooms.length ? `${listNames(rooms)} ${one ? "is marked as a guest room" : "are marked as guest rooms"}` +
-      `, but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. Untick ${one ? "it" : "them"}, ` +
-      `or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.` : "";
-    warnEl.hidden = !rooms.length;
+    const marked = (wbDoors || []).filter((d) => picked.has(d.id) && (d.kind === "room" || d.kind === "staff"));
+    const one = marked.length === 1;
+    const kinds = [...new Set(marked.map((d) => d.kind))].map((k) => (one ? `a ${KIND_WORDS[k]}` : KIND_PLURALS[k]));
+    warnEl.textContent = marked.length ? `${listNames(marked.map(doorName))} ${one ? "is" : "are"} marked as ` +
+      `${kinds.join(" or ")}, but ${one ? "is" : "are"} ticked here, so ${opens} ${one ? "it" : "them"}. ` +
+      `Untick ${one ? "it" : "them"}, or mark ${one ? "it as a public door" : "them as public doors"} under Doors below.` : "";
+    warnEl.hidden = !marked.length;
   }
 
   function drawDoorChecks(box, countEl, picked, warnEl, opens) {
@@ -2718,13 +2725,13 @@
       box.replaceChildren(doorsPending());
       return;
     }
-    // Shared doors are public doors, or ones not marked yet. A guest room or a door TT Hotel no
-    // longer lists stays here while it's ticked, so it can be unticked.
-    const doors = wbDoors.filter((d) => (d.active && d.kind !== "room") || picked.has(d.id));
+    // Shared doors are public doors, or ones not marked yet. A guest room, a staff door or a door
+    // TT Hotel no longer lists stays here while it's ticked, so it can be unticked.
+    const doors = wbDoors.filter((d) => (d.active && (!d.kind || d.kind === "public")) || picked.has(d.id));
     const unknown = [...picked].filter((id) => !wbDoors.some((d) => d.id === id));
     if (!doors.length && !unknown.length) {
       box.replaceChildren(h("p", { class: "hint" }, wbDoors.some((d) => d.active)
-        ? "Every door is marked as a guest room. Mark the shared doors as public doors under Doors below."
+        ? "Every door is marked as a guest room or a staff door. Mark the shared doors as public doors under Doors below."
         : "No doors yet. Save your TT Hotel details, then click Test connection or Sync from TT Hotel."));
       return;
     }
@@ -2741,7 +2748,7 @@
         rows.push(h("div", { class: "wb-door-group" }, `${b.name} · ${f.name}`));
         for (const d of f.doors) {
           rows.push(row(d.id, doorName(d), !d.active ? " · no longer in TT Hotel"
-            : d.kind === "room" ? " · guest room" : d.hidden ? " · hidden from staff" : ""));
+            : d.kind === "room" || d.kind === "staff" ? ` · ${KIND_WORDS[d.kind]}` : d.hidden ? " · hidden from staff" : ""));
         }
       }
     }
@@ -3143,22 +3150,23 @@
 
   // ------------------------------------------------ door kinds: public doors and guest rooms
 
-  const DOOR_KINDS = [["", "Not marked"], ["public", "Public door"], ["room", "Guest room"]];
-  const KIND_PLURALS = { public: "public doors", room: "guest rooms" };
+  const DOOR_KINDS = [["", "Not marked"], ["public", "Public door"], ["room", "Guest room"], ["staff", "Staff door"]];
   let markChoice = { where: "", kind: "room" };   // the floor or building and kind last marked
 
-  // How many doors aren't marked yet (they show as both rooms and shared doors until they are).
+  // How many doors aren't marked yet (they show as both rooms and shared doors until they are),
+  // and how many there are of each kind.
   function renderKindStatus() {
     const status = $("#wb-kinds-status");
     if (!status || !wbDoors) return;
     const active = wbDoors.filter((d) => d.active);
     const open = active.filter((d) => !d.kind).length;
-    const counted = (kind) => plural(active.filter((d) => d.kind === kind).length, kind === "room" ? "guest room" : "public door");
+    const counted = (kind) => plural(active.filter((d) => d.kind === kind).length, KIND_WORDS[kind]);
+    const counts = `${counted("public")}, ${counted("room")} and ${counted("staff")}`;
     status.className = open ? "wb-warn" : "hint";
     status.textContent = !active.length ? ""
       : open ? `${plural(open, "door")} ${open === 1 ? "isn't" : "aren't"} marked yet. Until ${open === 1 ? "it is" : "they are"}, ` +
-        `staff see ${open === 1 ? "it" : "them"} both as a guest room and as a shared door.`
-      : `Every door is marked: ${counted("public")} and ${counted("room")}.`;
+        `staff see ${open === 1 ? "it" : "them"} both as a guest room and as a shared door. Marked so far: ${counts}.`
+      : `Every door is marked: ${counts}.`;
   }
 
   // Marks a whole floor or building at once.
@@ -3194,7 +3202,7 @@
       const other = target.doors.filter((d) => d.kind && d.kind !== value);
       const doors = plural(target.doors.length, "door");
       const question = value
-        ? `${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked the other ` +
+        ? `${plural(other.length, "door")} on ${target.label} ${other.length === 1 ? "is" : "are"} marked another ` +
           `way now. Mark all ${doors} as ${KIND_PLURALS[value]}?`
         : `Unmark all ${doors} on ${target.label}? Staff then see them both as guest rooms and as shared doors.`;
       if (other.length && !(await askConfirm(question, value ? "Mark them" : "Unmark them"))) return;
@@ -3228,9 +3236,10 @@
       renderKindStatus();
       renderDefaultDoors();
       const shared = ["wb_daypass_doors", "wb_overnight_doors"].some((key) => wbPicks[key].has(d.id));
-      toast(value === "room" && shared ? `${doorName(d)} is a guest room now, but it's still one of the shared ` +
-        "doors above: untick it there."
-        : value ? `${doorName(d)} is a ${value === "room" ? "guest room" : "public door"} now.`
+      toast(value && value !== "public" && shared ? `${doorName(d)} is a ${KIND_WORDS[value]} now, but it's still ` +
+        "one of the shared doors above: untick it there."
+        : value === "staff" ? `${doorName(d)} is a staff door now: only staff cards and contractor badges open it.`
+        : value ? `${doorName(d)} is a ${KIND_WORDS[value]} now.`
         : `${doorName(d)} isn't marked: staff see it both as a room and as a shared door.`);
     }));
     return pick;
@@ -3302,7 +3311,7 @@
     const numbers = made.map((c) => c.card_number).filter(Boolean);
     const shown = numbers.slice(0, WB_SHOWN_NUMBERS).join(", ") +
       (numbers.length > WB_SHOWN_NUMBERS ? ` +${numbers.length - WB_SHOWN_NUMBERS} more` : "");
-    const noun = j.type === "staff" ? "card" : "wristband";
+    const noun = WB_NOUNS[j.type] || "wristband";
     const unfinished = j.status === "needs_attention" || (j.status === "cancelled" && made.length < j.count);
     return h("tr", null,
       h("td", { class: "nowrap" }, when(j.created_at)),
@@ -3409,7 +3418,8 @@
       h("td", { class: "nowrap" }, when(r.at)),
       h("td", null, r.door),
       h("td", null, who,
-        r.card_number && r.who ? h("div", { class: "sub" }, `Card ${r.card_number}`) : null,
+        r.card_number && r.who ? h("div", { class: "sub" },
+          `${r.card_type === "contractor" ? "Contractor badge · " : ""}Card ${r.card_number}`) : null,
         r.alert ? h("div", { class: "sub da-alert-note" }, DA_ALERTS[r.alert] || "Card not in use") : null),
       h("td", null, r.how),
       h("td", null, h("span", { class: `badge ${result[1]}` }, result[0])));
