@@ -33,14 +33,9 @@ from datetime import date, timedelta
 
 from aiohttp import web
 
-from . import access, audit, crypto, notify, server, service
+from . import access, audit, crypto, notify, policy, server, service
 from .access import rule
 from .server import error, read_json, svc_of, viewer_of
-
-try:   # the point system (the points builder's part): its probation policies, once published
-    from . import policy
-except ImportError:
-    policy = None
 
 log = logging.getLogger("staff_portal")
 
@@ -57,8 +52,8 @@ STAFF_WORDS = {"extended": "extended", "shortened": "end date changed", "passed"
 
 # Used until a point system is published, and for anything a published policy leaves out
 # (the recommended answers to questions 35 to 37).
-DEFAULT_POLICY = {"days": 90, "days_by_department": {}, "extensions": {"count": 1, "days": 30,
-                  "maximum": 120}, "review_lead_days": 14, "end_passes": "remind",
+DEFAULT_POLICY = {"days": 90, "department_days": {}, "departments": [], "extensions": {"count": 1,
+                  "days": 30, "max_days": 120}, "review_lead_days": 14, "when_end_passes": "remind",
                   "on_pass": "keep", "rehires": True, "transfers": False}
 DEFAULT_POLICIES = [
     {**DEFAULT_POLICY, "key": INTRODUCTORY, "name": "Introductory period", "kind": INTRODUCTORY},
@@ -213,38 +208,30 @@ def tell(db, ids, kind: str, *, title: str, link: str, urgent: bool = False,
 
 # ---------------------------------------------------------------- policies
 
-def _published(db, on: date):
-    if policy is None:
-        return None
-    try:
-        found = policy.current(db, on)
-    except Exception as err:  # noqa: BLE001 - probation keeps working on its defaults
-        log.warning("HR portal: reading the point system failed: %r", err)
-        return None
-    if isinstance(found, dict) and isinstance(found.get("body"), dict):
-        return found["body"]
-    return found if isinstance(found, dict) else None
-
-
 def policies(db, on: date | None = None) -> list[dict]:
-    """The probation policies in force: the published point system's, each filled in from the
-    defaults, or the defaults themselves."""
-    body = _published(db, on or today_of(db)) or {}
-    listed = body.get("probation") or body.get("probation_policies") or []
+    """The probation policies in force: the published point system's (policy.py), each filled in
+    from the defaults, or the defaults themselves."""
+    version = policy.current(db, on or today_of(db))
     found = []
-    for p in listed if isinstance(listed, list) else []:
-        if isinstance(p, dict) and p.get("key"):
-            ext = {**DEFAULT_POLICY["extensions"], **(p.get("extensions") or {})}
-            found.append({**DEFAULT_POLICY, **p, "extensions": ext,
-                          "kind": DISCIPLINARY if p.get("kind") == DISCIPLINARY else INTRODUCTORY})
+    for p in (version["body"].get("probation") or []) if version else []:
+        ext = {**DEFAULT_POLICY["extensions"], **(p.get("extensions") or {})}
+        found.append({**DEFAULT_POLICY, **p, "extensions": ext,
+                      "kind": DISCIPLINARY if p.get("kind") == DISCIPLINARY else INTRODUCTORY})
     for default in DEFAULT_POLICIES:
         if not any(p["kind"] == default["kind"] for p in found):
             found.append(dict(default))
     return found
 
 
-def policy_for(db, key: str, kind: str | None = None) -> dict:
+def policy_for(db, key: str, kind: str | None = None, groups=None) -> dict:
+    """A probation policy by key, else the first of its kind. groups (a new hire's departments):
+    the introductory policy that covers them (its departments; none listed covers everyone)."""
     listed = policies(db)
+    if groups is not None:
+        covers = [p for p in listed if p["kind"] == INTRODUCTORY and (
+            not p["departments"] or set(map(str, groups)) & set(map(str, p["departments"])))]
+        if covers:
+            return covers[0]
     return next((p for p in listed if p["key"] == key), None) or next(
         p for p in listed if p["kind"] == (kind or INTRODUCTORY))
 
@@ -258,7 +245,7 @@ def _int(value, default: int, low: int = 0, high: int = MAX_DAYS) -> int:
 
 def days_for(pol: dict, person: dict) -> int:
     """Its length for this person: their department's, the longest when they're in several."""
-    by_department = pol.get("days_by_department") or {}
+    by_department = {str(g): d for g, d in (pol.get("department_days") or {}).items()}
     found = [_int(by_department[g], 0, 1) for g in access.groups_of(person) if g in by_department]
     return max(found) if found else _int(pol.get("days"), 90, 1)
 
@@ -339,7 +326,7 @@ def ensure_introductory(db, person: dict, today: date | None = None) -> dict | N
     start = as_date(person.get("start_date"))
     if person.get("archived") or start is None or start > today + timedelta(days=366):
         return None
-    pol = policy_for(db, INTRODUCTORY)
+    pol = policy_for(db, INTRODUCTORY, groups=access.groups_of(person))
     ends = start + timedelta(days=days_for(pol, person))
     mine = [r for r in of_person(db, person["id"]) if r["kind"] == INTRODUCTORY]
     if any(r["starts"] == start.isoformat() for r in mine):
@@ -433,8 +420,8 @@ def change_end(db, row: dict, new_end: date, reason: str, actor_id, actor: str, 
                              "except for a leave of absence.")
         if (new_end - old).days > _int(ext.get("days"), 30):
             raise ValueError(f"An extension is at most {_int(ext.get('days'), 30)} days.")
-        if (new_end - starts).days > _int(ext.get("maximum"), 120):
-            raise ValueError(f"It can't run longer than {_int(ext.get('maximum'), 120)} days in all.")
+        if (new_end - starts).days > _int(ext.get("max_days"), 120):
+            raise ValueError(f"It can't run longer than {_int(ext.get('max_days'), 120)} days in all.")
     if not longer and new_end < today:
         raise ValueError("Choose today or a later day. To end it now, decide it instead.")
     db.conn.execute("UPDATE probations SET ends = ?, extensions = extensions + ?, "
@@ -581,7 +568,7 @@ def daily(db, today: date) -> dict:
         staff = team_managers(db, person) + hr_admins(db, exclude=(person["id"],))
         link = f"#/people/{person['id']}"
         if today > ends:
-            if pol.get("end_passes") == "pass":
+            if pol.get("when_end_passes") == "pass":
                 decide(db, row["id"], "pass", actor_id="policy", actor="HR portal",
                        reason="The end date passed with no decision; the policy passes it.",
                        today=today)
@@ -623,7 +610,7 @@ def view(db, row: dict, rel: str) -> dict:
     found.update(ends=row["ends"], first_ends=row["first_ends"], extensions=row["extensions"],
                  extension_limits={"count": _int(ext.get("count"), 1),
                                    "days": _int(ext.get("days"), 30),
-                                   "maximum": _int(ext.get("maximum"), 120)},
+                                   "maximum": _int(ext.get("max_days"), 120)},
                  review_due=(date.fromisoformat(row["ends"]) - timedelta(
                      days=_int(pol["review_lead_days"], 14))).isoformat(),
                  recommendation=row["recommendation"] and {

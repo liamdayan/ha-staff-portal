@@ -41,7 +41,6 @@ write-up delivered sees only "Withdrawn on [date]". Text people type is sealed; 
 and statuses stay readable. Issued records are never rewritten: the database refuses it.
 """
 
-import json
 import logging
 import time
 from datetime import date, datetime, timedelta
@@ -49,16 +48,12 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 
-from . import (access, audit, crypto, documents, files, hrdb, notify, pdfdoc, probation, server,
-               service, signin)
+from . import (access, audit, crypto, documents, files, hrdb, notify, pdfdoc, points, policy,
+               probation, server, service, signin)
 from .access import Refused, rule
 from .probation import as_date, clean_text, hr_admins, team_managers, tell, today_of
 from .server import error, read_json, read_optional, svc_of, viewer_of
 
-try:   # the point system and its ledger (the points part, joined later: stand-ins until then)
-    from . import points, policy
-except ImportError:
-    points = policy = None
 
 log = logging.getLogger("staff_portal")
 
@@ -69,10 +64,6 @@ NOT_SET_UP = ("The point system isn't set up yet, so incidents can't be recorded
 SIGN_STATEMENT = ("Signing confirms you received this write-up. It doesn't mean you agree with it. "
                   "You can add a comment, and you can appeal it within {days} days.")
 SIGN_FAILED = "That PIN or code didn't work."
-# Was it protected leave (design 7.10)? Any answer but "no" scores 0 and never leads to a step.
-LEAVES = {"no": "No", "sick": "Oregon sick time", "plo": "Paid Leave Oregon", "ofla": "OFLA/FMLA",
-          "jury": "Jury duty", "military": "Military leave", "dv": "Domestic violence leave",
-          "injury": "Work injury", "other": "Other protected leave"}
 INCIDENT_WORDS = {"with_hr": "Waiting for HR", "returned": "Returned to the manager",
                   "approved": "Approved", "voided": "Voided"}
 WRITEUP_WORDS = {"draft": "Draft", "with_hr": "With HR", "approved": "Approved: ready to deliver",
@@ -103,7 +94,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     track TEXT NOT NULL,
     happened TEXT NOT NULL,              -- YYYY-MM-DD
     what TEXT,                           -- sealed: what happened (managers and HR)
-    protected TEXT NOT NULL DEFAULT 'no',    -- LEAVES
+    protected TEXT NOT NULL DEFAULT 'no',    -- no, or the point system's protected leave key
     default_points REAL NOT NULL,
     manager_points REAL,                 -- the manager's choice within the range...
     manager_reason TEXT,                 -- ...and why (sealed)
@@ -165,7 +156,6 @@ CREATE TABLE IF NOT EXISTS writeups (
     delivered_at REAL,
     method TEXT,                         -- portal, in_person, paper, refused
     issued_on TEXT,                      -- the day it was delivered
-    active_days INTEGER,
     ends_on TEXT,                        -- the last day it counts
     signed_at REAL,
     signed_name TEXT,                    -- sealed: the name the employee typed
@@ -277,14 +267,6 @@ service.PARTS.append(_part)
 
 # ---------------------------------------------------------------- small helpers
 
-def first(d, *names, default=None):
-    """The first of these keys the dict has (the point system's names, read kindly)."""
-    for name in names:
-        if isinstance(d, dict) and d.get(name) is not None:
-            return d[name]
-    return default
-
-
 def num(value, default=None):
     try:
         return float(value)
@@ -330,201 +312,138 @@ def first_name(person: dict) -> str:
     return (person.get("name") or "").split(" ")[0] or "They"
 
 
-# ---------------------------------------------------------------- the point system, read kindly
-
-def ready() -> bool:
-    return policy is not None and points is not None
-
-
-def _version(found) -> tuple[str, dict] | None:
-    if not found or not isinstance(found, dict):
-        return None
-    body = found.get("body", found)
-    if isinstance(body, str):
-        try:
-            body = json.loads(body)
-        except ValueError:
-            return None
-    return str(first(found, "id", "version_id", default="")), body if isinstance(body, dict) else {}
-
+# ---------------------------------------------------------------- the point system (policy.py)
 
 def version_on(db, on: date) -> tuple[str, dict] | None:
     """(version id, body) of the point system published and in force that day, or None."""
-    if not ready():
-        return None
-    try:
-        return _version(policy.current(db, on))
-    except Exception as err:  # noqa: BLE001 - treated as not set up
-        log.warning("HR portal: reading the point system failed: %r", err)
-        return None
+    found = policy.current(db, on)
+    return (str(found["id"]), found["body"]) if found else None
 
 
 def body_of(db, version_id, on: date) -> dict:
     """The body an incident was scored under (else the one in force that day)."""
-    if ready() and version_id:
-        try:
-            found = _version(policy.get(db, version_id))
-            if found:
-                return found[1]
-        except Exception as err:  # noqa: BLE001
-            log.warning("HR portal: reading a point system version failed: %r", err)
+    found = policy.get(db, version_id) if version_id else None
+    if found:
+        return found["body"]
     found = version_on(db, on)
     return found[1] if found else {}
 
 
 def offences(body: dict) -> list[dict]:
-    return [o for o in (body or {}).get("offences") or [] if isinstance(o, dict) and o.get("key")]
+    return (body or {}).get("offences") or []
 
 
 def offence(body: dict, key) -> dict | None:
-    return next((o for o in offences(body) if o["key"] == key), None)
+    return policy.offence(body or {}, key)
 
 
 def steps(body: dict) -> list[dict]:
-    found = [s for s in (body or {}).get("steps") or [] if isinstance(s, dict) and s.get("key")]
-    return sorted(found, key=lambda s: num(s.get("rank"), 0))
+    return policy.steps(body or {})
 
 
 def step(body: dict, key) -> dict | None:
-    return next((s for s in steps(body) if s["key"] == key), None) if key else None
+    return policy.step(body or {}, key) if key else None
 
 
-def rank(body: dict, key) -> float:
-    found = step(body, key)
-    return num(found.get("rank"), 0) if found else 0
+def rank(body: dict, key) -> int:
+    return policy.rank(body or {}, key) if key else 0
 
 
 def step_name(body: dict, key, fallback: str = "") -> str:
     found = step(body, key)
-    return (found.get("name") or key) if found else (fallback or key or "")
+    return found["name"] if found else (fallback or key or "")
 
 
 def is_termination(s: dict | None) -> bool:
-    return bool(s) and ("termination" in str(s.get("key")) or s.get("termination") is True)
+    return bool(s and s.get("termination"))
 
 
 def is_suspension(s: dict | None) -> bool:
-    return bool(s) and ("suspension" in str(s.get("key")) or s.get("suspension") is True)
+    """An HR-only step short of a termination review (the sample's Suspension)."""
+    return bool(s and s.get("hr_only") and not s.get("termination"))
 
 
 def hr_only_step(s: dict | None) -> bool:
-    return is_termination(s) or is_suspension(s) or bool(s and s.get("hr_only"))
+    return bool(s and (s.get("hr_only") or s.get("termination")))
 
 
-def active_days(s: dict | None) -> int:
-    return int(num(first(s or {}, "active_days", "days"), 365))
-
-
-def default_points(o: dict) -> float:
-    return num(first(o, "default_points", "points", "default"), 0.0)
+def ends_on(body: dict, key, issued: date) -> str | None:
+    """The last day a write-up at this step, delivered that day, counts: the day before its step
+    stops being active (policy.step_end). None: it doesn't end by itself."""
+    found = policy.step_end(body or {}, key, issued) if key else None
+    return (found - timedelta(days=1)).isoformat() if found else None
 
 
 def points_range(o: dict) -> tuple[float, float]:
-    found = first(o, "manager_range", "range")
-    if isinstance(found, dict):
-        low, high = num(first(found, "min", "low")), num(first(found, "max", "high"))
-    elif isinstance(found, (list, tuple)) and len(found) == 2:
-        low, high = num(found[0]), num(found[1])
-    else:
-        low, high = num(first(o, "min_points", "range_min")), num(first(o, "max_points", "range_max"))
-    d = default_points(o)
-    return (d if low is None else low, d if high is None else high)
+    """What a manager may choose for this offence."""
+    low, high = o.get("min"), o.get("max")
+    return (o["points"] if low is None else low, o["points"] if high is None else high)
 
 
 def track_of(body: dict, o: dict) -> str:
     if o.get("track"):
         return str(o["track"])
     tracks = (body or {}).get("tracks") or []
-    head = tracks[0] if tracks else None
-    if isinstance(head, dict):
-        return str(first(head, "key", "id", default="discipline"))
-    return str(head or "discipline")
+    return tracks[0]["key"] if tracks else "discipline"
 
 
 def is_attendance(o: dict) -> bool:
-    return o.get("attendance") is True or str(o.get("category", "")).lower() == "attendance"
+    return bool(o.get("attendance"))
 
 
 def needs_hr(body: dict, o: dict) -> bool:
-    """HR approves before it counts: always while the approval rules say every incident (the
-    launch default), else as the offence says."""
-    rules = (body or {}).get("approval") or (body or {}).get("approval_rules") or {}
-    if not isinstance(rules, dict) or first(rules, "all", "every_incident", default=True) is not False:
-        return True
-    return first(o, "hr_approval", "needs_hr", default=True) is not False
+    """HR approves before it counts (every incident at launch; the policy can relax it)."""
+    return policy.needs_hr_approval(body, o["key"])
 
 
 def switches(body: dict) -> tuple[bool, bool]:
     """(employees see their total, employees see expired history): the policy's switches."""
     seen = (body or {}).get("visibility") or {}
-    return (first(seen, "employee_sees_total", "employee_total", default=True) is not False,
-            first(seen, "employee_sees_expired", "employee_expired", default=True) is not False)
+    return seen.get("employee_sees_total", True) is not False, \
+        seen.get("employee_sees_expired", True) is not False
 
 
 def wording(o: dict | None) -> str:
-    return str(first(o or {}, "handbook", "handbook_wording", "wording", default="") or "")
+    return str((o or {}).get("wording") or "")
+
+
+def leaves(body: dict) -> dict:
+    """Was it protected leave (design 7.10)? "No", then the point system's list."""
+    return {"no": "No", **{x["key"]: x["name"] for x in (body or {}).get("protected_leave") or []}}
 
 
 def next_step_name(body: dict, key) -> str | None:
-    later = [s for s in steps(body) if num(s.get("rank"), 0) > rank(body, key)]
-    return (later[0].get("name") or later[0]["key"]) if later else None
+    later = [s for s in steps(body) if s["rank"] > rank(body, key)]
+    return later[0]["name"] if later else None
 
 
 # ---------------------------------------------------------------- points (points.py)
 
 def totals(db, person_id, on: date) -> dict[str, float]:
-    if not ready():
-        return {}
-    try:
-        found = points.totals(db, str(person_id), on) or {}
-    except Exception as err:  # noqa: BLE001 - shown as nothing rather than failing the page
-        log.warning("HR portal: adding up points failed: %r", err)
-        return {}
-    return {str(k): num(v, 0.0) for k, v in found.items()}
+    return points.totals(db, str(person_id), on)
 
 
 def next_drop(db, person_id, on: date) -> dict | None:
-    if not ready():
-        return None
-    try:
-        found = points.next_drop(db, str(person_id), on)
-    except Exception as err:  # noqa: BLE001
-        log.warning("HR portal: finding the next drop failed: %r", err)
-        return None
-    if not found:
-        return None
-    when = first(found, "date", "on")
-    return {"date": when.isoformat() if isinstance(when, date) else str(when or ""),
-            "points": num(found.get("points"), 0.0)}
+    found = points.next_drop(db, str(person_id), on)
+    return {"date": found["date"], "points": found["points"]} if found else None
 
 
-def context(db, person_id, happened: date, leave: str | None = None) -> dict:
-    """What points.py needs to know about that day: probation in force, protected leave."""
+def context(db, person_id, happened: date, leave: str | None = None, repeat=None) -> dict:
+    """What points.py needs to know about that day: the day (for repeats), probation in force,
+    protected leave, and which repeat this is (for a repeat's step)."""
     on = probation.current(db, person_id, happened)
-    return {"on_probation": on["policy_key"] if on else None,
-            "protected": leave if leave and leave != "no" else None}
-
-
-def repeat_history(db, person_id, until: date, skip=None) -> list[dict]:
-    """The person's approved incidents up to that day, for the repeat rules."""
-    return [{"incident_id": r["id"], "offence_key": r["offence_key"], "offence": r["offence_key"],
-             "happened": r["happened"], "date": r["happened"], "points": r["final_points"]}
-            for r in db.conn.execute(
-                "SELECT id, offence_key, happened, final_points FROM incidents WHERE person_id = ? "
-                "AND status = 'approved' AND happened <= ? ORDER BY happened, id",
-                (str(person_id), until.isoformat())) if r["id"] != skip]
+    return {"happened": happened, "on_probation": on["policy_key"] if on else None,
+            "protected": leave if leave and leave != "no" else None, "repeat": repeat}
 
 
 def score(db, body: dict, person_id, offence_key: str, happened: date, leave: str,
-          manager_points=None, skip=None) -> dict:
+          manager_points=None) -> dict:
+    """incident_points for one incident, against the person's incidents already counting."""
     ctx = context(db, person_id, happened, leave)
-    found = points.incident_points(body, offence_key, ctx,
-                                   repeat_history(db, person_id, happened, skip),
-                                   manager_points=manager_points) or {}
-    return {"default": num(found.get("default"), 0.0),
-            "final": 0.0 if ctx["protected"] else num(found.get("final"), 0.0),
-            "repeat": found.get("repeat"), "errors": [str(e) for e in found.get("errors") or []],
-            "ctx": ctx}
+    found = points.incident_points(body, offence_key, ctx, points.past_incidents(db, str(person_id)),
+                                   manager_points=manager_points)
+    return {"default": found["default"], "final": found["final"], "repeat": found["repeat"],
+            "errors": [str(e) for e in found["errors"]], "ctx": ctx, "result": found}
 
 
 def current_step(db, body: dict, person_id, on: date) -> tuple[str | None, float]:
@@ -550,24 +469,28 @@ def waiting_rank(db, body: dict, person_id) -> float:
 
 
 def required(db, body: dict, person_id, offence_key: str, happened: date, on: date,
-             counted: dict | None = None) -> tuple[str | None, str]:
+             counted: dict | None = None, repeat=None) -> tuple[str | None, str]:
     """The step this incident makes due (design 7.5), when it's higher than the person's current
     step and any already waiting: (step key or None, the point system's reason)."""
-    if not ready():
-        return None, ""
     active, active_rank = current_step(db, body, person_id, on)
-    try:
-        found = points.required_step(body, context(db, person_id, happened),
-                                     counted if counted is not None else totals(db, person_id, on),
-                                     offence_key, active) or {}
-    except Exception as err:  # noqa: BLE001 - no step rather than a failed approval
-        log.warning("HR portal: working out the step failed: %r", err)
-        return None, ""
-    key, reason = found.get("step"), str(found.get("reason") or "")
+    found = points.required_step(body, context(db, person_id, happened, repeat=repeat),
+                                 counted if counted is not None else totals(db, person_id, on),
+                                 offence_key, active)
+    key, reason = found["step"], str(found["reason"] or "")
     higher = max(active_rank, waiting_rank(db, body, person_id))
     if key and step(body, key) and rank(body, key) > higher:
         return key, reason
     return None, reason
+
+
+def ends_to_points(db, w: dict, actor_id, reason: str) -> None:
+    """A write-up's end date, told to the points ledger (points.set_ends): under the expiry
+    rules "writeup" and "first", its incident's points stop counting the day after its last."""
+    inc = get_incident(db, w["incident_id"]) if w["incident_id"] else None
+    if inc and inc["status"] == "approved" and w["ends_on"]:
+        stops = date.fromisoformat(w["ends_on"]) + timedelta(days=1)
+        points.set_ends(db, w["person_id"], stops, actor_id, reason, incident_id=inc["id"],
+                        writeup=True)
 
 
 # ---------------------------------------------------------------- records
@@ -639,10 +562,12 @@ def history_view(db, rows: list[dict], rel: str) -> list[dict]:
 
 
 def incident_points_now(db, inc: dict) -> float:
-    """Its points after any adjustments HR made to it."""
-    extra = db.conn.execute("SELECT COALESCE(SUM(points), 0) FROM discipline_events WHERE "
-                            "incident_id = ? AND points IS NOT NULL", (inc["id"],)).fetchone()[0]
-    return inc["final_points"] + extra
+    """Its points now, from the ledger: after HR's changes to it and any re-score."""
+    if inc["status"] == "approved":
+        for line in points.history(db, inc["person_id"]):
+            if line["kind"] == "incident" and line["incident_id"] == str(inc["id"]):
+                return line["amount"]
+    return inc["final_points"]
 
 
 def add_task(db, person_id, kind: str, *, step_key=None, reason: str = "", incident_id=None,
@@ -695,17 +620,14 @@ def form_data(db, person: dict, today: date) -> dict:
     return {"set_up": True, "today": today.isoformat(),
             "earliest": (today - timedelta(days=MAX_BACK_DAYS)).isoformat(),
             "person": {"id": person["id"], "name": person["name"], "first": first_name(person)},
-            "offences": [{"key": o["key"], "name": o.get("name") or o["key"],
-                          "category": o.get("category") or "", "attendance": is_attendance(o),
-                          "default": default_points(o), "min": points_range(o)[0],
-                          "max": points_range(o)[1], "wording": wording(o),
-                          "writeup_required": first(o, "writeup_required", "write_up_required",
-                                                    default=False) is True}
+            "offences": [{"key": o["key"], "name": o["name"], "category": o["category"],
+                          "attendance": is_attendance(o), "default": o["points"],
+                          "min": points_range(o)[0], "max": points_range(o)[1],
+                          "wording": wording(o), "writeup_required": bool(o["writeup_required"])}
                          for o in offences(body)],
-            "leaves": [{"key": k, "name": v} for k, v in LEAVES.items()],
-            "steps": [{"key": s["key"], "name": s.get("name") or s["key"],
-                       "rank": num(s.get("rank"), 0), "hr_only": hr_only_step(s)}
-                      for s in steps(body)],
+            "leaves": [{"key": k, "name": v} for k, v in leaves(body).items()],
+            "steps": [{"key": s["key"], "name": s["name"], "rank": s["rank"],
+                       "hr_only": hr_only_step(s)} for s in steps(body)],
             "points": totals(db, person["id"], today)}
 
 
@@ -742,11 +664,11 @@ def preview(db, person: dict, data: dict, rel: str, today: date) -> dict:
         text += " HR approves it before it counts."
     pending = db.conn.execute("SELECT COUNT(*) FROM incidents WHERE person_id = ? AND status IN "
                               "('with_hr', 'returned')", (person["id"],)).fetchone()[0]
-    required_writeup = first(o, "writeup_required", "write_up_required", default=False) is True
+    required_writeup = bool(o["writeup_required"])
     return {"text": text, "default": s["default"], "final": s["final"], "track": track,
             "before": before.get(track, 0.0), "after": after[track], "errors": s["errors"],
             "protected": bool(s["ctx"]["protected"]), "on_probation": s["ctx"]["on_probation"],
-            "repeat": bool(s["repeat"]),
+            "repeat": bool(s["repeat"] and s["repeat"] > 1),   # a repeat of the same offence
             "step": found and (None if hr_only_step(found) and rel != "hr" else
                                {"key": key, "name": step_name(body, key), "reason": reason}),
             "needs_writeup": bool(found and not hr_only_step(found)) or (
@@ -762,10 +684,10 @@ def predicted(db, person: dict, body: dict, o: dict, happened: date, s: dict,
     track = track_of(body, o)
     before = totals(db, person["id"], today)
     return required(db, body, person["id"], o["key"], happened, today,
-                    {**before, track: before.get(track, 0.0) + s["final"]})
+                    {**before, track: before.get(track, 0.0) + s["final"]}, repeat=s["repeat"])
 
 
-def _incident_fields(db, person: dict, data: dict, today: date, skip=None) -> dict:
+def _incident_fields(db, person: dict, data: dict, today: date) -> dict:
     """The form's fields, checked and scored. Raises NotSetUp or ValueError (plain words)."""
     happened = as_date(data.get("happened"))
     if happened is None:
@@ -785,24 +707,25 @@ def _incident_fields(db, person: dict, data: dict, today: date, skip=None) -> di
     leave = "no"
     if is_attendance(o):
         leave = str(data.get("protected") or "")
-        if leave not in LEAVES:
+        if leave not in leaves(body):
             raise ValueError("Answer the question: was this protected leave?")
     manager_points = clean_points(data.get("points"))
-    s = score(db, body, person["id"], o["key"], happened, leave, manager_points, skip)
+    s = score(db, body, person["id"], o["key"], happened, leave, manager_points)
     if s["errors"]:
         raise ValueError(s["errors"][0])
     reason = clean_text(data.get("reason"), 1000)
-    changed = manager_points is not None and manager_points != s["default"]
+    changed = manager_points is not None and manager_points != o["points"]   # the offence's own
     if changed and not reason and not s["ctx"]["protected"]:
         raise ValueError("Say why you chose different points.")
-    return {"offence_key": o["key"], "offence_name": (o.get("name") or o["key"])[:120],
-            "category": str(o.get("category") or "")[:60], "track": track_of(body, o),
+    return {"offence_key": o["key"], "offence_name": o["name"][:120],
+            "category": str(o["category"] or "")[:60], "track": track_of(body, o),
             "happened": happened.isoformat(), "what": seal(what, "incident.what"),
             "protected": leave, "default_points": s["default"],
             "manager_points": manager_points if changed else None,
             "manager_reason": seal(reason, "incident.manager_reason") if changed else None,
             "final_points": s["final"], "version_id": version_id,
-            "probation_key": s["ctx"]["on_probation"], "_body": body, "_offence": o}
+            "probation_key": s["ctx"]["on_probation"], "_body": body, "_offence": o,
+            "_repeat": s["repeat"]}
 
 
 WRITEUP_FIELDS = ("improvement", "consequences", "support", "manager_note")
@@ -859,7 +782,7 @@ def record_incident(db, person: dict, viewer, rel: str, data: dict, today: date)
     HR, or counted at once when the point system lets this offence skip HR. Returns
     {incident, writeup, step}. Raises NotSetUp or ValueError."""
     fields = _incident_fields(db, person, data, today)
-    body, o = fields.pop("_body"), fields.pop("_offence")
+    body, o, repeat = fields.pop("_body"), fields.pop("_offence"), fields.pop("_repeat")
     hr_needed = needs_hr(body, o)
     cur = db.conn.execute(
         f"INSERT INTO incidents ({', '.join(fields)}, person_id, status, recorded_by, "
@@ -871,7 +794,8 @@ def record_incident(db, person: dict, viewer, rel: str, data: dict, today: date)
     wid = None
     wanted = data.get("writeup")
     if isinstance(wanted, dict) and fields["protected"] == "no":
-        guess = {"errors": [], "ctx": {"protected": None}, "final": fields["final_points"]}
+        guess = {"errors": [], "ctx": {"protected": None}, "final": fields["final_points"],
+                 "repeat": repeat}
         recommended, _ = predicted(db, person, body, o, as_date(fields["happened"]), guess, today)
         texts = _writeup_texts(wanted, body, recommended=recommended)
         texts.pop("step_name", None)
@@ -896,9 +820,9 @@ def edit_incident(db, inc: dict, person: dict, viewer, data: dict, today: date) 
     """The manager's changes to an incident HR returned; it goes back to HR. Raises ValueError."""
     if inc["status"] != "returned":
         raise ValueError("Only an incident HR returned can be changed.")
-    fields = _incident_fields(db, person, data, today, skip=inc["id"])
+    fields = _incident_fields(db, person, data, today)
     body = fields.pop("_body")
-    fields.pop("_offence")
+    fields.pop("_offence"), fields.pop("_repeat")
     sets = ", ".join(f"{k} = ?" for k in fields)
     db.conn.execute(f"UPDATE incidents SET {sets}, status = 'with_hr' WHERE id = ?",
                     (*fields.values(), inc["id"]))
@@ -924,10 +848,15 @@ def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_
     step it makes due becomes a task. Returns {step, task, writeup}. Raises ValueError."""
     if inc["status"] != "with_hr":
         raise ValueError("It isn't waiting for HR.")
-    if not ready():
-        raise NotSetUp(NOT_SET_UP)
     person = db.person(inc["person_id"])
     happened = date.fromisoformat(inc["happened"])
+    body = body_of(db, inc["version_id"], happened)
+    if not body:
+        raise NotSetUp(NOT_SET_UP)
+    # Scored again now, against the incidents counting (which repeat this is), for the ledger
+    # (so a re-score can work it out again) and for the step it makes due.
+    s = score(db, body, inc["person_id"], inc["offence_key"], happened, inc["protected"],
+              inc["manager_points"])
     final = inc["final_points"]
     if hr_points is not None and hr_points != final:
         if inc["protected"] != "no":
@@ -935,9 +864,12 @@ def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_
         if not hr_reason:
             raise ValueError("Say why you changed the points.")
         final = hr_points
-    entry = points.add_incident_entry(db, inc["person_id"], inc["id"], inc["track"], final, happened,
-                                      today, inc["version_id"], actor_id,
-                                      f"Incident: {inc['offence_name']}")
+    changed = final != inc["final_points"]
+    entry = points.add_incident_entry(
+        db, inc["person_id"], inc["id"], inc["track"], final, happened, today, inc["version_id"],
+        actor_id, f"Incident: {inc['offence_name']}", offence=inc["offence_key"],
+        scoring={**s["result"], "manager": inc["manager_points"], "hr": final if changed else None,
+                 "on_probation": s["ctx"]["on_probation"]})
     db.conn.execute(
         "UPDATE incidents SET status = 'approved', final_points = ?, hr_points = ?, hr_reason = ?, "
         "decided_by = ?, decided_by_name = ?, decided_at = ?, approved_on = ?, entry_id = ? "
@@ -953,20 +885,22 @@ def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_
         if final != inc["final_points"] else f" at {fmt(final)} points"),
           actor_id, actor, incident_id=inc["id"])
     db.conn.commit()
-    return evaluate_step(db, person, get_incident(db, inc["id"]), actor_id, actor, today)
+    return evaluate_step(db, person, get_incident(db, inc["id"]), actor_id, actor, today,
+                         repeat=s["repeat"])
 
 
-def evaluate_step(db, person: dict, inc: dict, actor_id, actor: str, today: date) -> dict:
+def evaluate_step(db, person: dict, inc: dict, actor_id, actor: str, today: date,
+                  repeat=None) -> dict:
     """After approval: the step it makes due (design 7.5), as a task with a pre-filled write-up;
     suspensions and termination reviews to HR only."""
     happened = date.fromisoformat(inc["happened"])
     body = body_of(db, inc["version_id"], happened)
     attached = attached_writeup(db, inc["id"])
     key, reason = (None, "Protected leave: no step.") if inc["protected"] != "no" else required(
-        db, body, inc["person_id"], inc["offence_key"], happened, today)
+        db, body, inc["person_id"], inc["offence_key"], happened, today, repeat=repeat)
     o = offence(body, inc["offence_key"]) or {}
-    if not key and attached and first(o, "writeup_required", "write_up_required", default=False):
-        key = first(o, "minimum_step", "min_step") or (steps(body)[0]["key"] if steps(body) else None)
+    if not key and attached and o.get("writeup_required"):
+        key = o.get("min_step") or (steps(body)[0]["key"] if steps(body) else None)
         reason = "This offence always needs a write-up."
     db.conn.execute("UPDATE incidents SET step_key = ?, step_reason = ? WHERE id = ?",
                     (key, reason[:300], inc["id"]))
@@ -995,10 +929,10 @@ def evaluate_step(db, person: dict, inc: dict, actor_id, actor: str, today: date
         keep = (proposed and attached["downgrade_reason"] and step(body, proposed)
                 and rank(body, proposed) < rank(body, key))
         db.conn.execute(
-            "UPDATE writeups SET step_key = ?, step_name = ?, recommended_key = ?, active_days = ?, "
+            "UPDATE writeups SET step_key = ?, step_name = ?, recommended_key = ?, "
             "hr_only = ?, version_id = ?, downgrade_reason = ? WHERE id = ?",
             (proposed if keep else key, step_name(body, proposed if keep else key), key,
-             active_days(step(body, proposed if keep else key)), 1 if hr_only else 0,
+             1 if hr_only else 0,
              inc["version_id"], attached["downgrade_reason"] if keep else None, attached["id"]))
         db.conn.commit()
         wid = attached["id"]
@@ -1084,7 +1018,7 @@ def adjust_incident(db, inc: dict, new_points: float, reason: str, actor_id, act
 
 def adjust_person(db, person: dict, data: dict, actor_id, actor: str, today: date) -> None:
     """HR adds or takes away points for someone, with a reason, a start and an optional end."""
-    if not ready() or version_on(db, today) is None:
+    if version_on(db, today) is None:
         raise NotSetUp(NOT_SET_UP)
     change = clean_points(data.get("points"), -MAX_POINTS, MAX_POINTS)
     if not change:
@@ -1097,8 +1031,7 @@ def adjust_person(db, person: dict, data: dict, actor_id, actor: str, today: dat
     if not reason:
         raise ValueError("Say why.")
     body = version_on(db, today)[1]
-    tracks = [str(first(t, "key", "id", default=t) if isinstance(t, dict) else t)
-              for t in body.get("tracks") or []] or [track_of(body, {})]
+    tracks = [t["key"] for t in body["tracks"]]
     track = str(data.get("track") or tracks[0])
     if track not in tracks:
         raise ValueError("Choose the point total.")
@@ -1163,13 +1096,12 @@ def new_writeup(db, person: dict, inc: dict | None, body: dict, key, *, created_
     fields.pop("step_name", None)
     cur = db.conn.execute(
         f"INSERT INTO writeups ({', '.join(fields)}, person_id, incident_id, version_id, step_key, "
-        "step_name, recommended_key, downgrade_reason, hr_only, status, active_days, created_by, "
+        "step_name, recommended_key, downgrade_reason, hr_only, status, created_by, "
         f"created_by_name, created_at, submitted_at) VALUES ({', '.join('?' * len(fields))}, ?, ?, "
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (*fields.values(), person["id"], inc["id"] if inc else None, inc and inc["version_id"],
          key, step_name(body, key) if key else None, recommended or key, downgrade,
-         1 if hr_only else 0, status,
-         active_days(step(body, key)) if key else None, created_by, created_by_name, time.time(),
+         1 if hr_only else 0, status, created_by, created_by_name, time.time(),
          time.time() if status == "with_hr" else None))
     event(db, person["id"], "Write-up started" if status == "draft" else "Write-up sent to HR",
           created_by, created_by_name or "HR portal", writeup_id=cur.lastrowid,
@@ -1202,8 +1134,6 @@ def edit_writeup(db, w: dict, data: dict, viewer, rel: str) -> None:
         if texts.get("suspension_from") or texts.get("suspension_to"):
             if not is_suspension(step(body, texts.get("step_key") or w["step_key"])):
                 raise ValueError("Suspension dates are only for a suspension.")
-        if "step_key" in texts:
-            texts["active_days"] = active_days(step(body, texts["step_key"]))
     if hr_note:
         texts["hr_note"] = seal(clean_text(data.get("hr_note"), TEXT_LIMIT) or None, "writeup.hr_note")
     _update_writeup(db, w, texts, viewer)
@@ -1279,12 +1209,13 @@ def void_draft(db, w: dict, reason: str, actor_id, actor: str) -> None:
 
 
 def _deliver_fields(db, w: dict, viewer, method: str, today: date) -> dict:
-    """The delivery details (the end date counts from the day it's delivered)."""
+    """The delivery details: the end date counts from the day it's delivered, as long as its
+    step stays active (policy.step_end)."""
     fields = {"method": method}
     if not w["delivered_at"]:
+        body = body_of(db, w["version_id"], today)
         fields.update(delivered_by=viewer.id, delivered_by_name=viewer.name, delivered_at=time.time(),
-                      issued_on=today.isoformat(),
-                      ends_on=(today + timedelta(days=w["active_days"] or 365)).isoformat())
+                      issued_on=today.isoformat(), ends_on=ends_on(body, w["step_key"], today))
     return fields
 
 
@@ -1301,6 +1232,7 @@ def send_to_sign(db, w: dict, viewer, person: dict, today: date) -> None:
     event(db, w["person_id"], "Delivered: sent to the employee to sign in the HR portal", viewer.id,
           viewer.name, writeup_id=w["id"], visibility="employee")
     db.conn.commit()
+    ends_to_points(db, get_writeup(db, w["id"]), viewer.id, "The write-up's end date")
     close_tasks(db, viewer.id, writeup_id=w["id"], outcome="Write-up delivered")
     tell(db, [person["id"]], "writeup_to_sign", link=f"#/writeup/{w['id']}",
          title="You have a write-up to read and sign.", once=f"writeup-{w['id']}-sign")
@@ -1311,10 +1243,13 @@ def made_active(db, w: dict, viewer, method: str, today: date, what: str, **fiel
     asked of the documents part's queue (made now, or once Google Drive can)."""
     if w["status"] not in ("approved", "delivered"):
         raise ValueError("It isn't waiting for a signature.")
+    first_time = not w["delivered_at"]
     _set(db, w, status="active", **_deliver_fields(db, w, viewer, method, today), **fields)
     event(db, w["person_id"], what, viewer.id, viewer.name, writeup_id=w["id"],
           visibility="employee")
     db.conn.commit()
+    if first_time:
+        ends_to_points(db, get_writeup(db, w["id"]), viewer.id, "The write-up's end date")
     close_tasks(db, viewer.id, writeup_id=w["id"], outcome="Write-up delivered")
     documents.queue_pdf(db, WRITEUPS, w["person_id"], w["id"])
 
@@ -1353,6 +1288,7 @@ def change_ends(db, w: dict, new_end: date, reason: str, actor_id, actor: str, t
     event(db, w["person_id"], f"HR changed when it stops counting: {w['ends_on']} → {new_end}",
           actor_id, actor, writeup_id=w["id"], note=reason)
     db.conn.commit()
+    ends_to_points(db, get_writeup(db, w["id"]), actor_id, reason)
     if new_end.isoformat() < (w["ends_on"] or ""):
         recheck_later(db, w["person_id"], w["issued_on"], actor_id, actor, today,
                       cause=f"The write-up from {w['issued_on']} now stops counting earlier.")
@@ -1718,7 +1654,8 @@ def incident_view(db, inc: dict, rel: str, viewer, person: dict, today: date) ->
              "offence": inc["offence_name"], "offence_key": inc["offence_key"],
              "category": inc["category"], "happened": inc["happened"],
              "what": opened(inc["what"], "incident.what") or "",
-             "protected": LEAVES.get(inc["protected"]) if inc["protected"] != "no" else None,
+             "protected": leaves(body).get(inc["protected"], "Protected leave")
+             if inc["protected"] != "no" else None,
              "protected_key": inc["protected"],
              "default_points": inc["default_points"], "manager_points": inc["manager_points"],
              "manager_reason": opened(inc["manager_reason"], "incident.manager_reason"),
@@ -1748,30 +1685,25 @@ def incident_view(db, inc: dict, rel: str, viewer, person: dict, today: date) ->
 def lines_view(db, person_id, on: date, rel: str, see_expired: bool) -> list[dict]:
     """The points history ("bank statement") as this relation may see it: voided lines are HR's,
     expired ones the employee's only when the policy allows."""
-    if not ready():
-        return []
-    try:
-        lines = points.history(db, str(person_id), on, True) or []
-    except Exception as err:  # noqa: BLE001
-        log.warning("HR portal: reading the points history failed: %r", err)
-        return []
     names = {str(r["id"]): r["offence_name"] for r in db.conn.execute(
         "SELECT id, offence_name FROM incidents WHERE person_id = ?", (str(person_id),))}
     found = []
-    for line in lines:
-        state = str(first(line, "state", default="counts"))
-        if (state == "voided" and rel != "hr") or (state == "expired" and not see_expired):
+    # history() hands reasons back unsealed: only HR's view keeps them.
+    for line in points.history(db, str(person_id), on, True):
+        state, kind = line["state"], line["kind"]
+        if rel != "hr" and (state == "voided" or kind == "void" or line.get("end_kind")):
+            continue   # voids, and end dates set on other lines, are HR's bookkeeping
+        if state == "expired" and not see_expired:
             continue
-        kind = str(first(line, "kind", "type", default="incident"))
-        offence_name = names.get(str(first(line, "incident_id")))
-        word = {"adjustment": "Adjustment by HR", "credit": "Credit", "void": "Void"}.get(kind, kind)
-        item = {"date": str(first(line, "happened", "date", "counts_from", default="")),
+        offence_name = names.get(str(line["incident_id"]))
+        word = ("End date changed" if line.get("end_kind") else
+                {"adjustment": "Adjustment by HR", "credit": "Credit", "void": "Void"}.get(kind, kind))
+        item = {"date": line["happened"],
                 "label": offence_name if kind == "incident" and offence_name else
                 f"{word}: {offence_name}" if offence_name else word,
-                "kind": kind, "points": num(line.get("points"), 0.0), "state": state,
-                "ends": str(first(line, "ends", "stops", "expires", default="") or "") or None,
-                "incident_id": first(line, "incident_id") if rel in STAFF else None}
-        if rel == "hr" and isinstance(line.get("reason"), str):
+                "kind": kind, "points": line["points"], "state": state, "ends": line.get("ends"),
+                "incident_id": line["incident_id"] if rel in STAFF else None}
+        if rel == "hr" and line.get("reason"):
             item["reason"] = line["reason"]
         found.append(item)
     return found
@@ -1850,8 +1782,6 @@ def summary_for_review(db, person_id, start, end) -> dict:
 
 def _clear_probation_points(db, row: dict, actor_id) -> None:
     """A probation whose policy clears its points on passing: one line taking them away."""
-    if not ready():
-        return
     happened = [dict(r) for r in db.conn.execute(
         "SELECT * FROM incidents WHERE person_id = ? AND status = 'approved' AND happened >= ? AND "
         "happened <= ?", (row["person_id"], row["starts"], row["ends"]))]

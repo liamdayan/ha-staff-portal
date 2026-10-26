@@ -5,24 +5,28 @@ reviews with probation and documents (the end-of-probation recommendation reache
 and the final PDF reaches Drive), the review side panel with real certificate statuses and the
 discipline summary, and the wiring itself (each part once, in one place).
 
-Google is the fake script (tests/fake_bridge.py) and Connecteam a fake server. The point system
-(policy.py, points.py) isn't joined yet: discipline_fakes.py stands in for it. Nothing here
+The point system is the real one (policy.py, points.py) with a small published policy
+(tests/point_system.py): from an incident to its write-up's end date reaching the ledger, the
+totals dropping that day, a repeat's step, and the review side panel's real points.
+
+Google is the fake script (tests/fake_bridge.py) and Connecteam a fake server. Nothing here
 talks to a real Google, Connecteam, TT Hotel or Home Assistant.
 """
 
 import asyncio
+import copy
 import json
 import time
 from datetime import date, timedelta
 
-import discipline_fakes
+import point_system
 from fake_bridge import html_text
 from hr_helpers import HR, ct_user, queue_done
 from test_hr_certificates import DocsConnecteam, add, jpeg
 from test_hr_documents import google
 
-from hr import (certificates, delivery, discipline, documents, notify, parts, probation, reviews,  # noqa: E402
-                server, service, signin)
+from hr import (certificates, delivery, discipline, documents, notify, parts, points, policy,  # noqa: E402
+                probation, reviews, server, service, signin)
 
 ANA = ct_user(201, "Ana", "Lee", code="4821", groups=[501], mobile="541-555-0201")
 MAX = ct_user(203, "Max", "Ray", code="9900", groups=[501], mobile="541-555-0203")
@@ -136,7 +140,7 @@ async def signed_writeup(hr: HR, s: dict) -> int:
 
 
 def test_a_signed_writeups_pdf_goes_through_the_documents_queue_once(tmp_path, monkeypatch):
-    pol, pts = discipline_fakes.install(monkeypatch)    # the points part's stand-in does the sums
+    pol, pts = point_system.install(monkeypatch)
     pol.publish()
 
     async def scenario():
@@ -265,7 +269,7 @@ def test_an_end_of_probation_review_reaches_hrs_decision_and_its_pdf_reaches_dri
 
 
 def test_the_review_side_panel_shows_real_certificates_and_discipline(tmp_path, monkeypatch):
-    pol, pts = discipline_fakes.install(monkeypatch)    # the points part's stand-in does the sums
+    pol, pts = point_system.install(monkeypatch)
     pol.publish()
 
     async def scenario():
@@ -309,12 +313,14 @@ def test_the_review_side_panel_shows_real_certificates_and_discipline(tmp_path, 
 # ---------------------------------------------------------------- the wiring
 
 def test_every_part_is_wired_once_in_one_place(tmp_path):
-    # Each part once; the documents part first (the others keep their files there), as every
-    # other part imports it.
+    # Each part once; the documents part before those keeping files there (they import it).
     names = [p.__module__ for p in service.PARTS]
-    assert sorted(names) == ["hr.certificates", "hr.discipline", "hr.documents", "hr.probation", "hr.reviews"]
-    assert names[0] == "hr.documents"
-    assert set(parts.__dict__) >= {"documents", "certificates", "probation", "discipline", "reviews"}
+    assert sorted(names) == ["hr.certificates", "hr.discipline", "hr.documents", "hr.points", "hr.policy",
+                             "hr.probation", "hr.reviews"]
+    assert all(names.index("hr.documents") < names.index(f"hr.{p}") for p in ("certificates", "discipline", "reviews"))
+    assert set(parts.__dict__) >= {"documents", "policy", "points", "certificates", "probation",
+                                   "discipline", "reviews"}
+    assert discipline.points is points and discipline.policy is policy and probation.policy is policy
     # Other parts' kinds of document and PDFs.
     assert documents.OWNED == {"certificates": "certificates", "writeups": "discipline", "reviews": "reviews"}
     assert set(documents.PDF_MAKERS) == {"writeups", "reviews"}
@@ -329,7 +335,7 @@ def test_every_part_is_wired_once_in_one_place(tmp_path):
     # Person-page sections and HR settings, in order.
     assert [n for _, n, _ in server.SECTIONS] == ["details", "documents", "certificates", "probation",
                                                   "discipline", "reviews", "signin"]
-    assert [n for _, n, _ in server.SETTINGS_SECTIONS] == ["roles", "documents", "certificates",
+    assert [n for _, n, _ in server.SETTINGS_SECTIONS] == ["roles", "documents", "certificates", "discipline",
                                                            "discipline_workflow", "reviews"]
 
     async def scenario():
@@ -337,7 +343,8 @@ def test_every_part_is_wired_once_in_one_place(tmp_path):
             svc = hr.svc
             for hooks in (svc.on_start, svc.tick_jobs, svc.daily_jobs, svc.migration_blockers, svc.on_stop):
                 assert len(hooks) == len(set(hooks))
-            assert len(svc.daily_jobs) == 5 and len(svc.migration_blockers) == 2
+            assert len(svc.daily_jobs) == 6 and len(svc.migration_blockers) == 2
+            assert points.nightly in svc.daily_jobs
             assert delivery.tick in svc.tick_jobs and probation.hourly in svc.tick_jobs
             assert documents.migration_blocker in svc.migration_blockers
             assert certificates.migration_blocker in svc.migration_blockers
@@ -351,4 +358,113 @@ def test_every_part_is_wired_once_in_one_place(tmp_path):
             hr.hdb.conn.commit()
             reason = svc.migration_blocker()
             assert "waiting for HR to confirm" in reason and reason.endswith("One more reason.")
+    run(scenario())
+
+
+# ---------------------------------------------------------------- the real point system
+
+def first_rule_body() -> dict:
+    """The test policy with points stopping on the write-up's end date or after 12 months,
+    whichever comes first (the design's recommended rule), and a second no call / no show within
+    12 months going to a termination review."""
+    body = copy.deepcopy(point_system.BODY)
+    body["expiry"] = {"rule": "first", "rolling": {"months": 12}, "clean_reset": None}
+    ncns = next(o for o in body["offences"] if o["key"] == "ncns")
+    ncns["repeat"] = {"within": {"months": 12}, "tiers": [{"nth": 2, "add": 0, "step": "termination_review"}]}
+    return body
+
+
+def test_from_an_incident_to_its_points_dropping_on_the_write_ups_end_date(tmp_path, monkeypatch):
+    pol, pts = point_system.install(monkeypatch)
+    pol.publish(first_rule_body())
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            db, day = hr.hdb, today(hr)
+            assert policy.set_up(db)
+            # Max records it (with its write-up); HR approves: 2 points reach Coaching.
+            wid = await signed_writeup(hr, s)
+            w = discipline.get_writeup(db, wid)
+            inc = discipline.get_incident(db, w["incident_id"])
+            assert (inc["status"], inc["step_key"], w["step_key"], w["status"]) == ("approved", "coaching", "coaching", "active")
+            assert w["step_name"] == "Coaching" and w["issued_on"] == day.isoformat()
+            # The ledger has the incident, with its offence and scoring (so it can be re-scored).
+            [line] = pts.lines("201", "incident")
+            assert (line["offence"], line["q"], line["incident_id"], line["happened"]) == \
+                ("rude", 8, str(inc["id"]), day - timedelta(days=1))
+            assert line["scoring"]["final"] == 2.0 and line["version_id"] == int(inc["version_id"])
+            # Signed: the write-up's end date (Coaching lasts 90 days) reached the points.
+            stops = policy.step_end(first_rule_body(), "coaching", day)
+            assert w["ends_on"] == (stops - timedelta(days=1)).isoformat()
+            [end] = [ln for ln in pts.lines("201", "adjustment") if ln["end_kind"] == "writeup"]
+            assert (end["ends"], end["target_id"]) == (stops, line["id"])
+            # The totals drop on that day, not before (the 12-month window would be later).
+            assert points.totals(db, "201", day) == {"discipline": 2.0}
+            assert points.totals(db, "201", stops - timedelta(days=1)) == {"discipline": 2.0}
+            assert points.totals(db, "201", stops) == {"discipline": 0.0}
+            assert discipline.next_drop(db, "201", day) == {"date": stops.isoformat(), "points": 2.0}
+            # Ana's statement: her incident, with its end date; no bookkeeping lines, no reasons.
+            _, mine, _ = await hr.call("GET", "/api/people/201/discipline", cookie=s["ana"])
+            assert [(x["label"], x["ends"], x["state"]) for x in mine["lines"]] == [
+                ("Rude to a guest", stops.isoformat(), "counts")]
+            assert all("reason" not in x for x in mine["lines"])
+            _, theirs, _ = await hr.call("GET", "/api/people/201/discipline", cookie=s["hana"])
+            assert any(x["label"].startswith("End date changed") and x["reason"] for x in theirs["lines"])
+            # HR moves the end date earlier: the points follow.
+            new_last = day + timedelta(days=29)
+            status, r, _ = await hr.call("POST", f"/api/writeups/{wid}/ends",
+                                         {"ends_on": new_last.isoformat(), "reason": "Agreed at the meeting."}, s["ivy"])
+            assert status == 200, r
+            assert points.totals(db, "201", new_last) == {"discipline": 2.0}
+            assert points.totals(db, "201", new_last + timedelta(days=1)) == {"discipline": 0.0}
+            # The review side panel shows the real points and the write-up.
+            rid = reviews.create(db, db.person("201"), "adhoc", day + timedelta(days=10),
+                                 period=((day - timedelta(days=30)).isoformat(), (day + timedelta(days=10)).isoformat()))
+            status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s["max"])
+            side = data["side"]["discipline"]
+            assert side["points"] == [{"track": "discipline", "total": 2.0}]
+            assert side["writeups"] == [{"date": day.isoformat(), "step": "Coaching", "status": "Active"}]
+            assert side["next_drop"] == {"date": (new_last + timedelta(days=1)).isoformat(), "points": 2.0}
+    run(scenario())
+
+
+def test_repeats_probation_and_protected_leave_use_the_real_rules(tmp_path, monkeypatch):
+    pol, pts = point_system.install(monkeypatch)
+    pol.publish(first_rule_body())
+
+    async def record(hr, s, offence, happened, **extra):
+        status, data, _ = await hr.call("POST", "/api/people/201/incidents", {
+            "offence": offence, "what": "It happened.", "points": "", "protected": "no",
+            "happened": happened.isoformat(), **extra}, s["max"])
+        assert status == 200, data
+        status, r, _ = await hr.call("POST", f"/api/incidents/{data['incident']}/approve", {}, s["hana"])
+        assert status == 200, r
+        return discipline.get_incident(hr.hdb, data["incident"])
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            db, day = hr.hdb, today(hr)
+            # A third late arrival within 90 days scores more (the repeat needs the day it happened).
+            for n, back in enumerate((40, 30, 20)):
+                inc = await record(hr, s, "late", day - timedelta(days=back))
+                assert inc["final_points"] == (1.5 if n == 2 else 1.0), n
+            # Protected leave: 0 points, no step.
+            inc = await record(hr, s, "late", day - timedelta(days=10), protected="sick")
+            assert (inc["final_points"], inc["step_key"]) == (0, None)
+            assert pts.contexts[-1]["protected"] == "sick"
+            # A second no call / no show within 12 months: its repeat's step, a termination review.
+            first = await record(hr, s, "ncns", day - timedelta(days=5))
+            assert first["step_key"] != "termination_review"
+            second = await record(hr, s, "ncns", day - timedelta(days=2))
+            assert second["step_key"] == "termination_review" and "2nd" in second["step_reason"]
+            assert [t["kind"] for t in db.conn.execute(
+                "SELECT kind FROM discipline_tasks WHERE incident_id = ?", (second["id"],))] == ["termination"]
+            # During an introductory period, the probation ladder applies (3 points: Final written).
+            db.update_person("203", start_date=(day - timedelta(days=20)).isoformat())
+            probation.ensure_introductory(db, db.person("203"))
+            assert probation.current(db, "203", day)["policy_key"] == "intro"
+            assert points.required_step(first_rule_body(), {"on_probation": "intro"}, {"discipline": 3},
+                                        "rude", None)["step"] == "final"
     run(scenario())

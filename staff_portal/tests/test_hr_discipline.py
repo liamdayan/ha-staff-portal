@@ -2,9 +2,9 @@
 the protected-leave question, HR's approval, step tasks and termination reviews (HR only),
 write-ups from draft to signed (in the portal, in person with the employee's PIN and code,
 refused with a witness, on paper), the signed PDF, appeals, voids, HR's adjustments, reminders,
-and who sees what. The point system and its ledger (policy.py, points.py) are stand-ins
-(discipline_fakes.py); documents and their PDF queue are the real part, with Google as the fake
-script (tests/fake_bridge.py).
+and who sees what. The point system and its ledger are the real ones (policy.py, points.py: a
+small published policy from tests/point_system.py); documents and their PDF queue are the real
+part, with Google as the fake script (tests/fake_bridge.py).
 
 Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
 """
@@ -17,7 +17,7 @@ from datetime import date, timedelta
 
 import pytest
 
-import discipline_fakes
+import point_system
 from fake_bridge import html_text
 from hr_helpers import CHANGE, HR, ct_user, next_code, queue_done
 from test_hr_documents import google
@@ -41,7 +41,7 @@ def run(coro):
 
 @pytest.fixture
 def engine(monkeypatch):
-    return discipline_fakes.install(monkeypatch)
+    return point_system.install(monkeypatch)
 
 
 async def setup(hr: HR, *, confirmed: bool = True) -> dict:
@@ -161,10 +161,10 @@ def test_the_form_previews_then_hr_approves_and_a_step_is_due(tmp_path, engine):
             # Points outside the offence's range, or changed without a reason, are refused.
             status, p, _ = await hr.call("POST", "/api/people/401/incident-preview",
                                          {**RUDE, "happened": day(hr), "points": 5}, s["max"])
-            assert p["errors"] == ["Choose between 1 and 3 points for this offence."]
+            assert p["errors"] == ["Managers may choose 1 to 3 points for Rude to a guest."]
             status, data, _ = await hr.call("POST", "/api/people/401/incidents",
                                             {**RUDE, "happened": day(hr), "points": 5}, s["max"])
-            assert status == 400 and "between 1 and 3" in data["error"]
+            assert status == 400 and "1 to 3 points" in data["error"]
             status, data, _ = await hr.call("POST", "/api/people/401/incidents",
                                             {**RUDE, "happened": day(hr), "points": 3}, s["max"])
             assert status == 400 and data["error"] == "Say why you chose different points."
@@ -190,12 +190,15 @@ def test_the_form_previews_then_hr_approves_and_a_step_is_due(tmp_path, engine):
             status, r, _ = await hr.call("POST", f"/api/incidents/{inc['id']}/approve", {}, s["hana"])
             assert status == 200 and "Written warning is due" in r["message"], r
             # Counted from today, expiring from the day it happened.
-            assert ("entry", "401", inc["id"], 2.0, today(hr) - timedelta(days=1), today(hr)) in pts.calls
+            [line] = pts.lines("401", "incident")
+            assert (line["incident_id"], line["q"], line["happened"], line["counts_from"], line["offence"]) == \
+                (str(inc["id"]), 8, today(hr) - timedelta(days=1), today(hr), "rude")
             assert pts.totals(None, "401", today(hr)) == {"discipline": 6.0}
             [task] = [dict(t) for t in hr.hdb.conn.execute("SELECT * FROM discipline_tasks")]
             assert task["kind"] == "step" and task["writeup_id"] == w["id"] and not task["hr_only"]
-            assert task["reason"] == "Points 6 ≥ 6 → written"
-            assert ("step_due", "Maria Lopez: Written warning is due. Points 6 ≥ 6 → written", 1) in inbox(hr, "max")
+            assert task["reason"] == "Points 6 ≥ 6 → Written warning"
+            assert ("step_due", "Maria Lopez: Written warning is due. Points 6 ≥ 6 → Written warning", 1) \
+                in inbox(hr, "max")
             assert "step_due" in kinds(hr, "hale")
             # The manager's "My team" and HR's queue.
             status, team, _ = await hr.call("GET", "/api/discipline/team", cookie=s["max"])
@@ -538,7 +541,7 @@ def test_signing_in_person_refusing_with_a_witness_and_paper(tmp_path, engine, m
             status, r, _ = await hr.call("POST", url, {**sign, "code": next_code(hr, "401", secret)}, s["max"])
             assert status == 200 and r["writeup"]["method_word"] == "Signed in person"
             w = discipline.get_writeup(hr.hdb, first)
-            assert w["issued_on"] == day(hr) and w["ends_on"] == day(hr, 90)      # Coaching: 90 days
+            assert w["issued_on"] == day(hr) and w["ends_on"] == day(hr, 89)      # Coaching: 90 days, from today
             # Refused, with another portal user as witness confirming with their PIN.
             second = await issued(hr, s)
             url = f"/api/writeups/{second}/refused"
@@ -645,7 +648,8 @@ def test_appeals_upheld_amended_and_voided(tmp_path, engine):
             w = discipline.get_writeup(hr.hdb, early)
             inc = discipline.get_incident(hr.hdb, w["incident_id"])
             assert w["status"] == "voided" and inc["status"] == "voided"
-            assert ("void", "401", inc["id"], "Appeal: The camera shows she was helping.") in pts.calls
+            [line] = [ln for ln in pts.lines("401", "incident") if ln["incident_id"] == str(inc["id"])]
+            assert line["id"] in {v["target_id"] for v in pts.lines("401", "void")}
             assert pts.totals(None, "401", today(hr)) == {"discipline": 2.0}
             # Maria and Max see only "Withdrawn on"; HR sees everything.
             for who in ("maria", "max"):
@@ -711,7 +715,9 @@ def test_hr_adjustments_voids_and_the_as_of_view(tmp_path, engine):
             assert (await hr.call("POST", "/api/people/401/points", {**body, "reason": ""}, s["hale"]))[0] == 400
             assert (await hr.call("POST", "/api/people/401/points", {**body, "points": 0.3}, s["hale"]))[0] == 400
             assert (await hr.call("POST", "/api/people/401/points", body, s["hale"]))[0] == 200
-            assert ("adjust", "401", "discipline", -0.5, today(hr), None, None, "Good attendance credit.") in pts.calls
+            [credit] = [ln for ln in pts.lines("401", "adjustment") if ln["q"] == -2]
+            assert (credit["track"], credit["counts_from"], credit["ends"], credit["target_id"]) == \
+                ("discipline", today(hr), None, None)
             # One incident's points: an adjustment line, the original kept.
             status, r, _ = await hr.call("POST", f"/api/incidents/{iid}/adjust",
                                          {"points": 2, "reason": "Guest complained in writing."}, s["hale"])
@@ -724,17 +730,18 @@ def test_hr_adjustments_voids_and_the_as_of_view(tmp_path, engine):
             assert view["hr_reason"] == "First time, and busy night."
             # The "as of" view: yesterday, nothing counted yet.
             status, d, _ = await hr.call("GET", f"/api/people/401/discipline?as_of={day(hr, -1)}", cookie=s["max"])
-            assert d["as_of"] == day(hr, -1) and d["points"] == {} and [i["id"] for i in d["incidents"]] == [iid]
+            assert d["as_of"] == day(hr, -1) and d["points"] == {"discipline": 0.0} and [i["id"] for i in d["incidents"]] == [iid]
             status, d, _ = await hr.call("GET", "/api/people/401/discipline", cookie=s["max"])
             assert d["points"] == {"discipline": 1.5}
-            assert [l["label"] for l in d["lines"]] == ["Rude to a guest", "Adjustment by HR",
-                                                        "Adjustment by HR: Rude to a guest"]
+            assert sorted(l["label"] for l in d["lines"]) == ["Adjustment by HR",
+                                                              "Adjustment by HR: Rude to a guest",
+                                                              "Rude to a guest"]
             status, d, _ = await hr.call("GET", f"/api/people/401/discipline?as_of={day(hr, -1)}", cookie=s["maria"])
             assert d["as_of"] == day(hr)                      # employees see today only
             # Voiding: a fresh code, a reason; HR only sees it afterwards.
             assert (await hr.call("POST", f"/api/incidents/{iid}/void", {"reason": ""}, s["hale"]))[0] == 400
             status, r, _ = await hr.call("POST", f"/api/incidents/{iid}/void", {"reason": "Wrong person."}, s["hale"])
-            assert status == 200 and ("void", "401", iid, "Wrong person.") in pts.calls
+            assert status == 200 and any(v["incident_id"] == str(iid) for v in pts.lines("401", "void"))
             assert (await hr.call("GET", f"/api/incidents/{iid}", cookie=s["max"]))[0] == 404
             status, d, _ = await hr.call("GET", "/api/people/401/discipline", cookie=s["max"])
             assert d["incidents"] == []
@@ -780,7 +787,7 @@ def test_changing_when_a_write_up_stops_counting_and_voiding_it(tmp_path, engine
 
 def test_employees_see_their_own_issued_write_ups_and_points_as_the_policy_allows(tmp_path, engine):
     pol, pts = engine
-    body = pol.publish()
+    pol.publish()
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -802,7 +809,8 @@ def test_employees_see_their_own_issued_write_ups_and_points_as_the_policy_allow
             assert [i["status"] for i in sec["incidents"]] == ["with_hr", "approved"]
             assert waiting["incident"] in [i["id"] for i in sec["incidents"]]
             # The policy's switches: no total, no expired history for employees.
-            body["visibility"] = {"employee_sees_total": False, "employee_sees_expired": False}
+            pol.publish({**point_system.BODY, "visibility": {"employee_sees_total": False,
+                                                            "employee_sees_expired": False}})
             hr.hdb.conn.execute("UPDATE writeups SET ends_on = ? WHERE id = ?", (day(hr, -1), wid))
             hr.hdb.conn.commit()
             status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["maria"])
@@ -874,7 +882,8 @@ def test_a_lower_step_than_the_point_system_calls_for_is_a_downgrade(tmp_path, e
 def test_an_offence_the_policy_lets_skip_hr_counts_at_once(tmp_path, engine):
     pol, pts = engine
     body = pol.publish()
-    body["approval"] = {"all": False}
+    body["approval"] = {"incidents": "per_offence", "writeups": "all"}
+    next(o for o in body["offences"] if o["key"] == "theft")["hr_approval"] = False
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -890,7 +899,6 @@ def test_an_offence_the_policy_lets_skip_hr_counts_at_once(tmp_path, engine):
             assert pts.totals(None, "401", today(hr)) == {"discipline": 0.25}
             assert kinds(hr, "hana") == []
             # Counted at once and reaching a termination review: the manager isn't told the step.
-            next(o for o in body["offences"] if o["key"] == "theft")["hr_approval"] = False
             data = await record(hr, s, offence="theft", what="Took a bottle home.")
             assert set(data) == {"ok", "message", "incident", "writeup"} and data["writeup"] is None
             assert [t["kind"] for t in hr.hdb.conn.execute("SELECT kind FROM discipline_tasks")] == ["termination"]

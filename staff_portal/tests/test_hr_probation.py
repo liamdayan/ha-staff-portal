@@ -3,12 +3,14 @@ disciplinary probation placed by HR, extensions within the policy's limits (and 
 absence), the employee's acknowledgement, the end-of-probation recommendation and HR's
 decision, reminders when the end passes undecided, the reviews part's calls (current,
 end_review_due, record_recommendation, decide), and discipline.summary_for_review. The point
-system is a stand-in (discipline_fakes.py); without one, the defaults apply.
+system is the real one (tests/point_system.py publishes a small policy); without one, the
+defaults apply.
 
 Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant.
 """
 
 import asyncio
+import copy
 import json
 import os
 import time
@@ -16,10 +18,10 @@ from datetime import timedelta
 
 import pytest
 
-import discipline_fakes
+import point_system
 from hr_helpers import HR, ct_user
 
-from hr import discipline, notify, probation  # noqa: E402
+from hr import discipline, notify, policy, probation  # noqa: E402
 from test_hr_discipline import WHO, day, inbox, kinds, setup, today  # noqa: E402
 
 ANN = ct_user(407, "Ann", "Wu", code="1357", groups=[502], mobile="541-555-0407")
@@ -31,7 +33,7 @@ def run(coro):
 
 @pytest.fixture
 def engine(monkeypatch):
-    return discipline_fakes.install(monkeypatch)
+    return point_system.install(monkeypatch)
 
 
 def section(page, name):
@@ -152,8 +154,9 @@ def test_extensions_never_pass_the_policys_maximum(tmp_path, engine):
             await setup(hr)
             hr.hdb.update_person("401", start_date=day(hr, -100))
             assert probation.ensure_introductory(hr.hdb, hr.hdb.person("401")) is None   # over already
-            body = pol.publish()
-            body["probation"][0]["extensions"] = {"count": 1, "days": 60, "maximum": 120}
+            body = copy.deepcopy(point_system.BODY)
+            body["probation"][0]["extensions"] = {"count": 1, "days": 60, "max_days": 120}
+            pol.publish(body)
             hr.hdb.update_person("401", start_date=day(hr, -10))                         # ends in 80 days
             row = probation.ensure_introductory(hr.hdb, hr.hdb.person("401"))
             with pytest.raises(ValueError, match="longer than 120 days"):
@@ -260,7 +263,7 @@ def test_the_end_of_probation_review_and_hrs_decision(tmp_path, engine):
 
 def test_an_end_date_passed_without_a_decision_reminds_daily_or_passes(tmp_path, engine):
     pol, pts = engine
-    body = pol.publish()
+    pol.publish()
 
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -276,7 +279,9 @@ def test_an_end_date_passed_without_a_decision_reminds_daily_or_passes(tmp_path,
             status, q, _ = await hr.call("GET", "/api/discipline/queue", cookie=s["hana"])
             assert [x["id"] for x in q["probation"]["overdue"]] == []   # not overdue yet today
             # A policy that passes it by itself.
-            body["probation"][0]["end_passes"] = "pass"
+            body = copy.deepcopy(point_system.BODY)
+            body["probation"][0]["when_end_passes"] = "pass"
+            pol.publish(body)                                   # a new version, from today
             assert probation.daily(hr.hdb, later + timedelta(days=2))["passed"] == 1
             row = probation.get(hr.hdb, row["id"])
             assert (row["status"], row["decided_by"]) == ("passed", "policy")
@@ -325,13 +330,12 @@ def test_summary_for_the_review_side_panel(tmp_path, engine):
             assert summary["points"] == {"discipline": 2.0}
             assert summary["writeups"] == [{"date": day(hr), "step": "Coaching",
                                             "status": "Delivered: waiting for signature"}]
-            assert summary["next_drop"] == {"date": day(hr, 365), "points": 2.0}
+            # It stops counting 12 months after the day it happened (the rolling window).
+            stops = policy.add_span(today(hr) - timedelta(days=1), {"months": 12}).isoformat()
+            assert summary["next_drop"] == {"date": stops, "points": 2.0}
             assert discipline.summary_for_review(hr.hdb, "401", day(hr, -60), day(hr, -1))["writeups"] == []
-            # Without the point system: nothing, rather than failing.
-            discipline.points = discipline.policy = None
-            assert discipline.summary_for_review(hr.hdb, "401", None, today(hr)) == {
-                "points": {}, "writeups": [{"date": day(hr), "step": "Coaching",
-                                            "status": "Delivered: waiting for signature"}], "next_drop": None}
+            # From the beginning (no start day): the same write-up.
+            assert discipline.summary_for_review(hr.hdb, "401", None, today(hr))["writeups"] == summary["writeups"]
     run(scenario())
 
 
