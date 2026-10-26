@@ -18,6 +18,8 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   ctapi.py    HR's own Connecteam requests: chat messages, certificate copies (HR's lane)
   gdrive.py   Google Drive through the owner's Apps Script (bridge.gs), and its OCR
   ocr_dates.py  the dates on a card, from the text Google read
+  policy.py   the point system as settings, in versions, and HR's Discipline setup (web/hr-policy.js)
+  points.py   the points ledger and its arithmetic: totals as of a day, steps, the simulator
 
 Nothing here imports main.py: main.py hands the service what it needs.
 """

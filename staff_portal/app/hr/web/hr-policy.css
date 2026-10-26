@@ -1,0 +1,168 @@
+/* HR portal: the point system (hr-policy.js). Phone first, light and dark. Chart colours are
+   the validated data-viz palette: an ordinal blue ramp for ladder steps, categorical lines for
+   point totals, hairline chrome, text in text colours only. */
+:root {
+  --viz-grid: #e1e0d9;
+  --viz-axis: #c3c2b7;
+  --viz-muted: #898781;
+  --viz-wash: rgba(42, 120, 214, 0.07);
+  --viz-none: #ecebe6;
+  --viz-r1: #86b6ef; --viz-r2: #5598e7; --viz-r3: #2a78d6; --viz-r4: #1c5cab; --viz-r5: #104281;
+  --viz-s1: #2a78d6; --viz-s2: #eb6834; --viz-s3: #1baf7a; --viz-s4: #eda100; --viz-s5: #e87ba4;
+  --viz-s6: #008300;
+  --viz-surface: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --viz-grid: #2c2c2a;
+    --viz-axis: #383835;
+    --viz-wash: rgba(57, 135, 229, 0.12);
+    --viz-none: #2c2c2e;
+    --viz-r1: #184f95; --viz-r2: #256abf; --viz-r3: #3987e5; --viz-r4: #6da7ec; --viz-r5: #9ec5f4;
+    --viz-s1: #3987e5; --viz-s2: #d95926; --viz-s3: #199e70; --viz-s4: #c98500; --viz-s5: #d55181;
+    --viz-s6: #008300;
+    --viz-surface: #1c1c1f;
+  }
+}
+
+.pol-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+.pol-head h1 { margin-bottom: 4px; }
+.pol-name { font-size: 1.25rem; font-weight: 600; }
+.pol-problems { margin: 10px 0 0; padding-left: 20px; color: var(--warn); }
+.pol-problems li { margin: 4px 0; }
+.pol-ok { color: var(--ok); font-weight: 500; }
+.pol-dirty { color: var(--warn); font-size: 0.875rem; align-self: center; }
+.pol-key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; color: var(--muted); }
+.pol-note { color: var(--muted); font-size: 0.875rem; margin: 4px 0 10px; }
+
+/* Rows of small fields that wrap on a phone. */
+.pol-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; padding: 10px 0;
+  border-top: 1px solid var(--line); }
+.pol-row:first-of-type { border-top: none; }
+.pol-row > label { margin: 0; flex: 1 1 120px; min-width: 0; }
+.pol-row > label.wide { flex: 2 1 200px; }
+.pol-row > label.check { flex: 1 1 100%; }
+.pol-row > button { flex: none; }
+.pol-row .narrow { flex: 0 1 96px; }
+.pol-span { display: flex; gap: 6px; }
+.pol-span input { flex: 1 1 70px; min-width: 0; }
+.pol-span select { flex: 1 1 90px; min-width: 0; }
+.pol-checks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0; }
+.pol-checks .check { margin-bottom: 4px; }
+.pol-sub { margin: 8px 0 0; padding: 10px 12px; border-radius: 12px; background: var(--bg); }
+.pol-sub h4 { margin: 0 0 6px; font-size: 0.95rem; }
+fieldset.pol-set { border: none; margin: 0 0 12px; padding: 0; min-width: 0; }
+fieldset.pol-set legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
+textarea { min-height: 88px; resize: vertical; }
+.pol-move { display: flex; gap: 4px; }
+.pol-move button { min-width: 44px; padding: 10px 8px; }
+
+/* The offences: an editable table, one row per offence (two lines on a phone). */
+.otable .ohead, .otable .orow { display: grid; gap: 6px; align-items: center;
+  grid-template-columns: minmax(0, 1fr) 4.6em 4.6em 4.6em auto; }
+.otable .ohead { color: var(--muted); font-size: 0.8rem; padding: 0 0 4px; }
+.otable .ohead span:nth-child(3) { grid-column: span 2; }
+.otable .orow input { margin-top: 0; padding: 8px; }
+.otable .offence { border-top: 1px solid var(--line); padding: 8px 0; }
+.otable .offence:first-of-type { border-top: none; }
+.otable .orow button { padding: 8px 10px; min-height: 40px; }
+@media (max-width: 559px) {
+  .otable .ohead { display: none; }
+  .otable .orow { grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+    grid-template-areas: "name name name name" "pts lo hi more"; }
+  .otable .orow .o-name { grid-area: name; }
+  .otable .orow .o-pts { grid-area: pts; }
+  .otable .orow .o-lo { grid-area: lo; }
+  .otable .orow .o-hi { grid-area: hi; }
+  .otable .orow .o-more { grid-area: more; }
+}
+.otable .tiny { display: none; font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+@media (max-width: 559px) { .otable .tiny { display: block; } .otable .orow label { margin: 0; } }
+.otable .orow label { margin: 0; }
+.otable .odetail { padding: 8px 0 4px; }
+
+/* Ladders: threshold bars. Segments in the ordinal ramp, a 2px surface gap between them. */
+.lbar-box { margin: 8px 0 4px; }
+.lbar { display: flex; gap: 2px; height: 16px; }
+.lseg { min-width: 4px; flex-basis: 0; border-radius: 0; outline-offset: 2px; }
+.lseg:first-child { border-radius: 4px 0 0 4px; }
+.lseg:last-child { border-radius: 0 4px 4px 0; }
+.lseg:only-child { border-radius: 4px; }
+.lseg.none { background: var(--viz-none); }
+.lseg.r1, .sw.r1 { background: var(--viz-r1); }
+.lseg.r2, .sw.r2 { background: var(--viz-r2); }
+.lseg.r3, .sw.r3 { background: var(--viz-r3); }
+.lseg.r4, .sw.r4 { background: var(--viz-r4); }
+.lseg.r5, .sw.r5 { background: var(--viz-r5); }
+.lseg:hover, .lseg:focus-visible { filter: brightness(1.12); }
+.lticks { position: relative; height: 18px; margin-top: 2px; font-size: 0.75rem; color: var(--viz-muted);
+  font-variant-numeric: tabular-nums; }
+.lticks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.lticks span:first-child { transform: none; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 8px;
+  vertical-align: -1px; flex: none; }
+.sw.none { background: var(--viz-none); }
+.rung { display: grid; grid-template-columns: 12px 4.2em minmax(0, 1fr) 44px; gap: 8px; align-items: center;
+  padding: 4px 0; }
+.rung.head { color: var(--muted); font-size: 0.8rem; padding: 6px 0 0; }
+.rung input, .rung select { margin-top: 0; }
+.rung .sw { margin-right: 0; }
+.rung button.x { min-width: 44px; min-height: 44px; padding: 0; text-decoration: none; font-size: 1.05rem; }
+.legend-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 0.9rem; }
+.legend-list li { display: flex; align-items: center; padding: 3px 0; }
+
+/* The simulator's chart and its tooltip. */
+.sim-chart { position: relative; margin: 6px 0 4px; }
+.sim-chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.sim-chart svg:focus { outline: none; }
+.sim-chart svg:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+.sim-chart text { fill: var(--viz-muted); font-size: 11px; font-family: inherit; }
+.sim-chart text.lbl { fill: var(--muted); }
+.sim-chart text.step { fill: var(--text); font-size: 11px; font-weight: 600; }
+.sim-chart .grid { stroke: var(--viz-grid); stroke-width: 1; }
+.sim-chart .axis { stroke: var(--viz-axis); stroke-width: 1; }
+.sim-chart .thr { stroke: var(--viz-axis); stroke-width: 1; stroke-dasharray: 4 4; }
+.sim-chart .wash { fill: var(--viz-wash); }
+.sim-chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.sim-chart .dot { stroke: var(--viz-surface); stroke-width: 2; }
+.sim-chart .cross { stroke: var(--viz-muted); stroke-width: 1; }
+.s1 { stroke: var(--viz-s1); } .s2 { stroke: var(--viz-s2); } .s3 { stroke: var(--viz-s3); }
+.s4 { stroke: var(--viz-s4); } .s5 { stroke: var(--viz-s5); } .s6 { stroke: var(--viz-s6); }
+.f1 { fill: var(--viz-s1); } .f2 { fill: var(--viz-s2); } .f3 { fill: var(--viz-s3); }
+.f4 { fill: var(--viz-s4); } .f5 { fill: var(--viz-s5); } .f6 { fill: var(--viz-s6); }
+.key { display: inline-block; width: 16px; height: 0; border-top: 2px solid; margin-right: 6px; vertical-align: middle; }
+.k1 { border-color: var(--viz-s1); } .k2 { border-color: var(--viz-s2); } .k3 { border-color: var(--viz-s3); }
+.k4 { border-color: var(--viz-s4); } .k5 { border-color: var(--viz-s5); } .k6 { border-color: var(--viz-s6); }
+.viz-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.875rem; margin: 4px 0; }
+.viz-tip { position: absolute; z-index: 30; pointer-events: none; max-width: min(280px, calc(100vw - 32px));
+  padding: 8px 10px; border-radius: 10px; background: var(--card); color: var(--text);
+  border: 1px solid var(--line); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); font-size: 0.85rem; }
+.viz-tip .v { font-weight: 700; }
+.viz-tip .d { color: var(--muted); font-size: 0.8rem; }
+.viz-tip div { margin: 2px 0; }
+
+/* The simulator's made-up incidents and its timeline (the chart's table view). */
+.sim-ev { border-top: 1px solid var(--line); padding: 8px 0; }
+.sim-ev:first-of-type { border-top: none; }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.timeline li { display: grid; grid-template-columns: 6.6em minmax(0, 1fr) auto; gap: 2px 10px;
+  padding: 10px 0; border-top: 1px solid var(--line); }
+.timeline li:first-child { border-top: none; }
+.timeline .when { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.timeline .tot { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; text-align: right; }
+.timeline .tot strong { color: var(--text); }
+.timeline .why { grid-column: 2 / 4; color: var(--muted); font-size: 0.85rem; }
+.timeline .quiet .what { color: var(--muted); }
+.chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; font-weight: 600;
+  background: var(--warn-bg); color: var(--warn); margin: 2px 6px 0 0; }
+.chip.hr { background: rgba(198, 40, 40, 0.12); color: var(--danger); }
+
+/* The policy as staff read it. */
+.offence-list { list-style: none; margin: 0; padding: 0; }
+.offence-list li { padding: 10px 0; border-top: 1px solid var(--line); }
+.offence-list li:first-child { border-top: none; }
+.offence-list .pts { float: right; font-weight: 600; margin-left: 10px; font-variant-numeric: tabular-nums; }
+.offence-list .why { color: var(--muted); font-size: 0.875rem; white-space: pre-line; margin-top: 2px; }
+.versions .item .sub { margin-top: 2px; }
+.qs { margin: 6px 0 0; padding-left: 20px; }
+.qs li { margin: 4px 0; }

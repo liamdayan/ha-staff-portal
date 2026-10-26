@@ -57,6 +57,7 @@ from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, 
                        parse_networks)
 from hr import access as hr_access, audit as hr_audit, crypto as hr_crypto, signin as hr_signin
 from hr import ctapi, gdrive, server as hr_server
+from hr import points as hr_points, policy as hr_policy  # noqa: F401  (the point system: HR parts)
 from hr.gdrive import BridgeError
 from hr.service import HRService
 

@@ -1736,6 +1736,83 @@ HR admins find these in the HR portal under **HR settings**: roles, managers' de
 must use an authenticator code, how soon people are signed out, notifications, which
 Connecteam profile fields hold the start date and direct manager, and the HR key (below).
 
+### The point system (Discipline setup)
+
+Your written point system is entered as settings, not programming, and saved in versions. HR
+admins set it up under **Point system** in the HR portal (**HR settings → Discipline** links to it
+too). Everyone else can read the version in force under **Point system**.
+
+**Until a version is published, nothing counts points.** Managers can't record incidents, the
+Discipline pages say the point system isn't set up yet, and HR has a to-do about it. The portal
+ships the sample from the design as a draft marked "not in use", so the screens aren't empty:
+one Discipline total; Coaching at 3 points, Verbal at 5, Written at 7, Final written at 9 and
+Termination review at 11; points stop counting after 12 months or when their write-up ends,
+whichever comes first; HR approves every incident; a 90-day introductory period where 3 points
+means Final written and 5 points (or any serious offence) means Termination review.
+
+**Setting it up:**
+
+1. **Load it.** Either import the spreadsheet (**Import a spreadsheet**: choose the CSV file, or
+   paste straight from a spreadsheet), or edit a draft on screen. The spreadsheet has sections
+   (Settings, Point totals, Steps, Ladder, Escalation, Offences, Repeats, Probation, Probation days
+   by department, Probation ladder, Probation offences and Protected leave); **Export spreadsheet**
+   on any version shows the layout. Anything the import had to guess comes back as a list of
+   questions, such as "Rolling window: '12' has no unit, so it was read as 12 months. Is that
+   right?"
+2. **Check it on the setup screens.** Offences are an editable table (name, points, and the range
+   a manager may choose; **More** for the category, attendance, serious, minimum step, repeat rule
+   and the handbook wording quoted on write-ups). Each ladder is a bar showing which point total
+   leads to which step. Then steps (how long each stays active, HR meeting, HR only), escalation,
+   when points stop counting, earning points back, probation policies, what employees and managers
+   see, what HR approves, and the protected-leave list. Problems are listed in plain English at the
+   top; a draft can be saved with problems, but not published.
+3. **Test it in the simulator.** Type made-up incidents for a test person (dates, offences,
+   protected leave, a manager's or HR's points, the day HR approved it) and press **Run**. You get
+   a chart of points over time, with the thresholds and the probation period, and a timeline of
+   every change: points added, steps due and why, points that stop counting, credits. Nothing in
+   the simulator reaches anyone's file.
+4. **Publish it with the day it starts.** It asks for your 6-digit code (or PIN) again. From that
+   day, new incidents are scored with it. The first version can start on an earlier day, to load
+   past incidents; later ones start today or later, after the one before. A version that hasn't
+   started yet can be **withdrawn**.
+
+**Versions.** A published version is never changed: to change the point system, make a new draft
+from it, test it and publish it. Old versions are kept, and every incident keeps the version it was
+scored under, so earlier incidents keep their points and expiry. To move people onto the new
+rules, use **Re-score people**: choose who, look at the preview (each incident's points and the day
+it stops counting, before and after), give a reason and confirm with your code. Each change is
+added as an adjustment, so the original stays visible.
+
+**How points are counted.** Every change to someone's points is a dated line, like a bank
+statement: an incident, an adjustment, a credit or a void. Totals are always added up from the
+lines, for any day ("as of"). Points can be whole, half or quarter points, and add up exactly.
+
+- **One incident:** the offence's points; a repeat within its period adds points (for example the
+  3rd late arrival within 90 days); on probation, the probation policy's multiplier, or its own
+  points for that offence (rounded to the nearest allowed point). A manager may choose within the
+  offence's range, and HR may set any value, including 0. An absence that was protected leave
+  always scores 0 and never leads to a step.
+- **When they count:** from HR's approval. Their expiry is dated from the day it happened.
+- **When they stop counting:** on the end date of the write-up they led to; after a rolling window
+  (12 months after January 31 is January 31); or whichever comes first. Optionally, a clean stretch
+  with no new incident clears a total, and any new incident restarts the clock. HR can change when
+  any one entry stops counting, and that always wins. A day is a calendar day in Pacific time.
+- **Adjustments and voids:** HR can add or take off points from a start day (with an optional end
+  day), change one incident's points, or void an incident, adjustment or credit, each from the day
+  it's recorded and with a reason. Points taken off, and credits, take the oldest points first and
+  go when those would have, so they never build up against later incidents, and a total never
+  goes below 0.
+- **Earning points back** (off by default): after a clean stretch (say 90 days), some points come
+  off, a few times a year at most. The nightly run adds them.
+
+**Steps.** When HR approves an incident, the step it calls for is the highest of: the step its
+point total reaches (on the probation ladder during probation), the offence's minimum step (theft
+goes straight to Termination review), a repeat's step, the probation step for serious offences,
+and escalation while a step is still active (a new incident while on a Final written warning goes
+to Termination review). When steps go in order, points alone only reach the next step up, and the
+reason says how far they reached ("Points 5.5 ≥ 5 → Verbal warning. Steps go in order, so the next
+step is Coaching"). Nothing is issued by itself: it's a task for the manager and HR.
+
 ### The audit log
 
 Every sign-in, failure, lock, reset, look at a file and change goes into the HR portal's audit
