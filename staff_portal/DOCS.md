@@ -465,6 +465,9 @@ TT Hotel's **Callback URL**, which sends Staff Access each unlock at doors with 
 one of these details: its address is under **Door activity** on the Wristbands tab (see [Door
 activity](#door-activity)).
 
+A third, **Google Drive (HR files)**, is for the HR portal's files: see [HR portal: Google Drive
+for HR files](#hr-portal-google-drive-for-hr-files).
+
 ## Wristbands (TT Hotel key cards)
 
 If your doors use **TT Hotel** (TTLock) locks, staff signed in on a front-desk computer can make
@@ -1150,6 +1153,11 @@ a small, steady share:
 - If Connecteam rejects the keys or the app is missing a scope, it stops all automatic requests
   until you save the Connecteam settings again or click **Test connection**.
 - Requests identify themselves as Staff Portal (in the User-Agent).
+- The HR portal, once you turn it on, has its own smaller share inside these limits: at most 6
+  requests a minute and 500 a day, and none once Staff Access has used half of its daily share, so
+  the time clock always has room. A chat message is one request; copying a one-page card to
+  Connecteam is three. If Connecteam refuses an HR request (a missing permission or plan feature,
+  or "too many requests"), only that HR feature stops or waits: the time clock checks carry on.
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
 Open **Connecteam** for how many your account has left (once Connecteam has answered) and, while
@@ -1159,6 +1167,119 @@ clocked in can't sign in.
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
 included in backups. After restoring a backup on a new system, enter it again (a migration file
 brings it across, encrypted).
+
+## HR portal: Google Drive for HR files
+
+The HR portal (off until you turn it on) keeps employee files, such as certificates and signed
+policies, in a Google **shared drive**, one folder per employee. Staff Access reaches the drive
+through a small script that runs in **your own Google account**. There's no Google Cloud
+project, no key file and nothing to change in the Google Workspace admin console. You set it up
+once, under **Settings → Connections → Google Drive (HR files)**.
+
+Until it's set up, nothing is sent to Google. After that, Google is only asked when you open,
+save or test this connection, or when the HR portal works with files.
+
+### Setting it up (about 5 minutes)
+
+1. In Google Drive, create a shared drive named **HR Employee Files**. If you like, create a
+   second one, **HR Restricted**, for restricted records (see [The drives](#the-drives)).
+2. In Staff Access, open **Settings → Connections → Google Drive (HR files)** and click **Copy
+   the script**. The script has a secret made for your Staff Access written into it.
+3. Go to **script.google.com**, signed in as the owner, and click **New project**. Delete what's
+   there and paste the script. You can name the project, for example "Staff Access HR".
+4. Next to **Services**, click **+**, choose **Drive API** (keep version v3) and click **Add**.
+5. Click **Deploy → New deployment**. Choose the type **Web app**, set **Execute as: Me** and
+   **Who has access: Anyone**, then click **Deploy**. Click **Authorize** and allow access: Google
+   asks for your Drive, your Google Docs (to read the text on cards) and your email address (to
+   show which account it is). If Google says it hasn't verified the app, that's because you made
+   it yourself: click **Advanced**, then **Go to** your project.
+6. Copy the **Web app URL** (it ends in `/exec`), paste it into Staff Access and click **Save**.
+   Staff Access checks it straight away and lists your shared drives.
+7. Pick **HR Employee Files** (and the restricted drive, if you made one), click **Save**, then
+   **Test connection**.
+
+Deploy it from the **owner's** Google account, one that isn't going away: the script works as
+whoever deployed it, and stops if that account is removed.
+
+The folded line shows **Connected as** your email address, **Not set up**, **Not checked yet**,
+**Pick the shared drive**, **Script out of date**, or a problem in a few words: **Secret doesn't
+match**, **Access refused**, **Google not answering**, **Google busy**, **Unexpected reply** or
+**Test failed**. Open it for the details.
+
+### Test connection
+
+**Test connection** runs four checks, each with a plain result:
+
+- **Sign-in**: the script answers and accepts Staff Access's secret, and which Google account it
+  works as.
+- **Shared drive**: the drives you picked can be used.
+- **Make and remove a test folder**: in the HR drive.
+- **Read text from a test image**: Google Drive reads the words on a small picture, as it will
+  read the dates on staff cards.
+
+### What the script can and can't do
+
+- It **only works inside the shared drives you picked**. It checks every file and folder it's
+  asked about, and refuses anything elsewhere: your My Drive, other shared drives, Gmail, and
+  everything else in your account.
+- In those drives it can make folders, upload, rename, move and download files, and move files
+  to the drive's trash (Google empties it after 30 days). It never deletes a file for good,
+  except its own temporary copies (below) and test folders.
+- To read a card, Google Drive turns a copy of the photo into a Google Doc in a folder named
+  **_OCR scratch** in the HR drive, Staff Access takes its text, and the copy is deleted at once.
+- It **only answers Staff Access**. "Who has access: Anyone" lets Staff Access reach it without a
+  Google sign-in, but every request must be signed with the secret only your Staff Access has,
+  and each one works for 5 minutes and only once. Opened in a web browser, it just says it's
+  working. The secret never leaves Staff Access except inside the script you copy, so keep the
+  script private.
+- Google's limits: a script runs for at most 6 minutes, and reading cards is limited to a few
+  thousand a day. Staff Access sends at most 2 requests at a time, and files of up to 25 MB.
+
+### The drives
+
+- **HR Employee Files**: keep its members to the owner, the HR lead, the CEO and the GM.
+  Managers and employees never need Drive access: anyone in the drive sees every folder, which
+  would get around the HR portal's rules.
+- **Restricted records** (I-9s and reasonable accommodation) are kept apart. Best: a second
+  shared drive, **HR Restricted**, with only you and the HR lead. Otherwise they go in a
+  **Restricted** folder in the HR drive, which every member of that drive can open.
+- An I-9 must be kept for 3 years after hire or 1 year after someone leaves, whichever is later.
+  Keeping records 5 years after leaving covers that.
+
+### If "Anyone" isn't offered
+
+On Google Workspace, the **Who has access** choices follow your Drive sharing settings: **Anyone**
+is hidden when sharing outside your organization is turned off. The bridge can't work without it.
+Ask whoever manages your Google Workspace to allow sharing outside your organization for your
+account (Google Admin console: **Apps → Google Workspace → Drive and Docs → Sharing settings**).
+They can allow it for an organizational unit with only your account in it, so nothing changes for
+anyone else.
+
+### When the script is out of date
+
+After an update, Staff Access may need a newer script. The connection then says **Script out of
+date**. To update it (the Web app URL stays the same):
+
+1. Click **Copy the script**.
+2. In script.google.com, open the project, select everything in the editor, paste over it and
+   save.
+3. Click **Deploy → Manage deployments**, then **Edit** (the pencil). Under **Version**, choose
+   **New version**, then click **Deploy**.
+
+Pasting alone isn't enough: Google keeps running the deployed version until you deploy a new one.
+
+### Making a new secret
+
+If you think someone else saw the script, click **Make a new secret**. The script in Google stops
+working at once: paste the new one there and deploy a new version, as above.
+
+If you ever make a new project instead of updating the old one, paste its new Web app URL into
+Staff Access and click **Save**. Staff Access tells the new script which drives to use, and it
+finds the folders the old one made.
+
+The Web app URL, the secret and the drives you picked are never in Staff Access's own backups (a
+restore keeps the ones saved). A migration file carries them, encrypted, so the script keeps
+working after a move.
 
 ## Seeing staff actions in Home Assistant
 

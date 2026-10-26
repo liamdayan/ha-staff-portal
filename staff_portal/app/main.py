@@ -53,6 +53,8 @@ from encoder import (DASHBOARD_PREFIX, NO_LINK, NO_REPLY, UNREACHABLE, EncoderEr
                      dashboard_user, local_address, local_device)
 from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, ha_networks,
                        parse_networks)
+from hr import ctapi, gdrive
+from hr.gdrive import BridgeError
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8099"))
@@ -132,6 +134,11 @@ connecteam = Connecteam(
     connecteam_settings, connecteam_wanted,
     (load_connecteam_usage, lambda u: db.update_settings({"connecteam_usage": json.dumps(u)})),
     USER_AGENT)
+# The HR portal's own Connecteam requests (chat messages, certificate copies), in a smaller lane
+# inside the same budget (hr/ctapi.py). It sends nothing unless the HR portal asks it to.
+hr_connecteam = ctapi.configure(
+    connecteam, (lambda: load_setting_object("hr_connecteam_usage"),
+                 lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})))
 
 
 def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
@@ -2785,6 +2792,7 @@ async def admin_state(request: web.Request):
     return web.json_response({
         "settings": public_settings(),
         "connecteam": connecteam_state(),
+        "hr_google": google_view(),
         "wristbands": await wristbands_state(),
         "tunnel_sources": tunnel_sources(),
         "roles": db.roles(),
@@ -4356,6 +4364,7 @@ async def admin_update_settings(request: web.Request):
     branding.invalidate()
     if connecteam_settings() != ct_before:
         connecteam.forget()   # also wakes the clock check, which runs only if someone needs it
+        hr_connecteam.forget()   # and lifts the HR portal's stops (new keys may fix them)
     if staff_sync_enabled() and (not sync_before or connecteam_settings() != ct_before
                                  or "connecteam_auto_clock_in" in values):
         sync_staff_soon()     # at most once a minute
@@ -4375,6 +4384,166 @@ def settings_log_text(values: dict) -> str:
     if values and all(wristband_setting(k) for k in values):
         return "Updated wristband settings"
     return "Updated settings"
+
+
+# ---------------------------------------------------------------- Google Drive (HR files)
+# The HR portal keeps its files in a Google shared drive, through a small script the owner
+# deploys in their own Google account (hr/gdrive.py, hr/bridge.gs): no Cloud project or key file.
+# Settings > Connections sets it up: copy the script (with this install's secret in it), paste
+# its Web app URL, pick the drives, test. The secret only ever leaves here inside that script.
+# Google is only asked when the owner checks, saves or tests the connection here, or when the HR
+# portal works with files.
+
+GOOGLE_CHECK_GAP = 5      # seconds between checks from the dashboard
+GOOGLE_TEST_GAP = 10      # ...and tests (each makes and removes a folder and reads an image)
+google_asked = {"check": 0.0, "test": 0.0}
+GOOGLE_NEW_SECRET = ("The script in Google still has the old secret. Paste the new script there "
+                     "and deploy a new version.")
+
+
+def google_status() -> dict:
+    """What the last check found: checked_at, email, version, code and error (None when it
+    worked), and drives (the shared drives the script could see)."""
+    return load_setting_object("hr_google_status")
+
+
+def save_google_status(**fields) -> None:
+    db.update_settings({"hr_google_status": json.dumps({**google_status(), **fields})})
+
+
+def google_view(full: bool = False) -> dict:
+    """The Google Drive connection as the dashboard sees it. Never the secret; the folded line
+    (in /api/state) doesn't get the address or the drives either."""
+    s = db.settings()
+    status = google_status()
+    view = {"set_up": gdrive.bridge_from_settings(s) is not None,
+            "script_made": bool(s.get("hr_google_secret")), "drive_set": bool(s.get("hr_google_drive")),
+            "script_version": gdrive.SCRIPT_VERSION,
+            **{k: status.get(k) for k in ("checked_at", "email", "version", "code", "error")}}
+    if full:
+        view.update(url=s.get("hr_google_url", ""), drive=s.get("hr_google_drive", ""),
+                    restricted_drive=s.get("hr_google_restricted_drive", ""),
+                    drives=status.get("drives") or [])
+    return view
+
+
+async def google_check(bridge: gdrive.Bridge) -> tuple[bool, BridgeError | None]:
+    """Asks the script who it runs as, which shared drives it sees and its version, and lets it
+    use the chosen drives if it doesn't yet (a copy deployed afresh starts with none). Returns
+    (whether the script answered, the problem or None), and keeps what it found."""
+    now = time.time()
+    try:
+        info = await bridge.ping()
+    except BridgeError as err:
+        save_google_status(checked_at=now, version=bridge.last_version, code=err.code, error=err.message)
+        return False, err
+    found = {"checked_at": now, "email": info["email"], "version": info["version"],
+             "drives": info["drives"]}
+    wanted = gdrive.drive_ids(db.settings())
+    if wanted and info["allowed"] != wanted:
+        try:
+            await bridge.setup(wanted)
+        except BridgeError as err:
+            save_google_status(**found, code=err.code, error=err.message)
+            return True, err
+    save_google_status(**found, code=None, error=None)
+    return True, None
+
+
+async def admin_google(request: web.Request):
+    return web.json_response(google_view(full=True))
+
+
+async def admin_google_script(request: web.Request):
+    """Copy the script: its text, with this install's secret (made the first time, or anew with
+    {"new_secret": true}, after which the script must be pasted and deployed again)."""
+    data = await optional_json(request)
+    s = db.settings()
+    secret = s.get("hr_google_secret") or ""
+    new = data.get("new_secret") in (True, "1") or not gdrive.SECRET_RE.fullmatch(secret)
+    if new:
+        replacing = bool(secret)
+        secret = gdrive.new_secret()
+        db.update_settings({"hr_google_secret": secret})
+        if replacing and s.get("hr_google_url"):
+            save_google_status(code="auth", error=GOOGLE_NEW_SECRET)
+        db.log(admin_name(request), "Made a new secret for the Google Drive script" if replacing
+               else "Made the Google Drive script")
+    else:
+        db.log(admin_name(request), "Copied the Google Drive script")
+    return web.json_response({"script": gdrive.script_source(secret), "new_secret": new},
+                             headers={"Cache-Control": "no-store"})
+
+
+async def admin_save_google(request: web.Request):
+    """Save: the Web app URL and the drives. A new address or other drives are checked straight
+    away (and the script is told which drives it may use)."""
+    data = await read_json(request)
+    s = db.settings()
+    try:
+        url = gdrive.clean_url(data["url"]) if "url" in data else s.get("hr_google_url", "")
+        drive, restricted = (
+            gdrive.clean_drive_id(data[key]) if key in data else s.get(f"hr_google_{key}", "")
+            for key in ("drive", "restricted_drive"))
+    except ValueError as err:
+        return bad_request(str(err))
+    if restricted and (restricted == drive or not drive):
+        return bad_request("Pick the HR drive, and a different shared drive for restricted files "
+                           "(or keep them in a folder in the HR drive).")
+    values = {"hr_google_url": url, "hr_google_drive": drive, "hr_google_restricted_drive": restricted}
+    changed = {k for k, v in values.items() if s.get(k, "") != v}
+    if "hr_google_url" in changed:
+        values["hr_google_status"] = "{}"   # another script: nothing known about it yet
+    db.update_settings(values)
+    db.log(admin_name(request), "Updated the Google Drive settings (HR files)")
+    bridge = gdrive.bridge_from_settings(db.settings())
+    problem = None
+    if bridge and changed:
+        google_asked["check"] = time.time()
+        _, problem = await google_check(bridge)
+    return web.json_response({"ok": True, "problem": problem.message if problem else None,
+                              "google": google_view(full=True)})
+
+
+async def admin_check_google(request: web.Request):
+    """Check: the account, the drives the script sees, its version (opening the connection on
+    the dashboard does this, at most every few seconds)."""
+    bridge = gdrive.bridge_from_settings(db.settings())
+    if not bridge:
+        return bad_request("Copy the script and paste its Web app URL first.")
+    problem = None
+    if time.time() - google_asked["check"] >= GOOGLE_CHECK_GAP:
+        google_asked["check"] = time.time()
+        _, problem = await google_check(bridge)
+    return web.json_response({"problem": problem.message if problem else None,
+                              "google": google_view(full=True)})
+
+
+async def admin_test_google(request: web.Request):
+    """Test connection: signing in, the drive, making and removing a test folder, and reading text
+    from a test image, each with a plain result."""
+    bridge = gdrive.bridge_from_settings(db.settings())
+    if not bridge:
+        return bad_request("Copy the script and paste its Web app URL first.")
+    if time.time() - google_asked["test"] < GOOGLE_TEST_GAP:
+        return bad_request("Wait a few seconds before testing again.", 429)
+    google_asked["test"] = google_asked["check"] = time.time()
+    answered, problem = await google_check(bridge)
+    if answered:
+        checks = await bridge.self_test()
+    else:
+        what = {"auth": "Sign-in", "outdated": "Script version"}.get(problem.code, "Reaching the script")
+        checks = [{"check": what, "ok": False, "detail": problem.message}]
+    failed = [c for c in checks if not c["ok"]]
+    if answered and failed:
+        save_google_status(code="outdated" if failed[0]["check"] == "Script version" else "test",
+                           error=failed[0]["detail"])
+    elif answered:
+        save_google_status(code=None, error=None, tested_at=time.time())
+    db.log(admin_name(request), "Tested the Google Drive connection (HR files)",
+           detail="Every check passed." if not failed else
+           f"{failed[0]['check']}: {failed[0]['detail']}", ok=not failed)
+    return web.json_response({"checks": checks, "google": google_view(full=True)})
 
 
 # ---------------------------------------------------------------- wristbands (dashboard)
@@ -5689,6 +5858,7 @@ async def admin_migrate_restore(request: web.Request):
         branding.remove_logo()
     pin_sessions.clear()  # devices stay signed in; people type their PIN again
     connecteam.forget()   # new settings and secrets: nothing cached from before applies
+    hr_connecteam.forget()
     tthotel.forget(saved_stops=True)   # but a pause or stop TT Hotel asked for still holds
     signed_in = sum(1 for d in snap["devices"] if d["token_hash"])
     made = time.strftime("%b %d, %Y %H:%M", time.localtime(header["created_at"]))
@@ -5781,6 +5951,11 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)
     app.router.add_post("/api/connecteam/sync-staff", admin_sync_staff)
+    app.router.add_get("/api/hr-google", admin_google)
+    app.router.add_put("/api/hr-google", admin_save_google)
+    app.router.add_post("/api/hr-google/script", admin_google_script)
+    app.router.add_post("/api/hr-google/check", admin_check_google)
+    app.router.add_post("/api/hr-google/test", admin_test_google)
     app.router.add_post("/api/departments", admin_create_department)
     app.router.add_put("/api/departments/order", admin_reorder_departments)
     app.router.add_put(r"/api/departments/{id:\d{1,12}}", admin_update_department)
@@ -5898,6 +6073,7 @@ async def main():
         await encoders.close_all()   # lets go of every encoder
         await tthotel.close()
         await connecteam.close()
+        await gdrive.close()
         await ha.close()
         db.close()
 

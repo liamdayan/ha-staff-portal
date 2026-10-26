@@ -601,6 +601,62 @@
               <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam settings</button></div>
             </form>
           </details>
+          <details class="conn" id="conn-google">
+            <summary>
+              <span class="conn-head"><span class="conn-name">Google Drive (HR files)</span>
+                <span class="badge" data-conn-state></span></span>
+              <span class="conn-use" data-conn-use></span>
+            </summary>
+            <form id="gd-form" class="conn-body">
+              <p class="hint">The HR portal keeps employee files in a Google shared drive. A small script in your
+                own Google account does the work, so there's no Google Cloud project, key file or Workspace admin
+                setting to change. The script can only use the shared drives you pick here, and only answers
+                Staff Access.</p>
+              <ol class="gd-steps">
+                <li>In Google Drive, create a shared drive named <b>HR Employee Files</b>. If you like, create a
+                  second one, <b>HR Restricted</b>, for I-9s and accommodation records, with only you and your HR
+                  lead in it.</li>
+                <li>Click <b>Copy the script</b>.</li>
+                <li>Go to <b>script.google.com</b>, signed in as the owner, and click <b>New project</b>. Delete
+                  what's there and paste the script.</li>
+                <li>Next to <b>Services</b>, click <b>+</b>, choose <b>Drive API</b> and click <b>Add</b>.</li>
+                <li>Click <b>Deploy → New deployment</b>. Choose the type <b>Web app</b>, set <b>Execute as: Me</b>
+                  and <b>Who has access: Anyone</b>, then click <b>Deploy</b> and <b>Authorize</b> (Google asks
+                  to allow access to Drive).</li>
+                <li>Copy the <b>Web app URL</b>, paste it below and click <b>Save</b>.</li>
+                <li>Pick the shared drive (and the restricted one), click <b>Save</b>, then <b>Test
+                  connection</b>.</li>
+              </ol>
+              <div class="gd-script">
+                <button class="btn" type="button" id="gd-copy">Copy the script</button>
+                <button class="btn subtle" type="button" id="gd-new-secret" hidden>Make a new secret</button>
+              </div>
+              <p class="wb-warn" id="gd-script-note" hidden></p>
+              <label id="gd-script-box" hidden>The script <small>Your browser didn't allow copying: select all
+                of it here and copy it.</small>
+                <textarea id="gd-script-text" readonly rows="6" spellcheck="false"></textarea></label>
+              <label>Web app URL <small>Shown after Deploy. It starts with https://script.google.com/ and ends
+                in /exec.</small>
+                <input name="url" type="url" maxlength="400" autocomplete="off" spellcheck="false"
+                  placeholder="https://script.google.com/macros/s/…/exec"></label>
+              <div class="row">
+                <label>Shared drive for employee files<select name="drive"></select></label>
+                <label>Restricted files (I-9, accommodation)<select name="restricted_drive"></select></label>
+              </div>
+              <p class="wb-warn" id="gd-restricted-warn" hidden>Restricted files will go in a “Restricted” folder in
+                the HR drive, which every member of that drive can open. A second shared drive keeps them apart.</p>
+              <div class="ct-status">
+                <span id="gd-status" class="hint"></span>
+                <button class="btn" type="button" id="gd-test">Test connection</button>
+              </div>
+              <ul class="gd-checks" id="gd-checks" hidden></ul>
+              <p class="hint">If Google doesn't offer <b>Anyone</b> under <b>Who has access</b>, your Google
+                Workspace doesn't allow it: ask whoever manages it to let you share web apps with anyone (see
+                the user guide). Deploy from the owner's account, which isn't going away: the script runs as
+                whoever deployed it.</p>
+              <div class="form-actions"><button class="btn primary" type="submit">Save Google Drive settings</button></div>
+            </form>
+          </details>
         </div>
       </fieldset>
     </div>

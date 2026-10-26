@@ -6,8 +6,10 @@ The old install makes a migration file: a full backup (logs included) plus what 
 carries, so nothing has to be set up or typed again on the new install:
 - device tokens (by hash, as stored) and the record of tokens issued, so every enrolled phone and
   computer stays signed in, and the setup codes of phones still waiting to be set up;
-- the Connecteam and TT Hotel secrets, TT Hotel's sign-in and both request counts, whether
+- the Connecteam and TT Hotel secrets, TT Hotel's sign-in and the request counts, whether
   remote lock-out was tested, and the Door activity address's secret;
+- the HR portal's Google Drive connection (the script's Web app URL and secret, and the drives),
+  so the script already deployed in Google keeps working;
 - the whole door list, and Home Assistant user links.
 
 All of it is encrypted with AES-256-GCM under a key made (scrypt) from a one-time code: 20
@@ -38,6 +40,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 import doorlog
 import transfer
 from db import DOOR_COLUMNS, PRIVATE_SETTINGS
+from hr import gdrive
 from wristbands import MAC_RE, door_kind
 
 FORMAT = transfer.MIGRATE_FORMAT
@@ -258,6 +261,23 @@ def _saved_object(value) -> str:
     return json.dumps(found) if isinstance(found, dict) else "{}"
 
 
+def _google_settings(raw: dict) -> dict:
+    """The HR portal's Google Drive connection, checked as the dashboard checks it: the script
+    deployed in Google keeps working with the same secret and Web app URL. Nothing from a file
+    made before it existed, or one with anything wrong in it."""
+    try:
+        url = gdrive.clean_url(raw.get("hr_google_url"))
+        drive, restricted = (gdrive.clean_drive_id(raw.get(k)) for k in
+                             ("hr_google_drive", "hr_google_restricted_drive"))
+    except ValueError:
+        return {}
+    secret = raw.get("hr_google_secret")
+    if not isinstance(secret, str) or not gdrive.SECRET_RE.fullmatch(secret):
+        return {}
+    return {"hr_google_url": url, "hr_google_secret": secret, "hr_google_drive": drive,
+            "hr_google_restricted_drive": restricted if restricted != drive else ""}
+
+
 def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_logo,
                    now: float | None = None) -> dict:
     """Validate an opened migration file as strictly as a backup (transfer.clean_backup, trusting
@@ -284,7 +304,8 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
     typed = {k: raw[k].strip() for k in TYPED_SECRETS if isinstance(raw.get(k), str)}
     checked = clean_settings({k: v for k, v in typed.items() if v}, current_settings)
     secret_values = {k: checked.get(k, "") for k in typed}
-    for key in ("connecteam_usage", "tthotel_token", "tthotel_usage"):
+    for key in ("connecteam_usage", "tthotel_token", "tthotel_usage", "hr_connecteam_usage",
+                "hr_google_status"):
         secret_values[key] = _saved_object(raw.get(key))
     tested = raw.get("wb_remote_lockout_tested")
     secret_values["wb_remote_lockout_tested"] = (
@@ -294,6 +315,7 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
     callback = raw.get("tthotel_callback_token")
     if isinstance(callback, str) and doorlog.TOKEN_RE.match(callback):
         secret_values["tthotel_callback_token"] = callback
+    secret_values.update(_google_settings(raw))
 
     # The door list, every column (a backup only has names and hiding, for doors already here).
     doors, lock_ids = None, set()

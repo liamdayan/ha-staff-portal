@@ -10,8 +10,9 @@ What files never contain:
 - Home Assistant sign-in tokens for linked users. After restoring onto the same system, links
   are kept for phones and staff that still match; otherwise they need relinking.
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
-- The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), and the secret in the Door
-  activity address. A restore keeps the ones saved.
+- The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), the secret in the Door
+  activity address, and the HR portal's Google Drive connection (its script's address and
+  secret, and the drives). A restore keeps the ones saved.
 - The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door or
   guest room) chosen here travel, and land on doors the system already has. A backup from before
   0.9.0 has no kind, and leaves each door's as it is.

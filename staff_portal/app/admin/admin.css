@@ -576,6 +576,19 @@ dialog input.code-input {
 #tt-form .row > label { grid-template-rows: auto 1fr auto; }
 #tt-form .row > label > :is(input, select) { align-self: end; }
 .wb-account { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0; }
+
+/* Google Drive (HR files): the setup steps, the script to copy and Test connection's results */
+.gd-steps { margin: 0; padding-left: 22px; display: grid; gap: 6px; font-size: 14px; }
+.gd-script { display: flex; gap: 8px; flex-wrap: wrap; }
+#gd-script-text { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--card-2); color: var(--text); resize: vertical;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.gd-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 14px; }
+.gd-checks li { display: flex; gap: 8px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.gd-mark { flex: none; font-weight: 800; }
+.gd-checks li.ok .gd-mark { color: var(--ok); }
+.gd-checks li.bad .gd-mark { color: var(--danger); }
+#conn-google .badge, #gd-status { overflow-wrap: anywhere; }
 .wb-account .linkish { padding: 0; }
 
 /* Page groups in the layout's page list */

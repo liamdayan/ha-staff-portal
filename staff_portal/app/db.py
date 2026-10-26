@@ -429,6 +429,16 @@ DEFAULT_SETTINGS = {
     # Home Assistant notification (it's always in the activity log).
     "tthotel_callback_token": "",
     "wb_lost_card_alert": "1",
+    # HR portal: Google Drive through the owner's Apps Script (hr/gdrive.py). The Web app URL, the
+    # secret written into the script, the HR shared drive and the restricted one ("": a folder in
+    # the HR drive), and what the last check found (internal). All private.
+    "hr_google_url": "",
+    "hr_google_secret": "",
+    "hr_google_drive": "",
+    "hr_google_restricted_drive": "",
+    "hr_google_status": "{}",
+    # The HR portal's Connecteam requests today, in its own lane (internal: hr/ctapi.py).
+    "hr_connecteam_usage": "{}",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -436,7 +446,9 @@ DEFAULT_SETTINGS = {
 # (migrate.py), to another install of the add-on.
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
-                    "tthotel_callback_token")
+                    "tthotel_callback_token", "hr_google_url", "hr_google_secret",
+                    "hr_google_drive", "hr_google_restricted_drive", "hr_google_status",
+                    "hr_connecteam_usage")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180

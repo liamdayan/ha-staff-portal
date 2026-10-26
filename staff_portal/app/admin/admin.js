@@ -357,6 +357,7 @@
     state.hasLogo = data.has_logo;
     state.tunnelSources = data.tunnel_sources;
     state.connecteam = data.connecteam;
+    state.hrGoogle = data.hr_google || {};
     state.wristbands = data.wristbands || {};
     state.departments = data.departments || [];
     state.staffSync = data.staff_sync || {};
@@ -2091,6 +2092,7 @@
     $("#wb-off-note").hidden = !!wb.enabled;
     renderTTStatus();
     renderConnecteam();
+    renderGoogle();
   }
 
   function showConnection(box, connState, requests) {
@@ -2186,7 +2188,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (connDirty.tt || connDirty.ct) e.preventDefault();
+    if (connDirty.tt || connDirty.ct || gdDirty) e.preventDefault();
   });
 
   // "Settings → Connections" links elsewhere open that connection (data-goto shows the tab).
@@ -2205,6 +2207,163 @@
         `${r.clocked_in} clocked in now.`);
     } finally {
       await load();
+    }
+  }));
+
+  // ------------------------------------------------ Google Drive (HR files), in Connections
+
+  // The script in the owner's Google account that keeps the HR portal's files. Folded, it says
+  // whether it works; opened, it's checked (who it runs as, its drives, its version: at most every
+  // few seconds) and shows the setup steps. The secret never comes here, only inside the script
+  // text when it's copied.
+  let gdDirty = false;
+  let gdFull = null;   // api/hr-google: also the Web app URL, the drives chosen and the drives seen
+  const GD_PROBLEMS = { auth: "Secret doesn't match", not_allowed: "Access refused",
+    unavailable: "Google not answering", quota: "Google busy", bad_reply: "Unexpected reply",
+    too_big: "File too big", test: "Test failed" };
+
+  const googleNow = () => ({ ...(gdFull || {}), ...(state.hrGoogle || {}) });
+
+  // Whether it works, in a few words, with its badge color.
+  function gdState(g) {
+    if (!g.set_up) return ["Not set up", ""];
+    if (g.code === "outdated") return ["Script out of date", "pending"];
+    if (g.code) return [GD_PROBLEMS[g.code] || "Last try failed", "locked"];
+    if (g.email && !g.drive_set) return ["Pick the shared drive", "pending"];
+    if (g.email) return [`Connected as ${g.email}`, "active"];
+    return ["Not checked yet", "pending"];
+  }
+
+  function renderGoogle() {
+    const g = googleNow();
+    showConnection($("#conn-google"), gdState(g), g.checked_at ? `Checked ${ago(g.checked_at).toLowerCase()}` : "");
+    $("#gd-new-secret").hidden = !g.script_made;
+    $("#gd-test").disabled = !g.set_up;
+    $("#gd-status").textContent = !g.set_up
+      ? (g.script_made ? "Paste the Web app URL and click Save." : "Start with Copy the script.")
+      : g.error || (g.email
+        ? `Connected as ${g.email}, script version ${g.version}.${g.drive_set ? "" : " Pick the shared drive and click Save."}`
+        : "Not checked yet.");
+    if (gdFull && !gdDirty) fillGoogle();
+  }
+
+  // The form, from what's saved: the drive pickers list the shared drives the script saw.
+  function fillGoogle() {
+    const form = $("#gd-form");
+    const g = googleNow();
+    const drives = g.drives || [];
+    form.elements.url.value = g.url || "";
+    const pick = (select, first, chosen) => {
+      const options = [h("option", { value: "" }, first), ...drives.map((d) => h("option", { value: d.id }, d.name))];
+      if (chosen && !drives.some((d) => d.id === chosen)) options.push(h("option", { value: chosen }, "The drive saved before"));
+      select.replaceChildren(...options);
+      select.value = chosen || "";
+    };
+    pick(form.elements.drive, drives.length ? "Choose…"
+      : g.set_up ? "No shared drives found yet" : "Save the Web app URL first", g.drive);
+    pick(form.elements.restricted_drive, "A “Restricted” folder in the HR drive", g.restricted_drive);
+    renderRestrictedWarning();
+  }
+
+  function renderRestrictedWarning() {
+    const f = $("#gd-form").elements;
+    $("#gd-restricted-warn").hidden = !f.drive.value || !!f.restricted_drive.value;
+  }
+
+  // Opened: check it (the server answers from its last check if that was a moment ago).
+  $("#conn-google").addEventListener("toggle", (e) => {
+    if (e.target.open) refreshGoogle();
+  });
+
+  async function refreshGoogle() {
+    try {
+      const r = googleNow().set_up ? await api("POST", "api/hr-google/check")
+        : { google: await api("GET", "api/hr-google") };
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+    } catch (err) {
+      toast(err.message, true);
+    }
+    renderGoogle();
+  }
+
+  $("#gd-form").addEventListener("input", () => { gdDirty = true; });
+  $("#gd-form").addEventListener("change", () => {
+    gdDirty = true;
+    renderRestrictedWarning();
+  });
+
+  $("#gd-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    run(async () => {
+      const r = await api("PUT", "api/hr-google", { url: f.url.value, drive: f.drive.value,
+        restricted_drive: f.restricted_drive.value });
+      gdDirty = false;
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+      renderGoogle();
+      if (r.problem) toast(`Saved, but Google says: ${r.problem}`, true);
+      else if (r.google.set_up && !r.google.drive_set && (r.google.drives || []).length) {
+        toast("Saved. Now pick the shared drive and click Save.");
+      } else toast("Google Drive settings saved.");
+    });
+  });
+
+  // Copy the script (the secret is made the first time). Inside Home Assistant's frame the
+  // clipboard can be blocked: then the script is shown, selected, to copy by hand.
+  async function copyScript(newSecret) {
+    const r = await api("POST", "api/hr-google/script", newSecret ? { new_secret: true } : undefined);
+    const box = $("#gd-script-box");
+    const text = $("#gd-script-text");
+    text.value = r.script;
+    let copied = true;
+    try {
+      await navigator.clipboard.writeText(r.script);
+    } catch {
+      box.hidden = false;
+      text.focus();
+      text.select();
+      copied = document.execCommand("copy");
+    }
+    box.hidden = copied;
+    const note = $("#gd-script-note");
+    note.hidden = !newSecret;
+    note.textContent = "Paste the new script in script.google.com over the old one, then click Deploy → " +
+      "Manage deployments → Edit (the pencil) → Version: New version → Deploy. Until then, the script there " +
+      "doesn't answer Staff Access.";
+    await load();
+    renderGoogle();
+    toast(copied ? "Script copied. Paste it in script.google.com." : "Select the script in the box and copy it.");
+  }
+
+  $("#gd-copy").addEventListener("click", () => run(() => copyScript(false)));
+  $("#gd-new-secret").addEventListener("click", () => run(async () => {
+    if (!await askConfirm("Make a new secret? The script in Google stops working until you paste the new " +
+      "script there and deploy a new version.", "Make a new secret")) return false;
+    await copyScript(true);
+  }));
+
+  // Test connection: each check with a plain result.
+  $("#gd-test").addEventListener("click", () => run(async () => {
+    if (gdDirty) throw new Error("Click Save Google Drive settings first: the test uses what's saved.");
+    const button = $("#gd-test");
+    button.disabled = true;
+    button.textContent = "Testing…";
+    try {
+      const r = await api("POST", "api/hr-google/test");
+      gdFull = r.google;
+      state.hrGoogle = r.google;
+      const list = $("#gd-checks");
+      list.replaceChildren(...r.checks.map((c) => h("li", { class: c.ok ? "ok" : "bad" },
+        h("span", { class: "gd-mark", role: "img", "aria-label": c.ok ? "OK" : "Problem" }, c.ok ? "\u2713" : "\u2715"),
+        h("span", null, h("b", null, c.check), ` ${c.detail}`))));
+      list.hidden = false;
+      toast(r.checks.every((c) => c.ok) ? "Google Drive works." : "Google Drive has a problem: see the list.",
+        !r.checks.every((c) => c.ok));
+    } finally {
+      button.textContent = "Test connection";
+      renderGoogle();
     }
   }));
 
