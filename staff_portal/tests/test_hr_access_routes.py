@@ -38,6 +38,11 @@ async def setup(hr: HR):
             for role, pid in ROLES.items()}
 
 
+def core(page: dict) -> list[str]:
+    """The foundation's own sections of a person's page (other parts add theirs)."""
+    return [s["name"] for s in page["sections"] if s["name"] in ("details", "signin")]
+
+
 def concrete(path: str, pid: str) -> str:
     """A real address for a route's pattern."""
     path = re.sub(r"\{pid[^}]*\}", pid, path)
@@ -136,15 +141,15 @@ def test_roles_follow_people_live(tmp_path):
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["manager"])
             labels = {r["label"] for s in page["sections"] for r in s["rows"]}
             assert status == 200 and "Mobile" not in labels and "Start date" in labels
-            assert [s["name"] for s in page["sections"]] == ["details"]
+            assert core(page) == ["details"]
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["hr"])
-            assert [s["name"] for s in page["sections"]] == ["details", "signin"]
+            assert core(page) == ["details", "signin"]
             assert "541-555-0201" in str(page)
             status, page, _ = await hr.call("GET", "/api/people/201", cookie=sessions["employee"])
-            assert [s["name"] for s in page["sections"]] == ["details"] and "541-555-0201" in str(page)
+            assert core(page) == ["details"] and "541-555-0201" in str(page)
             # HR admins see their own file only as an employee.
             status, page, _ = await hr.call("GET", "/api/people/205", cookie=sessions["hr"])
-            assert [s["name"] for s in page["sections"]] == ["details"]
+            assert core(page) == ["details"]
             # Bo moves to the kitchen in Connecteam: Max loses him at once.
             await hr.add_people(ANA, ct_user(202, "Bo", "Diaz", code="7302", groups=[502],
                                              mobile="541-555-0202"), MAX, DEE, HANA)
