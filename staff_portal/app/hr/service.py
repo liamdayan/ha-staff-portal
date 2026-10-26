@@ -9,7 +9,8 @@ Background work, every half minute while it runs:
 - once a day at 2:15 AM (HR's time zone): Connecteam's profile field names, its archived users,
   and the daily jobs other parts of the HR portal add (daily_jobs);
 - the daily summary for managers and HR at the time HR set;
-- hourly: forgetting ended sessions and setup codes.
+- hourly: forgetting ended sessions and setup codes;
+- the background work other parts add (tick_jobs), such as the documents' delivery queue.
 
 main.py makes one HRService and hands it what it needs from the rest of the add-on, so nothing
 in hr/ imports main.py.
@@ -43,6 +44,11 @@ MAX_MIGRATED_DB = 64 * 1024 * 1024
 NO_CONNECTEAM = ("Connecteam is turned off in Settings → Connections, so the HR portal can't "
                  "read its people.")
 
+# The parts of the HR portal beyond its foundation (documents.py, ...): each is fn(service), called
+# when a service is made, and adds its hooks (on_start, tick_jobs, daily_jobs, ...). A part adds
+# itself here when it's imported.
+PARTS: list = []
+
 
 class HRService:
     def __init__(self, data_dir: str, *, main_settings, connecteam, departments=lambda: [],
@@ -71,6 +77,10 @@ class HRService:
         self.on_start: list = []            # fn(service) after the database opens (their tables)
         self.daily_jobs: list = []          # async fn(service), in the nightly run
         self.migration_blockers: list = []  # fn(service) -> why a migration must wait, or None
+        self.tick_jobs: list = []           # async fn(service, now), every half minute
+        self.on_stop: list = []             # async fn(service), before the database closes
+        for part in PARTS:
+            part(self)
 
     # ------------------------------------------------------------ settings and state
 
@@ -158,6 +168,11 @@ class HRService:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001 - stopping regardless
                 pass
             self._task = None
+        for hook in self.on_stop:
+            try:
+                await hook(self)
+            except Exception as err:  # noqa: BLE001 - stopping regardless
+                log.warning("HR portal: stopping a part failed: %r", err)
         if self.db is not None:
             self.db.close()
         self.db = hrdb.current = None
@@ -206,6 +221,11 @@ class HRService:
             self.db.set_settings({"summary_day": day})
             notify.summaries(self.db, now)
         await notify.send_due(self.db, now)
+        for job in self.tick_jobs:
+            try:
+                await job(self, now)
+            except Exception as err:  # noqa: BLE001 - one part mustn't stop the others
+                log.warning("HR portal: background work of a part failed: %r", err)
 
     def sync_due(self, now: float) -> bool:
         state = self.sync_state
