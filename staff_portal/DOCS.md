@@ -1441,7 +1441,9 @@ once.
 **Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
 Staff Access's own Connecteam connection, only when someone opens one. They read a whole
 calendar month at a time, so moving between a week, its pay period and its month asks nothing
-new. This month is read again at most every 10 minutes, and earlier months every 6 hours. The first time a report is opened it can take a few seconds longer, because reports
+new. Each month is kept for a day, and read afresh every morning at 7 AM while the Attendance
+report is on; **Refresh now** at the top of a report reads it again (at most every 2 minutes).
+The first time a month is opened it can take a few seconds longer, because reports
 may only ask 40 things a minute (see [Staying within Connecteam's API
 limits](#staying-within-connecteams-api-limits)). For everything a report can show, the
 Connecteam app needs **users.read**, **time_clock.read**, **schedule.read**, **forms.read**, and
@@ -1471,8 +1473,8 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
 
 - **Where the numbers come from.** Timesheets (every time clock), schedules and form submissions
   come from Connecteam, read a whole month at a time when someone opens the report, so switching
-  between Week, Pay period and Month is instant. This month is read again at most every 10
-  minutes, and earlier months every 6 hours. Reports have their own small Connecteam allowance, so they never slow the
+  between Week, Pay period and Month is instant. Months are kept for a day and read afresh at 7
+  AM; **Refresh now** reads them again, and the report says when its data was read. Reports have their own small Connecteam allowance, so they never slow the
   clock-in checks. If Connecteam refuses (a missing scope, the allowance used up, Connecteam
   down), the report says so in plain words and shows the rest. It needs the Connecteam
   permissions [Connecteam permissions](#connecteam-permissions) lists for reports.

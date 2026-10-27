@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.11
+
+- **The Attendance report opens at once:** Connecteam data is kept for a day instead of 10
+  minutes, and read afresh every morning at 7 AM while the report is on (about 10 requests).
+  **Refresh now** at the top reads it again (at most every 2 minutes), and the report says when
+  its data was read.
+- **Drop-down lists are dark in dark mode** (on Windows they were white, with light text), in the
+  staff app, the dashboard and the HR portal.
+
 ## 0.12.10
 
 - **Recurring Connecteam tasks, now that we've seen how they come through:** Connecteam lists

@@ -78,7 +78,8 @@ this.
 ### ctx.ct: Connecteam
 
 All async, all cached (timesheets, shifts and form submissions are read a calendar month at a
-time and kept by month: this month for 10 minutes, earlier months for 6 hours), all in the
+time and kept by month for a day; a report's Refresh now (`?fresh=1`) reads them again, and
+`data()`'s answer gets `read_at`, when its oldest month was read), all in the
 property's time zone. Times are `"YYYY-MM-DDTHH:MM"`, dates `"YYYY-MM-DD"`, user IDs text.
 `start` and `end` are dates (or `"YYYY-MM-DD"`), both included, at most 400 days apart.
 
