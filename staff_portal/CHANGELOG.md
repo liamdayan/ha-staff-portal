@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.20
+
+- **HR portal: Enter presses OK in a dialog** (it pressed Cancel), such as Confirm start date or
+  typing your PIN to confirm.
+
 ## 0.12.19
 
 - **Won't do is gone from tasks:** a task is To do, In progress or Done. To get rid of one, delete

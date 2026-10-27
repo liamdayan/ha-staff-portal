@@ -134,8 +134,13 @@
         h("div", { class: "sheet-head" }, h("h2", null, title),
           h("button", { type: "button", class: "sheet-close", "aria-label": "Close", onclick: () => dialog.close() })),
         nodes,
-        h("div", { class: "actions" }, buttons.map((b) =>
-          h("button", { value: b.value, class: b.class || "", type: "submit" }, b.label))));
+        // Enter presses the main (primary) button: a form submits with its first submit button,
+        // so the others close the dialog themselves.
+        h("div", { class: "actions" }, buttons.map((b) => {
+          const main = (b.class || "").includes("primary") || !buttons.some((x) => (x.class || "").includes("primary"));
+          return main ? h("button", { value: b.value, class: b.class || "", type: "submit" }, b.label)
+            : h("button", { value: b.value, class: b.class || "", type: "button", onclick: () => dialog.close(b.value) }, b.label);
+        })));
       dialog.replaceChildren(form);
       dialog.returnValue = "";
       dialog.onclose = () => resolve(dialog.returnValue);
