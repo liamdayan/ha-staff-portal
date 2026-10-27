@@ -48,6 +48,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+import ctdata
 import tasks
 from connecteam import ConnecteamError, OwnTooMany, Rejected, ReportsBusy, ReportsRefused
 
@@ -582,6 +583,10 @@ async def _push_form(t: dict) -> bool:
     body = {"managerFields": [{"managerFieldId": follow["field"], "managerFieldType": "status",
                                "status": {"statusOptionId": option["id"], "name": option["name"],
                                           "color": option["color"]}}]}
+    note_field, note = await _note_field(t["form_id"]), None
+    if note_field:
+        note = marked_note(t["manager_note"], option["name"], t["status_by"])
+        body["managerFields"].append({"managerFieldId": note_field, "managerFieldType": "note", "note": note})
     try:
         await _ask("PUT", f"/forms/v1/forms/{t['form_id']}/form-submissions/{t['submission_id']}",
                    body=body)
@@ -592,8 +597,32 @@ async def _push_form(t: dict) -> bool:
               clear_pending=True, pending_was=t["ct_pending"])
         return False
     _save(t["id"], ct_status=option["id"], ct_sync={"wrote": time.time()}, ct_note=None,
-          clear_pending=True, pending_was=t["ct_pending"])
+          clear_pending=True, pending_was=t["ct_pending"],
+          **({"manager_note": note} if note is not None else {}))
     return True
+
+
+MARKED_RE = re.compile(r"^Marked .{1,80} by .{1,80} in Staff Access$")
+
+
+def marked_note(note: str | None, status: str, by: str | None) -> str:
+    """The submission's note with who changed its status here as its last line: Connecteam's
+    API can't say who made a change (it's always the account the keys belong to). An earlier
+    such line is replaced, so the note doesn't grow with each change; a manager's text stays."""
+    kept = [line for line in (note or "").split("\n") if not MARKED_RE.match(line.strip())]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    line = f"Marked {status or 'changed'} by {(by or 'someone').strip()[:60]} in Staff Access"
+    return "\n".join(kept + [line])[-tasks.MAX_NOTES:]
+
+
+async def _note_field(form_id) -> str | None:
+    """The form's note manager field, when it has exactly one (else None: nothing is written)."""
+    try:
+        notes = [f["id"] for f in await ctdata.form_fields(form_id) if f["type"] == "note"]
+    except (ctdata.Unavailable, ValueError):
+        return None
+    return notes[0] if len(notes) == 1 else None
 
 
 # ---------------------------------------------------------------- changes made in Connecteam

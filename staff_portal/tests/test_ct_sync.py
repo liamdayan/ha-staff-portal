@@ -556,8 +556,11 @@ def test_a_followed_form_shows_open_submissions_and_follows_their_status(tmp_pat
             await ctsync.settle()
             [(method, path, body)] = writes(ct)
             assert (method, path) == ("PUT", "/forms/v1/forms/55/form-submissions/s1")
-            assert body == {"managerFields": [{"managerFieldId": "mf1", "managerFieldType": "status",
-                                               "status": working}]}
+            # Who did it goes in the form's note, under what the manager wrote.
+            assert body == {"managerFields": [
+                {"managerFieldId": "mf1", "managerFieldType": "status", "status": working},
+                {"managerFieldId": "mf2", "managerFieldType": "note",
+                 "note": "Ordered the part\nMarked Working on it by Cy in Staff Access"}]}
             assert p.db.task(leaky["id"])["ct_status"] == "o1"
             # To do is "no status": Connecteam can't clear one, so it isn't written, and the task says so.
             await p.call("POST", f"/api/tasks/{leaky['id']}/status", cy, {"status": "todo"})
@@ -1020,3 +1023,17 @@ def test_a_followed_form_matches_status_by_name_too():
     assert tasks.follow_status(follow, "other-id", "Done") == "done"   # IDs that don't match
     assert tasks.follow_status(follow, "", "") == "todo"
     assert tasks.follow_status(follow, "x", "Unknown") == "todo"
+
+
+def test_who_changed_a_followed_forms_status_goes_in_its_note():
+    """Connecteam credits every API change to the keys' owner, so the note says who did it:
+    one line, replaced on the next change, under whatever a manager wrote."""
+    one = ctsync.marked_note("Ordered in a box", "Done", "Isaiah Kast")
+    assert one == "Ordered in a box\nMarked Done by Isaiah Kast in Staff Access"
+    again = ctsync.marked_note(one, "Working on it", "Ana Ray")
+    assert again == "Ordered in a box\nMarked Working on it by Ana Ray in Staff Access"
+    assert ctsync.marked_note(None, "Done", None) == "Marked Done by someone in Staff Access"
+
+
+def test_the_staff_app_lists_finished_tasks_for_two_days():
+    assert tasks.LIST_FINISHED_DAYS == 2

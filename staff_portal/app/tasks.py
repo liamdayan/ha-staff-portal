@@ -30,7 +30,7 @@ MAX_FORM_NAME = 120
 MAX_QUESTION = 200
 BIN_DAYS = 30            # deleted tasks can be put back for this long
 KEEP_FINISHED_DAYS = 365 # finished tasks are kept this long, then dropped
-LIST_FINISHED_DAYS = 30  # the staff app lists finished tasks from this far back
+LIST_FINISHED_DAYS = 2   # the staff app lists finished tasks from this far back (they stay kept)
 FORM_CHECK_SECONDS = 600 # each form chosen on the dashboard is checked this often, at most...
 FORM_DAILY_REQUESTS = 300  # ...and all of them together ask about this many times a day (under a
                          # third of the reports lane's 1,000), so the checks are spread out more

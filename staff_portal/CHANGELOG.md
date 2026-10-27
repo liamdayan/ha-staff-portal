@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.7
+
+- **A followed form's note says who changed its status in Staff Access:** "Marked Done by Isaiah
+  Kast in Staff Access" as its last line, under whatever a manager wrote (one such line, replaced
+  on the next change). Connecteam's API credits every change to the account the keys belong to,
+  so this is where the real name goes. Only for a form with one Note field.
+- **Finished tasks leave the staff app after 2 days** (was 30), so the list doesn't fill up. They
+  stay in Staff Access's records and backups.
+
 ## 0.12.6
 
 - **A followed form shows every open submission from the last month,** including ones sent
