@@ -237,6 +237,36 @@ def test_connecteam_trouble_and_report_bugs_are_plain_messages(setup, monkeypatc
     go(scenario())
 
 
+def test_a_slow_report_carries_on_and_is_picked_up_later(setup, monkeypatch):
+    """The tunnel gives up on a request after 100 seconds: a long first look answers "pending"
+    and carries on, once, until the staff app asks again."""
+    p = setup
+    monkeypatch.setattr(main, "REPORT_WAIT", 0.05)
+    gate, runs = asyncio.Event(), []
+    real = ctdata.timesheets
+
+    async def slow(start, end):
+        runs.append(start)
+        await gate.wait()
+        return await real(start, end)
+
+    async def scenario():
+        async with p:
+            await share(p)
+            ana = await p.sign_in(p.ana)
+            monkeypatch.setattr(ctdata, "timesheets", slow)
+            status, body = await p.call("GET", "/api/reports/hours?week=2026-10-19", ana)
+            assert status == 202 and body == {"pending": True}
+            status, body = await p.call("GET", "/api/reports/hours?week=2026-10-19", ana)
+            assert status == 202 and len(runs) == 1   # the same look, not a second one
+            gate.set()
+            await asyncio.sleep(0.05)
+            status, body = await p.call("GET", "/api/reports/hours?week=2026-10-19", ana)
+            assert status == 200 and body["params"] == {"week": "2026-10-19"}
+            assert main.report_jobs == {} and len(runs) == 1
+    go(scenario())
+
+
 def test_the_report_gets_the_person_and_departments(setup, monkeypatch):
     p = setup
     seen = {}
@@ -377,7 +407,7 @@ def test_the_reports_tab(setup):
             listed = {r["key"]: r for r in body["reports"]}
             assert "template" not in listed
             assert listed["hours"]["enabled"] is False and listed["hours"]["view"] == []
-            assert body["lane"]["daily_cap"] == 1000 and body["lane"]["minute_cap"] == 15
+            assert body["lane"]["daily_cap"] == 2000 and body["lane"]["minute_cap"] == 40
             await share(p, view=[p.front, p.kitchen], manage=[p.kitchen])
             listed = {r["key"]: r for r in (await p.admin_call("GET", "/api/reports"))[1]["reports"]}
             assert listed["hours"]["enabled"] and listed["hours"]["view"] == [p.front, p.kitchen]

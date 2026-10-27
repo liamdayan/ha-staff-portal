@@ -612,7 +612,7 @@ def test_the_dashboard_says_what_form_checks_cost(tmp_path, monkeypatch):
         FakeCt(monkeypatch)
         async with p:
             status, body = await p.admin_call("GET", "/api/tasks/forms")
-            assert (body["check_minutes"], body["requests_a_day"], body["lane_a_day"]) == (10, 0, 1000)
+            assert (body["check_minutes"], body["requests_a_day"], body["lane_a_day"]) == (10, 0, 2000)
             for form_id in ("55", "56", "57"):
                 status, body = await p.admin_call("PUT", f"/api/tasks/forms/{form_id}", {"name": form_id})
             assert (body["check_minutes"], body["requests_a_day"]) == (15, 288)

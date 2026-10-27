@@ -6,7 +6,7 @@ Quick Tasks (Connecteam's Tasks API; scopes in brackets):
 - read:    GET    /tasks/v1/taskboards/{board}/tasks?status=all         [quick_tasks.read]
 - create:  POST   /tasks/v1/taskboards/{board}/tasks                    [quick_tasks.write]
 - change:  PUT    /tasks/v1/taskboards/{board}/tasks/{task}             [quick_tasks.write]
-- delete:  DELETE /tasks/v1/taskboards/{board}/tasks/{task}             [quick_tasks.delete]
+- delete:  DELETE /tasks/v1/taskboards/{board}/tasks/{task}             [quick_tasks.delete, optional]
 A followed form: PUT /forms/v1/forms/{form}/form-submissions/{id}       [forms.write]
 
 How the two sides map (a task's "view", the same shape for both):
@@ -17,7 +17,8 @@ How the two sides map (a task's "view", the same shape for both):
   A task with no one linked assigned is a "draft" in Connecteam, which it requires, and which
   says nothing about done.
 - Won't do and the bin archive the Connecteam task. Connecteam can't archive a draft, so an
-  unassigned one is deleted there instead (and made again if it's reopened or put back).
+  unassigned one is deleted there instead (and made again if it's reopened or put back), when the
+  app has quick_tasks.delete; without it the draft is left on the board and the task says so.
 - Archived or deleted in Connecteam: the bin here, saying so ("Someone in Connecteam").
 
 Each synced task keeps what both sides held when they last agreed (ct_sync: "seen", Connecteam's
@@ -64,7 +65,10 @@ BY_CT = {"name": "Someone in Connecteam"}
 IN_CT = "in Connecteam"
 NO_BOARD = "Not in Connecteam: no board is chosen for this department."
 CT_ID_RE = tasks.CT_ID_RE
-SCOPES_NEEDED = ("quick_tasks.read", "quick_tasks.write", "quick_tasks.delete")
+SCOPES_NEEDED = ("quick_tasks.read", "quick_tasks.write")
+SCOPE_DELETE = "quick_tasks.delete"   # optional: only for closing a task nobody is assigned to
+LEFT_OPEN = ("Still on the Connecteam board: Connecteam can't close a task nobody is assigned "
+             "to without the quick_tasks.delete permission.")
 SCOPES_FOLLOW = ("forms.write",)
 
 _db = lambda: None   # noqa: E731 - the Database (main.db; tests swap it)
@@ -420,8 +424,17 @@ async def _push(t: dict) -> bool:
         return False
     path = f"/tasks/v1/taskboards/{board['board_id']}/tasks/{t['ct_task_id']}"
     try:
-        if merged["archived"] and not merged["users"]:
-            await _ask("DELETE", path)   # a draft can't be archived
+        if merged["archived"] and not merged["users"]:   # a draft can't be archived
+            if _ct.scopes is not None and SCOPE_DELETE not in _ct.scopes:
+                _left_open(t, seen, sa)
+                return False
+            try:
+                await _ask("DELETE", path)
+            except Rejected as err:
+                if err.status != 403:
+                    raise
+                _left_open(t, seen, sa)
+                return False
             _gone(t, board["board_id"])
             return True
         data = await _ask("PUT", path, body=_payload(merged))
@@ -454,6 +467,14 @@ def _answered(data: dict, sent: dict) -> dict:
     if not v["users"]:
         v["done"] = sent["done"]   # a draft says nothing about done
     return v
+
+
+def _left_open(t: dict, seen: dict, sa: dict) -> None:
+    """Won't do or the bin here for a task nobody is assigned to, with no permission to delete
+    it there: Connecteam keeps its draft, both sides count as agreed (so it isn't tried again),
+    and the task says so."""
+    _save(t["id"], ct_sync={"seen": seen, "base": sa}, ct_note=LEFT_OPEN, clear_pending=True,
+          pending_was=t["ct_pending"])
 
 
 def _gone(t: dict, board_id: str) -> None:
@@ -878,8 +899,12 @@ async def test() -> dict:
     else:
         missing = [s for s in SCOPES_NEEDED if s not in scopes]
         checks.append({"check": "Permissions", "ok": not missing, "detail":
-                       "quick_tasks.read, quick_tasks.write and quick_tasks.delete." if not missing
+                       "quick_tasks.read and quick_tasks.write." if not missing
                        else f"The Connecteam app is missing {', '.join(missing)}."})
+        if not missing and SCOPE_DELETE not in scopes:
+            checks.append({"check": "Unassigned tasks", "ok": True, "detail": "No "
+                           "quick_tasks.delete (not needed): a task nobody is assigned to stays on "
+                           "the Connecteam board when it's marked Won't do or binned here."})
         follow = all(s in scopes for s in SCOPES_FOLLOW)
         checks.append({"check": "Forms", "ok": True, "detail": "forms.write: followed forms write "
                        "their status back." if follow else "No forms.write: forms that follow a "

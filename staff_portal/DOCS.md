@@ -1380,7 +1380,7 @@ a small, steady share:
   signed in), so a wrong PIN, or someone just holding a phone, never costs a request. They happen
   at most every 30 seconds (less often while Connecteam is failing) and stop once three quarters
   of the day's share is used, keeping the rest for the hourly checks.
-- Its own hard limits: 30 requests a minute, and 5,000 a day (never more than half of your
+- Its own hard limits: 60 requests a minute, and 5,000 a day (never more than half of your
   account's daily limit, so your other integrations always keep the other half), counted across
   add-on restarts. At the cap it pauses until midnight UTC.
 - It reads Connecteam's rate-limit headers. If your account (from any integration) has less than
@@ -1399,17 +1399,17 @@ a small, steady share:
   Access has used half of its day, so the time clock always has room. If Connecteam refuses an HR
   request, or says "too many requests" to one, only the HR portal waits: the time clock checks
   carry on.
-- Reports and tasks have a share of their own in the same way: at most 15 requests a minute and
-  1,000 a day, and none once Staff Access has used half of its day. Nothing is asked until
-  someone opens a report (or a form's tasks are due), and the same week is asked again at most
-  every 10 minutes. Forms that make tasks use at most about 300 of the 1,000 (see
+- Reports and tasks have a share of their own in the same way: at most 40 requests a minute and
+  2,000 a day, and none once Staff Access has used half of its day. Nothing is asked until
+  someone opens a report (or a form's tasks are due), and the same month is asked again at most
+  every 10 minutes. Forms that make tasks use at most about 300 of the 2,000 (see
   [Tasks](#tasks)), so reports keep the rest. If Connecteam refuses a report's request or says "too many requests", only
   reports and tasks wait; the time clock checks carry on. See [Reports](#reports).
 - How the shares add up (Expert: 100 a minute and 10,000 a day for your whole account): Staff
-  Access takes at most 30 a minute and 5,000 a day; inside that, the HR portal at most 6 and 500,
-  and reports and tasks at most 15 and 1,000. Together, those two never take the last 10 of a
-  minute. So the time clock always keeps at least 10 a minute and 3,500 a day, and your other
-  integrations keep 70 a minute and 5,000 a day.
+  Access takes at most 60 a minute and 5,000 a day; inside that, the HR portal at most 6 and 500,
+  and reports and tasks at most 40 and 2,000. Together, those two never take the last 10 of a
+  minute. So the time clock always keeps at least 10 a minute and 2,500 a day, and your other
+  integrations keep 40 a minute and 5,000 a day.
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
 Open **Connecteam** for how many your account has left (once Connecteam has answered), how many
@@ -1442,7 +1442,7 @@ once.
 Staff Access's own Connecteam connection, only when someone opens one. They read a whole
 calendar month at a time, so moving between a week, its pay period and its month asks nothing
 new. This month is read again at most every 10 minutes, and earlier months every 6 hours. The first time a report is opened it can take a few seconds longer, because reports
-may only ask 15 things a minute (see [Staying within Connecteam's API
+may only ask 40 things a minute (see [Staying within Connecteam's API
 limits](#staying-within-connecteams-api-limits)). For everything a report can show, the
 Connecteam app needs **users.read**, **time_clock.read**, **schedule.read**, **forms.read**, and
 optionally **jobs.read** (see [Connecteam permissions](#connecteam-permissions)). If one is
@@ -1572,7 +1572,7 @@ you chose the form count, and none becomes a task twice, even after its task is 
 **What the checks cost.** Each check is usually one Connecteam request (it reads what was sent
 since an hour before the last good check). With one or two forms, each is checked every 10
 minutes (144 requests a day per form). With more, each is checked less often, so all of them
-together use at most about 300 requests a day of the 1,000 reports and tasks share: 3 forms every
+together use at most about 300 requests a day of the 2,000 reports and tasks share: 3 forms every
 15 minutes, 5 every 24, 10 every 48, 50 every 4 hours. The Tasks tab shows how often and about how
 many requests a day. Nothing is asked of Connecteam while no form is chosen, and reading the
 form list costs a few more a day. The checks use the reports share of Staff Access's Connecteam
@@ -1606,8 +1606,10 @@ expires. One that can't be had says **Photo unavailable**.
 
 **Two-way sync with Connecteam Quick Tasks.** Off until you turn it on, on the **Tasks** tab:
 
-1. Check that Staff Access's Connecteam app has **quick_tasks.read**, **quick_tasks.write** and
-   **quick_tasks.delete** (and **forms.write** for forms that follow a status). **Test** shows
+1. Check that Staff Access's Connecteam app has **quick_tasks.read** and **quick_tasks.write**
+   (and **forms.write** for forms that follow a status). **quick_tasks.delete** isn't needed: it
+   only lets Won't do and the bin remove a task nobody is assigned to (Connecteam can't close
+   those); without it they stay on the board. **Test** shows
    which it has, and reads the list of boards. A Connecteam app's permissions can't be changed:
    if one is missing, make a new OAuth app with all of them and enter its keys in Settings →
    Connections.

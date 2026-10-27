@@ -2436,14 +2436,13 @@ def report_context(report, member: dict, manage: bool) -> "reports_kit.Context":
         staff=staff, tz=report_zone(), manage=manage)
 
 
-async def api_report_data(request: web.Request):
-    """Run a report's data(ctx, params) for the person signed in."""
-    device, member, manage = report_caller(request)
-    report = REPORTS[request.match_info["key"]]
-    if not db.settings().get("wb_time_zone"):
-        await ha_time_zone()   # so report_zone() knows Home Assistant's zone
-    ctx = report_context(report, member, manage)
-    params = reports_kit.clean_params(report, request.query)
+REPORT_WAIT = 20         # seconds a request waits for a report before saying "still working on it"
+REPORT_KEEP = 120        # seconds a finished report waits to be picked up
+report_jobs: dict[tuple, dict] = {}   # (report, person, manage, params) -> {"task", "done"}
+
+
+async def run_report(report, ctx, params: dict, manage: bool) -> tuple[int, str]:
+    """A report's data(ctx, params), as (HTTP status, JSON body)."""
     try:
         data = await report.data(ctx, params)
         if not isinstance(data, dict):
@@ -2451,15 +2450,46 @@ async def api_report_data(request: web.Request):
         # Someone who can't manage the report gets the settings data() sent (trimmed to what
         # they may see, when it trims them), not all that's stored.
         shown = data["settings"] if not manage and isinstance(data.get("settings"), dict) else ctx.settings
-        body = json.dumps({"data": data, "settings": shown, "manage": manage, "params": params})
+        return 200, json.dumps({"data": data, "settings": shown, "manage": manage, "params": params})
     except ctdata.Unavailable as err:
-        return bad_request(str(err), 503, unavailable=True)
+        return 503, json.dumps({"error": str(err), "unavailable": True})
     except ValueError as err:
-        return bad_request(str(err)[:300])
+        return 400, json.dumps({"error": str(err)[:300]})
     except Exception:  # noqa: BLE001 - a report's own bug mustn't take the app down
         log.exception("Report %s failed", report.key)
-        return bad_request("This report couldn't be made. Try again later.", 500)
-    return web.Response(text=body, content_type="application/json")
+        return 500, json.dumps({"error": "This report couldn't be made. Try again later."})
+
+
+async def api_report_data(request: web.Request):
+    """Run a report's data(ctx, params) for the person signed in. A first look can need more
+    Connecteam requests than its lane allows in a minute, longer than the tunnel waits (Cloudflare
+    gives up after 100 seconds), so after REPORT_WAIT it carries on in the background and the
+    answer is 202 {"pending": true}: the staff app asks again with the same params and gets it
+    once it's ready."""
+    device, member, manage = report_caller(request)
+    report = REPORTS[request.match_info["key"]]
+    params = reports_kit.clean_params(report, request.query)
+    now = time.monotonic()
+    for k, job in list(report_jobs.items()):
+        if job["done"] and now - job["done"] > REPORT_KEEP:
+            del report_jobs[k]
+    key = (report.key, member["id"], manage, json.dumps(params, sort_keys=True))
+    job = report_jobs.get(key)
+    if job is None:
+        if len(report_jobs) >= 50:
+            return bad_request("Reports are busy. Try again in a minute.", 503)
+        if not db.settings().get("wb_time_zone"):
+            await ha_time_zone()   # so report_zone() knows Home Assistant's zone
+        task = asyncio.create_task(run_report(report, report_context(report, member, manage),
+                                              params, manage))
+        job = report_jobs[key] = {"task": task, "done": None}
+        task.add_done_callback(lambda _t, job=job: job.update(done=time.monotonic()))
+    try:
+        status, body = await asyncio.wait_for(asyncio.shield(job["task"]), REPORT_WAIT)
+    except TimeoutError:
+        return web.json_response({"pending": True}, status=202)
+    report_jobs.pop(key, None)
+    return web.Response(text=body, status=status, content_type="application/json")
 
 
 async def read_upload_file(request: web.Request, limit: int) -> tuple[str, bytes]:

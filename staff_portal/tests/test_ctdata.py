@@ -422,10 +422,10 @@ def test_dates_follow_the_property_zone_across_midnight(tmp_path):
 
 
 def test_the_lane_maths_leaves_the_clock_checks_room(tmp_path):
-    """Reports (15 a minute, 1,000 a day) and HR (6 and 500) fit inside Staff Access's 30 and
+    """Reports (40 a minute, 2,000 a day) and HR (6 and 500) fit inside Staff Access's 60 and
     5,000, and together never take the clock checks' last 10 of a minute."""
-    assert (connecteam.REPORTS_MINUTE_CAP, connecteam.REPORTS_DAILY_CAP) == (15, 1000)
-    assert (connecteam.MINUTE_CAP, connecteam.DAILY_CAP) == (30, 5000)
+    assert (connecteam.REPORTS_MINUTE_CAP, connecteam.REPORTS_DAILY_CAP) == (40, 2000)
+    assert (connecteam.MINUTE_CAP, connecteam.DAILY_CAP) == (60, 5000)
     assert connecteam.CLOCK_MINUTE_KEEP >= 10
     assert connecteam.REPORTS_MINUTE_CAP <= connecteam.MINUTE_CAP - connecteam.CLOCK_MINUTE_KEEP
     assert (connecteam.REPORTS_DAILY_CAP + connecteam.HR_DAILY_CAP
@@ -444,12 +444,15 @@ def test_the_lane_maths_leaves_the_clock_checks_room(tmp_path):
                 except connecteam.ReportsBusy:
                     break
                 spent += 1
-            # HR's 6 and reports' 14 make 20: neither lane gets more this minute...
-            assert spent == connecteam.MINUTE_CAP - connecteam.CLOCK_MINUTE_KEEP - connecteam.HR_MINUTE_CAP
+            # HR's 6 and reports' 40 make 46: neither lane gets more this minute...
+            assert spent == min(connecteam.REPORTS_MINUTE_CAP,
+                                connecteam.MINUTE_CAP - connecteam.CLOCK_MINUTE_KEEP - connecteam.HR_MINUTE_CAP)
             with pytest.raises(connecteam.HRBusy):
                 c.hr_room()
-            # ...and the clock checks still have 10.
-            for _ in range(connecteam.CLOCK_MINUTE_KEEP):
+            # ...and the clock checks still have the rest of the minute, at least 10.
+            left = connecteam.MINUTE_CAP - connecteam.HR_MINUTE_CAP - spent
+            assert left >= connecteam.CLOCK_MINUTE_KEEP
+            for _ in range(left):
                 c._spend()
             with pytest.raises(connecteam.ConnecteamError):
                 c._spend()

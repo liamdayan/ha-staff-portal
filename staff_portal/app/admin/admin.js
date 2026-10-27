@@ -2457,7 +2457,7 @@
   }
 
   // What checking the forms and the synced boards costs: they're checked less often as more are
-  // chosen, so together they never use more than about 300 of the 1,000 Connecteam requests a
+  // chosen, so together they never use more than about 300 of the 2,000 Connecteam requests a
   // day reports and tasks share. Changes the sync sends are on top, at most write_cap a day.
   function taskFormsCost() {
     const n = taskForms.forms.length;

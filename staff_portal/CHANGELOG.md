@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.1
+
+- **A report's first look no longer times out.** Fetching a whole month from Connecteam can take
+  longer than the 100 seconds Cloudflare waits, which showed Cloudflare's "524: A timeout
+  occurred". Now a report that takes more than 20 seconds carries on in the background, and the
+  staff app keeps asking until it's ready ("Still asking Connecteam…").
+- **Higher Connecteam limits, since Staff Access is the only thing using your account:** Staff
+  Access may now ask 60 times a minute (was 30), and reports and tasks 40 times a minute and
+  2,000 a day (was 15 and 1,000). The clock checks still always keep 10 a minute, and the daily
+  total stays at 5,000, half of what the Expert plan allows.
+- **The task sync doesn't need quick_tasks.delete any more.** Only quick_tasks.read and
+  quick_tasks.write are needed. Delete was only used for Won't do or the bin on a task nobody is
+  assigned to, which Connecteam can't close; without it, that task stays on the board and says
+  so. Tasks given to someone are still closed (archived) as before.
+
 ## 0.12.0
 
 **People in several departments**

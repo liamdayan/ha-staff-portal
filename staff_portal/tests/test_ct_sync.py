@@ -934,3 +934,34 @@ def test_a_followed_forms_status_written_here_isnt_undone_by_an_older_read(tmp_p
             await ctsync.follow_submissions(form, old, {}, main.report_zone(), time.time(), time.time())
             assert p.db.task(t["id"])["status"] == "doing"
     run(scenario())
+
+
+def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_path):
+    """quick_tasks.delete is optional: without it, Won't do on a task nobody is assigned to (a
+    draft, which Connecteam can't close) leaves the draft there, says so, and isn't tried again;
+    Test passes and says what it means."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        ct.scope = ALL_SCOPES.replace(" quick_tasks.delete", "")
+        async with p, ct:
+            ana = await p.sign_in(p.ana)
+            u = await p.add(ana, title="Sweep")
+            await ctsync.settle()
+            first = p.db.task(u["id"])["ct_task_id"]
+            await p.call("POST", f"/api/tasks/{u['id']}/status", ana, {"status": "wont"})
+            await sent(p)
+            assert not writes(ct, "DELETE") and p.db.task(u["id"])["ct_task_id"] == first
+            assert "quick_tasks.delete" in p.db.task(u["id"])["ct_note"]
+            await sent(p)
+            await poll(p)
+            assert not writes(ct, "DELETE") and p.db.task(u["id"])["status"] == "wont"
+            # An assigned task is archived as before: that needs no delete.
+            t = await p.add(ana, title="Count towels", assigned_id=p.ana)
+            await ctsync.settle()
+            await p.call("POST", f"/api/tasks/{t['id']}/status", ana, {"status": "wont"})
+            await sent(p)
+            remote = next(x for x in ct.board_tasks["501"] if x["id"] == p.db.task(t["id"])["ct_task_id"])
+            assert remote["isArchived"] is True
+            status, body = await p.admin_call("POST", "/api/tasks/sync/test")
+            assert body["ok"] and any(c["check"] == "Unassigned tasks" for c in body["checks"])
+    run(scenario())

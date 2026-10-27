@@ -1416,11 +1416,17 @@
     const slow = setTimeout(() => {
       if (rp === state && seq === state.seq) {
         state.body.prepend(h("p", { class: "rp-muted rp-slow", role: "status" },
-          "Still asking Connecteam. The first look at a week can take up to a minute."));
+          "Still asking Connecteam. The first look at a month can take a few minutes."));
       }
     }, 5000);
     const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
-    const res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
+    // A long first look carries on on the add-on (202): ask again until it's ready.
+    let res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
+    for (let tries = 0; res.status === 202 && res.data.pending && tries < 60; tries++) {
+      await new Promise((ok) => setTimeout(ok, 3000));
+      if (rp !== state || seq !== state.seq || state.open !== report) { clearTimeout(slow); return; }
+      res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
+    }
     clearTimeout(slow);
     if (rp !== state || seq !== state.seq || state.open !== report || rpAuthError(res)) return;
     state.body.classList.remove("rp-loading");

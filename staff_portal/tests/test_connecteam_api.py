@@ -426,8 +426,8 @@ def test_the_caps_and_how_the_shares_add_up():
     assert ct.daily_cap() == 5000                     # Enterprise: still 5,000
     ct.limits["day_limit"] = 100
     assert ct.daily_cap() == 50                       # SBP: half of 100
-    assert connecteam.MINUTE_CAP == 30 and connecteam.DAILY_CAP == 5000
+    assert connecteam.MINUTE_CAP == 60 and connecteam.DAILY_CAP == 5000
     reports = (4, 300)                                # the reports lane planned for 0.11.0
     assert connecteam.MINUTE_CAP - connecteam.HR_MINUTE_CAP - reports[0] >= 20
     assert connecteam.DAILY_CAP - connecteam.HR_DAILY_CAP - reports[1] >= 4200
-    assert connecteam.MINUTE_CAP <= 100 - connecteam.LOW_MINUTE_LEFT - 60   # the account keeps room
+    assert connecteam.MINUTE_CAP <= 100 - connecteam.LOW_MINUTE_LEFT - 30   # the account keeps room

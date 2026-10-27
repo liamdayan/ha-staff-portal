@@ -54,11 +54,11 @@ Staff Access has used REPORTS_STOP_SHARE of its daily cap. A refusal raises Repo
 "too many requests" pauses only that lane (reports_too_many); the clock checks carry on.
 
 How the shares add up (Expert: 100 a minute and 10,000 a day for the whole account): Staff
-Access takes at most 30 a minute and 5,000 a day. Inside that, the HR lane takes at most 6 a
-minute and 500 a day and the reports lane 15 a minute and 1,000 a day; both stop once Staff
+Access takes at most 60 a minute and 5,000 a day. Inside that, the HR lane takes at most 6 a
+minute and 500 a day and the reports lane 40 a minute and 2,000 a day; both stop once Staff
 Access has used half of its day, and together they never take the last CLOCK_MINUTE_KEEP (10)
-of a minute. So the clock checks always have at least 10 a minute and 3,500 a day, and the
-account's other integrations keep 70 a minute and 5,000 a day.
+of a minute. So the clock checks always have at least 10 a minute and 2,500 a day, and the
+account's other integrations keep 40 a minute and 5,000 a day.
 """
 
 import asyncio
@@ -79,7 +79,7 @@ API_OVERRIDE = os.environ.get("CONNECTEAM_API", "").rstrip("/")   # for testing
 STALE_MARGIN = 15 * 60       # trust the last answer this long past the next check when Connecteam is down
 FORCE_GAP = 30               # an on-demand check (sign-in or control) at most this often
 SKIP_WINDOW = 20 * 60        # an on-demand check this close before an hourly check replaces it
-MINUTE_CAP = 30              # requests a minute, at most (Expert allows 100 for the whole account)
+MINUTE_CAP = 60              # requests a minute, at most (Expert allows 100 for the whole account)
 DAILY_CAP = 5000             # requests a day, at most...
 DAILY_SHARE = 0.5            # ...and never more than this share of the account's daily limit
 POLL_SHARE = 0.15            # ...of which regular checks are planned to use at most this much
@@ -99,8 +99,8 @@ MAX_SHIFT_HOURS = 24         # an open shift older than this doesn't count (a fo
 HR_MINUTE_CAP = 6            # the HR portal's lane: requests a minute...
 HR_DAILY_CAP = 500           # ...and a day...
 HR_STOP_SHARE = 0.5          # ...and none once Staff Access has used this share of its daily cap
-REPORTS_MINUTE_CAP = 15      # reports and tasks (ctdata.py): requests a minute...
-REPORTS_DAILY_CAP = 1000     # ...and a day...
+REPORTS_MINUTE_CAP = 40      # reports and tasks (ctdata.py): requests a minute...
+REPORTS_DAILY_CAP = 2000     # ...and a day...
 REPORTS_STOP_SHARE = 0.5     # ...and none once Staff Access has used this share of its daily cap
 CLOCK_MINUTE_KEEP = 10       # HR and reports together never take the last this many of a minute
 FIELDS_TTL = 24 * 3600       # how long the list of profile fields (custom fields) is reused
