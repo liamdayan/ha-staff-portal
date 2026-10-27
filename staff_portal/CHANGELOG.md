@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.12.0
+
+**People in several departments**
+
+- **Everyone is in every department whose Connecteam smart group they're in,** and you can tick
+  several in a person's Edit dialog.
+- **A person's role, key card and clock-in rule each come from the first department in the list
+  that sets one.** Departments that leave it alone are skipped, so "All users group" no longer
+  blocks Front Desk's role. Anything set by hand on the person still wins.
+- **Every department a person is in counts** for reports, tasks and the attendance report.
+- **Hide instead of Delete** for departments made from smart groups. A hidden department gives
+  nothing, isn't offered anywhere and is never made again. Hidden ones fold away under "Hidden
+  smart groups", each with Show.
+- **Connecteam's "All users group" and "All admins group" are hidden automatically,** including on
+  existing installs when you haven't given them a role, key card or clock-in rule.
+- **Each department shows how many people are in it and what it actually sets.** Two smart groups
+  with the same name show their group ID and size, so you can tell them apart.
+- **A start page per department:** where the staff app opens when someone in it signs in (a page,
+  Tasks, Reports or Wristbands). Someone in several departments gets the first one that sets it,
+  and anything they've opened since signing in still wins.
+
+**Tasks and Connecteam**
+
+- **Optional two-way sync with Connecteam Quick Tasks** (Tasks tab, off until you turn it on).
+  Each Connecteam board goes to a department or Everyone. Title, notes, due date, assignee,
+  status, Won't do and the bin sync both ways; the newer change wins and the history says where
+  it came from. Tasks made on those boards in Connecteam show up for the board's department,
+  given to the linked person.
+- **A form can follow its Status manager field** (such as the Maintenance Request's blank,
+  "Working on it" and "Done"): open submissions from the last month show as tasks for the whole
+  department, they drop off once they're Done, and changing the task's status writes it back to
+  the form in Connecteam.
+- **Photos sent with a form show on its task** (tap to enlarge). The add-on fetches them itself,
+  only from Connecteam's own sites, and keeps a smaller copy.
+- **New Connecteam permissions for this:** quick_tasks.read, quick_tasks.write,
+  quick_tasks.delete and forms.write. The Tasks tab's Test button says which are missing.
+- **Its own budget:** reading boards and followed forms shares the forms' 300 requests a day, and
+  changes sent to Connecteam use at most 200 more. A refusal or "too many requests" pauses only
+  the task sync, with the reason on the Tasks tab; the clock checks carry on. A restore leaves the
+  sync off until you turn it back on.
+
+**Reports**
+
+- **Reports read Connecteam a whole month at a time,** so switching between Week, Pay period and
+  Month is instant and costs nothing more. This month is read again at most every 10 minutes,
+  earlier months every 6 hours.
+- **People archived in Connecteam show their names** instead of "User 123".
+- **A shift's missed forms show on that day** in a person's day-by-day view.
+- **A timed form has its own checked hours** (Checked from, Until) and its own rate for the rest of
+  the night: 0, the default for new forms, means not checked, and those hours are left off its
+  grid.
+- **Drop-downs in the Attendance report show their arrow.**
+
+**HR portal: a new look**
+
+- **The HR portal now looks like the staff app,** in light and dark: a top bar and a tab bar on
+  phones, a sidebar on computers, and cards, rows and sheets throughout. Documents, certificates,
+  discipline, the point system and reviews all use it. Nothing it does has changed.
+- **Dates start at HR's today, not the device's:** the date on a document, a review's meeting date
+  and an extra review's due date.
+- **"An OLCC Service Permit"** (it said "a OLCC").
+- **Fixed:** a person's Reviews card showed "[object HTMLLabelElement]" instead of its control.
+
+**Staff**
+
+- **Typing a PIN for someone turned off for having no kiosk code ticks Can sign in for you,** and a
+  turned-off person's row says how to turn them back on.
+
 ## 0.11.0
 
 **Reports in the staff app**
