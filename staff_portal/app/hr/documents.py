@@ -401,7 +401,7 @@ def shown_to(rel: str | None, doc: dict, k: dict) -> bool:
 
 def copies_on(settings: dict) -> bool:
     """The owner's switch for Connecteam document copies (Settings, Connections)."""
-    return settings.get("hr_connecteam_documents") == "1" and settings.get("connecteam_enabled") == "1"
+    return False   # the owner chose read-only Connecteam for HR: Google Drive keeps every file
 
 
 # ---------------------------------------------------------------- documents

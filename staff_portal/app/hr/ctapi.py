@@ -392,17 +392,16 @@ class HRConnecteam:
     # ------------------------------------------------------------ test and status
 
     async def test(self) -> dict:
-        """The HR settings' Test: the chat sender, and the documents (each {"ok", "detail"}).
-        Lifts a stop first. Two requests (plus the access token)."""
+        """The HR settings' Test: whether HR can read Connecteam's people ({"ok", "detail"}). The
+        HR portal only reads from Connecteam: no chat messages and no certificate copies (the
+        owner's choice). Lifts a stop first. One request (plus the access token)."""
         self.stopped = dict.fromkeys(FEATURES)
         self._publisher = None
-        results = {}
-        for feature, check in (("chat", self._test_chat), ("documents", self._test_documents)):
-            try:
-                results[feature] = {"ok": True, "detail": await check()}
-            except CTError as err:
-                results[feature] = {"ok": False, "detail": err.message}
-        return results
+        try:
+            people = await self.ct.users(hr=True)
+            return {"people": {"ok": True, "detail": f"Can read Connecteam's people ({len(people)} found)."}}
+        except Exception as err:  # noqa: BLE001 - any refusal is shown as it is
+            return {"people": {"ok": False, "detail": str(err) or "Connecteam refused."}}
 
     async def _test_chat(self) -> str:
         await self.publisher_id()

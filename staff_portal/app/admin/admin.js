@@ -7180,14 +7180,10 @@
 
   // Whether it works, in a few words, with its badge color (the HR tab shows the same).
   function hrctState(c) {
-    const on = c.chat || c.documents;
-    const stopped = [c.chat && c.stopped?.chat, c.documents && c.stopped?.documents].find(Boolean);
-    if (!state.connecteam?.enabled) return [on ? "Connecteam is off" : "Not set up", on ? "locked" : ""];
-    if (stopped) return ["Refused by Connecteam", "locked"];
-    if (!on) return [c.client_id && c.secret_set ? "Saved; nothing turned on" : "Not set up", ""];
+    if (!state.connecteam?.enabled) return ["Not set up", ""];
     if (c.paused) return ["Waiting", "pending"];
-    const what = [c.chat ? "Chat" : null, c.documents ? "certificate copies" : null].filter(Boolean).join(" and ");
-    return [`${what.charAt(0).toUpperCase()}${what.slice(1)} on`, state.hr?.status === "on" ? "active" : ""];
+    return [c.client_id && c.secret_set ? "Own read-only app" : "Uses the connection above",
+      state.hr?.status === "on" ? "active" : ""];
   }
 
   function fillHrConnecteam() {
@@ -7197,19 +7193,15 @@
       f.hr_connecteam_client_id.value = c.client_id || "";
       f.hr_connecteam_client_secret.value = "";
       f.hr_connecteam_client_secret.placeholder = c.secret_set ? "Saved — leave blank to keep" : "Blank: the connection above";
-      f.hr_connecteam_chat.checked = !!c.chat;
-      f.hr_connecteam_documents.checked = !!c.documents;
       f.hr_connecteam_clear_secret.checked = false;
       $("#hrct-clear-row").hidden = !c.secret_set;
     }
     const connState = hrctState(c);
     showConnection($("#conn-hr-connecteam"), connState, requestsText(c.used_today, "today", c.daily_cap));
     showState($("#hr-ct-state"), connState);
-    const stopped = [c.chat && c.stopped?.chat, c.documents && c.stopped?.documents].filter(Boolean);
     $("#hrct-status").textContent = !state.connecteam?.enabled
       ? "Turn on Connecteam above first: the HR portal uses it."
-      : stopped.length ? `${[...new Set(stopped)].join(" ")} Fix it, save, then click Test connection.`
-        : c.paused ? c.paused
+      : c.paused ? c.paused
           : state.hr?.status !== "on" ? "The HR portal is off, so nothing is sent until you turn it on (HR portal tab)."
             : "";
     $("#hrct-test").disabled = !state.connecteam?.enabled;
@@ -7221,9 +7213,7 @@
     run(async () => {
       await api("PUT", "api/hr/connecteam", { hr_connecteam_client_id: f.hr_connecteam_client_id.value,
         hr_connecteam_client_secret: f.hr_connecteam_client_secret.value,
-        hr_connecteam_clear_secret: f.hr_connecteam_clear_secret.checked ? "1" : "0",
-        hr_connecteam_chat: f.hr_connecteam_chat.checked ? "1" : "0",
-        hr_connecteam_documents: f.hr_connecteam_documents.checked ? "1" : "0" });
+        hr_connecteam_clear_secret: f.hr_connecteam_clear_secret.checked ? "1" : "0" });
       hrctDirty = false;
       await load();
       fillHrConnecteam();
@@ -7238,8 +7228,7 @@
     list.hidden = false;
   }
 
-  // Tests what's saved: whether chat can be sent as "Hot Lake HR", and whether Connecteam's
-  // documents can be read (the HR & Skills hub). It lifts a stop.
+  // Tests what's saved: whether the HR portal can read Connecteam's people. It lifts a stop.
   $("#hrct-test").addEventListener("click", () => run(async () => {
     if (hrctDirty) throw new Error("Click Save Connecteam for HR first: the test uses what's saved.");
     const button = $("#hrct-test");

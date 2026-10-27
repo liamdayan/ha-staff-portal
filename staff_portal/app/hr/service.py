@@ -129,11 +129,7 @@ class HRService:
         """Whether the owner turned on Connecteam chat messages (Settings → Connections →
         Connecteam for HR) with keys to send them: the HR connection's own app, or else Staff
         Access's (hr/ctapi.py uses that when HR has none)."""
-        s = self.main_settings()
-        own = s.get("hr_connecteam_client_id") and s.get("hr_connecteam_client_secret")
-        main = s.get("connecteam_client_id") and s.get("connecteam_client_secret")
-        return (s.get("hr_connecteam_chat") == "1" and s.get("connecteam_enabled") == "1"
-                and bool(own or main))
+        return False   # the owner chose no Connecteam chat: the portal's inbox only
 
     def chat_problem(self) -> str | None:
         """Why chat messages aren't going out although they're on: Connecteam refused them (a

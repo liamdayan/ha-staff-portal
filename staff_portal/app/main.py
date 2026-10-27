@@ -158,7 +158,7 @@ def hr_connecteam_settings() -> dict:
     s = db.settings()
     return {"client_id": s.get("hr_connecteam_client_id", ""),
             "client_secret": s.get("hr_connecteam_client_secret", ""),
-            "documents": s.get("hr_connecteam_documents") == "1"}
+            "documents": False}   # no certificate copies: HR only reads from Connecteam
 
 
 # The HR portal's own Connecteam requests (chat messages, certificate copies), in the HR lane
@@ -5875,8 +5875,7 @@ def hr_brief() -> dict:
     return {"status": hr_service.status(), "enabled": s.get("hr_enabled") == "1",
             "connecteam": {"client_id": s.get("hr_connecteam_client_id", ""),
                            "secret_set": bool(s.get("hr_connecteam_client_secret")),
-                           "chat": s.get("hr_connecteam_chat") == "1",
-                           "documents": s.get("hr_connecteam_documents") == "1",
+                           "chat": False, "documents": False,
                            "stopped": lane["stopped"], "paused": lane["paused"],
                            "used_today": lane["used_today"], "daily_cap": HR_DAILY_CAP}}
 
@@ -6058,9 +6057,6 @@ async def admin_hr_connecteam(request: web.Request):
         values["hr_connecteam_client_secret"] = ""
     if "hr_connecteam_client_secret" in values and (refusal := hr_key_locked()):
         return refusal
-    for key in ("hr_connecteam_chat", "hr_connecteam_documents"):
-        if key in data:
-            values[key] = "1" if data[key] in (True, "1", "on", "true") else "0"
     s = db.settings()
     changed = {k for k, v in values.items() if s.get(k, "") != v}
     db.update_settings(values)
@@ -6076,17 +6072,15 @@ hr_connecteam_tested = {"at": 0.0}
 
 
 async def admin_hr_connecteam_test(request: web.Request):
-    """Test the Connecteam connection for HR: whether chat messages can be sent as "Hot Lake HR"
-    and whether Connecteam's documents can be read (the HR & Skills hub), each with a plain
-    result. It lifts a stop, and works while the HR portal is off (the owner asked)."""
+    """Test the Connecteam connection for HR: whether it can read Connecteam's people (all the HR
+    portal uses Connecteam for). It lifts a stop, and works while the HR portal is off."""
     if db.settings().get("connecteam_enabled") != "1":
         return bad_request("Turn on Connecteam first (Settings → Connections).")
     if time.time() - hr_connecteam_tested["at"] < HR_CONNECTEAM_TEST_GAP:
         return bad_request("Wait a few seconds before testing again.", 429)
     hr_connecteam_tested["at"] = time.time()
     results = await hr_connecteam.test()
-    checks = [{"check": "Chat messages", **results["chat"]},
-              {"check": "Certificate copies", **results["documents"]}]
+    checks = [{"check": "Reading people", **results["people"]}]
     failed = [c for c in checks if not c["ok"]]
     hr_connection_log(request, "Tested the Connecteam connection for HR",
                       detail="Every check passed." if not failed else
