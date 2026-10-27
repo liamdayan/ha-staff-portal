@@ -186,6 +186,12 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def dept_of(member: dict):
+    """A person's first department as stored (None: none), for tests from one department each."""
+    from db import department_list
+    return (department_list(member["department_ids"]) or [None])[0]
+
+
 def day_pass(name="Smith party", count=2, **extra):
     return {"type": "day_pass", "name": name, "count": count, **extra}
 

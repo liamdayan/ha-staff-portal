@@ -13,7 +13,7 @@ import json
 import time
 
 from test_staffcards_server import FakeConnecteam, by_name, connecteam_on, ct_user, department, sync
-from test_wristbands_server import Portal, run
+from test_wristbands_server import dept_of, Portal, run
 
 import main  # noqa: E402
 import transfer  # noqa: E402
@@ -67,7 +67,7 @@ def test_precedence_matrix(tmp_path):
             itertools.product((0, 1), (0, 1), (None, 1, 0, "none"))):
         staff_id = db.create_staff(f"Person {n}", f"{1000 + n}")
         db.update_staff(staff_id, connecteam_user_id=str(n), clock_in_set=set_by_hand,
-                        require_clock_in=own, department_id=None if dept == "none" else rules[dept])
+                        require_clock_in=own, department_ids=[] if dept == "none" else [rules[dept]])
         expected = ((bool(own), "person") if set_by_hand
                     else (bool(dept), "department") if dept in (0, 1)
                     else (bool(own), "default"))
@@ -108,7 +108,7 @@ def test_departments_set_it_and_the_staff_tab_says_where_it_comes_from(tmp_path,
             ana = await staff_tab(p, p.ana)
             assert (ana["clock_in"], ana["clock_in_from"], ana["clock"]) == (False, "default", None)
             # Her department says everyone must be clocked in: she must, and she's not on the clock.
-            p.db.update_staff(p.ana, department_id=house)
+            p.db.update_staff(p.ana, department_ids=[house])
             await p.admin_call("PUT", f"/api/departments/{house}", {"clock_in": True})
             ana = await staff_tab(p, p.ana)
             assert (ana["clock_in"], ana["clock_in_from"], ana["clock"]) == (True, "department", "out")
@@ -125,7 +125,7 @@ def test_departments_set_it_and_the_staff_tab_says_where_it_comes_from(tmp_path,
             assert (await p.admin_call("PATCH", f"/api/staff/{p.ana}", {"clock_in_set": False}))[0] == 200
             ana = await staff_tab(p, p.ana)
             assert (ana["clock_in"], ana["clock_in_from"], ana["clock_in_set"]) == (True, "department", 0)
-            assert p.db.activity(1)[0]["detail"] == "clock-in rule from their department"
+            assert p.db.activity(1)[0]["detail"] == "clock-in rule from their departments"
 
             # Saving Edit with the switch as it shows changes nothing, here or when she moves to
             # a department that leaves it to her (the switch then follows, untouched).
@@ -164,8 +164,8 @@ def test_a_department_change_takes_effect_at_the_next_sign_in(tmp_path, monkeypa
         checks = clock(p, monkeypatch, clocked_in={"20"})
         house = department(p, "Housekeeping")
         # Ana (not on the clock) and Bob (on it) are in Housekeeping; neither must clock in.
-        p.db.update_staff(p.ana, connecteam_user_id="10", require_clock_in=0, department_id=house)
-        p.db.update_staff(p.bob, connecteam_user_id="20", require_clock_in=0, department_id=house)
+        p.db.update_staff(p.ana, connecteam_user_id="10", require_clock_in=0, department_ids=[house])
+        p.db.update_staff(p.bob, connecteam_user_id="20", require_clock_in=0, department_ids=[house])
         async with p:
             assert not main.connecteam_wanted()
             assert (await unlock(p, p.ana))[0] == 200
@@ -247,7 +247,7 @@ def test_the_staff_sync_never_changes_it(tmp_path):
                         ct_user(802, "Gil", code="6666", groups=[22])]
             await sync(p)
             eve, gil = p.db.staff(eve["id"]), p.db.staff(gil["id"])
-            assert eve["department_id"] == gil["department_id"] == managers
+            assert dept_of(eve) == dept_of(gil) == managers
             assert p.db.clock_in_rule(eve) == (True, "default")
             assert p.db.clock_in_rule(gil) == (True, "person")
             assert p.db.department(managers)["clock_in"] is None
@@ -262,7 +262,7 @@ def test_backups_exports_and_imports_carry_it(tmp_path):
         house = department(p, "Housekeeping", clock_in=1)
         spa = department(p, "Spa", clock_in=0)
         front = department(p, "Front Desk")
-        p.db.update_staff(p.cy, department_id=house, connecteam_user_id="77", require_clock_in=0,
+        p.db.update_staff(p.cy, department_ids=[house], connecteam_user_id="77", require_clock_in=0,
                           clock_in_set=1)
         async with p:
             status, backup = await p.admin_call("GET", "/api/backup")

@@ -13,7 +13,7 @@ import time
 
 from aiohttp import web
 
-from test_wristbands_server import (DOORS, FakeTTHotel, Portal, Simulator, free_port, run,
+from test_wristbands_server import (dept_of, DOORS, FakeTTHotel, Portal, Simulator, free_port, run,
                                     staff_card, tt_lock, tthotel_account, waiting_for)
 
 import connecteam  # noqa: E402
@@ -144,12 +144,12 @@ def test_departments_from_the_dashboard(tmp_path):
                                        {"department_id": 999}))[0] == 400
             status, state = await p.admin_call("GET", "/api/state")
             ana = next(m for m in state["staff"] if m["id"] == p.ana)
-            assert ana["department_name"] == "Housekeeping" and ana["key_cards"] == 0
+            assert ana["department_ids"] == [house] and ana["key_cards"] == 0
             assert [d["name"] for d in state["departments"]] == ["Spa", "Housekeeping"]
             assert next(d for d in state["departments"] if d["id"] == house)["staff_count"] == 1
             # Deleting one leaves its people with no department.
             assert (await p.admin_call("DELETE", f"/api/departments/{house}"))[0] == 200
-            assert p.db.staff(p.ana)["department_id"] is None
+            assert dept_of(p.db.staff(p.ana)) is None
             assert ("Admin", "Deleted department Housekeeping", True) in p.activity()
             # A damaged template makes no card, never a wider one.
             p.db.conn.execute("UPDATE departments SET card_access = '[{\"level\": \"all\"' "
@@ -185,19 +185,19 @@ def test_connecteam_sync_adds_updates_and_turns_off(tmp_path):
             assert p.db.activity(1)[0]["detail"] == (
                 "5 added, 1 updated, 2 without a kiosk code, 1 waiting to be linked (same name as "
                 "someone here)")
-            assert ("Admin", "Moved Ana to Managers", True) in p.activity()
+            assert ("Admin", "Ana's departments: Managers", True) in p.activity()
             assert not any(m["name"] == "Bob (2)" for m in p.db.staff_list())
             eve, bob2, finn, gus, hal = (by_name(p, n) for n in
                                          ("Eve Adams", "Bo", "Finn", "Gus", "Hal"))
             assert (eve["status"], eve["connecteam_auto"], eve["require_clock_in"]) == ("active", 1, 1)
-            assert eve["department_id"] == house and eve["role_id"] == p.front_desk
-            assert hal["department_id"] == managers and hal["role_id"] == p.manager
+            assert dept_of(eve) == house and eve["role_id"] == p.front_desk
+            assert dept_of(hal) == managers and hal["role_id"] == p.manager
             assert check_pin("5555", p.db.staff(eve["id"])["pin_hash"])
             assert eve["pin_from_connecteam"] == 1 and bob2["status"] == "active"
             for m in (finn, gus):
                 assert m["status"] == "disabled" and m["connecteam_note"] == main.NO_KIOSK_CODE
             ana = p.db.staff(p.ana)
-            assert ana["connecteam_auto"] == 0 and ana["department_id"] == managers
+            assert ana["connecteam_auto"] == 0 and dept_of(ana) == managers
             assert ana["role_id"] == p.front_desk and check_pin("1111", ana["pin_hash"])
             assert ct.count("/users/v1/users") == 1
 
@@ -225,7 +225,7 @@ def test_connecteam_sync_adds_updates_and_turns_off(tmp_path):
                               "no_code": 0, "waiting": 1, "departments_added": 0,
                               "departments_renamed": 0}
             eve = p.db.staff(eve["id"])
-            assert eve["department_id"] == managers                # follows the smart group
+            assert dept_of(eve) == managers                # follows the smart group
             assert eve["role_id"] == p.no_cards                    # but not the role set by hand
             assert eve["require_clock_in"] == 0                    # nor the clock-in override
             assert check_pin("5556", eve["pin_hash"])               # the PIN follows the code
@@ -377,8 +377,8 @@ def test_key_cards_made_from_the_staff_tab(tmp_path):
             house = department(p, "Housekeeping", card_access=FLOOR_ONE, card_days=10,
                                card_lockout=0)
             plain = department(p, "Kitchen")
-            p.db.update_staff(p.cy, department_id=house)
-            p.db.update_staff(p.dee, department_id=plain)
+            p.db.update_staff(p.cy, department_ids=[house])
+            p.db.update_staff(p.dee, department_ids=[plain])
             async with p:
                 # No department, or one without a key card template: nothing to make.
                 for who in (p.ana, p.dee):
@@ -460,7 +460,7 @@ def test_lost_cards_notice_and_staff_app_revoke(tmp_path):
             p = Portal(tmp_path, encoder_url=f"ws://127.0.0.1:{sim._runner.addresses[0][1]}")
             tthotel_account(p)
             house = department(p, "Housekeeping", card_access=FLOOR_ONE, card_days=10)
-            p.db.update_staff(p.cy, department_id=house)
+            p.db.update_staff(p.cy, department_ids=[house])
             async with p:
                 job, lost = await make_card(p, sim, f"/api/staff/{p.cy}/keycard")
                 lost_id = card_id(p, lost)
@@ -684,7 +684,7 @@ def test_departments_and_new_staff_fields_in_backups(tmp_path):
         p = Portal(tmp_path)
         house = department(p, "Housekeeping", smart_group_id="11", role_id=p.front_desk,
                            card_access=FLOOR_ONE, card_days=14, card_lockout=0)
-        p.db.update_staff(p.cy, department_id=house, connecteam_user_id="77", connecteam_auto=1,
+        p.db.update_staff(p.cy, department_ids=[house], connecteam_user_id="77", connecteam_auto=1,
                           clock_in_set=1, role_set=1, pin_from_connecteam=1,
                           connecteam_note=main.NO_KIOSK_CODE)
         p.db.update_settings({"wb_remote_lockout": "1", "wb_remote_lockout_tested": "1700000000",
@@ -702,7 +702,7 @@ def test_departments_and_new_staff_fields_in_backups(tmp_path):
             assert dept["card_access"] == FLOOR_ONE and dept["smart_group_id"] == "11"
             assert dept["role_id"] == p.front_desk and dept["card_lockout"] == 0
             cy = p.db.staff(p.cy)
-            assert (cy["department_id"], cy["connecteam_auto"], cy["clock_in_set"],
+            assert (dept_of(cy), cy["connecteam_auto"], cy["clock_in_set"],
                     cy["role_set"], cy["pin_from_connecteam"], cy["connecteam_note"]) == (
                 house, 1, 1, 1, 1, main.NO_KIOSK_CODE)
             assert p.db.settings()["connecteam_auto_staff"] == "1"
@@ -714,14 +714,14 @@ def test_departments_and_new_staff_fields_in_backups(tmp_path):
             old = json.loads(json.dumps(backup))
             old.pop("departments")
             for row in old["staff"]:
-                for key in ("department_id", "connecteam_auto", "clock_in_set", "role_set",
+                for key in ("department_ids", "connecteam_auto", "clock_in_set", "role_set",
                             "pin_from_connecteam", "connecteam_note"):
                     row.pop(key)
             status, reply = await p.admin_call("POST", "/api/restore", {"backup": old})
             assert status == 200, reply
             assert p.db.department(house)["name"] == "Housekeeping"
             cy = p.db.staff(p.cy)
-            assert (cy["department_id"], cy["connecteam_auto"], cy["role_set"]) == (None, 0, 0)
+            assert (dept_of(cy), cy["connecteam_auto"], cy["role_set"]) == (None, 0, 0)
 
             # Damaged templates in a file make no card; repeated smart groups are dropped.
             bad = json.loads(json.dumps(backup))
@@ -756,7 +756,7 @@ def test_departments_and_new_staff_fields_in_backups(tmp_path):
                 assert names == ["Housekeeping", "Housekeeping (imported)"]
                 assert q.db.departments()[1]["smart_group_id"] is None   # one group, one department
                 result = transfer.import_staff(q.db, staff, "replace")
-                assert q.db.staff(q.cy)["department_id"] == dept["id"]
+                assert dept_of(q.db.staff(q.cy)) == dept["id"]
                 assert result["missing_departments"] == []
                 assert q.db.staff(q.cy)["connecteam_auto"] == 0        # imports are by hand
             q.db.conn.close()
@@ -826,7 +826,7 @@ def test_sync_leaves_people_with_no_matching_group_where_they_are(tmp_path):
         async with FakeConnecteam(users) as ct, p:
             await sync(p)
             eve, ivy = by_name(p, "Eve"), by_name(p, "Ivy")
-            assert (eve["department_id"], eve["role_id"]) == (managers, p.manager)
+            assert (dept_of(eve), eve["role_id"]) == (managers, p.manager)
             # Ivy's department chosen by hand on the Staff tab: the sync leaves it so.
             assert (await p.admin_call("PATCH", f"/api/staff/{ivy['id']}",
                                        {"department_id": spa}))[0] == 200
@@ -835,8 +835,8 @@ def test_sync_leaves_people_with_no_matching_group_where_they_are(tmp_path):
             assert (await sync(p))["updated"] == 1                # Ivy's role, from Spa
             eve, ivy = p.db.staff(eve["id"]), p.db.staff(ivy["id"])
             # No matching group: left as she was.
-            assert (eve["department_id"], eve["role_id"]) == (managers, p.manager)
-            assert (ivy["department_id"], ivy["role_id"]) == (spa, p.front_desk)
+            assert (dept_of(eve), eve["role_id"]) == (managers, p.manager)
+            assert (dept_of(ivy), ivy["role_id"]) == (spa, p.front_desk)
             # A role an admin chose stays.
             await p.admin_call("PATCH", f"/api/staff/{eve['id']}", {"role_id": p.front_desk})
             ct.users = users
@@ -847,9 +847,9 @@ def test_sync_leaves_people_with_no_matching_group_where_they_are(tmp_path):
             assert (await p.admin_call("PATCH", f"/api/staff/{ivy['id']}",
                                        {"department_set": False}))[0] == 200
             ivy = p.db.staff(ivy["id"])
-            assert (ivy["department_id"], ivy["department_set"]) == (managers, 0)
+            assert (dept_of(ivy), ivy["department_set"]) == (managers, 0)
             assert len(ct.calls) == calls
-            assert ("Admin", "Ivy's department follows Connecteam again", True) in p.activity()
+            assert ("Admin", "Ivy's departments follow Connecteam again", True) in p.activity()
     run(scenario())
 
 

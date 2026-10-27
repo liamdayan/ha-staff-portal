@@ -622,6 +622,10 @@
   // ("wristbands", "tasks" or "reports"), or null.
   const view = { pageId: session.get("page"), detail: null,
     tool: ["wristbands", "tasks", "reports"].includes(session.get("tool")) ? session.get("tool") : null };
+  // The sign-in a page or tool was last chosen in (or the start page applied in): a department's
+  // start page opens once per sign-in, and never over something chosen in it.
+  const START_KEY = "start_for";
+  const signInMark = () => session.get(SESSION_KEY) || "device";
   let lastData = null;
 
   // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
@@ -695,9 +699,32 @@
     return shown;
   }
 
+  // Where to open: their department's start page (the server sends it only when they can see
+  // it), once per sign-in (mark), and never over a page or tool chosen in it (chosenIn: the
+  // sign-in the last choice was made in). One they can't open here: null, as it always was.
+  function startChoice(start, chosenIn, mark, tools, pageIds) {
+    if (!start || chosenIn === mark) return null;
+    if (start.tool && tools.includes(start.tool)) return { tool: start.tool };
+    if (start.page && pageIds.includes(start.page)) return { page: start.page };
+    return null;
+  }
+
   function render(data) {
     data.entities = data.entities.map(withExpected);
     lastData = data;
+    // Their department's start page, once per sign-in.
+    const start = startChoice(data.start, session.get(START_KEY), signInMark(), toolsFor(data),
+      (data.layout?.pages || []).map((p) => p.id));
+    session.set(START_KEY, signInMark());
+    if (start?.tool) {
+      view.tool = start.tool;
+      session.set("tool", start.tool);
+    } else if (start?.page) {
+      view.tool = null;
+      session.del("tool");
+      view.pageId = start.page;
+      session.set("page", start.page);
+    }
     lock.enabled = !!data.control_lock;
     lock.minutes = data.control_lock_minutes || 10;
     const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
@@ -1062,6 +1089,7 @@
     view.pageId = id;
     view.detail = null;
     session.set("page", id);
+    session.set(START_KEY, signInMark());
     history.replaceState(null, "", "/");
     window.scrollTo(0, 0);
     rerender();
@@ -1156,8 +1184,8 @@
 
   // Screens beside the pages that don't come from the layout. Wristbands is offered only on a
   // front-desk computer with a card encoder, to someone allowed to make at least one kind of
-  // card; Tasks to anyone signed in with their own PIN; Reports to someone signed in whose
-  // department may see at least one. The server says so with every poll, and checks again on
+  // card; Tasks to anyone signed in with their own PIN; Reports to someone signed in with a
+  // department that may see at least one. The server says so with every poll, and checks again on
   // every request.
   const TOOL_NAMES = { wristbands: "Wristbands", tasks: "Tasks", reports: "Reports" };
   const TOOL_PAUSE_MS = 60000;   // after the server turns a tool down, how long before offering it again
@@ -1188,6 +1216,7 @@
     view.tool = name;
     view.detail = null;
     session.set("tool", name);
+    session.set(START_KEY, signInMark());
     history.replaceState(null, "", "/");
     window.scrollTo(0, 0);
     rerender();
@@ -4444,8 +4473,8 @@
 
   // ---------------------------------------------------------------- tasks
 
-  // Each department's to-do list. Everyone signed in with their own PIN has it: tasks for their
-  // department, for Everyone, and given to them. One tap on a status chip moves a task on; a long
+  // Each department's to-do list. Everyone signed in with their own PIN has it: tasks for each of
+  // their departments, for Everyone, and given to them. One tap on a status chip moves a task on; a long
   // press (or right click) on it offers every status. Phones get a list grouped by status, wider
   // screens a board. The server checks every request; what's offered here is only a guide.
   const TK_STATUS = {
@@ -4657,7 +4686,7 @@
     const deptSelect = h("select", { class: "tk-filter-select", "aria-label": "Department" },
       h("option", { value: "all" }, "Department"),
       h("option", { value: "everyone" }, "Everyone"),
-      depts.filter((d) => used.has(d.id) || d.id === tk.data.me.department_id)
+      depts.filter((d) => used.has(d.id) || (tk.data.me.department_ids || []).includes(d.id))
         .map((d) => h("option", { value: String(d.id) }, d.name)));
     deptSelect.value = [...deptSelect.options].some((o) => o.value === String(f.dept)) ? String(f.dept) : "all";
     deptSelect.addEventListener("change", () => { f.dept = deptSelect.value; tkSaveFilter(); tkDraw(); });
@@ -4937,18 +4966,21 @@
     const me = state.data.me;
     const f = t ? { title: t.title, notes: t.notes, dept: t.department_id, who: t.assigned_id,
       date: t.due_date || "", time: t.due_time || "", urgent: t.priority === "urgent" }
-      : { title: "", notes: "", dept: me.department_id, who: null, date: "", time: "", urgent: false };
+      : { title: "", notes: "", dept: me.department_ids?.[0] ?? null, who: null, date: "", time: "", urgent: false };
     const title = h("input", { class: "field tk-title-input", type: "text", maxlength: "120", value: f.title,
       placeholder: "What needs doing?", "aria-label": "Title", enterkeyhint: "done", autocomplete: "off", "data-autofocus": "" });
     const dept = h("select", { class: "field", "aria-label": "Department" },
       h("option", { value: "" }, "Everyone"),
-      state.data.departments.map((d) => h("option", { value: String(d.id) }, d.name)));
+      state.data.departments.map((d) => h("option", { value: String(d.id) }, d.name)),
+      // A task's own department, hidden or gone since, stays as it is unless changed.
+      t && t.department_id != null && !state.data.departments.some((d) => d.id === t.department_id)
+        ? h("option", { value: String(t.department_id) }, t.department) : null);
     dept.value = f.dept == null ? "" : String(f.dept);
     const who = h("select", { class: "field", "aria-label": "Given to" });
     const fillPeople = () => {
       const chosen = who.value || (f.who == null ? "" : String(f.who));
       const d = dept.value ? Number(dept.value) : null;
-      const inDept = people.filter((p) => d != null && p.department_id === d);
+      const inDept = people.filter((p) => d != null && (p.department_ids || []).includes(d));
       const others = people.filter((p) => !inDept.includes(p));
       who.replaceChildren(h("option", { value: "" }, "Anyone"),
         inDept.length ? h("optgroup", { label: state.data.departments.find((x) => x.id === d)?.name || "Department" },

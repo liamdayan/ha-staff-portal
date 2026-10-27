@@ -21,7 +21,10 @@ What files never contain:
 - Door activity (TT Hotel's lock records): TT Hotel keeps its own six months of them.
 (A migration file, migrate.py, carries all of these but door activity, encrypted.)
 Departments (with their key card templates, and their clock-in rules from 0.9.0) are in backups;
-a backup from before departments leaves the ones here as they are. The activity log and the
+a backup from before departments leaves the ones here as they are. Each person's departments (a
+list; files from before people could be in several have one, which becomes their list) and whether each department is
+hidden travel too; a file from before hiding hides Connecteam's groups for everyone, as an
+install from then does once. The activity log and the
 record of wristbands and key cards made are in backups from 0.8.6 (schema 4), and a restore adds
 them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
@@ -47,8 +50,8 @@ import zlib
 
 from db import (ACTIVITY_MAX_ROWS, CARD_STATES, LOCKOUT_METHODS, LOCKOUT_STATUSES, PRIVATE_SETTINGS,
                 WB_ACTIVE, WB_CARD_STATUSES, WB_JOB_KINDS, WB_JOB_STATUSES, WB_JOBS_MAX_ROWS,
-                ActivityRow, CardJobRow, CardRow, LockoutRow, card_access_choice, page_choice,
-                pin_length)
+                ActivityRow, CardJobRow, CardRow, LockoutRow, built_in_group, card_access_choice,
+                department_list, page_choice, pin_length)
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
@@ -107,6 +110,7 @@ STOPPED_IN_BACKUP = "Stopped: it was still running when the backup was made."
 SMART_GROUP_RE = re.compile(r"^\d{1,20}$")   # a Connecteam smart group ID
 MAX_CARD_DAYS = 3650     # how long a key card made from the Staff tab may last
 MAX_CARD_ACCESS = 256    # entries in a department's key card template (as in a card request)
+MAX_PERSON_DEPARTMENTS = 200   # departments one person can be in, from a file
 REPORT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_REPORT_SETTINGS = 64 * 1024   # a report's settings, as JSON (reports.SETTINGS_MAX)
 MAX_PLACE = {"building": 254, "floor": 255, "door": 2**53}   # the encoder's (and TT Hotel's) ranges
@@ -216,6 +220,36 @@ def clean_card_access(raw) -> list[dict] | None:
         if entry not in cleaned:
             cleaned.append(entry)
     return cleaned
+
+
+START_TOOLS = ("tasks", "reports", "wristbands")
+START_PAGE_RE = re.compile(r"^page:[A-Za-z0-9_-]{1,32}$")   # a layout page's ID (layout.ID_RE)
+
+
+def start_page(value) -> str | None:
+    """A department's start page: "page:<ID>" or "tool:<name>", or None (left alone). Raises
+    ValueError for anything else."""
+    if value in (None, ""):
+        return None
+    value = str(value)
+    if START_PAGE_RE.match(value) or value in {f"tool:{t}" for t in START_TOOLS}:
+        return value
+    raise ValueError("Choose a start page from the list.")
+
+
+def _file_start_page(value) -> str | None:
+    """A start page from a file: damaged means left alone."""
+    try:
+        return start_page(value)
+    except ValueError:
+        return None
+
+
+def hidden_by_default(name: str, group, role_id, card_access, clock_in) -> int:
+    """Whether a department from a file from before hiding is hidden: Connecteam's groups for
+    everyone are, while they follow their smart group and give nothing (as db hides them once)."""
+    return 1 if (group and built_in_group(name) and role_id is None and card_access is None
+                 and clock_in is None) else 0
 
 
 def card_days(value, default: int = 30) -> int:
@@ -466,11 +500,17 @@ def export_staff(db, version: str) -> dict:
          "clock_in_set": bool(r["clock_in_set"]),
          "role": roles.get(r["role_id"]), "pages": _page_names(layout, page_choice(r["layout_pages"])),
          "overrides": overrides(r["id"]), "wristbands": permission_choice(r["wristbands"]),
-         "department": departments.get(r["department_id"])}
+         # Every department they're in, by name ("department": the first, for older versions).
+         **staff_departments(department_list(r["department_ids"]), departments)}
         for r in db.conn.execute("""SELECT id, name, pin_hash, pin_length, status,
                                     connecteam_user_id, require_clock_in, clock_in_set, role_id,
-                                    layout_pages, wristbands, department_id FROM staff
+                                    layout_pages, wristbands, department_ids FROM staff
                                     ORDER BY name""")])
+
+
+def staff_departments(ids: list[int], names: dict[int, str]) -> dict:
+    found = [names[i] for i in ids if i in names]
+    return {"departments": found, "department": found[0] if found else None}
 
 
 def export_departments(db, version: str) -> dict:
@@ -481,7 +521,8 @@ def export_departments(db, version: str) -> dict:
         {"name": d["name"], "smart_group_id": d["smart_group_id"], "role": roles.get(d["role_id"]),
          "card_access": d["card_access"], "card_days": d["card_days"],
          "card_lockout": bool(d["card_lockout"]),
-         "clock_in": None if d["clock_in"] is None else bool(d["clock_in"])}
+         "clock_in": None if d["clock_in"] is None else bool(d["clock_in"]),
+         "hidden": bool(d["hidden"]), "start_page": d["start_page"]}
         for d in db.departments()])
 
 
@@ -670,16 +711,21 @@ def _import_staff(db, rows: list, mode: str) -> dict:
             result["missing_roles"].add(role_name)
         elif "role" in raw:
             db.conn.execute("UPDATE staff SET role_id = NULL WHERE id = ?", (staff_id,))
-        # Their department, matched by name, the same way (files from before departments leave
-        # it as it is).
-        dept_name = _name(raw.get("department"), 40) if isinstance(raw.get("department"), str) else ""
-        if dept_name and dept_name.lower() in departments:
-            db.conn.execute("UPDATE staff SET department_id = ? WHERE id = ?",
-                            (departments[dept_name.lower()], staff_id))
-        elif dept_name:
-            result["missing_departments"].add(dept_name)
+        # Their departments, matched by name, the same way: "departments", or "department" in
+        # files from before people could be in several (files from before departments leave
+        # them as they are). Names with no match here are left out.
+        if isinstance(raw.get("departments"), list):
+            names = [_name(n, 40) for n in raw["departments"][:MAX_PERSON_DEPARTMENTS]
+                     if isinstance(n, str)]
         elif "department" in raw:
-            db.conn.execute("UPDATE staff SET department_id = NULL WHERE id = ?", (staff_id,))
+            names = [_name(raw["department"], 40)] if isinstance(raw["department"], str) else []
+        else:
+            names = None
+        if names is not None:
+            result["missing_departments"].update(n for n in names if n and n.lower() not in departments)
+            db.conn.execute("UPDATE staff SET department_ids = ? WHERE id = ?", (json.dumps(list(
+                dict.fromkeys(departments[n.lower()] for n in names if n.lower() in departments))),
+                staff_id))
         _write_pages(db, "staff", staff_id,
                      _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP)
         if "overrides" in raw:
@@ -730,6 +776,9 @@ def _import_departments(db, rows: list, mode: str) -> dict:
         if not name:
             continue
         match = existing.get(name.lower())
+        # Hidden or not (files from before hiding leave a replaced department's as it is, and
+        # add Connecteam's groups for everyone hidden).
+        hidden = (1 if raw["hidden"] in (1, True) else 0) if "hidden" in raw else None
         if match and mode == "skip":
             result["skipped"] += 1
             continue
@@ -751,6 +800,12 @@ def _import_departments(db, rows: list, mode: str) -> dict:
             if "clock_in" in raw:
                 db.conn.execute("UPDATE departments SET clock_in = ? WHERE id = ?",
                                 (clock_in, match["id"]))
+            if hidden is not None:
+                db.conn.execute("UPDATE departments SET hidden = ? WHERE id = ?",
+                                (hidden, match["id"]))
+            if "start_page" in raw:
+                db.conn.execute("UPDATE departments SET start_page = ? WHERE id = ?",
+                                (_file_start_page(raw["start_page"]), match["id"]))
             dept_id = match["id"]
             result["replaced"] += 1
         else:
@@ -760,9 +815,12 @@ def _import_departments(db, rows: list, mode: str) -> dict:
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM departments").fetchone()[0]
             dept_id = db.conn.execute(
                 """INSERT INTO departments (name, sort_order, smart_group_id, role_id, card_access,
-                   card_days, card_lockout, created_at, clock_in)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (name, order, *values, time.time(), clock_in)).lastrowid
+                   card_days, card_lockout, created_at, clock_in, hidden, start_page)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (name, order, *values, time.time(), clock_in,
+                 hidden if hidden is not None else hidden_by_default(name, group, role_id,
+                                                                    values[2], clock_in),
+                 _file_start_page(raw.get("start_page")))).lastrowid
             existing[name.lower()] = {"id": dept_id, "name": name, "smart_group_id": group}
             result["added"] += 1
         if group:
@@ -804,13 +862,13 @@ def make_backup(db, branding, version: str) -> dict:
                         encoder_port, encoder_auto, encoder_auto_ip, pin_length, encoder_local
                         FROM devices WHERE status != 'deleted'"""),
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
-                      require_clock_in, role_id, layout_pages, wristbands, department_id,
+                      require_clock_in, role_id, layout_pages, wristbands, department_ids,
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
                       connecteam_note, pin_length, archived_at, archived_by, archived_from,
                       department_set FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
                             card_days, card_lockout, created_at, clock_in, group_named,
-                            group_gone FROM departments"""),
+                            group_gone, hidden, start_page FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
@@ -960,19 +1018,27 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                 group = None   # one smart group, one department
             groups.add(group)
             order = row.get("sort_order")
+            role_id = row.get("role_id") if row.get("role_id") in role_ids else None
+            card_access, clock_in = _stored_card_access(row.get("card_access")), _file_clock_in(row.get("clock_in"))
             departments.append({
                 "id": dept_id, "name": name,
                 "sort_order": order if isinstance(order, int) and not isinstance(order, bool) else 0,
                 "smart_group_id": group,
-                "role_id": row.get("role_id") if row.get("role_id") in role_ids else None,
-                "card_access": _stored_card_access(row.get("card_access")),
+                "role_id": role_id,
+                "card_access": card_access,
                 "card_days": card_days(row.get("card_days")),
                 "card_lockout": 0 if row.get("card_lockout") in (0, False) else 1,
                 "created_at": _time(row.get("created_at"), time.time()),
                 # Backups from before the department clock-in rule: each person's own setting.
-                "clock_in": _file_clock_in(row.get("clock_in")),
+                "clock_in": clock_in,
                 "group_named": 1 if group and row.get("group_named") in (1, True) else 0,
-                "group_gone": 1 if group and row.get("group_gone") in (1, True) else 0})
+                "group_gone": 1 if group and row.get("group_gone") in (1, True) else 0,
+                # Backups from before hiding: Connecteam's groups for everyone are hidden, as
+                # an install from then hides its own once.
+                "hidden": (1 if row["hidden"] in (1, True) else 0) if "hidden" in row
+                else hidden_by_default(name, group, role_id, card_access, clock_in),
+                # Backups from before start pages: left alone.
+                "start_page": _file_start_page(row.get("start_page"))})
     department_ids = {d["id"] for d in departments or []}
     flag = lambda value: 1 if value in (1, True) else 0
 
@@ -997,9 +1063,13 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                       "role_id": row.get("role_id") if row.get("role_id") in role_ids else None,
                       "layout_pages": _stored_pages(row.get("layout_pages")),
                       "wristbands": _stored_wristbands(row.get("wristbands")),
+                      # Backups from before people could be in several have one department_id
+                      # (and from before departments, none).
+                      "department_ids": [i for i in department_list(
+                          row["department_ids"] if "department_ids" in row
+                          else [row.get("department_id")])[:MAX_PERSON_DEPARTMENTS]
+                          if i in department_ids],
                       # Backups from before departments and the Connecteam sync: added by hand.
-                      "department_id": (row.get("department_id")
-                                        if row.get("department_id") in department_ids else None),
                       "connecteam_auto": flag(row.get("connecteam_auto")) if link else 0,
                       "clock_in_set": flag(row.get("clock_in_set")),
                       "role_set": flag(row.get("role_set")),

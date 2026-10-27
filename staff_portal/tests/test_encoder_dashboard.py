@@ -53,7 +53,7 @@ def dashboard_portal(tmp_path, monkeypatch) -> Portal:
     monkeypatch.setattr(main.ha, "is_admin", is_admin)
     house = p.db.create_department(name="Housekeeping",
                                    card_access=[{"level": "door", "door": 900}])
-    p.db.update_staff(p.cy, department_id=house)
+    p.db.update_staff(p.cy, department_ids=[house])
     return p
 
 

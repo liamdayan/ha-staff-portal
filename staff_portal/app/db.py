@@ -373,8 +373,10 @@ MIGRATIONS = {
         # Which wristbands and cards they may make, and for which doors (JSON, see
         # wristbands.py; NULL = the same as their role).
         "wristbands": "TEXT",
-        # Their department (no foreign key: departments are replaced by a restore).
-        "department_id": "INTEGER",
+        # Every department they're in: a JSON list of department IDs (no foreign key: departments
+        # are replaced by a restore). It used to be one department, in department_id, which an
+        # older install still has: the first time this opens, it becomes their first one.
+        "department_ids": "TEXT NOT NULL DEFAULT '[]'",
         # 1 = added by the Connecteam staff sync, which keeps them up to date. People added by
         # hand are never touched by it.
         "connecteam_auto": "INTEGER NOT NULL DEFAULT 0",
@@ -395,8 +397,8 @@ MIGRATIONS = {
         "archived_at": "REAL",
         "archived_by": "TEXT",
         "archived_from": "TEXT",
-        # 1 once an admin chose a linked person's department by hand (or kept it when linking):
-        # the Connecteam sync no longer moves them to their smart group's department.
+        # 1 once an admin chose a linked person's departments by hand (or kept them when
+        # linking): the Connecteam sync no longer changes their list to match their smart groups.
         "department_set": "INTEGER NOT NULL DEFAULT 0",
     },
     "wb_doors": {
@@ -450,6 +452,12 @@ MIGRATIONS = {
         # the group's. group_gone: 1 once its smart group is no longer listed (never deleted).
         "group_named": "INTEGER NOT NULL DEFAULT 0",
         "group_gone": "INTEGER NOT NULL DEFAULT 0",
+        # 1 = hidden: it gives nothing (no role, key card, clock-in rule, reports or tasks), it's
+        # in no list to pick from, and the sync never makes it again. Its people stay in it.
+        "hidden": "INTEGER NOT NULL DEFAULT 0",
+        # The staff app's start page for people in it: "page:<layout page ID>" or "tool:tasks",
+        # "tool:reports", "tool:wristbands"; NULL = left alone (the first page, as always).
+        "start_page": "TEXT",
     },
 }
 
@@ -595,7 +603,7 @@ LOCKOUT_STATUSES = ("pending", "done", "failed")
 KEY_CARD_FILTERS = ("active", "expired", "revoked", "lost", "all")
 STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locked_until",
                 "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
-                "require_clock_in", "role_id", "layout_pages", "wristbands", "department_id",
+                "require_clock_in", "role_id", "layout_pages", "wristbands", "department_ids",
                 "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
                 "connecteam_note", "pin_length", "archived_at", "archived_by", "archived_from",
                 "department_set"}
@@ -605,7 +613,13 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
 STAFF_OFF = ("disabled", "archived")
 STAFF_ON = "status NOT IN ('disabled', 'archived')"
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
-                     "card_lockout", "clock_in", "group_named", "group_gone"}
+                     "card_lockout", "clock_in", "group_named", "group_gone", "hidden", "start_page"}
+# What a department may give its people. Each comes from the first of their departments, in the
+# Staff tab's order, that sets it (Database.giving_department); hidden ones give nothing.
+DEPARTMENT_GIVES = ("role_id", "card_access", "clock_in", "start_page")
+# Connecteam's own smart groups for everyone: their departments are made hidden (by name,
+# ignoring capitals), and installs from before hiding hide theirs once.
+BUILT_IN_GROUPS = ("all users group", "all admins group")
 
 # One row of each log table as backups carry it: a section's "columns" are these fields, in this
 # order. Tuples rather than dicts because a full log is tens of thousands of rows, and a backup
@@ -673,6 +687,31 @@ def card_access_choice(raw) -> list[dict] | None:
     return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
 
 
+def department_list(raw) -> list[int]:
+    """A person's departments as stored (staff.department_ids, JSON text) or already read: their
+    IDs, each once, in the order given. Damaged means none."""
+    try:
+        value = raw if isinstance(raw, list) else json.loads(raw or "[]")
+    except (TypeError, ValueError, RecursionError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(i for i in value if isinstance(i, int) and not isinstance(i, bool)))
+
+
+def built_in_group(name) -> bool:
+    """Whether a department or smart group name is one of Connecteam's groups for everyone."""
+    return " ".join(str(name or "").split()).casefold() in BUILT_IN_GROUPS
+
+
+def _staff_sets(fields: dict) -> dict:
+    """The staff columns in fields, as stored: department_ids (a list) as JSON."""
+    sets = {k: v for k, v in fields.items() if k in STAFF_FIELDS}
+    if "department_ids" in sets:
+        sets["department_ids"] = json.dumps(department_list(sets["department_ids"]))
+    return sets
+
+
 def _report_row(row) -> dict:
     def ids(raw):
         try:
@@ -727,11 +766,19 @@ class Database:
         self.conn.execute(f"PRAGMA journal_size_limit = {WAL_LIMIT}")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        added = set()
         for table, columns in MIGRATIONS.items():
             existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             for column, kind in columns.items():
                 if column not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+                    added.add(f"{table}.{column}")
+            if table == "staff" and "department_id" in existing and "department_ids" not in existing:
+                # From one department each to several: the one they had comes first.
+                self.conn.execute("UPDATE staff SET department_ids = json_array(department_id), "
+                                  "department_id = NULL WHERE department_id IS NOT NULL")
+        if "departments.hidden" in added:
+            self._hide_built_in_groups()
         self.conn.executescript(INDEXES)
         if self.conn.execute("SELECT 1 FROM settings WHERE key = 'connecteam_enabled'").fetchone():
             # Set up before smart group departments existed: they stay off until turned on.
@@ -986,14 +1033,14 @@ class Database:
     # Departments (people's teams: their Connecteam smart group, role and key card template)
 
     def departments(self) -> list[dict]:
-        """Every department, in order (a person in several mapped smart groups gets the first),
-        with card_access as a list (None: no key card template; damaged: an empty list, which
-        makes no card) and how many people are in each."""
+        """Every department, in the Staff tab's order (which decides what someone in several gets:
+        giving_department), with card_access as a list (None: no key card template; damaged: an
+        empty list, which makes no card) and how many people are in each."""
         found = [dict(r) for r in self.conn.execute(
             "SELECT * FROM departments ORDER BY sort_order, id")]
         counts = dict(self.conn.execute(
-            "SELECT department_id, COUNT(*) FROM staff WHERE department_id IS NOT NULL "
-            "AND status != 'archived' GROUP BY department_id").fetchall())
+            "SELECT j.value, COUNT(*) FROM staff s, json_each(s.department_ids) j "
+            "WHERE json_valid(s.department_ids) AND s.status != 'archived' GROUP BY j.value").fetchall())
         for dept in found:
             dept["card_access"] = card_access_choice(dept["card_access"])
             dept["staff_count"] = counts.get(dept["id"], 0)
@@ -1002,23 +1049,63 @@ class Database:
     def department(self, department_id) -> dict | None:
         return next((d for d in self.departments() if d["id"] == department_id), None)
 
+    def department_name(self, department_id) -> str | None:
+        row = self.conn.execute("SELECT name FROM departments WHERE id = ?",
+                                (department_id,)).fetchone()
+        return row[0] if row else None
+
+    def shown_departments(self) -> list[dict]:
+        """The departments that aren't hidden, in order: the ones offered anywhere, and the only
+        ones that give anything."""
+        return [d for d in self.departments() if not d["hidden"]]
+
+    def member_department_ids(self, member: dict, ordered: list[dict] | None = None) -> list[int]:
+        """The departments this person is in that aren't hidden, in the Staff tab's order.
+        ordered: departments(), when checking many people."""
+        mine = set(department_list(member.get("department_ids")))
+        return [d["id"] for d in (self.departments() if ordered is None else ordered)
+                if d["id"] in mine and not d["hidden"]]
+
+    def giving_department(self, member: dict, what: str, ordered: list[dict] | None = None,
+                          keep=None) -> dict | None:
+        """The department this person gets `what` from (role_id, card_access, clock_in or
+        start_page): the first of theirs, in the Staff tab's order, that sets it. Hidden ones are
+        skipped, and so is one whose role was deleted (or whose value keep(value) turns down: a
+        start page that was removed). Their own settings, set by hand, are the caller's."""
+        assert what in DEPARTMENT_GIVES
+        mine = set(department_list(member.get("department_ids")))
+        roles = ({r[0] for r in self.conn.execute("SELECT id FROM roles")}
+                 if what == "role_id" else None)
+        return next((d for d in (self.departments() if ordered is None else ordered)
+                     if d["id"] in mine and not d["hidden"] and d[what] is not None
+                     and (roles is None or d[what] in roles) and (keep is None or keep(d[what]))),
+                    None)
+
     def department_clock_ins(self) -> dict[int, int]:
-        """{department ID: its clock-in rule} for the departments that set one (1 or 0)."""
+        """{department ID: its clock-in rule} for the departments that set one (1 or 0) and
+        aren't hidden, in the Staff tab's order."""
         return dict(self.conn.execute(
-            "SELECT id, clock_in FROM departments WHERE clock_in IS NOT NULL").fetchall())
+            "SELECT id, clock_in FROM departments WHERE clock_in IS NOT NULL AND hidden = 0 "
+            "ORDER BY sort_order, id").fetchall())
+
+    def clock_in_department(self, member: dict, rules: dict | None = None) -> int | None:
+        """The department whose clock-in rule this person gets: the first of theirs that sets one."""
+        mine = set(department_list(member.get("department_ids")))
+        return next((d for d in (self.department_clock_ins() if rules is None else rules)
+                     if d in mine), None)
 
     def clock_in_rule(self, member: dict, rules: dict | None = None) -> tuple[bool, str]:
         """Whether this person must be clocked in on Connecteam to sign in, and where that comes
-        from: "person" (an admin set theirs by hand, which beats their department), "department"
-        (their department sets it for everyone in it) or "default" (their own setting, which the
+        from: "person" (an admin set theirs by hand, which beats their departments), "department"
+        (the first of their departments that sets one) or "default" (their own setting, which the
         Connecteam sync keeps in line with "People added this way must be clocked in"). The one
         place the rule is worked out. rules: department_clock_ins(), when checking many people."""
         if member.get("clock_in_set"):
             return bool(member.get("require_clock_in")), "person"
-        rule = (self.department_clock_ins() if rules is None else rules).get(
-            member.get("department_id"))
-        if rule is not None:
-            return bool(rule), "department"
+        rules = self.department_clock_ins() if rules is None else rules
+        dept = self.clock_in_department(member, rules)
+        if dept is not None:
+            return bool(rules[dept]), "department"
         return bool(member.get("require_clock_in")), "default"
 
     def create_department(self, name: str, **fields) -> int:
@@ -1049,11 +1136,34 @@ class Database:
         self.conn.commit()
 
     def delete_department(self, department_id: int) -> None:
-        """Delete a department. Its people stay, with no department."""
-        self.conn.execute("UPDATE staff SET department_id = NULL WHERE department_id = ?",
-                          (department_id,))
+        """Delete a department. Its people stay, in their other departments."""
         self.conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+        self._drop_lost_departments()
         self.conn.commit()
+
+    def _drop_lost_departments(self) -> None:
+        """Take departments that no longer exist off everyone's list (not committed)."""
+        known = {r[0] for r in self.conn.execute("SELECT id FROM departments")}
+        changes = []
+        for staff_id, raw in self.conn.execute("SELECT id, department_ids FROM staff").fetchall():
+            ids = department_list(raw)
+            kept = [i for i in ids if i in known]
+            if kept != ids or raw != json.dumps(ids):
+                changes.append((json.dumps(kept), staff_id))
+        self.conn.executemany("UPDATE staff SET department_ids = ? WHERE id = ?", changes)
+
+    def _hide_built_in_groups(self) -> None:
+        """Once, on installs from before hiding: Connecteam's groups for everyone ("All users
+        group", "All admins group") put everyone in a department, so theirs are hidden while they
+        still follow their smart group and give nothing (no role, key card or clock-in rule)."""
+        for dept_id, name in self.conn.execute(
+                "SELECT id, name FROM departments WHERE smart_group_id IS NOT NULL AND hidden = 0 "
+                "AND role_id IS NULL AND card_access IS NULL AND clock_in IS NULL").fetchall():
+            if built_in_group(name):
+                self.conn.execute("UPDATE departments SET hidden = 1 WHERE id = ?", (dept_id,))
+                self.log("Staff Portal", f"Hid department {name}",
+                         detail="Connecteam's group for everyone: it gives nothing while hidden. "
+                                "Show it under Hidden smart groups on the Staff tab.")
 
     # Reports
 
@@ -1086,9 +1196,11 @@ class Database:
         return dict(row) if row else None
 
     # Who sees a task (tasks.can_see): its department's people, everyone for Everyone, the
-    # person it's given to and the one who made it, and managers when its department is gone.
-    TASK_SEEN = """(department_id IS NULL OR department_id = ? OR assigned_id = ? OR created_by_id = ?
-                    OR (? AND department_id NOT IN (SELECT id FROM departments)))"""
+    # person it's given to and the one who made it, and managers when its department is gone or
+    # hidden. The person's departments are a JSON list (member["department_ids"]: shown ones).
+    TASK_SEEN = """(department_id IS NULL OR department_id IN (SELECT value FROM json_each(?))
+                    OR assigned_id = ? OR created_by_id = ?
+                    OR (? AND department_id NOT IN (SELECT id FROM departments WHERE hidden = 0)))"""
 
     def tasks_for(self, member: dict, since: float, manager: bool = False) -> list[dict]:
         """The tasks someone may see (tasks.can_see), not in the bin: every open one, and finished
@@ -1098,14 +1210,16 @@ class Database:
                AND (status IN ('todo', 'doing') OR status_at >= ?)
                ORDER BY priority = 'urgent' DESC, due_date IS NULL, due_date, due_time IS NULL,
                         due_time, created_at DESC, id DESC""",
-            (member.get("department_id"), member["id"], member["id"], 1 if manager else 0, since))
+            (json.dumps(member.get("department_ids") or []), member["id"], member["id"],
+             1 if manager else 0, since))
         return [dict(r) for r in rows]
 
     def tasks_in_bin(self, member: dict, manager: bool) -> list[dict]:
         """Deleted tasks this person may put back (tasks.can_restore): their own, and for a
         manager the ones they could see if they weren't deleted."""
         seen = self.TASK_SEEN if manager else "created_by_id = ?"
-        args = (member.get("department_id"), member["id"], member["id"], 1) if manager else (member["id"],)
+        args = ((json.dumps(member.get("department_ids") or []), member["id"], member["id"], 1)
+                if manager else (member["id"],))
         rows = self.conn.execute(
             f"SELECT * FROM tasks WHERE deleted_at IS NOT NULL AND {seen} "
             "ORDER BY deleted_at DESC LIMIT 200", args)
@@ -1309,11 +1423,11 @@ class Database:
     def staff_list(self) -> list[dict]:
         result = []
         for r in self.conn.execute(
-                """SELECT s.*, r.name AS role_name, dp.name AS department_name FROM staff s
+                """SELECT s.*, r.name AS role_name FROM staff s
                    LEFT JOIN roles r ON r.id = s.role_id
-                   LEFT JOIN departments dp ON dp.id = s.department_id
                    ORDER BY s.name COLLATE NOCASE"""):
             m = dict(r)
+            m["department_ids"] = department_list(m["department_ids"])
             m.pop("pin_hash")
             m.pop("ha_refresh_token")
             m["layout_pages"] = page_choice(m["layout_pages"])
@@ -1346,7 +1460,7 @@ class Database:
     def staff_for_device(self, device: dict) -> list[dict]:
         """Active staff members allowed to sign in on a shared phone."""
         cols = ("s.id, s.name, s.connecteam_user_id, s.require_clock_in, s.clock_in_set, "
-                "s.department_id")
+                "s.department_ids")
         if device["staff_all"]:
             rows = self.conn.execute(
                 f"SELECT {cols} FROM staff s WHERE {STAFF_ON} ORDER BY name COLLATE NOCASE")
@@ -1388,7 +1502,7 @@ class Database:
         return dict(row) if row else None
 
     def update_staff(self, staff_id: int, **fields) -> None:
-        sets = {k: v for k, v in fields.items() if k in STAFF_FIELDS}
+        sets = _staff_sets(fields)
         if not sets:
             return
         cols = ", ".join(f"{k} = ?" for k in sets)
@@ -1400,7 +1514,7 @@ class Database:
         swapped between two people without either being linked twice."""
         try:
             for staff_id, fields in changes:
-                sets = {k: v for k, v in fields.items() if k in STAFF_FIELDS}
+                sets = _staff_sets(fields)
                 if sets:
                     cols = ", ".join(f"{k} = ?" for k in sets)
                     self.conn.execute(f"UPDATE staff SET {cols} WHERE id = ?",
@@ -1582,10 +1696,11 @@ class Database:
                 c.executemany(
                     """INSERT INTO departments (id, name, sort_order, smart_group_id, role_id,
                        card_access, card_days, card_lockout, created_at, clock_in, group_named,
-                       group_gone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       group_gone, hidden, start_page) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [(d["id"], d["name"], d["sort_order"], d["smart_group_id"], d["role_id"],
                       d["card_access"], d["card_days"], d["card_lockout"], d["created_at"],
-                      d.get("clock_in"), d.get("group_named", 0), d.get("group_gone", 0))
+                      d.get("clock_in"), d.get("group_named", 0), d.get("group_gone", 0),
+                      d.get("hidden", 0), d.get("start_page"))
                      for d in snap["departments"]])
             else:
                 by_name = {r["name"].casefold(): r["id"] for r in snap["roles"]}
@@ -1597,19 +1712,19 @@ class Database:
             c.executemany(
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
                    connecteam_user_id, require_clock_in, role_id, layout_pages, wristbands,
-                   department_id, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
+                   department_ids, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
                    connecteam_note, pin_length, archived_at, archived_by, archived_from,
                    department_set)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
                   m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"],
-                  m["wristbands"], m.get("department_id"), m.get("connecteam_auto", 0),
+                  m["wristbands"], json.dumps(department_list(m.get("department_ids"))),
+                  m.get("connecteam_auto", 0),
                   m.get("clock_in_set", 0), m.get("role_set", 0), m.get("pin_from_connecteam", 0),
                   m.get("connecteam_note"), m.get("pin_length"), m.get("archived_at"),
                   m.get("archived_by"), m.get("archived_from"), m.get("department_set", 0))
                  for m in snap["staff"]])
-            c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
-                      "(SELECT id FROM departments)")
+            self._drop_lost_departments()
             self._restore_tasks(snap.get("tasks"))
             c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["staff_entities"].items()])

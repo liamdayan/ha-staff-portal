@@ -1001,14 +1001,16 @@ def people_choices(svc: HRService) -> list[dict]:
 
 def departments_list(svc: HRService) -> list[dict]:
     """HR's departments: Staff Access's departments with a smart group, and other smart groups
-    people are in (by name when Connecteam's list is known)."""
+    people are in (by name when Connecteam's list is known). Smart groups whose department is
+    hidden in Staff Access (Connecteam's groups for everyone, say) aren't offered."""
     names = group_names(svc)
     seen, found = set(), []
     for d in svc.departments():
         g = str(d.get("smart_group_id") or "")
         if g and g not in seen:
             seen.add(g)
-            found.append({"group": g, "name": d["name"]})
+            if not d.get("hidden"):
+                found.append({"group": g, "name": d["name"]})
     for p in svc.db.people(archived=False):
         for g in people.groups(p):
             if g not in seen:

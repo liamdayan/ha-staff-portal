@@ -40,7 +40,7 @@ class Tasks(Portal):
         self.desk = self.db.create_department("Front Desk")
         self.house = self.db.create_department("Housekeeping")
         for person, dept in ((self.ana, self.desk), (self.dee, self.desk), (self.cy, self.house)):
-            self.db.update_staff(person, department_id=dept)
+            self.db.update_staff(person, department_ids=[dept] if dept else [])
         self.db.set_role_manage_tasks(self.manager, True)
 
     async def add(self, who, **fields):
@@ -66,9 +66,9 @@ def submission(sub_id, at, user_id="ct-7", name="Ana Lopez", **answers):
 # ---------------------------------------------------------------- the rules on their own
 
 def test_who_sees_and_edits_a_task():
-    ana = {"id": 1, "department_id": 10}
-    cy = {"id": 3, "department_id": 20}
-    nobody = {"id": 4, "department_id": None}
+    ana = {"id": 1, "department_ids": [10]}
+    cy = {"id": 3, "department_ids": [20]}
+    nobody = {"id": 4, "department_ids": []}
     task = {"department_id": 10, "assigned_id": None, "created_by_id": 2, "deleted_at": None}
     assert tasks.can_see(task, ana) and not tasks.can_see(task, cy) and not tasks.can_see(task, nobody)
     assert tasks.can_see({**task, "department_id": None}, nobody)          # Everyone
@@ -219,14 +219,14 @@ def test_people_see_their_department_everyone_and_their_own(tmp_path):
             # (the ones they made stay theirs).
             await p.add(dee, title="Dee's desk task")
             assert "Dee's desk task" in await p.listed(ana)
-            p.db.update_staff(p.ana, department_id=p.house)
+            p.db.update_staff(p.ana, department_ids=[p.house])
             moved = await p.listed(ana)
             assert "Rooms" in moved and "Desk task" in moved and "Dee's desk task" not in moved
             # The people list for the form: names and departments only, turned-off people left out.
             p.db.update_staff(p.dee, status="disabled")
             status, body = await p.call("GET", "/api/tasks/people", cy)
             assert {x["name"] for x in body["people"]} == {"Ana", "Bob", "Cy"}
-            assert set(body["people"][0]) == {"id", "name", "department_id"}
+            assert set(body["people"][0]) == {"id", "name", "department_ids"}
             status, body = await p.call("POST", "/api/tasks", cy, {"title": "x", "assigned_id": p.dee})
             assert status == 400
     run(scenario())
@@ -345,7 +345,7 @@ def test_a_managers_bin_holds_only_tasks_they_could_see(tmp_path):
                                  ("POST", f"/api/tasks/{task['id']}/restore")):
                 assert (await p.call(method, path, bob))[0] == 404
             # In Housekeeping, the manager sees it there and may put it back.
-            p.db.update_staff(p.bob, department_id=p.house)
+            p.db.update_staff(p.bob, department_ids=[p.house])
             status, body = await p.call("GET", "/api/tasks/bin", bob)
             assert [t["title"] for t in body["tasks"]] == ["Incident in 12"]
             assert (await p.call("POST", f"/api/tasks/{task['id']}/restore", bob))[0] == 200
@@ -391,7 +391,7 @@ def test_the_list_finished_tasks_and_polls(tmp_path):
             status, body = await p.call("GET", "/api/tasks", ana)
             assert [t["title"] for t in body["tasks"]] == ["Urgent one", "Due sooner", "Due later"]
             assert "Done long ago" not in [t["title"] for t in body["tasks"]]
-            assert body["me"] == {"id": p.ana, "name": "Ana", "department_id": p.desk, "manager": False}
+            assert body["me"] == {"id": p.ana, "name": "Ana", "department_ids": [p.desk], "manager": False}
             assert {d["name"] for d in body["departments"]} == {"Front Desk", "Housekeeping"}
             # Polls: the same version back costs nothing; a change gives a new one.
             status, again = await p.call("GET", f"/api/tasks?v={body['v']}", ana)
