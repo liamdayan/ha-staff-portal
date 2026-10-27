@@ -1324,8 +1324,8 @@ once.
 
 **Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
 Staff Access's own Connecteam connection, only when someone opens one, and keep the answer for
-10 minutes. The first time a report is opened it can take a minute or so, because reports may
-only ask 4 things a minute. For everything a report can show, the Connecteam app needs these
+10 minutes. The first time a report is opened it can take a few seconds longer, because reports
+may only ask 15 things a minute. For everything a report can show, the Connecteam app needs these
 scopes (Integration Center → OAuth 2.0): **users.read**, **time_clock.read**, **schedule.read**,
 **forms.read**, and optionally **jobs.read** (job names; without it jobs show without names). If
 one is missing, the report says which, with Connecteam's own words. Scopes can't be added to an
@@ -1343,6 +1343,54 @@ upload the newest one again after restoring a backup. A migration file carries t
 
 Each report is a folder of code in the add-on (`app/reports/<name>/`). Adding one needs no other
 change: see [REPORTS.md](REPORTS.md), the guide for Claude or a developer.
+
+## Attendance & Leave report
+
+The first report on the staff app's **Reports** page. For a week, a pay period (1st to 15th, 16th
+to month end) or a month, it shows who was late, left early, missed a lunch or a shift, or didn't
+fill in a required form, and whether their sick time and PTO in Gusto cover the shifts they
+missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, like any report.
+
+- **Where the numbers come from.** Timesheets (every time clock), schedules and form submissions
+  come from Connecteam, read only when someone opens the report or changes the period, and kept
+  for 10 minutes. Reports have their own small Connecteam allowance, so they never slow the
+  clock-in checks. If Connecteam refuses (a missing scope, the allowance used up, Connecteam
+  down), the report says so in plain words and shows the rest. Reports need the Connecteam scopes
+  the Reports section lists.
+- **Gusto balances.** In Gusto, open **Reports → Time Off Balances** and download it as CSV. On
+  the report's **Leave balances** tab, someone who manages the report clicks **Upload Gusto CSV**.
+  It's kept on the add-on, so everyone who can see the report sees the newest one. Columns are
+  found by their names, whichever layout Gusto uses (one row per person, or one per policy).
+- **Matching people.** Connecteam people are matched by their Connecteam ID. Gusto has no
+  Connecteam ID, so Gusto names are matched by name: "Patel, Dev" matches "Dev Patel", and short
+  names (Nate and Nathan) match on their own. The Leave balances tab lists anyone who didn't match;
+  add the pair under **Rules → Name matches** (one per line, Gusto name = Connecteam name).
+- **Departments.** Each person shows under their Staff Access department: the first department
+  whose Connecteam smart group they're in (Connecteam's user list says which groups). People
+  without one show under their Gusto title.
+- **Who can see whom.** On the **Rules** tab, people who manage the report choose:
+  - **Everyone sees all departments** (the default): everyone who may view the report sees
+    everybody.
+  - **Viewers see only their own department**: people who view the report see only the people in
+    their own department (their timesheets, schedules, forms and Gusto rows), and the name matches
+    for them. People who manage the report still see everyone. The add-on leaves the others out
+    before anything is sent, so they can't be seen by any means. Someone whose department isn't
+    known (no smart group) is only shown to managers.
+- **Rules and required forms.** The **Rules** tab holds the grace minutes, the lunch rule (Oregon:
+  30 minutes for shifts of 6 hours or more), the low-balance flags, when someone needs action,
+  which jobs are checked for early clock-outs, and the name matches. Under **Required forms**, pick
+  Connecteam forms and say when each is due (every shift worked, once a week, or on a timer by
+  whoever is on shift, such as an hourly tub check) and for whom. People who **manage** the report
+  change these and click **Save**; everyone else sees them read-only.
+- **Reading it.** Six numbers at the top, then everyone who worked or was scheduled, worst first
+  (**Action**, **Watch**, **Clear**). Tap a name for their day-by-day punches. Tap a form for its
+  grid, hour by hour for timed checks; tap a square to see who was on and who submitted.
+- **Sharing it.** **Copy summary** copies a short text version. **Download CSV** saves the staff
+  table. **Print or PDF** opens the browser's print window (choose **Save as PDF** there) with
+  everyone's days, only the rows you opened, or just the summary.
+
+Report settings (rules and required forms) are in backups and migration files. The Gusto file is
+in migration files but not in backups, like other report uploads.
 
 ## Seeing staff actions in Home Assistant
 
