@@ -74,8 +74,7 @@
 
   async function showPhoto(c) {
     const body = c.pdf
-      ? [h("p", null, "It's a PDF, so it's downloaded rather than shown here."),
-        h("a", { class: "button", href: c.photo, download: "" }, "Download the PDF")]
+      ? H.pdfPages(c.photo, `The ${c.type} (PDF)`)
       : [h("div", { class: "cert-photo small-photo" }, h("img", { src: c.photo, alt: `Photo of the ${c.type}` }))];
     await openDialog(c.type, body, [{ label: "Close", value: "ok", class: "primary" }]);
   }
@@ -420,7 +419,7 @@
         // Turning works while the photo waits here; a confirmed card opens as its document.
         c.status === "waiting" ? h("button", { type: "button", class: "small-btn", onclick: () => { turn = (turn + 90) % 360; img.src = `${c.photo}?turn=${turn}`; } }, "Turn") : null,
         h("a", { class: "button small-btn", href: c.photo, target: "_blank", rel: "noopener" }, "Full size"))]
-        : c.photo ? h("a", { class: "button", href: c.photo, download: "" }, "Download the PDF")
+        : c.photo ? H.pdfPages(c.photo, `${d.person.name}'s ${d.type.name} (PDF)`)
           : emptyState("The photo isn't kept here any more."));
     const read = h("section", { class: "card cert-side" }, h("h2", null, "What Google read"),
       d.segments.length ? h("div", { class: "cert-text" }, d.segments.map((s) => (s.d ? h("mark", null, s.t) : s.l ? h("strong", null, s.t) : s.t)))

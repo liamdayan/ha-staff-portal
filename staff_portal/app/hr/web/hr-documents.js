@@ -52,7 +52,11 @@
   // ---------------------------------------------------------------- one document
 
   function openFile(d) {
-    if (d.type === "pdf") return;   // a plain download link
+    if (d.type === "pdf") {
+      return openDialog(d.title, [...H.pdfPages(d.url, d.title),
+        h("p", { class: "muted small" }, `${d.kind_name} · ${day(d.date)}`)],
+      [{ label: "Close", value: "ok", class: "primary" }]);
+    }
     openDialog(d.title, [
       h("img", { class: "doc-image", src: d.url, alt: d.title }),
       h("p", { class: "muted small" }, `${d.kind_name} · ${day(d.date)}`),
@@ -69,9 +73,7 @@
     const buttons = [];
     const btn = (label, onclick, cls = "") => h("button", { type: "button", class: `small-btn ${cls}`.trim(), onclick }, label);
     if (d.url) {
-      buttons.push(d.type === "pdf"
-        ? h("a", { class: "button small-btn", href: d.url, download: "" }, "Download")
-        : btn("Open", () => openFile(d)));
+      buttons.push(btn("Open", () => openFile(d)));
     }
     if (d.drive_link) buttons.push(h("a", { class: "button small-btn", href: d.drive_link, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive"));
     if (d.can_check) {

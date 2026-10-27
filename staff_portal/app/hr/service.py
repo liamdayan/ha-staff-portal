@@ -26,14 +26,14 @@ import time
 import urllib.parse
 from datetime import datetime
 
-from connecteam import ConnecteamError
+from connecteam import FIELDS_TTL, ConnecteamError
 
 from . import access, audit, crypto, gdrive, hrdb, notify, people, signin
 
 log = logging.getLogger("staff_portal")
 
 TICK = 30
-SYNC_EVERY = 3600
+SYNC_EVERY = 15 * 60           # people from Connecteam: one request (a page of 500 users)
 SYNC_SOON_GAP = 5 * 60          # a sync for someone new signing in, at most this often...
 SOON_A_DAY = 48                 # ...and this many a day, so strangers typing numbers can't use up
                                 # HR's Connecteam requests
@@ -235,9 +235,9 @@ class HRService:
         if self.main_settings().get("connecteam_enabled") != "1":
             self.sync_state["error"] = NO_CONNECTEAM
             return None
-        if not self.db.setting("ct_fields"):
-            try:
-                await self.read_fields()
+        if fresh or not self.db.setting("ct_fields"):
+            try:   # Sync now reads the field list again too (a field added or renamed today)
+                await self.read_fields(max_age=60 if fresh else FIELDS_TTL)
             except ConnecteamError as err:   # the start date then comes from the field HR picks
                 log.info("HR portal: couldn't read Connecteam's profile fields: %s", err)
         try:
@@ -266,9 +266,9 @@ class HRService:
         self.sync_state.update(at=time.time(), error=None, result=result)
         return result
 
-    async def read_fields(self) -> None:
+    async def read_fields(self, max_age: float = FIELDS_TTL) -> None:
         """Connecteam's profile field names (one request, through HR's lane)."""
-        fields = await self.connecteam.profile_fields()
+        fields = await self.connecteam.profile_fields(max_age=max_age)
         if self.running:
             self.db.set_settings({"ct_fields": json.dumps(fields)})
 

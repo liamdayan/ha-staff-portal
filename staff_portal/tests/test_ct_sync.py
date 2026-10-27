@@ -115,6 +115,15 @@ def test_new_tasks_go_to_their_departments_board_and_changes_follow(tmp_path):
     run(scenario())
 
 
+async def binned(p, task_id, member):
+    """The bin, for a task in Connecteam: the app won't delete one (409), so as one binned before
+    that (or put there by Connecteam) would be."""
+    status, _ = await p.call("DELETE", f"/api/tasks/{task_id}", member)
+    if status == 409:
+        p.db.bin_task(task_id, p.db.staff(p.ana), time.time())
+        ctsync.touch(task_id)
+
+
 def test_status_mapping_both_ways(tmp_path):
     """To do and In progress are "published" (In progress kept here), Done is "completed", Won't
     do archives (an unassigned draft can't be archived, so it's deleted, and made again when
@@ -137,7 +146,7 @@ def test_status_mapping_both_ways(tmp_path):
             await sent(p)
             assert (remote["status"], remote["isArchived"]) == ("published", False)
             # The bin archives it there; putting it back unarchives it.
-            await p.call("DELETE", f"/api/tasks/{t['id']}", ana)
+            await binned(p, t['id'], ana)
             await sent(p)
             assert (remote["status"], remote["isArchived"]) == ("published", True)
             await p.call("POST", f"/api/tasks/{t['id']}/restore", ana)
@@ -161,7 +170,7 @@ def test_status_mapping_both_ways(tmp_path):
             await ctsync.settle()
             first = p.db.task(u["id"])["ct_task_id"]
             assert next(x for x in ct.board_tasks["501"] if x["id"] == first)["status"] == "draft"
-            await p.call("DELETE", f"/api/tasks/{u['id']}", ana)
+            await binned(p, u['id'], ana)
             await sent(p)
             assert writes(ct)[-1][0] == "DELETE" and p.db.task(u["id"])["ct_task_id"] is None
             await p.call("POST", f"/api/tasks/{u['id']}/restore", ana)
@@ -223,7 +232,7 @@ def test_the_bin_and_deletion_both_ways(tmp_path):
             await ctsync.settle()
             [remote] = ct.board_tasks["501"]
             # The bin here archives it there; putting it back unarchives it.
-            await p.call("DELETE", f"/api/tasks/{t['id']}", ana)
+            await binned(p, t['id'], ana)
             await ctsync.settle()
             assert remote["isArchived"] is True
             await p.call("POST", f"/api/tasks/{t['id']}/restore", ana)
@@ -1264,7 +1273,7 @@ def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_pat
             u = await p.add(ana, title="Sweep")
             await ctsync.settle()
             first = p.db.task(u["id"])["ct_task_id"]
-            await p.call("DELETE", f"/api/tasks/{u['id']}", ana)
+            await binned(p, u['id'], ana)
             await sent(p)
             assert not writes(ct, "DELETE") and p.db.task(u["id"])["ct_task_id"] == first
             assert "quick_tasks.delete" in p.db.task(u["id"])["ct_note"]
@@ -1274,7 +1283,7 @@ def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_pat
             # An assigned task is archived as before: that needs no delete.
             t = await p.add(ana, title="Count towels", assigned_id=p.ana)
             await ctsync.settle()
-            await p.call("DELETE", f"/api/tasks/{t['id']}", ana)
+            await binned(p, t['id'], ana)
             await sent(p)
             remote = next(x for x in ct.board_tasks["501"] if x["id"] == p.db.task(t["id"])["ct_task_id"])
             assert remote["isArchived"] is True

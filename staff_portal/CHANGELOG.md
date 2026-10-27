@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.21
+
+- **Tasks in Connecteam can't be deleted from Staff Access** (Quick Tasks, and requests from
+  followed forms): Staff Access has no permission to delete things in Connecteam. Mark them Done,
+  or delete them in Connecteam. Tasks made only here can still be deleted.
+- **HR portal: start dates follow Connecteam.** Connecteam sends dates day first (30/03/2024),
+  which was being read month first, and a start date confirmed in HR was never updated again.
+  Now a start date changed in Connecteam replaces the one here (logged in the audit), and HR's
+  own change stays until Connecteam's changes again. **Connecteam writes dates as** now works it
+  out from your dates, and the field is found as "Employment Start Date", "Start Date" or "Hire
+  Date".
+- **HR portal: people follow Connecteam every 15 minutes** (it was hourly): names, departments,
+  mobile, email, direct manager and start date. It's usually no extra request, since it's the
+  same user list Staff Access reads. **Sync now** also reads the profile field names again.
+- **HR portal: PDFs show in the portal** (card PDFs and documents) as a picture of their first 8
+  pages, with Download the PDF underneath.
+
 ## 0.12.20
 
 - **HR portal: Enter presses OK in a dialog** (it pressed Cancel), such as Confirm start date or

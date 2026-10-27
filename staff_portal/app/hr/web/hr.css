@@ -624,3 +624,7 @@ body.signed-in .toast { bottom: calc(var(--tabbar-space) + 4px); }
 
 /* A drop-down's list is drawn by the system (white on Windows), so its options get the theme's own colours. */
 option, optgroup { background-color: var(--card); color: var(--text); }
+
+/* A PDF's pages, drawn by the server as one picture: scrolls inside the box. */
+.pdf-pages { overflow: auto; max-height: 70vh; border-radius: var(--radius-sm); background: var(--card-2); }
+.pdf-pages img { display: block; width: 100%; height: auto; }

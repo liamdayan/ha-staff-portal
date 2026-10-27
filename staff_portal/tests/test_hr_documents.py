@@ -914,6 +914,38 @@ def test_opening_files_sandboxed_pdfs_downloaded_and_fetched_from_drive(tmp_path
     run(scenario())
 
 
+def real_pdf(pages: int) -> bytes:
+    from PIL import Image
+    out = io.BytesIO()
+    sheets = [Image.new("RGB", (612, 792), (255, 255, 255)) for _ in range(pages)]
+    sheets[0].save(out, "PDF", save_all=True, append_images=sheets[1:])
+    return out.getvalue()
+
+
+def test_a_pdf_is_shown_as_a_picture_of_its_pages(tmp_path, monkeypatch):
+    shown = files.pdf_preview(real_pdf(10))   # 8 pages drawn, and a line about the other 2
+    assert files.sniff(shown) == "jpeg"
+    with pytest.raises(files.FileRefused):
+        files.pdf_preview(b"%PDF-1.4 not really")
+
+    async def scenario():
+        async with HR(tmp_path) as hr, google(hr, monkeypatch):
+            s = await people(hr)
+            status, r = await upload(hr, s["hr"], "202", kid(hr, "policies"), real_pdf(2),
+                                     title="Signed")
+            did = r["document"]["id"]
+            resp = await hr.client.get(f"/api/documents/{did}/file?view=1",
+                                       headers={**READ, "Cookie": f"{signin.COOKIE}={s['self']}"})
+            assert resp.status == 200 and resp.content_type == "image/jpeg"
+            assert resp.headers["Content-Disposition"].startswith("inline")
+            assert resp.headers["Content-Security-Policy"].startswith("sandbox")
+            status, r = await upload(hr, s["hr"], "202", kid(hr, "policies"), PDF, title="Odd")
+            resp = await hr.client.get(f"/api/documents/{r['document']['id']}/file?view=1",
+                                       headers={**READ, "Cookie": f"{signin.COOKIE}={s['self']}"})
+            assert resp.status == 415 and "Download it" in (await resp.json())["error"]
+    run(scenario())
+
+
 # ---------------------------------------------------------------- PDFs
 
 def test_pdfdoc_makes_plain_escaped_html():

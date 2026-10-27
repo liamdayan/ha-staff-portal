@@ -263,6 +263,47 @@ def test_dates_from_connecteam():
     assert people.parse_date("not a date") is None and people.parse_date("02/30/2024") is None
 
 
+def test_date_order_is_worked_out_from_connecteams_dates():
+    assert people.date_order(["30/03/2024", "03/09/2026"], "auto") == "dmy"
+    assert people.date_order(["10/25/2024", "03/09/2026"], "auto") == "mdy"
+    assert people.date_order(["03/09/2026", None, 5], "auto") == "dmy"   # Connecteam's usual
+    assert people.date_order(["30/03/2024"], "mdy") == "mdy"             # HR chose
+
+
+def test_start_dates_follow_connecteam_when_they_change_there(tmp_path, db):
+    # The field found by the name in the users' own records (no list of fields saved).
+    def ana(value):
+        u = user("1", "Ana Lee", fields={"77": value} if value else {})
+        u["field_names"] = {"77": "Start Date"} if value else {}
+        return u
+    run(people.apply_users(db, [ana(None)]))
+    assert db.person("1")["start_estimated"] == 1
+    run(people.apply_users(db, [ana("03/09/2026")]))      # added in Connecteam: day first
+    p = db.person("1")
+    assert (p["start_date"], p["start_estimated"], p["start_ct"]) == ("2026-09-03", 0, "2026-09-03")
+    db.update_person("1", start_date="2026-09-01", start_estimated=0, start_confirmed=1)
+    run(people.apply_users(db, [ana("03/09/2026")]))      # unchanged there: HR's date stays
+    assert db.person("1")["start_date"] == "2026-09-01"
+    run(people.apply_users(db, [ana("08/09/2026")]))      # changed there: Connecteam's wins
+    p = db.person("1")
+    assert (p["start_date"], p["start_confirmed"]) == ("2026-09-08", 0)
+    assert db.conn.execute("SELECT COUNT(*) FROM audit WHERE action = "
+                           "'Start date changed in Connecteam'").fetchone()[0] == 1
+
+
+def test_an_old_month_first_setting_becomes_auto(tmp_path):
+    first = HRDatabase(os.path.join(tmp_path, "x"))
+    first.conn.execute("UPDATE settings SET value = 'mdy' WHERE key = 'date_order'")
+    first.conn.execute("DELETE FROM settings WHERE key = 'date_order_v'")
+    first.conn.commit()
+    first.conn.close()
+    again = HRDatabase(os.path.join(tmp_path, "x"))
+    assert again.setting("date_order") == "auto"
+    again.set_settings({"date_order": "mdy"})
+    again.conn.close()
+    assert HRDatabase(os.path.join(tmp_path, "x")).setting("date_order") == "mdy"
+
+
 def test_people_sync_encrypts_contacts_and_finds_start_dates(tmp_path, db):
     db.set_settings({"ct_fields": json.dumps([{"id": "11", "name": "Employment Start Date"},
                                               {"id": "12", "name": "Direct manager"}])})

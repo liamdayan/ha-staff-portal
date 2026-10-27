@@ -1571,7 +1571,9 @@ tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes t
 department (the first of yours) unless you pick another (or Everyone), a person, or a due date. Tap a task's status
 chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
 computer) to pick any status, or **Reopen** a done one. Tap a task to see its notes and history, and to edit
-or delete it. The filters show only **Mine**, one department, or one status. Done tasks fold
+or delete it. A task that's in Connecteam (a Quick Task, or a followed form's request) can't be
+deleted here, since Staff Access has no permission to delete things there: mark it **Done**, or
+delete it in Connecteam. The filters show only **Mine**, one department, or one status. Done tasks fold
 away after a day (**Show older**). On a tablet or computer the list becomes a board with a column
 for each status. The list updates by itself every few seconds.
 
@@ -1643,9 +1645,8 @@ expires. One that can't be had says **Photo unavailable**.
 **Two-way sync with Connecteam Quick Tasks.** Off until you turn it on, on the **Tasks** tab:
 
 1. Check that Staff Access's Connecteam app has **quick_tasks.read** and **quick_tasks.write**
-   (and **forms.write** for forms that follow a status). **quick_tasks.delete** isn't needed: it
-   only lets the bin remove a task nobody is assigned to (Connecteam can't close
-   those); without it they stay on the board. **Test** shows
+   (and **forms.write** for forms that follow a status). **quick_tasks.delete** isn't needed:
+   tasks in Connecteam can't be deleted from Staff Access (mark them Done). **Test** shows
    which it has, and reads the list of boards. A Connecteam app's permissions can't be changed:
    if one is missing, make a new OAuth app with all of them and enter its keys in Settings →
    Connections.
@@ -2248,17 +2249,22 @@ Being a manager in Connecteam doesn't make someone a manager here: HR chooses, i
 
 ### People from Connecteam
 
-Every hour the HR portal reads Connecteam's user list, the same one Staff Access already reads,
-so it usually costs no extra request. Around sign-ins it reads it at most every 5 minutes, so a
+Every 15 minutes the HR portal reads Connecteam's user list (one request for up to 500 people,
+and usually none, since it's the same list Staff Access already reads), so a change made in
+Connecteam shows in HR within about 15 minutes. **Sync now** on the dashboard's HR portal tab
+reads it straight away, along with the list of profile fields. Around sign-ins it reads it at most every 5 minutes, so a
 new hire can sign in soon after being added. Once a day it reads Connecteam's archived users and
 the names of its profile fields. For each person it keeps:
 
 - name, mobile number and email (the last two encrypted);
 - departments: the Staff Access departments, which follow your Connecteam smart groups;
 - **start date**, from the profile field HR picks in **HR settings → Connecteam profile fields**
-  (until then, a field called "Employment Start Date"). If it's empty, the day they were added
-  to Connecteam is used, marked **estimated**, and HR gets a to-do to confirm it. Check that
-  dates are read the right way round (month/day or day/month) with one test employee;
+  (until then, a field called "Employment Start Date", "Start Date" or "Hire Date"). If it's
+  empty, the day they were added to Connecteam is used, marked **estimated**, and HR gets a
+  to-do to confirm it. When the date changes in Connecteam, HR follows it, even over a date HR
+  changed here (which stays until Connecteam's changes again). Connecteam sends dates day first
+  (30/03/2024); **Connecteam writes dates as** is set to work that out from your dates, or can be
+  set to month/day or day/month;
 - **direct manager**, from the "Direct manager" profile field, shown as a hint;
 - whether they're archived.
 
@@ -2304,8 +2310,9 @@ An HR admin sees their own page only as an employee would.
 ### Documents
 
 Each person's page in the HR portal has a **Documents** section: the files in their file that
-the person looking may see, with **Open** (photos open in the portal) or **Download** (PDFs are
-always downloaded, never opened inside the portal). Every file is kept in Google Drive, in the
+the person looking may see, with **Open**. A photo opens in the portal; so does a PDF, as a
+picture of its first 8 pages drawn on this computer (the PDF itself is never opened in the
+browser), with **Download the PDF** underneath. Card PDFs in Certificates open the same way. Every file is kept in Google Drive, in the
 person's folder, with the date first in its name, such as `2026-10-25 Handbook
 acknowledgement.pdf`, so folders sort in order.
 

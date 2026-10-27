@@ -757,6 +757,7 @@
       h("select", { name: "start_field" }, fieldOptions(g.start_field))),
     h("label", null, "Direct manager", h("select", { name: "manager_field" }, fieldOptions(g.manager_field))),
     h("label", null, "Connecteam writes dates as", h("select", { name: "date_order" },
+      h("option", { value: "auto", selected: !["mdy", "dmy"].includes(g.date_order) }, "Work it out (Connecteam's usual is day/month/year)"),
       h("option", { value: "mdy", selected: g.date_order === "mdy" }, "Month/day/year (10/25/2026)"),
       h("option", { value: "dmy", selected: g.date_order === "dmy" }, "Day/month/year (25/10/2026)"))),
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")));
@@ -860,10 +861,22 @@
       : `Last checked ${when(r.checked_at)}: line ${r.first_bad} doesn't match. Someone may have changed the log; tell the owner.`;
   }
 
+  // A PDF shown in the portal: the server draws its first pages as one picture (?view=1), so the
+  // PDF itself never opens in the browser. Scrolls inside its box; a download link underneath.
+  function pdfPages(url, label) {
+    const view = `${url}${url.includes("?") ? "&" : "?"}view=1`;
+    const box = h("div", { class: "pdf-pages" });
+    box.append(h("img", { src: view, alt: label, onerror: () => box.replaceChildren(
+      h("p", { class: "muted small" }, "This PDF can't be shown here. Download it to open it.")) }));
+    return [box, h("div", { class: "actions" },
+      h("a", { class: "button small-btn", href: view, target: "_blank", rel: "noopener noreferrer" }, "Full size"),
+      h("a", { class: "button small-btn", href: url, download: "" }, "Download the PDF"))];
+  }
+
   // ---------------------------------------------------------------- for other parts
 
   Object.assign(H, {
-    h, api, toast, ask, confirmDialog, openDialog, showQr, show, when, route, pageHead, emptyState, initial,
+    h, api, toast, ask, confirmDialog, openDialog, showQr, show, when, route, pageHead, emptyState, initial, pdfPages,
     registerSection(name, render) { H.sections[name] = render; },
     registerPage(route_, page) {
       H.pages[route_] = page;

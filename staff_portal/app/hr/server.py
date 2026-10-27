@@ -1080,7 +1080,7 @@ async def api_settings_general(request: web.Request):
                 return error("Choose a field from the list.")
             values[key] = value
     if "date_order" in data:
-        if data["date_order"] not in ("mdy", "dmy"):
+        if data["date_order"] not in ("auto", "mdy", "dmy"):
             return error("Choose how Connecteam writes dates.")
         values["date_order"] = data["date_order"]
     policy_changed = "totp_policy" in values and values["totp_policy"] != svc.db.setting(

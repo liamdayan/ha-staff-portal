@@ -4967,8 +4967,9 @@
       h("span", { class: `tk-dot ${e.to_status || "todo"}`, "aria-hidden": "true" }),
       h("span", { class: "tk-trail-text" }, tkHistoryText(e)),
       h("time", null, tkWhen(e.at))));
+    // Tasks in Connecteam aren't deleted here (no permission there): marked Done instead.
     const actions = t.can_edit ? h("div", { class: "tk-sheet-actions" },
-      h("button", { class: "btn tk-danger", type: "button", onclick: () => tkDelete(t) }, "Delete"),
+      t.can_delete ? h("button", { class: "btn tk-danger", type: "button", onclick: () => tkDelete(t) }, "Delete") : null,
       h("button", { class: "btn primary", type: "button", onclick: () => tkOpenForm(t) }, "Edit")) : null;
     const body = [statusRow, facts, link, notes, managerNote, photos,
       trail.length ? h("details", { class: "tk-trail", open: again ? tk.sheet?.panel.querySelector(".tk-trail")?.open : null },

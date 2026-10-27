@@ -1393,7 +1393,12 @@ async def api_photo(request: web.Request):
     if data is None:
         return error("The photo isn't kept here any more.", 404)
     turn = request.query.get("turn", "0")
-    if rel == "hr" and turn in ("90", "180", "270") and mime != files.MIME["pdf"]:
+    if request.query.get("view") == "1" and mime == files.MIME["pdf"]:
+        try:   # shown in the portal as a picture of its pages
+            data, mime = await files.pdf_preview_async(data), files.MIME["jpeg"]
+        except files.FileRefused as err:
+            return error(str(err), 415)
+    elif rel == "hr" and turn in ("90", "180", "270") and mime != files.MIME["pdf"]:
         async with files.image_slots():
             data = await asyncio.to_thread(_turned, data, int(turn))
         mime = files.MIME["jpeg"]

@@ -143,7 +143,9 @@ DROP TABLE IF EXISTS outbox;
 """
 
 # Columns added after a table was first made: {table: {column: SQL type}}.
-MIGRATIONS: dict[str, dict[str, str]] = {}
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "people": {"start_ct": "TEXT"},   # the start date Connecteam last had, to see it change
+}
 INDEXES = ""
 
 DEFAULTS = {
@@ -154,11 +156,11 @@ DEFAULTS = {
     "time_zone": "America/Los_Angeles",   # every date is in this time zone
     "start_field": "",                    # the Connecteam profile field holding the start date
     "manager_field": "",                  # ...and the direct manager ("" finds it by its name)
-    "date_order": "mdy",                  # how Connecteam writes dates: mdy (US) or dmy
+    "date_order": "auto",                 # how Connecteam writes dates: auto, mdy (US) or dmy
     "retention_years": "5",               # records of people who left are listed after this
 }
 PEOPLE_FIELDS = {"name", "mobile", "email", "signin_hash", "signin_name", "signin_name_hash",
-                 "groups", "start_date", "start_estimated", "start_confirmed", "managers",
+                 "groups", "start_date", "start_estimated", "start_confirmed", "start_ct", "managers",
                  "archived", "archived_at", "synced_at", "kiosk_hash", "totp_secret", "totp_on",
                  "totp_step", "totp_redo", "totp_source", "failed", "failed_at", "locked_until",
                  "day_failed", "day_since", "hard_locked", "access_ended", "last_signin_at",
@@ -187,6 +189,11 @@ class HRDatabase:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         self.conn.executescript(INDEXES)
         self.append_only("audit")
+        if not self.conn.execute("SELECT 1 FROM settings WHERE key = 'date_order_v'").fetchone():
+            # Month first was the old default, and wrong for Connecteam's users list: work it out.
+            self.conn.execute("UPDATE settings SET value = 'auto' WHERE key = 'date_order' "
+                              "AND value = 'mdy'")
+            self.conn.execute("INSERT INTO settings (key, value) VALUES ('date_order_v', '2')")
         for key, value in DEFAULTS.items():
             self.conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                               (key, value))

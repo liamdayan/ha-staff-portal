@@ -211,7 +211,13 @@ async def api_file(request: web.Request):
     audit.record(db, "Opened a restricted document" if doc["restricted"] else "Opened a document",
                  actor_id=v.id, actor=v.name, target_id=person["id"], target=person["name"],
                  detail=f"{k['name']}, {doc['doc_date']}", ip=svc.client_ip(request))
-    return files.file_response(data, doc["mime"], documents.file_name(doc))
+    mime = doc["mime"]
+    if request.query.get("view") == "1" and mime == files.MIME["pdf"]:
+        try:   # shown in the portal as a picture of its pages
+            data, mime = await files.pdf_preview_async(data), files.MIME["jpeg"]
+        except files.FileRefused as err:
+            return error(str(err), 415)
+    return files.file_response(data, mime, documents.file_name(doc))
 
 
 # ---------------------------------------------------------------- adding a file

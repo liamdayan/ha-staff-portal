@@ -706,7 +706,8 @@ class Connecteam:
                               "mobile": _short_text(u.get("phoneNumber"), 40),
                               "email": _short_text(u.get("email"), 200),
                               "created_at": _timestamp(u.get("createdAt")),
-                              "fields": _profile_fields(u.get("customFields"))})
+                              "fields": _profile_fields(u.get("customFields")),
+                              "field_names": _field_names(u.get("customFields"))})
             if len(page) < PAGE or offset >= PAGE * (MAX_USER_PAGES - 1):
                 break
             offset += PAGE
@@ -1088,6 +1089,18 @@ def _profile_fields(raw) -> dict[str, object]:
             value = value[:200]
         if value not in (None, "", []):
             found[str(fid)[:40]] = value
+    return found
+
+
+def _field_names(raw) -> dict[str, str]:
+    """{field ID: name} of the profile fields in a user's record (the users list names them), so
+    the HR portal finds its fields even when the list of fields can't be read."""
+    found: dict[str, str] = {}
+    for f in raw[:MAX_FIELDS] if isinstance(raw, list) else []:
+        fid = f.get("customFieldId", f.get("id")) if isinstance(f, dict) else None
+        name = _short_text(f.get("name"), 80) if isinstance(f, dict) else None
+        if isinstance(fid, (int, str)) and not isinstance(fid, bool) and name:
+            found[str(fid)[:40]] = name
     return found
 
 

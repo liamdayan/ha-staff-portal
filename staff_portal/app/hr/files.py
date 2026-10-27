@@ -6,7 +6,9 @@ or shows them.
 - Images are re-encoded: turned upright, shrunk to at most 3,000 pixels on the long side, and
   saved fresh, so location and every other piece of metadata is gone and a booby-trapped file
   can't come through as it was.
-- PDFs are kept byte for byte, and only ever offered as downloads.
+- PDFs are kept byte for byte, and offered as downloads. To show one in the portal, its first
+  pages are drawn as a picture on this computer (pdf_preview), so the PDF itself is never opened
+  in anyone's browser.
 - Every file is served with a sandbox policy, nosniff and no caching (file_response).
 - Image work runs in worker threads, a couple at a time, so it never stalls doors or wristbands.
 """
@@ -103,6 +105,68 @@ def clean_image(data: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
 
 
 _slots: dict = {}
+
+
+PREVIEW_PAGES = 8          # pages a PDF's preview shows (the rest: download it)
+PREVIEW_WIDTH = 1200       # pixels across each page
+PREVIEW_PAGE_HEIGHT = 2400 # ...and at most this tall (a strange page size is shrunk to fit)
+NO_PREVIEW = "This PDF can't be shown here. Download it to open it."
+
+
+def pdf_preview(data: bytes) -> bytes:
+    """A JPEG of a PDF's first pages, one under the other, with a line saying how many more
+    there are. Raises FileRefused when it can't be drawn. Slow: use pdf_preview_async."""
+    try:
+        import pypdfium2 as pdfium   # only loaded when a PDF is shown
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as err:
+        raise FileRefused(NO_PREVIEW) from err
+    pages = []
+    try:
+        pdf = pdfium.PdfDocument(data)
+        try:
+            count = len(pdf)
+            for n in range(min(count, PREVIEW_PAGES)):
+                page = pdf[n]
+                try:
+                    width, height = page.get_size()
+                    if width <= 0 or height <= 0:
+                        continue
+                    scale = min(PREVIEW_WIDTH / width, PREVIEW_PAGE_HEIGHT / height, 4)
+                    pages.append(page.render(scale=scale, fill_color=(255, 255, 255, 255),
+                                             may_draw_forms=True).to_pil().convert("RGB"))
+                finally:
+                    page.close()
+        finally:
+            pdf.close()
+    except FileRefused:
+        raise
+    except Exception as err:  # noqa: BLE001 - a damaged or locked PDF: download it instead
+        raise FileRefused(NO_PREVIEW) from err
+    if not pages:
+        raise FileRefused(NO_PREVIEW)
+    gap, note = 16, 64 if count > len(pages) else 0
+    sheet = Image.new("RGB", (max(p.width for p in pages),
+                              sum(p.height for p in pages) + gap * (len(pages) - 1) + note),
+                      (220, 220, 220))
+    y = 0
+    for p in pages:
+        sheet.paste(p, ((sheet.width - p.width) // 2, y))
+        y += p.height + gap
+    if note:
+        more = count - len(pages)
+        ImageDraw.Draw(sheet).text(
+            (24, y + 8), f"{more} more page{'s' if more != 1 else ''}: download the PDF to see "
+                         f"{'them' if more != 1 else 'it'}.",
+            fill=(40, 40, 40), font=ImageFont.load_default(size=28))
+    out = io.BytesIO()
+    sheet.save(out, "JPEG", quality=85)
+    return out.getvalue()
+
+
+async def pdf_preview_async(data: bytes) -> bytes:
+    async with image_slots():
+        return await asyncio.to_thread(pdf_preview, data)
 
 
 def image_slots() -> asyncio.Semaphore:

@@ -3113,9 +3113,11 @@ def task_view(t: dict, member: dict, manager: bool, departments: dict[int, str])
             "deleted_at": t["deleted_at"], "deleted_by": t["deleted_by"],
             "can_edit": tasks.can_edit(t, member, manager, departments) and not ctsync.recurring(t),
             "ct_recurring": ctsync.recurring(t),
+            "can_delete": (tasks.can_edit(t, member, manager, departments)
+                           and not ctsync.in_connecteam(t)),
             # The Connecteam sync: in Connecteam (as a Quick Task, or a followed submission),
             # or why not; a form's photos (fetched through /photos/) and manager notes.
-            "connecteam": bool(t["ct_task_id"]) or bool(t["source"] == "form" and t["ct_status"] is not None),
+            "connecteam": ctsync.in_connecteam(t),
             "ct_note": t["ct_note"], "manager_note": t["manager_note"],
             "photos": [p.get("name") or "" for p in json.loads(t["photos"] or "[]")]}
 
@@ -3226,6 +3228,8 @@ async def api_delete_task(request: web.Request):
     task = visible_task(request.match_info["id"], member, manager)
     if ctsync.recurring(task):
         return bad_request(ctsync.RECURRING, 409)
+    if ctsync.in_connecteam(task):
+        return bad_request(ctsync.IN_CONNECTEAM, 409)
     if not tasks.can_edit(task, member, manager, task_departments()):
         return bad_request("Only the person who made this task, or a manager, can delete it.", 403)
     db.bin_task(task["id"], member, time.time())

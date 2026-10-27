@@ -292,7 +292,15 @@ def _by(t: dict) -> str:
 
 RECURRING = ("This task repeats in Connecteam, so it's edited or deleted there. Its status "
              "can be changed here: each repeat is a task of its own.")
+IN_CONNECTEAM = ("This task is in Connecteam, and Staff Access can't delete things there. Mark it "
+                 "Done, or delete it in Connecteam.")
 _logged_recurring: set[tuple] = set()
+
+
+def in_connecteam(t: dict) -> bool:
+    """In Connecteam: a Quick Task, or a followed form's submission. The app has no delete
+    permission there, so it's never deleted here (where it would only come back)."""
+    return bool(t.get("ct_task_id")) or (t.get("source") == "form" and t.get("ct_status") is not None)
 
 
 def recurring(t: dict) -> bool:

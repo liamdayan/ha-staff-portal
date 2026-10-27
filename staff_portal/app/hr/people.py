@@ -26,7 +26,8 @@ from . import audit, crypto, signin
 
 SAFETY_SHARE = 0.75      # a list with fewer than this share of the people active now trips the catch
 SAFETY_MIN = 4           # ...once there are at least this many
-START_FIELD_NAME = "employment start date"   # used until HR picks a field
+START_FIELD_NAMES = ("employment start date", "start date", "hire date", "date of hire",
+                     "date hired")   # used until HR picks a field
 MANAGER_FIELD_NAMES = ("direct manager", "manager", "reports to")
 CAUGHT = ("Connecteam listed {n} people, far fewer than the {before} active here, so nobody's HR "
           "access was ended. Check Connecteam; the next sync tries again.")
@@ -71,14 +72,34 @@ def ids_in(value) -> list[str]:
             and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", str(v))][:10]
 
 
-def find_field(fields: list[dict], chosen: str, names) -> str | None:
-    """The profile field to use: the one HR chose, else the first whose name is one of names."""
+def find_field(fields: list[dict], chosen: str, names, users=()) -> str | None:
+    """The profile field to use: the one HR chose, else the first whose name is one of names (in
+    order), from the list of fields or else as the users' own records name them."""
     if chosen:
         return chosen
+    named = {}
     for f in fields:
-        if str(f.get("name", "")).strip().casefold() in names:
-            return str(f["id"])
-    return None
+        named.setdefault(str(f.get("name", "")).strip().casefold(), str(f.get("id")))
+    for u in users:
+        for fid, name in (u.get("field_names") or {}).items():
+            named.setdefault(str(name).strip().casefold(), str(fid))
+    return next((named[n] for n in names if n in named), None)
+
+
+def date_order(values, chosen: str) -> str:
+    """How the dates in values are written: what HR chose (mdy or dmy), else (auto) worked out
+    from the dates themselves: a first number over 12 means day first, a second one over 12
+    month first. Connecteam's users list writes them day first (30/03/2024), so that's the
+    answer when nothing tells."""
+    if chosen in ("mdy", "dmy"):
+        return chosen
+    for v in values:
+        if isinstance(v, str) and (m := re.fullmatch(r"\s*(\d{1,2})[/.-](\d{1,2})[/.-]\d{4}\s*", v)):
+            if int(m[1]) > 12 >= int(m[2]):
+                return "dmy"
+            if int(m[2]) > 12 >= int(m[1]):
+                return "mdy"
+    return "dmy"
 
 
 def _fingerprint(stored: str, code: str) -> str:
@@ -125,15 +146,17 @@ async def apply_users(db, users: list[dict], *, group_name=lambda g: g,
     # From here on nothing is awaited: read fresh and written in one go.
     existing = {p["id"]: p for p in db.people(archived=None)}
     fields_list = db.setting_json("ct_fields", []) or []
-    start_field = find_field(fields_list, db.setting("start_field"), (START_FIELD_NAME,))
-    manager_field = find_field(fields_list, db.setting("manager_field"), MANAGER_FIELD_NAMES)
-    order = db.setting("date_order")
+    start_field = find_field(fields_list, db.setting("start_field"), START_FIELD_NAMES, users)
+    manager_field = find_field(fields_list, db.setting("manager_field"), MANAGER_FIELD_NAMES,
+                               users)
+    order = date_order([(u.get("fields") or {}).get(start_field) for u in users],
+                       db.setting("date_order"))
     counts = {"added": 0, "updated": 0, "archived": 0, "returned": 0, "no_code": 0}
     signed_out = set()
     for u in users:
         uid, old = u["id"], existing.get(u["id"])
         fields = u.get("fields") or {}
-        start = parse_date(fields.get(start_field), order) if start_field else None
+        start = ct_start = parse_date(fields.get(start_field), order) if start_field else None
         estimated = 0
         if not start and u.get("created_at"):
             start = datetime.fromtimestamp(u["created_at"], timezone.utc).date().isoformat()
@@ -148,8 +171,17 @@ async def apply_users(db, users: list[dict], *, group_name=lambda g: g,
             new["signin_hash"] = signin.mobile_key(mobile)
         if old is None or _unseal(old["email"], "people.email") != email:
             new["email"] = crypto.seal_text(email, "people.email")
-        if old is None or not old["start_confirmed"]:
+        if old is not None and ct_start and ct_start != old["start_ct"]:
+            # Changed in Connecteam (or there for the first time): it wins, even over a date HR
+            # confirmed here. HR's own change stays until Connecteam's changes again.
+            new.update(start_date=ct_start, start_estimated=0, start_confirmed=0)
+            if old["start_date"] and old["start_date"] != ct_start and not old["start_estimated"]:
+                audit.record(db, "Start date changed in Connecteam", target_id=uid,
+                             target=u["name"], detail=f"{old['start_date']} → {ct_start}")
+        elif old is None or not old["start_confirmed"]:
             new.update(start_date=start, start_estimated=estimated)
+        if ct_start:
+            new["start_ct"] = ct_start
         code = u.get("kiosk_code")
         if code and uid in hashed:
             stored, changed = hashed[uid]

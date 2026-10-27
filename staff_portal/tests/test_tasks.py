@@ -304,6 +304,24 @@ def test_only_the_maker_or_a_manager_edits_and_deletes(tmp_path):
     run(scenario())
 
 
+def test_a_task_in_connecteam_is_edited_but_never_deleted_here(tmp_path):
+    async def scenario():
+        p = Tasks(tmp_path)
+        async with p:
+            ana = await p.sign_in(p.ana)
+            tid = (await p.add(ana, title="Fix the ice machine", department_id=None))["id"]
+            status, body = await p.call("PUT", f"/api/tasks/{tid}", ana, {"notes": "Room 12"})
+            assert body["task"]["can_delete"] and not body["task"]["connecteam"]
+            p.db.conn.execute("UPDATE tasks SET ct_task_id = 'ct-9' WHERE id = ?", (tid,))
+            p.db.conn.commit()
+            status, body = await p.call("PUT", f"/api/tasks/{tid}", ana, {"notes": "Room 14"})
+            assert status == 200 and body["task"]["can_edit"] and not body["task"]["can_delete"]
+            status, body = await p.call("DELETE", f"/api/tasks/{tid}", ana)
+            assert status == 409 and "Connecteam" in body["error"]
+            assert p.db.task(tid)["deleted_at"] is None
+    run(scenario())
+
+
 def test_deleted_tasks_go_to_a_30_day_bin(tmp_path):
     async def scenario():
         p = Tasks(tmp_path)
