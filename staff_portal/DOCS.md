@@ -505,6 +505,25 @@ Restoring a backup made before someone was archived keeps them archived (the res
 names them, and so does Activity): bring them back with **Restore** if you want them. Copying
 staff in from a file skips anyone archived here.
 
+## The dashboard updates by itself
+
+While the dashboard is open, it checks every 12 seconds whether anything it shows has changed:
+another admin's change, a Connecteam sync in the background, someone signing in. Changes appear
+without reloading, and the header says when it last checked ("Updated 3:41 PM").
+
+- It never gets in your way: nothing is redrawn while a dialog is open, while you're typing or
+  saving, or while you drag something. The change appears as soon as you're done. Your scroll
+  position, opened rows and folds stay as they were.
+- If you have unsaved changes (a role, the layout, Wristbands or Settings), they're never
+  overwritten: the header says "Changed elsewhere meanwhile" with **Show it**, which shows the
+  change and keeps your edits.
+- The Activity tab adds new lines at the top as they happen.
+- It only checks while the page is showing, and once straight away when you come back to it.
+- The checks only read Staff Access's own records: they never ask Connecteam, TT Hotel or Home
+  Assistant anything (apart from Home Assistant's usual check that you're an administrator, at
+  most every 10 minutes).
+- The Tasks, Reports and HR portal tabs are read when you open them.
+
 ## Connections: TT Hotel and Connecteam
 
 **Settings → Connections** holds the two outside services Staff Access can sign in to: **TT
@@ -1373,6 +1392,9 @@ a small, steady share:
   once an hour, after the add-on starts, after saving the settings and on **Sync staff now** (at
   most once a minute). The list of smart groups is only read when you edit a department, and
   reused for 6 hours. Nothing is asked on page loads.
+- The dashboard keeps itself up to date while it's open (see [The dashboard updates by
+  itself](#the-dashboard-updates-by-itself)) from what Staff Access already knows: that never
+  asks Connecteam anything.
 - With one time clock, hourly checks are 24 requests a day. Add one for each sign-in or control
   by someone the last check didn't find clocked in, typically the start of each shift. With many
   time clocks it checks less often if needed, so regular checks stay under 15% of your daily limit.
@@ -1709,8 +1731,9 @@ Under **Settings → Phone security**:
     host), set the **Tunnel address** first, to the IP address that computer connects from. For
     a Docker container this is usually the Docker host's own LAN address (such as the VM's IP in
     Proxmox), not the container's internal address. The easy way: open the staff app once
-    through your https address, reload Settings, and click **Use this address** next to the
-    address shown under "Cloudflare traffic recently came from". Then tick the box and save.
+    through your https address, wait a few seconds on Settings, and click **Use this address**
+    next to the address shown under "Cloudflare traffic recently came from". Then tick the box
+    and save.
   - Staff Access won't turn this on until it has seen tunnel traffic from an allowed address, so
     it can't cut every phone off. If the tunnel computer's address changes later, phones are
     blocked until you update the Tunnel address. Give that computer a fixed IP.

@@ -7,9 +7,13 @@
   let haAreas = [];
   let editing = null; // Roles tab: { kind: "role"|"person", id, name, entities, areas, pages, wristbands, dirty, ... }
   let oldestActivity = null;
+  let newestActivity = null;   // the newest line on the Activity tab (null: not read yet)
   let wbDoors = null;   // TT Hotel's doors as last synced (api/wristbands/doors), loaded when needed
   let wbDirty = false;  // Wristbands tab: settings changed but not saved yet
   let linkWatcher = null; // the open computer editor's { redraw, fast } for the encoder link check
+  // Live updates: the version of api/state on screen, a newer answer waiting to be drawn, how
+  // many changes are being saved, and the poll's timer (see "live updates" below).
+  const live = { v: null, pending: null, drawn: 0, saving: 0, saved: 0, timer: null, retry: null };
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const toastEl = $("#toast");
@@ -296,7 +300,18 @@
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    const res = await fetch(path, opts);
+    // While a change is being saved, the live poll waits (what follows the save draws it).
+    const saving = method !== "GET";
+    if (saving) live.saving++;
+    let res;
+    try {
+      res = await fetch(path, opts);
+    } finally {
+      if (saving) {
+        live.saving--;
+        live.saved++;
+      }
+    }
     let data = {};
     // Read the body once: some errors are plain text, and a failed .json() would use it up.
     const text = await res.text().catch(() => "");
@@ -343,7 +358,16 @@
   }
 
   async function load() {
-    const data = await api("GET", "api/state");
+    drawState(await api("GET", "api/state"));
+  }
+
+  // Everything api/state gives, drawn (after a save, or by the live poll).
+  function drawState(data) {
+    live.v = data.v;
+    live.pending = null;
+    live.drawn++;
+    live.checked = Date.now();
+    showLive();
     state.settings = data.settings;
     // The dashboard wears the same brand color as the phones.
     if (/^#[0-9a-f]{6}$/i.test(state.settings.accent_color || "")) {
@@ -2654,22 +2678,23 @@
 
   // ---------------------------------------------------------------- activity
 
+  const activityRow = (a) => h("tr", { class: a.ok ? "" : "failed" },
+    h("td", { class: "nowrap" }, when(a.ts)),
+    h("td", null, a.actor, a.role ? h("div", { class: "sub" }, a.role) : null),
+    h("td", null, a.action.replace(/_/g, " "), a.detail ? h("div", { class: "sub" }, a.detail) : null),
+    h("td", null, a.entity_id || ""));
+
   async function loadActivity(reset) {
     const rows = $("#activity-rows");
-    if (reset) { oldestActivity = null; rows.replaceChildren(); }
+    if (reset) { oldestActivity = null; newestActivity = null; rows.replaceChildren(); }
     await run(async () => {
       const q = oldestActivity ? `?before=${oldestActivity}` : "";
       const { activity } = await api("GET", `api/activity${q}`);
       if (reset && !activity.length) {
-        rows.replaceChildren(h("tr", null, h("td", { colspan: "4", class: "empty" }, "Nothing yet.")));
+        rows.replaceChildren(h("tr", { "data-empty": "" }, h("td", { colspan: "4", class: "empty" }, "Nothing yet.")));
       }
-      for (const a of activity) {
-        rows.append(h("tr", { class: a.ok ? "" : "failed" },
-          h("td", { class: "nowrap" }, when(a.ts)),
-          h("td", null, a.actor, a.role ? h("div", { class: "sub" }, a.role) : null),
-          h("td", null, a.action.replace(/_/g, " "), a.detail ? h("div", { class: "sub" }, a.detail) : null),
-          h("td", null, a.entity_id || "")));
-      }
+      rows.append(...activity.map(activityRow));
+      if (reset) newestActivity = activity.length ? activity[0].ts : 0;
       if (activity.length) oldestActivity = activity[activity.length - 1].ts;
       $("#more-activity").hidden = activity.length < 200;
     });
@@ -2778,16 +2803,19 @@
     $("#remove-logo").hidden = !state.hasLogo;
   }
 
-  function fillSettings() {
+  let settingsDirty = false;   // the Settings form has changes not saved yet
+
+  function fillSettings(icon = true) {
     const form = $("#settings-form");
     for (const [k, v] of Object.entries(state.settings)) {
       const field = form.elements[k];
       if (field?.type === "checkbox") field.checked = v === "1";
       else if (field) field.value = v;
     }
+    settingsDirty = false;
     renderTunnelSources();
     fillConnections();
-    refreshIcon();
+    if (icon) refreshIcon();
   }
 
   // ------------------------------------------------ connections (in Settings)
@@ -3180,11 +3208,14 @@
           src.ha_network ? "the Cloudflared add-on (allowed)" : src.allowed ? "allowed" : "not allowed yet"),
         !src.allowed ? h("button", { type: "button", class: "btn", onclick: () => {
           input.value = [...input.value.split(/[\s,]+/).filter(Boolean), src.address].join(", ");
+          settingsDirty = true;
           toast(`Added ${src.address}. Click Save settings to keep it.`);
         } }, "Use this address") : null)),
       h("p", { class: "hint" }, "Only add an address you recognize as the computer running cloudflared."));
   }
 
+  $("#settings-form").addEventListener("input", () => { settingsDirty = true; });
+  $("#settings-form").addEventListener("change", () => { settingsDirty = true; });
   $("#settings-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target).entries());
@@ -3336,11 +3367,17 @@
       doorsLoading = null;
       renderDoors();
       renderDefaultDoors();
-      renderDepartments();
-      renderStaff();   // each person's "Make key card" line names the doors
-      if (editing && !$("#tab-roles").hidden) renderRoleEditor();
+      doorsChanged();
     })();
     return doorsLoading;
+  }
+
+  // What names the doors elsewhere, drawn again after the list or a door changed.
+  function doorsChanged() {
+    renderDoorFilter();   // Door activity's list of doors
+    renderDepartments();
+    renderStaff();   // each person's "Make key card" line names the doors
+    if (editing && !$("#tab-roles").hidden) renderRoleEditor();
   }
 
   // "Loading doors…", or why they couldn't be loaded, while there's no door list yet.
@@ -4078,7 +4115,7 @@
     linkChecking = true;
     try {
       if (linkCheckWanted()) {
-        const data = await api("GET", "api/state");
+        const data = await api("GET", "api/state?v=");   // the whole state, read as the live poll reads it
         const before = encoderSignature();
         const fresh = new Map((data.devices || []).map((x) => [x.id, x]));
         for (const d of state.devices) {
@@ -4216,6 +4253,7 @@
       applyUnshared(reply.unshared, value === "staff" ? target.doors : []);
       renderDoors();
       renderDefaultDoors();
+      doorsChanged();
       $("#wb-doors .wb-mark button")?.focus();
       toast(value ? `${target.label}: ${doors} marked as ${KIND_PLURALS[value]}.` +
         (shared.length ? ` ${listNames(shared.map(doorName))} ${shared.length === 1 ? "is" : "are"} no longer on day passes or overnight wristbands.` : "")
@@ -4252,6 +4290,7 @@
       pick.classList.toggle("wb-unmarked", !value);
       renderKindStatus();
       renderDefaultDoors();
+      doorsChanged();
       const shared = ["wb_daypass_doors", "wb_overnight_doors"].some((key) => wbPicks[key].has(d.id));
       toast(value === "staff" && places ? `${doorName(d)} is a staff door now, and no longer on day passes ` +
         "or overnight wristbands: only staff cards and contractor badges open it."
@@ -4279,6 +4318,7 @@
       }
       d.name = value;
       renderDefaultDoors();
+      doorsChanged();
       toast(value ? `Staff now see it as ${value}.` : `Staff now see TT Hotel's name, ${ttName}.`);
     }));
     const shown = h("input", { type: "checkbox", checked: !d.hidden });
@@ -4303,6 +4343,7 @@
       row.classList.toggle("wb-hidden", d.hidden);
       renderDoorStatus();
       renderDefaultDoors();
+      doorsChanged();
       toast(d.hidden ? `${doorName(d)} is hidden from staff.` : `Staff see ${doorName(d)} again.`);
     }));
     return row;
@@ -7041,6 +7082,7 @@
     state.layout = layout;
     layoutDraft = null;
     renderLayoutEditor();
+    await load();   // phones, roles and departments name its pages
   }, "Layout saved. Phones update within a few seconds."));
 
   $("#discard-layout").addEventListener("click", async () => {
@@ -7927,6 +7969,126 @@
     list.hidden = false;
   }
 
+  // ---------------------------------------------------------------- live updates
+
+  // While the page is visible it asks every LIVE_MS whether anything it shows has changed: another
+  // admin's change, a Connecteam sync in the background, someone signing in. The add-on answers
+  // from its own records (api/state?v=, just "unchanged" when nothing did), so the poll never
+  // makes it ask Connecteam, TT Hotel or Home Assistant anything. A change is drawn straight away,
+  // keeping the scroll, the open rows and folds and the focus; never while a dialog is open,
+  // something is being typed or saved, or a row is being dragged (it waits, then draws), and never
+  // over unsaved changes (a note offers to show it).
+  const LIVE_MS = 12000;
+
+  // Why a change can't be drawn now: "wait" (it's drawn once that's over), "edits", or null.
+  function liveBusy() {
+    const el = document.activeElement;
+    if (document.querySelector("dialog[open]") || activeDrag || live.saving
+        || el?.matches?.("textarea, select, input:not([type=search]):not([type=checkbox]):not([type=radio])")) return "wait";
+    if (editing?.dirty || layoutDraft?.dirty || wbDirty || connDirty.tt || connDirty.ct || gdDirty
+        || settingsDirty || $("#hr-form").dataset.dirty) return "edits";
+    return null;
+  }
+
+  async function livePoll() {
+    clearTimeout(live.timer);
+    if (document.visibilityState !== "visible") return;   // started again when it's shown
+    const seen = [live.drawn, live.saved];
+    try {
+      if (!live.saving) {
+        const data = await api("GET", `api/state?v=${encodeURIComponent(live.v || "")}`);
+        // A save meanwhile draws what's newer itself.
+        if (seen[0] === live.drawn && seen[1] === live.saved && !live.saving) {
+          if (!data.unchanged) live.pending = data;
+          live.checked = Date.now();
+          showLatest();
+          newActivity(data.activity);
+        }
+      }
+    } catch { /* the add-on didn't answer: the next poll tries again */ }
+    clearTimeout(live.timer);
+    if (document.visibilityState === "visible") live.timer = setTimeout(livePoll, LIVE_MS);
+  }
+
+  // Draws a waiting change if nothing's in the way, else tries again shortly.
+  function showLatest() {
+    clearTimeout(live.retry);
+    if (!live.pending) return showLive();
+    const busy = liveBusy();
+    if (busy) {
+      showLive(busy === "edits");
+      live.retry = setTimeout(showLatest, 1500);
+      return;
+    }
+    const data = live.pending;
+    const before = { synced: state.wristbands?.synced_at, cards: JSON.stringify(state.keyCardTotals) };
+    keepPlace(() => {
+      drawState(data);
+      // What only the open tab shows, as drawn when it's opened (unsaved changes are left alone).
+      if (!$("#tab-settings").hidden) fillSettings(false);
+      if (!$("#tab-wristbands").hidden) {
+        fillWristbands();
+        if (wbDoors && before.synced !== state.wristbands?.synced_at) loadDoors();
+      }
+      if (!$("#tab-layout").hidden) {
+        layoutDraft = null;   // nothing changed in it (else this waits): start again from what's saved
+        renderLayoutEditor();
+      }
+      if (!$("#tab-staff").hidden && before.cards !== JSON.stringify(state.keyCardTotals)) loadKeyCards(true);
+    });
+  }
+
+  // Redraws without moving the page or losing the focus (found again by its words in the new page).
+  function keepPlace(draw) {
+    const [x, y] = [window.scrollX, window.scrollY];
+    const el = document.activeElement;
+    const key = el && el !== document.body
+      ? [el.tagName, el.getAttribute("aria-label") || el.textContent.trim().slice(0, 80)] : null;
+    draw();
+    window.scrollTo(x, y);
+    if (key && !document.contains(el)) {
+      const again = [...document.querySelectorAll(`main ${key[0]}`)].find((e) => e.offsetParent
+        && (e.getAttribute("aria-label") || e.textContent.trim().slice(0, 80)) === key[1]);
+      again?.focus({ preventScroll: true });
+    }
+  }
+
+  // New Activity lines go on top of an open Activity tab (as long as it's showing the newest).
+  async function newActivity(ts) {
+    if ($("#tab-activity").hidden || newestActivity == null || !ts || ts <= newestActivity) return;
+    const since = newestActivity;
+    let activity;
+    try {
+      ({ activity } = await api("GET", "api/activity"));
+    } catch { return; }
+    if (newestActivity !== since) return;   // read again meanwhile
+    const fresh = activity.filter((a) => a.ts > since);
+    if (!fresh.length) return;
+    const rows = $("#activity-rows");
+    const height = document.documentElement.scrollHeight;
+    rows.querySelector("[data-empty]")?.remove();
+    rows.prepend(...fresh.map(activityRow));
+    newestActivity = fresh[0].ts;
+    // Reading further down: the lines being read stay where they were.
+    if (rows.getBoundingClientRect().top < 0) window.scrollBy(0, document.documentElement.scrollHeight - height);
+  }
+
+  // "Updated 3:41 PM" in the header, and the note while a change waits for unsaved edits.
+  function showLive(waiting = false) {
+    const at = live.checked || Date.now();
+    $("#live-status").textContent = `Updated ${new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    $("#live-note").hidden = !waiting || !live.pending;
+  }
+
+  $("#live-show").addEventListener("click", () => run(async () => {
+    if (live.pending) keepPlace(() => drawState(live.pending));
+  }));
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") livePoll();   // once straight away, then as usual
+    else clearTimeout(live.timer);
+  });
+
   // ---------------------------------------------------------------- start
 
   $("#version").textContent = `v${SCRIPT_VERSION}`;
@@ -7935,6 +8097,8 @@
     let tab = "phones";
     try { tab = sessionStorage.getItem("tab") || tab; } catch { /* ignore */ }
     selectTab(tab);
-  }).catch((err) => toast(err.message, true));
+  }).catch((err) => toast(err.message, true)).finally(() => {
+    live.timer = setTimeout(livePoll, LIVE_MS);
+  });
   scheduleLinkCheck(LINK_CHECK_MS);
 })();
