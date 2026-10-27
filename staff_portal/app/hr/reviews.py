@@ -1372,7 +1372,9 @@ def reviews_section(svc, v, p: dict, rel: str) -> dict | None:
         items.append({"id": r["id"], "kind_word": s["kind_word"], "due": r["due"],
                       "status_word": s["status_word"], "overdue": s["overdue"]})
     found = {"title": "Reviews", "items": items, "rows": [],
-             "can_start": rel in STAFF_RELS and not p["archived"]}
+             "can_start": rel in STAFF_RELS and not p["archived"],
+             # HR's day, and an extra review's default due date two weeks on: never the device's
+             "today": today.isoformat(), "start_due": (today + timedelta(days=14)).isoformat()}
     if rel == "hr":
         names = group_names(svc)
         main, chosen = main_group(db, p), db.conn.execute(
