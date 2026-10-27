@@ -29,8 +29,12 @@
 - **Gusto balances:** someone who manages the report uploads Gusto's Time Off Balances CSV once,
   and everyone who can see the report sees it. Rules and required forms are set on the report's
   Rules tab.
-- **Departments come from Connecteam smart groups:** each person shows under the Staff Access
-  department whose smart group they're in, otherwise their Gusto title.
+- **Departments are Staff Access's:** each person shows under their department on the Staff tab
+  (set by hand or by smart group), otherwise their Gusto title.
+- **Gusto names match Connecteam names** by name, by the Rules tab's name matches, or by a common
+  short name (Tom and Thomas, Bill and William) when only one person fits.
+- **Time off shows its Connecteam policy** (Sick leave, Vacation) when the app has the optional
+  time_off.read permission, and leave booked in days counts as the rules' shift length.
 - **Who can see whom:** a new setting on the Rules tab. Everyone who may view the report sees all
   departments (as before, the default), or viewers see only the people in their own department
   while those who manage the report see everyone. The add-on leaves the others out before
@@ -50,19 +54,24 @@
   computers show a board. Filters for Mine, department and status. Done tasks fold away after a
   day, and the list updates live.
 - **Only the person who made a task, or a role with the new Manage tasks setting,** can edit or
-  delete it. Deleted tasks stay in a bin for 30 days.
+  delete it, and only tasks they can see. Deleted tasks stay in a bin for 30 days.
+- **A department can't be deleted while a form still sends its tasks there.** Tasks already in a
+  deleted department stay visible to their maker and to Manage tasks roles, who can move them.
 - **Dashboard Tasks tab:** choose Connecteam forms whose new submissions become tasks, with their
   department, which answer is the title (picked from the form's questions), and whether the
-  person who sent it gets the task. Forms are checked every 10 minutes in the reports' share of
-  Connecteam requests, and no submission becomes a task twice.
+  person who sent it gets the task, and no submission becomes a task twice. Forms are checked
+  every 10 minutes, less often once more than 2 are chosen, so together they use at most about
+  300 Connecteam requests a day; the Tasks tab shows how often and what it costs.
 
 **Connecteam permissions**
 
 - **Reports and tasks need two more permissions** besides users.read and time_clock.read:
-  schedule.read and forms.read (and jobs.read, optionally, for job names). Connecteam can't add
+  schedule.read and forms.read (and, optionally, jobs.read for job names and time_off.read for
+  time off policy names). Connecteam can't add
   permissions to an existing app: create a new OAuth app with all of them and enter its keys in
   Settings → Connections. **Test connection** says when reports and tasks lack one, and a report
-  or a form's card names the permission Connecteam refused, in its own words.
+  or a form's card names the permission Connecteam refused, in its own words. A refused
+  permission isn't asked again for 30 minutes, so it doesn't use up the requests.
 
 **Backups**
 
