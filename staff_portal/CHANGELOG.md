@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.9
+
+- **Recurring tasks from Connecteam show in the staff app, marked "Repeats · Connecteam",** and
+  are changed only in Connecteam: Connecteam's API can't say how a recurring task repeats, or
+  whether completing one completes the whole series, so Staff Access doesn't risk it. Done in
+  Connecteam shows here within about 10 minutes.
+- **The add-on log notes what Connecteam sends for each recurring task** ("Task sync: recurring
+  task on board …"), to see how its repeats come through.
+
 ## 0.12.8
 
 - **Attendance report: Gusto balances older than 2 weeks get a warning,** on the report and the

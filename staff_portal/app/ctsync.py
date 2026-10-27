@@ -263,7 +263,10 @@ def ct_view(r: dict) -> dict:
             "due": int(due) if isinstance(due, (int, float)) and not isinstance(due, bool)
             and 0 < due < 2**33 else None,
             "users": users, "done": r.get("status") == "completed",
-            "archived": r.get("isArchived") is True}
+            "archived": r.get("isArchived") is True,
+            # Connecteam's API can't say how a recurring task repeats, or whether completing it
+            # completes the series: kept to show it, never compared or sent (not in FIELDS).
+            "recurring": r.get("type") == "recurring"}
 
 
 BY_LINE = "Added by {} in Staff Access"
@@ -275,6 +278,27 @@ def _by(t: dict) -> str:
     task (that's always the account the keys belong to). "" when Staff Access didn't make it."""
     name = (t.get("created_by_name") or "").strip()
     return name[:60] if name and t.get("source") == "quick" else ""
+
+
+RECURRING = ("This task repeats in Connecteam, so it's changed there: mark it done in "
+             "Connecteam and it shows here within about 10 minutes.")
+_logged_recurring: set[tuple] = set()
+
+
+def recurring(t: dict) -> bool:
+    """A task from a Connecteam recurring task: shown here, but changed only in Connecteam."""
+    return bool(t.get("ct_task_id")) and bool((_sync(t).get("seen") or {}).get("recurring"))
+
+
+def _log_recurring(board_id: str, r: dict) -> None:
+    """What Connecteam sends for a recurring task (its docs don't say how they work), once per
+    change, so the add-on log shows how its repeats come through."""
+    key = (str(r.get("id")), r.get("status"), r.get("startTime"), r.get("dueDate"), r.get("isArchived"))
+    if key in _logged_recurring or len(_logged_recurring) > 2000:
+        return
+    _logged_recurring.add(key)
+    log.info("Task sync: recurring task on board %s: id %s, status %s, start %s, due %s, "
+             "archived %s, %d people", board_id, *key[:5], len(r.get("userIds") or []))
 
 
 def _payload(v: dict, by: str = "") -> dict:
@@ -425,6 +449,9 @@ async def _push(t: dict) -> bool:
         return await _push_form(t)
     if not on():
         return False   # waits until the sync is on again
+    if recurring(t):   # changed only in Connecteam (the routes refuse changes; this is a backstop)
+        _save(t["id"], clear_pending=True, pending_was=t["ct_pending"])
+        return False
     sync, (to_ct, _) = _sync(t), _links()
     mapped = {b["board_id"]: b for b in boards()}
     if sync.get("creating"):
@@ -683,6 +710,9 @@ async def _poll(b: dict) -> None:
         raise
     ct_time = b["last_ok"] or 0.0
     by_id = {str(r["id"]): r for r in remote}
+    for r in remote:
+        if r.get("type") == "recurring":
+            _log_recurring(board_id, r)
     to_ct, to_staff = _links()
     seen_ids = {r[0] for r in db.conn.execute("SELECT ct_task_id FROM task_ct_seen")}
     # Creates that may have arrived: found by title and assignees, never made twice.

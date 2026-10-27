@@ -1037,3 +1037,29 @@ def test_who_changed_a_followed_forms_status_goes_in_its_note():
 
 def test_the_staff_app_lists_finished_tasks_for_two_days():
     assert tasks.LIST_FINISHED_DAYS == 2
+
+
+def test_a_recurring_connecteam_task_is_shown_but_changed_only_there(tmp_path):
+    """Connecteam's API can't say how a recurring task repeats or whether completing it
+    completes the series, so it shows here (marked) and changes come only from Connecteam."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        weekly = {**ct_task("r1", "Check the fire doors", [7]), "type": "recurring"}
+        ct.board_tasks["501"] = [weekly]
+        async with p, ct:
+            await poll(p)
+            ana = await p.sign_in(p.ana)
+            seen = (await p.listed(ana))["Check the fire doors"]
+            assert seen["ct_recurring"] is True and seen["can_edit"] is False
+            for method, path, body in (("POST", f"/api/tasks/{seen['id']}/status", {"status": "done"}),
+                                       ("PUT", f"/api/tasks/{seen['id']}", {"title": "x"}),
+                                       ("DELETE", f"/api/tasks/{seen['id']}", None)):
+                status, answer = await p.call(method, path, ana, body)
+                assert status == 409 and "repeats in Connecteam" in answer["error"], (method, path)
+            await sent(p)
+            assert not writes(ct)
+            # Done in Connecteam shows here, as for any task.
+            weekly["status"] = "completed"
+            await poll(p)
+            assert p.db.task(seen["id"])["status"] == "done"
+    run(scenario())
