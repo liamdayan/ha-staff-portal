@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.18
+
+- **Tasks are checked in Connecteam every 3 minutes during business hours** (9 AM to 6 PM, your
+  time zone) and every 30 minutes the rest of the day. Change the hours and both intervals on the
+  Tasks tab under **Checking Connecteam**.
+- **Each check of a Connecteam board reads only its open tasks,** so it stays at about one
+  request however many finished tasks pile up. Tasks finished, archived or deleted in Connecteam
+  are still noticed. New unassigned tasks made in Connecteam show up within the hour.
+- **Forms that follow a status read back only to their oldest open request:** one request
+  instead of two. A request marked Done in Connecteam still shows as Done here.
+- **Staff Access may use up to 9,000 Connecteam requests a day** (your Expert plan allows
+  10,000). Reports and tasks share up to 3,000 of them; the time clock checks always keep at least
+  4,500 a day and the last 10 of every minute.
+- **The Tasks tab shows how often forms and boards are checked** and about how many Connecteam
+  requests that takes a day (about 444 for one board and one followed form).
+
 ## 0.12.17
 
 - **The dashboard updates by itself while it's open:** changes made by another admin, by a
