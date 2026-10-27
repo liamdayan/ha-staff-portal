@@ -252,7 +252,7 @@
     const isCurrent = (href) => (href === "#/" ? current === "#/" || current === "#" : current.startsWith(href));
     const link = ([href, label, count], cls = "nav-link") => h("a", { href, class: cls, "aria-current": isCurrent(href) ? "page" : null },
       h("span", { class: "nav-text" }, label), count ? h("span", { class: "count", "aria-label": `${count} unread` }, String(count)) : null);
-    nav.replaceChildren(
+    nav.replaceChildren(...[
       h("div", { class: "nav-brand" }, h("img", { src: "/icon.png", alt: "", width: "36", height: "36" }),
         h("div", { class: "nav-brand-text" }, h("div", { class: "nav-name" }, portalName), h("div", { class: "nav-sub" }, "HR portal")),
         h("span", { class: "hr-mark" }, "HR")),
@@ -261,7 +261,7 @@
       admin.length ? h("div", { class: "nav-links" }, admin.map((l) => link(l))) : null,
       h("div", { class: "nav-foot" }, h("span", { class: "avatar sm", "aria-hidden": "true" }, initial(me.name)),
         h("div", { class: "nav-who" }, h("div", { class: "nav-who-name" }, me.name), h("div", { class: "nav-who-sub" }, me.role_word || "")),
-        h("a", { href: "#/signout", class: "nav-signout" }, "Sign out")));
+        h("a", { href: "#/signout", class: "nav-signout" }, "Sign out"))].filter(Boolean));   // no HR admin links: nothing, not "null"
     // The tab bar: Home and People (or My file), then More for everything else.
     const onTab = isCurrent("#/") || isCurrent(mine[0]);
     tabbar.replaceChildren(link(links[0], "tab"), link(mine, "tab"), menuBtn);
