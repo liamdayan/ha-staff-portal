@@ -634,10 +634,10 @@ class Connecteam:
             return await self._fetch_users(hr=hr, reports=reports)
         return await self._call(self._fetch_users)
 
-    async def archived_users(self) -> list[dict]:
-        """Archived Connecteam users (as users() lists them), for the HR portal's daily check.
-        Through the HR lane, never cached."""
-        return await self._fetch_users(hr=True, archived=True)
+    async def archived_users(self, reports: bool = False) -> list[dict]:
+        """Archived Connecteam users (as users() lists them), for the HR portal's daily check, or
+        reports (reports: their lane, for the names of people who have left). Never cached here."""
+        return await self._fetch_users(hr=not reports, archived=True, reports=reports)
 
     async def _fetch_users(self, hr: bool = False, archived: bool = False,
                            reports: bool = False) -> list[dict]:

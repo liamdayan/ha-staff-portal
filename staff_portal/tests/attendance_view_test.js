@@ -15,7 +15,7 @@ const out = {
     name: r.p.name, key: r.p.key, dept: r.p.dept, title: r.p.title, status: r.status, late: r.late, early: r.early, lunch: r.lunch,
     missed: r.missed.length, missedHrs: r.missedHrs, formsExpected: r.formsExpected, formsMissed: r.formsMissed, formMisses: r.formMisses,
     workedMin: r.workedMin, sick: r.sick, pto: r.pto, sickLow: r.sickLow, ptoLow: r.ptoLow, sickEarly: r.sickEarly, cover: r.cover,
-    offHrs: r.offHrs, unchecked: r.unchecked,
+    offHrs: r.offHrs, unchecked: r.unchecked, dayFormMisses: r.dayFormMisses ? [...r.dayFormMisses.entries()] : [],
     flags: r.days.flatMap(day => day.blocks.flatMap(b => b.flags.map(f => f[1]))),
   })),
   forms: W.forms.map(f => ({ name: f.name, expected: f.expected, done: f.done, missed: f.missed, misses: f.misses,

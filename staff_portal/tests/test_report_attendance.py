@@ -272,6 +272,9 @@ def test_view_forms(tmp_path):
     assert len(wed) == 16 and "off" not in wed and wed[8:15] == ["done", "done", "missed", "done", "done", "done", "done"]
     lena = by_name(out)["Lena Brooks"]
     assert lena["formsMissed"] == 2 and lena["formMisses"] == ["Shift handoff log ×1", "Tub temperature check ×1"]
+    # the shift she didn't hand it in shows on that day
+    assert [names for _, names in lena["dayFormMisses"]] == [["Shift handoff log"]]
+    assert by_name(out)["Dev Patel"]["dayFormMisses"] == []
     assert out["totals"]["formsExpected"] == 12 and out["totals"]["formsMissed"] == 2
 
 

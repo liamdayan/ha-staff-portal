@@ -587,7 +587,14 @@
         if (f.frequency === "week") {
           const wks = [...new Set(worked.map(d => weekStartOf(d, R.weekStart)))];
           exp = wks.length; got = wks.filter(w => Array.from({ length: 7 }, (_, i) => w + i).some(d => sub.has(d))).length;
-        } else { exp = worked.length; got = worked.filter(d => sub.has(d) || sub.has(d + 1)).length; }
+        } else {
+          exp = worked.length; got = worked.filter(d => sub.has(d) || sub.has(d + 1)).length;
+          // the days it wasn't handed in, for the person's day-by-day view
+          for (const d of worked) if (!sub.has(d) && !sub.has(d + 1)) {
+            r.dayFormMisses = r.dayFormMisses || new Map();
+            r.dayFormMisses.set(d, (r.dayFormMisses.get(d) || []).concat(f.name));
+          }
+        }
         expected += exp; done += got;
         if (exp - got > 0) { misses.push({ name: r.p.name, n: exp - got }); r.formsMissed += exp - got; r.formMisses.push(`${f.name} ×${exp - got}`); }
         r.formsExpected += exp;
@@ -878,6 +885,8 @@
         const [fname, dd] = k.split("|");
         if (+dd === day.d) kids.push(h("span", { class: "att-chips" }, h("span", { class: "att-chip warn", title: `${fname} not done in the slot starting ${hrs.join(", ")}` }, `${fname}: ${hrs.length} missed`)), h("span", { class: "db" }, hrs.join(", ")));
       }
+      const notIn = r.dayFormMisses && r.dayFormMisses.get(day.d);
+      if (notIn) kids.push(h("span", { class: "att-chips" }, notIn.map(n => h("span", { class: "att-chip warn", title: `${n}: no submission for this shift` }, `${n} not done`))));
       if (empty) kids.push(h("span", { class: "ds" }, "Off"));
       cells.push(h("div", { class: "att-day" + (empty ? " off" : "") }, kids));
     }

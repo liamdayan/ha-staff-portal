@@ -545,3 +545,30 @@ def test_a_refused_permission_is_asked_once_and_keeps_the_clocks_token(tmp_path)
                 await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
             assert ct.count("/scheduler/v1/schedulers") == 2
     go(scenario())
+
+
+def test_people_archived_in_connecteam_keep_their_names(tmp_path):
+    p = setup(tmp_path)
+
+    async def scenario():
+        async with p, fake() as ct:
+            ct.archived = [ct_user(9, "Cara", "Gone", archived=True)]
+            ct.shifts[30].append(ct_shift("sh9", at("2026-10-23", "09:00"), at("2026-10-23", "17:00"), [9]))
+            rows = await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
+            await ctdata.shifts(date(2026, 10, 1), date(2026, 10, 31))
+            return rows, ct
+    rows, ct = go(scenario())
+    assert [r["name"] for r in rows if r["user_id"] == "9"] == ["Cara Gone"]
+    # asked once, only because someone wasn't on the active list
+    assert ct.calls.count("/users/v1/users?archived") == 1
+
+
+def test_without_archived_names_rows_keep_their_number(tmp_path):
+    p = setup(tmp_path)
+
+    async def scenario():
+        async with p, fake() as ct:
+            ct.shifts[30].append(ct_shift("sh9", at("2026-10-23", "09:00"), at("2026-10-23", "17:00"), [9]))
+            return await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
+    rows = go(scenario())
+    assert [r["name"] for r in rows if r["user_id"] == "9"] == ["User 9"]

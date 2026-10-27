@@ -253,6 +253,31 @@ async def _names() -> dict[str, str]:
     return {u["user_id"]: u["name"] for u in await users()}
 
 
+async def _archived_names(rows: list[dict]) -> None:
+    """Names for people no longer on the active user list (archived in Connecteam), so a
+    report shows who worked rather than "User 123". Asked only when such a row turns up, and
+    reused for LISTS_TTL; without it the rows keep "User 123"."""
+    gone = {r["user_id"] for r in rows if r.get("user_id") and r["name"] == f"User {r['user_id']}"}
+    if not gone or _ct is None:
+        return
+
+    async def fetch():
+        try:
+            found = await _ct.archived_users(reports=True)
+        except ReportsBusy as err:
+            raise Unavailable(str(err)) from None
+        except ReportsRefused as err:
+            raise Unavailable(f"Connecteam refused: {_refusal(err)}") from None
+        except ConnecteamError as err:
+            raise Unavailable(f"Connecteam didn't answer: {err}") from None
+        return {u["id"]: u["name"] for u in found}
+    names = await _optional("archived users", lambda: _kept(("archived",), LISTS_TTL, fetch), {},
+                            lenient=True)
+    for r in rows:
+        if r.get("user_id") in gone and r["user_id"] in names:
+            r["name"] = names[r["user_id"]]
+
+
 async def users() -> list[dict]:
     """Active Connecteam users as [{user_id, name, groups}] (groups: smart group IDs), from the
     user list Staff Access keeps (asked again at most hourly, in the reports lane)."""
@@ -409,6 +434,7 @@ async def _fetch_timesheets(start: date, end: date) -> list[dict]:
                          else [_punch(kind, item, uid, name, jobs, planned)])
                 rows.extend(row for row in found
                             if row and start.isoformat() <= row["date"] <= end.isoformat())
+    await _archived_names(rows)
     rows.sort(key=lambda r: (r["name"].lower(), r["clock_in"] or r["date"]))
     return rows
 
@@ -504,6 +530,7 @@ async def _fetch_shifts(start: date, end: date) -> list[dict]:
             for uid in people or [None]:
                 rows.append({"user_id": uid, "name": names.get(uid, f"User {uid}") if uid else "",
                              **base})
+    await _archived_names(rows)
     rows.sort(key=lambda r: (r["start"] or "", r["name"].lower()))
     return rows
 
@@ -571,6 +598,7 @@ async def _fetch_submissions(form_id: str, begin: int, finish: int) -> list[dict
                      "name": names.get(uid, f"User {uid}") if uid else "Anonymous",
                      "submitted_at": _text(_local(s.get("submissionTimestamp"))),
                      "answers": answers[:MAX_ANSWERS]})
+    await _archived_names(rows)
     rows.sort(key=lambda r: r["submitted_at"] or "")
     return rows
 
