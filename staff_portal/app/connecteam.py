@@ -3,7 +3,11 @@ they're clocked in.
 
 Uses Connecteam's OAuth 2.0 client-credentials flow (Integration Center -> OAuth 2.0), so the
 add-on only ever holds a client ID and secret it was given, never anyone's password. Scopes
-needed: users.read, time_clock.read. A user's kiosk code (users.read) can become their PIN.
+needed: users.read, time_clock.read (read only: Staff Access and the HR portal never write to
+Connecteam). A user's kiosk code (users.read) can become their PIN. The token is asked for as
+Connecteam documents it (POST /oauth/v1/token, HTTP Basic, grant_type=client_credentials, no
+scope: it carries all of the app's scopes, which its reply lists and Test connection shows). It
+lasts 24 hours and is renewed 5 minutes early; one token is kept, for one set of keys.
 
 The staff sync (main.py) adds every active Connecteam user as a person, using the same cached
 user list (one request, at most hourly) and the smart groups each user is in. The list of smart
@@ -22,31 +26,41 @@ as it can:
   seconds; that check updates everyone. If it happened within SKIP_WINDOW of the next hourly
   check, that hourly check is skipped. Reading never checks.
 - The list of time clocks and the user list are cached.
-- Hard caps of its own: MINUTE_CAP requests a minute and DAILY_SHARE of the account's daily
-  limit, counted across restarts.
+- Hard caps of its own, counted across restarts: MINUTE_CAP requests a minute and DAILY_CAP a
+  day (never more than DAILY_SHARE of the account's daily limit, so the account's other
+  integrations always keep the other half).
 - It reads Connecteam's x-ratelimit headers and pauses when the account (not just this add-on)
   is running low, honors 429s with exponential backoff, and backs off after errors.
-- Rejected credentials or scopes stop all automatic requests until the settings change or an
-  admin clicks Test connection, so it never hammers Connecteam with requests that will fail.
+- A refused key or permission (401 or 403, after one try with a fresh token) stops automatic
+  requests, with Connecteam's own words. The stop is tried again after HALT_RETRY, at most
+  HALT_RETRIES times a day; then it waits until the settings are saved or Test connection is
+  clicked, so it never hammers Connecteam with requests that will fail.
 
 If Connecteam can't be asked, the last answer is kept until STALE_MARGIN after the next check
 was due, after which clocked-in-only people can't sign in or use controls until it answers.
 
-The HR portal (hr/) asks through one smaller lane of its own inside these caps (hr_room and
-hr_spend): at most HR_MINUTE_CAP a minute and HR_DAILY_CAP a day, and nothing once Staff Access
-has used HR_STOP_SHARE of its daily share, so clock checks always have room. Its people come
-from the same cached user list (users(), which also carries mobile numbers, emails and profile
-fields); its chat messages and certificate copies (hr/ctapi.py) count in the same lane. A
-refusal of an HR request raises HRRefused, and a "too many requests" pauses only HR's lane
-(hr_too_many): neither ever stops or pauses Staff Access's own requests, so the clock checks
-that let clocked-in-only staff use controls keep running. Only the account itself running low
-(its rate-limit headers) pauses everyone, as it always has.
+The HR portal (hr/) reads people through this same connection, in one smaller lane of its own
+inside these caps (hr_room and hr_spend): at most HR_MINUTE_CAP a minute and HR_DAILY_CAP a day,
+and nothing once Staff Access has used HR_STOP_SHARE of its daily cap, so clock checks always
+have room. Its people come from the same cached user list (users(), which also carries mobile
+numbers, emails and profile fields). A refusal of an HR request raises HRRefused, and a "too
+many requests" pauses only HR's lane (hr_too_many): neither ever stops or pauses Staff Access's
+own requests, so the clock checks that let clocked-in-only staff use controls keep running.
+Only the account itself running low (its rate-limit headers) pauses everyone, as it always has.
+
+How the shares add up (Expert: 100 a minute and 10,000 a day for the whole account): Staff
+Access takes at most 30 a minute and 5,000 a day. Inside that, the HR lane takes at most 6 a
+minute and 500 a day, and a reports lane (0.11.0) is planned at 4 and 300; both stop once Staff
+Access has used half of its day. So the clock checks always have at least 20 a minute and 4,200
+a day, and the account's other integrations keep 70 a minute and 5,000 a day.
 """
 
 import asyncio
 import collections
+import json
 import logging
 import os
+import re
 import time
 
 import aiohttp
@@ -59,8 +73,9 @@ API_OVERRIDE = os.environ.get("CONNECTEAM_API", "").rstrip("/")   # for testing
 STALE_MARGIN = 15 * 60       # trust the last answer this long past the next check when Connecteam is down
 FORCE_GAP = 30               # an on-demand check (sign-in or control) at most this often
 SKIP_WINDOW = 20 * 60        # an on-demand check this close before an hourly check replaces it
-MINUTE_CAP = 20              # requests a minute, at most (Expert allows 100 for the whole account)
-DAILY_SHARE = 0.2            # at most this share of the account's daily limit
+MINUTE_CAP = 30              # requests a minute, at most (Expert allows 100 for the whole account)
+DAILY_CAP = 5000             # requests a day, at most...
+DAILY_SHARE = 0.5            # ...and never more than this share of the account's daily limit
 POLL_SHARE = 0.15            # ...of which regular checks are planned to use at most this much
 DEFAULT_DAY_LIMIT = 10_000   # Expert plan, until Connecteam's headers say otherwise
 LOW_DAY_SHARE = 0.10         # pause when the account has less than this share left today
@@ -80,6 +95,10 @@ HR_DAILY_CAP = 500           # ...and a day...
 HR_STOP_SHARE = 0.5          # ...and none once Staff Access has used this share of its daily cap
 FIELDS_TTL = 24 * 3600       # how long the list of profile fields (custom fields) is reused
 MAX_FIELDS = 100             # profile fields kept for one user (in memory only, never stored)
+PAGE = 500                   # results a page (Connecteam's most; its default is only 10)
+HALT_RETRY = 30 * 60         # a stop after a refusal is tried again after this...
+HALT_RETRIES = 3             # ...at most this many times a day (UTC), then waits for Save or Test
+MAX_SAID = 300               # characters of Connecteam's own words kept from a refusal
 
 
 class ConnecteamError(Exception):
@@ -97,7 +116,8 @@ class HRRefused(ConnecteamError):
 
 class HRBusy(ConnecteamError):
     """The HR portal's lane is used up for now (this minute, today, or Staff Access needs the
-    rest), or paused: try again later. budget: the outbox waits without counting a try."""
+    rest), or paused, or Staff Access's connection is stopped: try again later. budget: the
+    caller waits without counting a try."""
     budget = True
 
 
@@ -130,6 +150,9 @@ class Connecteam:
         self.checked_at: float | None = None    # last successful check
         self.last_error: str | None = None
         self.halted: str | None = None          # why automatic requests stopped (bad keys/scopes)
+        self.halted_at = 0.0
+        self._halt_tries = ["", 0]              # [UTC day, stops lifted by themselves that day]
+        self.scopes: set[str] | None = None     # the permissions the last token carries
         self.paused_until = 0.0                 # no requests before this (rate limits)
         self.pause_reason: str | None = None
         self.failures = 0
@@ -159,7 +182,7 @@ class Connecteam:
         return self.limits.get("day_limit") or DEFAULT_DAY_LIMIT
 
     def daily_cap(self) -> int:
-        return max(50, int(self.day_limit() * DAILY_SHARE))
+        return max(50, min(DAILY_CAP, int(self.day_limit() * DAILY_SHARE)))
 
     def usage(self) -> dict:
         today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -217,18 +240,28 @@ class Connecteam:
             raise HRBusy("Staff Access has made enough Connecteam requests for this minute. The "
                          "HR portal tries again shortly.")
 
-    def hr_spend(self, own_keys: bool = False) -> None:
+    def hr_spend(self) -> None:
         """Count an HR portal request against its own lane and then Staff Access's caps (so it
-        counts there too), or refuse it with HRBusy. A halt (Staff Access's keys refused) stops
-        HR's requests with those keys too; own_keys: it uses the HR connection's own app."""
-        if self.halted and not own_keys:
-            raise ConnecteamError(self.halted)
+        counts there too), or refuse it with HRBusy. While Staff Access's connection is stopped
+        (a refusal), HR waits too, without repeating that refusal's words (they're about
+        another request)."""
+        if self.stop_reason():
+            raise HRBusy("Staff Access's Connecteam connection is stopped after a refusal (see "
+                         "Settings, Connections), so the HR portal waits until it works again.")
         self.hr_room(1)
         self._spend()
         self._hr_recent.append(time.time())
         u = self.hr_usage()
         u["count"] += 1
         self._save_hr_usage(u)
+
+    def hr_status(self) -> dict:
+        """HR's lane, for the dashboard and the HR tab."""
+        now = time.time()
+        return {"used_today": self.hr_usage()["count"], "daily_cap": HR_DAILY_CAP,
+                "minute_cap": HR_MINUTE_CAP,
+                "paused": self.hr_pause_reason if self.hr_paused_until > now else None,
+                "paused_until": self.hr_paused_until if self.hr_paused_until > now else None}
 
     def hr_too_many(self, resp: aiohttp.ClientResponse) -> HRBusy:
         """A 429 to an HR request: only HR's lane waits (backing off), never Staff Access's clock
@@ -321,31 +354,39 @@ class Connecteam:
                 "Waiting a minute before asking Connecteam for a new access token.")
         self.hr_spend() if hr else self._spend()   # refused: nothing was asked, so no wait
         self._last_token_try = time.time()
+        self._token = None   # never a token of other keys, even if this fails
         try:
             async with self.session.post(
                 f"{self._api()}/oauth/v1/token", data={"grant_type": "client_credentials"},
-                auth=aiohttp.BasicAuth(creds[0], creds[1]),
+                headers={"Authorization": aiohttp.encode_basic_auth(creds[0], creds[1]),
+                         "Accept": "application/json"},
             ) as resp:
                 self._read_limits(resp)
                 if resp.status == 429:
                     raise self.hr_too_many(resp) if hr else self._too_many(resp)
-                body = await resp.json(content_type=None)
                 if resp.status in (400, 401, 403):
+                    said = await _said(resp)
+                    # The keys themselves: they're the one connection's, whoever asked.
                     raise (HRRefused if hr else Halt)(
-                        "Connecteam didn't accept the Client ID and Secret "
-                        f"(HTTP {resp.status}). Check them in Settings.")
+                        f"Connecteam didn't accept the Client ID and Secret (HTTP {resp.status})"
+                        f"{_quote(said)}. Check them in Settings, Connections.")
+                body = await resp.json(content_type=None)
                 if resp.status >= 400 or not isinstance(body, dict) or not body.get("access_token"):
                     raise ConnecteamError(f"Connecteam couldn't issue an access token (HTTP {resp.status}).")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
             raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
         ttl = body.get("expires_in") if isinstance(body.get("expires_in"), (int, float)) else 86400
         ttl = min(max(ttl, 360), 86400) if ttl == ttl else 86400   # sane, and not NaN
+        scope = body.get("scope")
+        self.scopes = set(scope.split()) if isinstance(scope, str) else None
         self._token = (str(body["access_token"]), time.time() + ttl - 300)
         self._token_for = creds
         return self._token[0]
 
     async def _get(self, path: str, params: dict | None = None, hr: bool = False) -> dict:
-        """hr: an HR portal request (its lane; a refusal raises HRRefused, never Halt)."""
+        """hr: an HR portal request (its lane; a refusal raises HRRefused, never Halt). A 401 or
+        403 is asked once more with a fresh token (an expired or replaced one is refused too)
+        before it counts as a refusal."""
         for attempt in (1, 2):
             token = await self._access_token(hr)
             self.hr_spend() if hr else self._spend()
@@ -356,20 +397,17 @@ class Connecteam:
                     self._read_limits(resp)
                     if resp.status == 429:
                         raise self.hr_too_many(resp) if hr else self._too_many(resp)
-                    if resp.status == 401 and attempt == 1:
-                        self._token = None   # expired or revoked: get a new one and retry once
-                        self._last_token_try = 0.0
-                        continue
-                    if resp.status in (401, 403) and hr:
-                        raise HRRefused(f"Connecteam refused {path} for the HR portal (HTTP "
-                                        f"{resp.status}). Check the app's permissions and your plan.")
                     if resp.status in (401, 403):
-                        raise Halt(f"Connecteam refused {path} (HTTP {resp.status}). Check that the "
-                                   "OAuth app has the users.read and time_clock.read scopes, and that "
-                                   "your plan includes API access.")
+                        said = await _said(resp)
+                        if attempt == 1:
+                            self._token = None   # a fresh token, once
+                            self._last_token_try = 0.0
+                            continue
+                        raise (HRRefused if hr else Halt)(self.refusal(path, resp.status, said, hr))
                     body = await resp.json(content_type=None)
                     if resp.status >= 400:
-                        raise ConnecteamError(f"Connecteam couldn't answer {path} (HTTP {resp.status}).")
+                        raise ConnecteamError(f"Connecteam couldn't answer {path} (HTTP {resp.status})"
+                                              f"{_quote(_words(body))}.")
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
                 raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
             if not isinstance(body, dict):
@@ -378,7 +416,24 @@ class Connecteam:
                 self.hr_failures = 0
             data = body.get("data", body)
             return data if isinstance(data, dict) else {"items": data}
-        raise (HRRefused if hr else Halt)("Connecteam didn't accept the access token.")
+
+    def refusal(self, path: str, status: int, said: str, hr: bool = False) -> str:
+        """A refusal in plain words: Connecteam's own, then what's missing. A token that lists
+        its permissions shows whether it's the permission or the plan."""
+        scope = "time_clock.read" if path.startswith("/time-clock/") else "users.read"
+        text = (f"Connecteam refused {path}{' for the HR portal' if hr else ''} (HTTP {status})"
+                f"{_quote(said)}.")
+        if self.scopes is not None and scope not in self.scopes:
+            return (f"{text} The Connecteam app doesn't have the {scope} permission (it has: "
+                    f"{', '.join(sorted(self.scopes)) or 'none'}). An app's permissions can't be "
+                    "changed in Connecteam: create a new OAuth app with users.read and "
+                    "time_clock.read, and enter its keys in Settings, Connections.")
+        if self.scopes is not None:
+            return (f"{text} The app has {scope}, so it's your Connecteam plan: API access needs "
+                    "the Expert plan or higher" + (" on the Operations hub (the time clock)"
+                                                   if scope == "time_clock.read" else "") + ".")
+        return (f"{text} Check that the OAuth app has the users.read and time_clock.read "
+                "permissions, and that your plan includes API access (Expert or higher).")
 
     async def _call(self, coro_fn, *args):
         """An admin-initiated request: same caps, and a halt is recorded."""
@@ -390,14 +445,40 @@ class Connecteam:
             raise
 
     def _check_halt(self) -> None:
-        if self.halted:
-            raise ConnecteamError(self.halted + " (Automatic checks are stopped until the Connecteam "
-                                                "settings are saved again or Test connection is clicked.)")
+        if self.stop_reason():
+            due = self.retry_at()
+            again = f"tried again by itself in {max(1, round((due - time.time()) / 60))} min, " \
+                if due else ""
+            raise ConnecteamError(f"{self.halted} (Automatic checks are stopped: {again}or when the "
+                                  "Connecteam settings are saved or Test connection is clicked.)")
 
     def _halt(self, reason: str) -> None:
         if self.halted != reason:
             log.warning("Connecteam: %s Automatic checks stopped.", reason)
         self.halted = reason
+        self.halted_at = time.time()
+
+    def retry_at(self) -> float | None:
+        """When a stop is tried again by itself (None: not stopped, or no tries left today)."""
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        tries = self._halt_tries[1] if self._halt_tries[0] == today else 0
+        return self.halted_at + HALT_RETRY if self.halted and tries < HALT_RETRIES else None
+
+    def stop_reason(self) -> str | None:
+        """Why automatic requests are stopped (None: they aren't). The stop lifts by itself
+        after HALT_RETRY, at most HALT_RETRIES times a day."""
+        due = self.retry_at()
+        if due is not None and time.time() >= due:
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            if self._halt_tries[0] != today:
+                self._halt_tries = [today, 0]
+            self._halt_tries[1] += 1
+            log.info("Connecteam: trying again after the stop (%d of %d today).",
+                     self._halt_tries[1], HALT_RETRIES)
+            self.halted = None
+            self._token = None
+            self._last_token_try = 0.0
+        return self.halted
 
     async def users(self, max_age: float = USERS_TTL, hr: bool = False) -> list[dict]:
         """Active Connecteam users as [{"id", "name", "kiosk_code", "groups", "mobile", "email",
@@ -419,9 +500,9 @@ class Connecteam:
     async def _fetch_users(self, hr: bool = False, archived: bool = False) -> list[dict]:
         found, offset = [], 0
         while True:
-            params = {"limit": 500, "offset": offset}
+            params = {"limit": PAGE, "offset": offset}
             if archived:
-                params["userStatus"] = "archived"
+                params["userStatus"] = "archived"   # documented: active (the default), archived, all
             data = await self._get("/users/v1/users", params, hr=hr)
             page = _first_list(data, "users")
             for u in page:
@@ -440,9 +521,9 @@ class Connecteam:
                               "email": _short_text(u.get("email"), 200),
                               "created_at": _timestamp(u.get("createdAt")),
                               "fields": _profile_fields(u.get("customFields"))})
-            if len(page) < 500 or offset >= 500 * (MAX_USER_PAGES - 1):
+            if len(page) < PAGE or offset >= PAGE * (MAX_USER_PAGES - 1):
                 break
-            offset += 500
+            offset += PAGE
         found.sort(key=lambda u: u["name"].lower())
         if not archived:
             self._users = (found, time.time())
@@ -451,10 +532,10 @@ class Connecteam:
     async def profile_fields(self, max_age: float = FIELDS_TTL) -> list[dict]:
         """Connecteam's profile fields (custom fields) as [{"id", "name", "type"}], for the HR
         portal: which one holds the start date, and the direct manager. Through the HR lane,
-        reused for a day."""
+        reused for a day. One page of PAGE (Connecteam's default is only 10)."""
         if self._fields and time.time() - self._fields[1] < max_age:
             return self._fields[0]
-        data = await self._get("/users/v1/custom-fields", hr=True)
+        data = await self._get("/users/v1/custom-fields", {"limit": PAGE, "offset": 0}, hr=True)
         found = []
         for f in _first_list(data, "customFields")[:MAX_FIELDS * 5]:
             fid = f.get("id", f.get("customFieldId")) if isinstance(f, dict) else None
@@ -549,8 +630,8 @@ class Connecteam:
                 return   # the rest of today's share is for the scheduled checks
             self._last_attempt = now   # paced from here, even if nothing is sent below
             if admin:
-                self.halted = None
-            elif self.halted:
+                self.lift_stop()
+            elif self.stop_reason():
                 return
             if now < self.paused_until:
                 self.last_error = self.pause_reason
@@ -594,11 +675,69 @@ class Connecteam:
         self.clocked_in = set()
         self.checked_at = None
         self.last_error = None
-        self.halted = None
+        self.lift_stop()
+        self.scopes = None
         self.failures = 0
         self._last_attempt = 0.0
         self.next_due = None
         self._wake.set()
+
+    def lift_stop(self) -> None:
+        """Saved settings or Test connection: no stop, and its tries for today start over."""
+        self.halted = None
+        self._halt_tries = ["", 0]
+
+    async def diagnose(self) -> list[dict]:
+        """Test connection, step by step, each with Connecteam's own words: a new access token
+        (and the permissions it carries), the users, the time clock, the smart groups. Lifts a
+        stop first, and a refusal stops automatic requests again. [{"check", "ok", "detail"}]"""
+        steps = []
+
+        async def step(name: str, fn) -> bool:
+            try:
+                steps.append({"check": name, "ok": True, "detail": await fn()})
+            except Halt as err:
+                self._halt(str(err))
+                steps.append({"check": name, "ok": False, "detail": str(err)})
+            except ConnecteamError as err:
+                steps.append({"check": name, "ok": False, "detail": str(err)})
+            return steps[-1]["ok"]
+
+        async def token() -> str:
+            self._token, self._last_token_try = None, 0.0
+            await self._access_token()
+            if self.scopes is None:
+                return "Connecteam issued an access token."
+            missing = [s for s in ("users.read", "time_clock.read") if s not in self.scopes]
+            if missing:
+                raise ConnecteamError(
+                    f"Connecteam issued an access token, but the app lacks {' and '.join(missing)} "
+                    f"(it has: {', '.join(sorted(self.scopes)) or 'none'}). An app's permissions "
+                    "can't be changed in Connecteam: create a new OAuth app with users.read and "
+                    "time_clock.read, and enter its keys here.")
+            return f"Connecteam issued an access token with: {', '.join(sorted(self.scopes))}."
+
+        async def users() -> str:
+            return f"Read {len(await self._fetch_users())} active users."
+
+        async def clock() -> str:
+            clocks = await self.time_clock_ids(max_age=0)
+            self.clocked_in = await self.fetch_clocked_in()
+            self.checked_at, self.last_error, self.failures = time.time(), None, 0
+            return f"Read {len(clocks)} time clock(s); {len(self.clocked_in)} people are clocked in now."
+
+        async def groups() -> str:
+            return f"Read {len(await self._fetch_smart_groups())} smart groups."
+
+        async with self._lock:
+            self.lift_stop()
+            if await step("Getting an access token", token) or self._token:
+                for name, fn in (("Reading users", users), ("Reading the time clock", clock),
+                                 ("Reading smart groups", groups)):
+                    await step(name, fn)
+            if not all(s["ok"] for s in steps) and self.last_error is None:
+                self.last_error = next(s["detail"] for s in steps if not s["ok"])
+        return steps
 
     async def run(self) -> None:
         """Background loop: regular checks while Connecteam is on and someone needs them."""
@@ -608,8 +747,8 @@ class Connecteam:
             try:
                 if self._settings()[0] and self._wanted():
                     now = time.time()
-                    if self.next_due is None:
-                        self.next_due = now   # just started, or the settings changed
+                    if self.next_due is None or (self.halted and self.stop_reason() is None):
+                        self.next_due = now   # just started, the settings changed, or a stop lifted
                     if now >= self.next_due:
                         # An on-demand check shortly before this one already did the job.
                         if not (self.checked_at and self.checked_at >= self.next_due - SKIP_WINDOW):
@@ -618,6 +757,8 @@ class Connecteam:
                         if self.next_due <= time.time():   # behind (asleep, paused): start over
                             self.next_due = time.time() + self.interval()
                     wait = max(1, self.next_due - time.time())
+                    if self.retry_at():
+                        wait = min(wait, max(1, self.retry_at() - time.time()))
                 else:
                     self.next_due = None
             except Exception as err:  # noqa: BLE001 - the loop must keep running
@@ -641,6 +782,37 @@ def _first_list(data: dict, preferred: str) -> list:
         if isinstance(value, list):
             return value
     return []
+
+
+async def _said(resp: aiohttp.ClientResponse) -> str:
+    """Connecteam's own words in a refusal (its JSON's detail or message, else the text)."""
+    try:
+        raw = (await resp.content.read(8192)).decode("utf-8", "replace")
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return ""
+    try:
+        return _words(json.loads(raw))
+    except ValueError:
+        return " ".join(re.sub(r"<[^>]*>", " ", raw).split())[:MAX_SAID]
+
+
+def _words(body) -> str:
+    """The message in a JSON error reply: detail (text, or validation errors' msg), message,
+    error_description or error."""
+    if not isinstance(body, dict):
+        return ""
+    for key in ("detail", "message", "error_description", "error", "title"):
+        value = body.get(key)
+        if isinstance(value, list):
+            value = "; ".join(str(v.get("msg") or v) if isinstance(v, dict) else str(v)
+                              for v in value[:5])
+        if isinstance(value, (str, int)) and str(value).strip():
+            return " ".join(str(value).split())[:MAX_SAID]
+    return ""
+
+
+def _quote(said: str) -> str:
+    return f": “{said}”" if said else ""
 
 
 def _short_text(value, limit: int) -> str | None:

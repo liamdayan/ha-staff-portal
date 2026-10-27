@@ -643,32 +643,8 @@
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")));
     const signinBox = h("section", { class: "card" }, h("h2", null, "Who must use an authenticator code"), policy);
 
-    const chat = s.chat;
-    const notifyForm = h("form", { onsubmit: (e) => {
-      e.preventDefault();
-      const f = notifyForm.elements;
-      run(() => api("PUT", "/api/settings/general", { quiet_start: f.quiet_start.value, quiet_end: f.quiet_end.value,
-        summary_time: f.summary_time.value }), "Saved.");
-    } },
-    h("p", { class: chat.on && chat.ready ? "muted small" : "warn" }, chat.on && chat.ready
-      ? "Connecteam chat messages are on. They never say what it's about, only that something is waiting here."
-      : chat.on ? `Connecteam chat is on in Home Assistant, but Connecteam refused it, so only the portal inbox is used and messages wait. ${chat.why || ""} The owner can fix it there (Settings, Connections, Connecteam for HR) and press Test.`
-        : "Only the portal inbox is used. The owner can turn on Connecteam chat messages in Home Assistant (Settings, Connections, Connecteam for HR)."),
-    chat.last_error ? h("p", { class: "warn" }, `Last problem sending a message: ${chat.last_error}`) : null,
-    h("p", { class: "muted small" }, "Employees' messages wait until quiet hours end."),
-    h("div", { class: "row" },
-      h("label", null, "Quiet hours start", h("input", { name: "quiet_start", type: "time", value: g.quiet_start })),
-      h("label", null, "Quiet hours end", h("input", { name: "quiet_end", type: "time", value: g.quiet_end }))),
-    h("label", null, "Daily summary for managers and HR", h("input", { name: "summary_time", type: "time", value: g.summary_time })),
-    h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, "Save")),
-    chat.stuck.length ? [h("h3", null, "Messages that couldn't be sent"), h("ul", { class: "list" }, chat.stuck.map((m) =>
-      h("li", null, h("div", { class: "item" }, h("div", { class: "title" }, `To ${m.name}`),
-        h("div", { class: "sub" }, `${m.tries} tries. ${m.error || ""}`),
-        h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
-          await api("POST", `/api/messages/${m.id}/retry`, {});
-          await again();
-        }, "It will be sent again.") }, "Retry")))))] : null);
-    const notifications = h("section", { class: "card" }, h("h2", null, "Notifications"), notifyForm);
+    const notifications = h("section", { class: "card" }, h("h2", null, "Notifications"),
+      h("p", { class: "muted small" }, "Everything new shows in each person's inbox on their home page here. Nothing is sent outside the HR portal: it only reads from Connecteam."));
 
     const fieldOptions = (current) => [h("option", { value: "" }, "Find it by its name"),
       ...s.fields.map((f) => h("option", { value: f.id, selected: f.id === current }, f.name))];

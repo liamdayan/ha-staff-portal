@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.10.4
+
+**HR portal: Connecteam is read only**
+
+- **The HR portal now only reads from Connecteam.** It sends no Connecteam chat messages and
+  copies no certificates or documents to Connecteam, so no write permissions are needed. Google
+  Drive keeps every file.
+- **Notifications are in the HR portal's inbox**, on each person's home page. Quiet hours, the
+  daily summary and "Messages that couldn't be sent" are gone from HR settings.
+- **One Connecteam connection.** "Connecteam for HR" is gone from Settings → Connections: the HR
+  portal reads its people through the Connecteam connection you already have. Its old keys are
+  removed, and a migration file from 0.10.0 to 0.10.3 that still has them is fine (they're
+  ignored).
+- Gone with it: the Connecteam document for each kind of document and certificate, "Read
+  Connecteam's documents", "Cards added in Connecteam" and the to-dos to remove copies in
+  Connecteam. Card heads-ups all come from the portal now.
+
+**Connecteam**
+
+- **Test connection shows each step in Connecteam's own words**: getting an access token (and the
+  permissions the app has), reading users, reading the time clock and reading smart groups. If a
+  step fails, it says which permission the app is missing, or that it's your Connecteam plan.
+- **A refused request is asked once more with a fresh token** before it counts. When Connecteam
+  refuses, the stop quotes Connecteam's own words, and it's tried again by itself after 30
+  minutes, up to 3 times a day; then it waits for Save or Test connection.
+- The HR portal no longer repeats another request's refusal (like "/users/v1/users (HTTP 403)")
+  for its own reads: it says Staff Access's connection is stopped and waits.
+- **Higher limits:** Staff Access now uses up to 5,000 requests a day (half of the Expert
+  plan's 10,000) and 30 a minute. The HR portal keeps its small share (6 a minute, 500 a day), so
+  the time clock always has room.
+- All of Connecteam's profile fields are read (it used to stop at 10).
+
 ## 0.10.3
 
 **Wristbands**

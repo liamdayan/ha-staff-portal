@@ -44,7 +44,7 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import migrate
 import transfer
-from connecteam import HR_DAILY_CAP, USERS_TTL, Connecteam, ConnecteamError
+from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 import doorlog
@@ -56,7 +56,7 @@ from encoder import (DASHBOARD_PREFIX, NO_LINK, NO_REPLY, UNREACHABLE, EncoderEr
 from discovery import (SN_WEB_SOCKET_PORT, Discovery, DiscoveryError, describe, ha_networks,
                        parse_networks)
 from hr import access as hr_access, audit as hr_audit, crypto as hr_crypto, signin as hr_signin
-from hr import ctapi, gdrive, server as hr_server
+from hr import gdrive, server as hr_server
 from hr import parts as hr_parts  # noqa: F401 - every part of the HR portal, before hr_service
 from hr.gdrive import BridgeError
 from hr.service import HRService
@@ -150,20 +150,6 @@ connecteam = Connecteam(
     USER_AGENT,
     hr_usage_store=(load_hr_connecteam_usage,
                     lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})))
-
-
-def hr_connecteam_settings() -> dict:
-    """The HR Connecteam connection for hr/ctapi.py: HR's own app (blank uses Staff Access's)
-    and whether certificate copies are on. The chat sender is "Hot Lake HR"."""
-    s = db.settings()
-    return {"client_id": s.get("hr_connecteam_client_id", ""),
-            "client_secret": s.get("hr_connecteam_client_secret", ""),
-            "documents": False}   # no certificate copies: HR only reads from Connecteam
-
-
-# The HR portal's own Connecteam requests (chat messages, certificate copies), in the HR lane
-# inside the same budget (connecteam.hr_spend). It sends nothing unless the HR portal asks it to.
-hr_connecteam = ctapi.configure(connecteam, hr_connecteam_settings)
 
 
 def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
@@ -2893,7 +2879,8 @@ def connecteam_state() -> dict:
     now = time.time()
     return {"enabled": connecteam_settings()[0], "checked_at": connecteam.checked_at,
             "last_error": connecteam.last_error, "clocked_in": len(connecteam.clocked_in),
-            "halted": connecteam.halted, "needed": connecteam_wanted(),
+            "halted": connecteam.stop_reason(), "retry_at": connecteam.retry_at(),
+            "needed": connecteam_wanted(), "hr": connecteam.hr_status(),
             "paused": connecteam.pause_reason if connecteam.paused_until > now else None,
             "paused_until": connecteam.paused_until if connecteam.paused_until > now else None,
             "interval": connecteam.interval(), "used_today": connecteam.usage()["count"],
@@ -2926,17 +2913,11 @@ async def admin_connecteam_test(request: web.Request):
     if time.time() - connecteam_tested[0] < 10:
         return bad_request("Wait a few seconds before testing again.", 429)
     connecteam_tested[0] = time.time()
-    await connecteam.check(admin=True)   # also lifts a stop after rejected keys
-    if connecteam.last_error:
-        return bad_request(connecteam.last_error, 502)
-    try:
-        users = await connecteam.users()          # reused for 5 minutes
-        clocks = await connecteam.time_clock_ids()  # cached by the check above
-    except ConnecteamError as err:
-        return bad_request(str(err), 502)
-    db.log(admin_name(request), "Tested the Connecteam connection")
-    return web.json_response({"users": len(users), "time_clocks": len(clocks),
-                              "clocked_in": len(connecteam.clocked_in)})
+    checks = await connecteam.diagnose()   # each step in Connecteam's own words; lifts a stop
+    failed = [c for c in checks if not c["ok"]]
+    db.log(admin_name(request), "Tested the Connecteam connection", ok=not failed,
+           detail="; ".join(f"{c['check']}: {c['detail']}" for c in failed) or None)
+    return web.json_response({"ok": not failed, "checks": checks})
 
 
 async def kiosk_pin(uid: str | None) -> str:
@@ -3254,7 +3235,7 @@ def staff_sync_due() -> bool:
     and the last try was an hour ago (a minute, after Save)."""
     gap = STAFF_SYNC_GAP if staff_sync["soon"] else STAFF_SYNC_EVERY
     now = time.time()
-    return (staff_sync_enabled() and not connecteam.halted and now >= connecteam.paused_until
+    return (staff_sync_enabled() and not connecteam.stop_reason() and now >= connecteam.paused_until
             and now - staff_sync["tried"] >= gap)
 
 
@@ -4532,8 +4513,6 @@ async def admin_update_settings(request: web.Request):
     branding.invalidate()
     if connecteam_settings() != ct_before:
         connecteam.forget()   # also wakes the clock check, which runs only if someone needs it
-        hr_connecteam.forget()   # and lifts the HR portal's stops (new keys may fix them)
-        hr_service.refresh_chat()
     if staff_sync_enabled() and (not sync_before or connecteam_settings() != ct_before
                                  or "connecteam_auto_clock_in" in values):
         sync_staff_soon()     # at most once a minute
@@ -5801,8 +5780,8 @@ hr_service = HRService(
 
 class HRSealer:
     """Database.sealer: the HR portal's key as it is now. While it's kept out of backups, the
-    Google script's Web app URL and secret and the Connecteam for HR secret are stored sealed
-    with it (hr/crypto.py), so a stolen Home Assistant backup alone can't reach HR's files."""
+    Google script's Web app URL and secret are stored sealed with it (hr/crypto.py), so a
+    stolen Home Assistant backup alone can't reach HR's files."""
 
     def open_settings(self, values: dict) -> dict:
         return hr_service.keyring.open_settings(values)
@@ -5867,17 +5846,10 @@ def hr_person_view(p: dict, roles: set[str]) -> dict:
 
 
 def hr_brief() -> dict:
-    """What /api/state says about HR: enough for the HR Connecteam connection in Settings (its
-    keys only as set or not, whether chat and certificate copies are on, what Connecteam refused
-    and why, and HR's requests today)."""
-    s = db.settings()
-    lane = hr_connecteam.status()
-    return {"status": hr_service.status(), "enabled": s.get("hr_enabled") == "1",
-            "connecteam": {"client_id": s.get("hr_connecteam_client_id", ""),
-                           "secret_set": bool(s.get("hr_connecteam_client_secret")),
-                           "chat": False, "documents": False,
-                           "stopped": lane["stopped"], "paused": lane["paused"],
-                           "used_today": lane["used_today"], "daily_cap": HR_DAILY_CAP}}
+    """What /api/state says about HR: whether it's on, and its Connecteam reads today (it uses
+    Staff Access's connection, in a small lane of its own)."""
+    return {"status": hr_service.status(), "enabled": db.settings().get("hr_enabled") == "1",
+            "connecteam": connecteam.hr_status()}
 
 
 def hr_connection_log(request: web.Request, action: str, detail: str | None = None,
@@ -5898,7 +5870,7 @@ async def admin_hr(request: web.Request):
              "port": HR_PORT, "connecteam_on": s.get("connecteam_enabled") == "1",
              "key": {"kept_out": hr_service.keyring.kept_out(),
                      "state": hr_service.keyring.status()},
-             "admins": [], "people": 0, "sync": None, "events": [], "chat": None}
+             "admins": [], "people": 0, "sync": None, "events": []}
     if hr_service.running:
         hdb = hr_service.db
         roles = hdb.all_roles()
@@ -5910,9 +5882,6 @@ async def admin_hr(request: web.Request):
         state["sync"] = {"at": sync["at"], "error": sync["error"], "result": sync["result"],
                          "warning": hdb.setting("sync_warning") or None}
         state["events"] = hr_audit.lines(hdb, 50, security=True)
-        last = hdb.conn.execute("SELECT status, error FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
-        state["chat"] = {"on": hr_service.chat_wanted(), "ready": hr_service.chat_sender() is not None,
-                         "why": hr_service.chat_problem(), "last": dict(last) if last else None}
     return web.json_response(state)
 
 
@@ -6036,57 +6005,6 @@ async def admin_hr_sync(request: web.Request):
     if result is None:
         return bad_request(hr_service.sync_state["error"] or "Couldn't sync people.", 502)
     return web.json_response(result)
-
-
-async def admin_hr_connecteam(request: web.Request):
-    """The HR Connecteam connection (Settings > Connections): a second Connecteam app, for chat
-    messages and documents. The secret is write-only: blank keeps the saved one."""
-    data = await read_json(request)
-    values = {}
-    if "hr_connecteam_client_id" in data:
-        client_id = str(data["hr_connecteam_client_id"] or "").strip()
-        if len(client_id) > 200 or not re.fullmatch(r"[\x21-\x7e]*", client_id):
-            return bad_request("The Client ID doesn't look right.")
-        values["hr_connecteam_client_id"] = client_id
-    secret = str(data.get("hr_connecteam_client_secret") or "").strip()
-    if secret:
-        if len(secret) > 500 or not re.fullmatch(r"[\x21-\x7e]+", secret):
-            return bad_request("The Client Secret doesn't look right.")
-        values["hr_connecteam_client_secret"] = secret
-    if data.get("hr_connecteam_clear_secret") in (True, "1", "on", "true"):
-        values["hr_connecteam_client_secret"] = ""
-    if "hr_connecteam_client_secret" in values and (refusal := hr_key_locked()):
-        return refusal
-    s = db.settings()
-    changed = {k for k, v in values.items() if s.get(k, "") != v}
-    db.update_settings(values)
-    if changed:
-        hr_connecteam.forget()   # new keys or switches: a new token, and Connecteam asked again
-        hr_connection_log(request, "Changed the Connecteam connection for HR")
-    hr_service.refresh_chat()
-    return web.json_response({"ok": True, "hr": hr_brief()})
-
-
-HR_CONNECTEAM_TEST_GAP = 10   # seconds between tests (each is two or three requests)
-hr_connecteam_tested = {"at": 0.0}
-
-
-async def admin_hr_connecteam_test(request: web.Request):
-    """Test the Connecteam connection for HR: whether it can read Connecteam's people (all the HR
-    portal uses Connecteam for). It lifts a stop, and works while the HR portal is off."""
-    if db.settings().get("connecteam_enabled") != "1":
-        return bad_request("Turn on Connecteam first (Settings → Connections).")
-    if time.time() - hr_connecteam_tested["at"] < HR_CONNECTEAM_TEST_GAP:
-        return bad_request("Wait a few seconds before testing again.", 429)
-    hr_connecteam_tested["at"] = time.time()
-    results = await hr_connecteam.test()
-    checks = [{"check": "Reading people", **results["people"]}]
-    failed = [c for c in checks if not c["ok"]]
-    hr_connection_log(request, "Tested the Connecteam connection for HR",
-                      detail="Every check passed." if not failed else
-                      "; ".join(f"{c['check']}: {c['detail']}" for c in failed), ok=not failed)
-    hr_service.refresh_chat()
-    return web.json_response({"checks": checks, "hr": hr_brief()})
 
 
 # ---------------------------------------------------------------- export, import, backup
@@ -6330,7 +6248,7 @@ async def admin_migrate_create(request: web.Request):
     with the code, for the dashboard to save; the code is never stored, logged or put in an
     address, and nothing of either is kept here."""
     if refusal := hr_service.migration_blocker():
-        return bad_request(refusal, 409)   # HR uploads still on their way to Google or Connecteam
+        return bad_request(refusal, 409)   # HR uploads still on their way to Google Drive
 
     def build(database):
         snap = migrate.make_snapshot(database, branding, VERSION)
@@ -6417,7 +6335,6 @@ async def admin_migrate_restore(request: web.Request):
         branding.remove_logo()
     pin_sessions.clear()  # devices stay signed in; people type their PIN again
     connecteam.forget()   # new settings and secrets: nothing cached from before applies
-    hr_connecteam.forget()
     tthotel.forget(saved_stops=True)   # but a pause or stop TT Hotel asked for still holds
     signed_in = sum(1 for d in snap["devices"] if d["token_hash"])
     made = time.strftime("%b %d, %Y %H:%M", time.localtime(header["created_at"]))
@@ -6589,8 +6506,6 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/hr/sign-out-everyone", admin_hr_sign_out_everyone)
     app.router.add_post("/api/hr/unlock-key", admin_hr_unlock_key)
     app.router.add_post("/api/hr/sync", admin_hr_sync)
-    app.router.add_put("/api/hr/connecteam", admin_hr_connecteam)
-    app.router.add_post("/api/hr/connecteam/test", admin_hr_connecteam_test)
     return app
 
 

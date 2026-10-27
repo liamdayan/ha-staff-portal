@@ -21,7 +21,7 @@ from test_wristbands_server import Portal, free_port
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import transfer  # noqa: E402
-from hr import crypto, delivery, hrdb, notify, people, server as hr_server, signin, totp  # noqa: E402
+from hr import crypto, delivery, hrdb, people, server as hr_server, signin, totp  # noqa: E402
 from hr.service import HRService  # noqa: E402
 
 HOST = "hr.example.com"
@@ -42,9 +42,8 @@ def ct_user(user_id, first, last="", code=None, groups=(), mobile=None, email=No
 
 
 class FakeConnecteam:
-    """Connecteam as the HR portal uses it (and hr/ctapi.py's chat). refuse: paths answered with
-    403; too_many: paths answered with 429. tokens: the client IDs that asked for a token;
-    messages: the chat messages sent, as (user ID, body)."""
+    """Connecteam as Staff Access and the HR portal read it. refuse: paths answered with 403;
+    too_many: paths answered with 429. tokens: the client IDs that asked for a token."""
 
     def __init__(self, users=(), archived=(), fields=(), clocked_in=()):
         self.users = list(users)
@@ -55,7 +54,6 @@ class FakeConnecteam:
         self.too_many: set[str] = set()
         self.calls: list[str] = []
         self.tokens: list[str] = []
-        self.messages: list[tuple[int, dict]] = []
         self.port = free_port()
         self.app = web.Application()
         self.app.router.add_route("*", "/{tail:.*}", self.handle)
@@ -72,14 +70,8 @@ class FakeConnecteam:
         if path == "/oauth/v1/token":
             auth = request.headers.get("Authorization", "").split()[-1]
             self.tokens.append(base64.b64decode(auth).decode().split(":")[0])
-            return web.json_response({"access_token": "fake", "expires_in": 3600})
-        if path == "/publishers/v1/publishers":
-            return web.json_response({"data": {"publishers": [{"id": 77, "name": "Hot Lake HR"}]}})
-        if path.startswith("/chat/v1/conversations/privateMessage/"):
-            self.messages.append((int(path.rsplit("/", 1)[1]), await request.json()))
-            return web.json_response({"data": {}})
-        if path.startswith("/documents/"):   # no HR & Skills hub on Expert
-            return web.json_response({"detail": "Forbidden"}, status=403)
+            return web.json_response({"access_token": "fake", "token_type": "Bearer", "expires_in": 3600,
+                                      "scope": "users.read time_clock.read"})
         if path == "/users/v1/users":
             source = self.archived if request.query.get("userStatus") == "archived" else self.users
             offset = int(request.query.get("offset", 0))
@@ -126,8 +118,7 @@ def fresh_connecteam() -> None:
     c.hr_pause_reason = None
     c.hr_failures = 0
     c.limits.clear()
-    main.hr_connecteam.forget()
-    main.hr_connecteam_tested["at"] = 0.0
+    main.connecteam_tested[0] = 0.0
 
 
 class HR:
@@ -161,7 +152,6 @@ class HR:
         # nightly run doesn't start by itself whatever the time of day.
         self.svc.start = lambda background=False, _s=self.svc: HRService.start(_s, False)
         self.svc.daily_state["day"] = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
-        notify.chat = None
         self.client = self.admin = None
         self.pins: dict[str, str] = {}
 

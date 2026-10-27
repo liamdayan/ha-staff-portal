@@ -330,7 +330,6 @@
     const counts = Object.entries(data.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${data.statuses[k].toLowerCase()}`);
     const hrLinks = data.hr ? h("div", { class: "actions" },
       data.waiting ? h("a", { class: "button primary-link", href: "#/certificates/check" }, `${data.waiting} to check`) : null,
-      data.connecteam ? h("a", { class: "button", href: "#/certificates/connecteam" }, `${plural(data.connecteam, "card")} added in Connecteam`) : null,
       h("button", { type: "button", onclick: () => run(async () => {
         const r = await api("POST", "/api/certificates/export", Object.fromEntries(q));
         const link = h("a", { href: URL.createObjectURL(new Blob([r.csv], { type: "text/csv" })), download: r.name });
@@ -433,31 +432,11 @@
     h("section", { class: "card" }, h("h2", null, "Confirm the dates"), form));
   }
 
-  async function renderConnecteam() {
-    const again = () => renderConnecteam();
-    const data = await api("GET", "/api/certificates/connecteam");
-    show(h("section", { class: "card" }, h("h1", null, "Cards added in Connecteam"),
-      h("p", { class: "muted small" }, "Once a day the HR portal looks at Connecteam's documents. Staff Access can't fetch a card someone added in Connecteam's own app, so approve or reject it there, and ask them to add it here too."),
-      data.copy_on ? null : h("p", { class: "warn" }, "The Connecteam copy is off, so Connecteam isn't checked."),
-      data.error ? h("p", { class: "warn" }, data.error) : null,
-      data.checked_at ? h("p", { class: "muted small" }, `Last checked ${when(data.checked_at)}.`) : null,
-      data.notes.length ? h("ul", { class: "list" }, data.notes.map((n) => h("li", { class: "cert-item" },
-        h("p", null, n.text), h("div", { class: "sub" }, `Found ${when(n.found_at)}`),
-        h("div", { class: "actions" }, h("a", { class: "button", href: `#/people/${enc(n.person_id)}` }, "Their page"),
-          h("button", { type: "button", onclick: () => run(async () => {
-            await api("POST", `/api/certificates/connecteam/${n.id}/done`, {});
-            await again();
-          }, "Done.") }, "Done")))))
-        : h("p", { class: "muted" }, "Nothing to do."),
-      h("p", null, h("a", { href: "#/certificates" }, "Certificate board"))));
-  }
-
   H.registerPage("certificates", {
     nav: "Certificates",
     who: (me) => me.staff,
     render: async (_main, parts, params) => {
       if (parts[0] === "check" && H.me.hr) return parts[2] ? renderCheck(decodeURIComponent(parts[1]), parts[2]) : renderWaiting();
-      if (parts[0] === "connecteam" && H.me.hr) return renderConnecteam();
       return renderBoard(params);
     },
   });
@@ -479,8 +458,6 @@
       addPerson.value = "";
       drawPeople();
     });
-    const ct = data.connecteam;
-    const matched = !t.ct_document && ct.documents.find((d) => d.name.trim().toLowerCase() === t.name.trim().toLowerCase());
     const others = data.types.filter((o) => o.key !== t.key);
     const form = h("form", { onsubmit: (e) => {
       e.preventDefault();
@@ -491,7 +468,6 @@
         reader: f.reader.value, active: f.active.checked, people: [...chosenPeople],
         groups: data.departments.filter((d) => f[`g-${d.group}`]?.checked).map((d) => d.group),
         accepts: others.filter((o) => f[`a-${o.key}`]?.checked).map((o) => o.key),
-        ct_document: f.ct_document.value || null,
       };
       run(async () => {
         await api("PUT", `/api/settings/certificates/types/${t.id}`, body);
@@ -517,14 +493,6 @@
     h("h4", null, "People who need it too"), peopleList, addPerson,
     others.length ? [h("h4", null, "Accepted in its place"), ...others.map((o) => h("label", { class: "check" },
       h("input", { type: "checkbox", name: `a-${o.key}`, checked: t.accepts.includes(o.key) }), o.name))] : null,
-    h("h4", null, "Connecteam document"),
-    h("p", { class: ct.copy_on ? "muted small" : "warn" }, ct.copy_on
-      ? "A confirmed card is copied there with its expiry date, so Connecteam reminds the person too."
-      : "The Connecteam copy is off. The owner turns it on in Home Assistant (Settings, Connections, Connecteam for HR); until then cards stay in Google Drive and the portal."),
-    h("select", { name: "ct_document", "aria-label": "Connecteam document" }, h("option", { value: "" }, "None"),
-      ct.documents.map((d) => h("option", { value: d.id, selected: d.id === t.ct_document || (matched && matched.id === d.id) }, d.name)),
-      t.ct_document && !ct.documents.some((d) => d.id === t.ct_document) ? h("option", { value: t.ct_document, selected: true }, `Document ${t.ct_document}`) : null),
-    matched ? h("p", { class: "muted small" }, "Matched by its name. Save to use it.") : null,
     h("label", { class: "check" }, h("input", { type: "checkbox", name: "active", checked: !!t.active }), "Track this certificate"),
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, `Save ${t.name}`)));
     return h("details", { class: "cert-type", open: !t.groups_confirmed || null },
@@ -547,17 +515,10 @@
     } }, h("label", null, "Add a kind of certificate", h("small", null, "Such as CPR and First Aid, or a pool operator's certificate"),
       h("input", { name: "name", maxlength: "60", required: true })),
     h("div", { class: "actions" }, h("button", { type: "submit" }, "Add")));
-    const refresh = h("button", { type: "button", onclick: () => run(async () => {
-      await api("POST", "/api/settings/certificates/connecteam-documents", {});
-      await again();
-    }, "Connecteam's documents were read.") }, "Read Connecteam's documents");
     box.append(...[h("h2", null, "Certificates"),
       h("p", { class: "muted small" }, "Which certificates people need and when. Cards are checked by HR before they count."),
       remind,
       data.types.map((t) => typeForm(t, data, again)),
-      h("div", { class: "actions" }, refresh),
-      data.connecteam.error ? h("p", { class: "warn" }, data.connecteam.error) : null,
-      data.connecteam.listed_at ? h("p", { class: "muted small" }, `Connecteam's documents were read ${when(data.connecteam.listed_at)}.`) : null,
       add].flat().filter(Boolean));
   });
 })();

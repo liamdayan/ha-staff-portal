@@ -517,18 +517,18 @@ folded to one line until you click it, showing:
   details), **Paused until** a time or date (a request limit), or **Last try failed**.
 - The requests Staff Access made against its own limit: for TT Hotel this month, such as
   "1,240 requests this month (limit 7,500)", and for Connecteam today, such as "35 requests today
-  (limit 2,000)". Showing them costs no requests.
+  (limit 5,000)". Showing them costs no requests.
 
 Open one for its details, **Test connection**, the full status (why it's stopped or paused) and
 how its requests are kept low. Each has its own **Save** button, which saves only that
 connection's settings, so saving one never changes the other or the rest of Settings. Secrets
 stay hidden: leave the box blank to keep the saved one.
 
-Two more are used only by the [HR portal](#hr-portal), and you can set them up before or after
+One more is used only by the [HR portal](#hr-portal), and you can set it up before or after
 turning it on: **Google Drive (HR files)**, where it keeps employee files (see [Google Drive for
-HR files](#google-drive-for-hr-files)), and the optional **Connecteam for HR**, for its chat
-messages and certificate copies, which counts its requests against the HR portal's own small
-share (see [Connecteam for HR](#connecteam-for-hr)). The HR portal tab shows how both are doing.
+HR files](#google-drive-for-hr-files)). The HR portal reads its people through the **Connecteam**
+connection above, only ever reading, in a small share of its own (see [Connecteam and the HR
+portal](#connecteam-and-the-hr-portal)). The HR portal tab shows how both are doing.
 
 TT Hotel's **Callback URL**, which sends Staff Access each unlock at doors with a gateway, isn't
 one of these details: its address is under **Door activity** on the Wristbands tab (see [Door
@@ -1147,13 +1147,17 @@ they're **clocked in**. Staff you add by hand keep working exactly as before.
 API access needs Connecteam's **Expert plan or higher** (with the Operations hub for the time clock).
 
 1. In Connecteam, open **your name → Integration Center → OAuth 2.0** and click **Create app**.
-   Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later.
+   Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later: to
+   add one, create a new app and enter its keys. Staff Access and the HR portal only ever read
+   from Connecteam, so no write permissions are needed.
 2. Copy the **Client ID** and **Client Secret**. Connecteam only shows the secret once.
 3. In Staff Access, open **Settings → Connections → Connecteam**, tick **Link staff to
    Connecteam**, paste both keys, choose **Australia** under **Account hosted in** if your
    Connecteam account is hosted there, and click **Save Connecteam settings**, then **Test
-   connection**. It reports how many users and time clocks it found and how many people are
-   clocked in now.
+   connection**. It shows each step with Connecteam's own words: **Getting an access token**
+   (and the permissions the app has), **Reading users**, **Reading the time clock** (and how many
+   people are clocked in now) and **Reading smart groups**. If a step fails, it says which
+   permission the app is missing, or that it's your Connecteam plan.
 4. On the **Staff** tab, click **Add from Connecteam** and pick a person. People already added are
    greyed out (archived people too: restore them instead).
    - **Use their Connecteam kiosk code as their PIN** is ticked when Connecteam has a kiosk code
@@ -1262,26 +1266,36 @@ a small, steady share:
   signed in), so a wrong PIN, or someone just holding a phone, never costs a request. They happen
   at most every 30 seconds (less often while Connecteam is failing) and stop once three quarters
   of the day's share is used, keeping the rest for the hourly checks.
-- Its own hard limits: 20 requests a minute, and a fifth of your account's daily limit (2,000 on
-  Expert) per day, counted across add-on restarts. At the cap it pauses until midnight UTC.
+- Its own hard limits: 30 requests a minute, and 5,000 a day (never more than half of your
+  account's daily limit, so your other integrations always keep the other half), counted across
+  add-on restarts. At the cap it pauses until midnight UTC.
 - It reads Connecteam's rate-limit headers. If your account (from any integration) has less than
   10% of its daily requests left, or is close to the per-minute limit, Staff Access pauses until
   the limit resets.
 - If Connecteam says "too many requests", it waits as long as Connecteam asks (at least a
   minute, doubling each time, and never more than 24 hours) and never retries straight away.
-- If Connecteam rejects the keys or the app is missing a scope, it stops all automatic requests
-  until you save the Connecteam settings again or click **Test connection**.
+- If Connecteam refuses a request (401 or 403), it asks once more with a fresh access token (an
+  expired or replaced token is refused too). Refused again, it stops all automatic requests,
+  with Connecteam's own words and what's missing (a permission, or your plan). It tries again by
+  itself after 30 minutes, up to 3 times a day; after that it waits until you save the
+  Connecteam settings again or click **Test connection**.
 - Requests identify themselves as Staff Portal (in the User-Agent).
-- The HR portal, once you turn it on, has its own smaller share inside these limits: at most 6
-  requests a minute and 500 a day, and none once Staff Access has used half of its daily share, so
-  the time clock always has room. A chat message is one request; copying a one-page card to
-  Connecteam is three. If Connecteam refuses an HR request (a missing permission or plan feature,
-  or "too many requests"), only that HR feature stops or waits: the time clock checks carry on.
+- The HR portal, once you turn it on, reads through this same connection with its own smaller
+  share inside these limits: at most 6 requests a minute and 500 a day, and none once Staff
+  Access has used half of its day, so the time clock always has room. If Connecteam refuses an HR
+  request, or says "too many requests" to one, only the HR portal waits: the time clock checks
+  carry on.
+- How the shares add up (Expert: 100 a minute and 10,000 a day for your whole account): Staff
+  Access takes at most 30 a minute and 5,000 a day; inside that, the HR portal at most 6 and 500
+  (and a reports lane, planned for 0.11.0, at most 4 and 300). The time clock always keeps at
+  least 20 a minute and 4,200 a day, and your other integrations keep 70 a minute and 5,000 a
+  day.
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
-Open **Connecteam** for how many your account has left (once Connecteam has answered) and, while
-paused or stopped, why. Remember that after 15 minutes without an answer, people who must be
-clocked in can't sign in.
+Open **Connecteam** for how many your account has left (once Connecteam has answered), how many
+of today's were the HR portal's, and, while paused or stopped, why (in Connecteam's own words)
+and when it tries again by itself. Remember that after 15 minutes without an answer, people who
+must be clocked in can't sign in.
 
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
 included in backups. After restoring a backup on a new system, enter it again (a migration file
@@ -1553,8 +1567,9 @@ asked of Connecteam or Google, and its address only says "The HR portal is turne
 4. **Turn on Home Assistant's backup encryption** for every backup location. HR records are in
    Home Assistant's backups (see [The HR key and backups](#the-hr-key-and-backups)).
 5. **Connect Google Drive** for employee files (see [Google Drive for HR
-   files](#google-drive-for-hr-files)) and, if you like, **Connecteam for HR** (see [Connecteam
-   for HR](#connecteam-for-hr)).
+   files](#google-drive-for-hr-files)). Connecteam needs nothing more: the HR portal reads its
+   people through the Connecteam connection you already have (see [Connecteam and the HR
+   portal](#connecteam-and-the-hr-portal)).
 
 ### Turning it on
 
@@ -1574,7 +1589,8 @@ Turning it off signs everyone out of it. Nothing in it is deleted, and turning i
 brings it all back.
 
 The tab also shows how its two connections are doing, **Google Drive (HR files)** and
-**Connecteam for HR**, with a link to each in **Settings → Connections** (below).
+**Connecteam** (read only, the same connection as Staff Access's), with a link to each in
+**Settings → Connections** (below).
 
 ### Google Drive for HR files
 
@@ -1729,31 +1745,21 @@ The Web app URL, the secret and the drives you picked are never in Staff Access'
 restore keeps the ones saved). A migration file carries them, encrypted, so the script keeps
 working after a move.
 
-### Connecteam for HR
+### Connecteam and the HR portal
 
-Optional. In **Settings → Connections → Connecteam for HR**:
+The HR portal only **reads** from Connecteam: its people (names, mobile numbers, emails, kiosk
+codes and profile fields), its archived users and its smart groups. It sends no chat messages
+and copies nothing to Connecteam, so no write permissions are needed, and there's nothing to set
+up for it: it reads through the one **Connecteam** connection in **Settings → Connections**
+(its app needs **users.read**, which Staff Access needs anyway). Google Drive keeps every file.
 
-- **Client ID and Client Secret** of a second Connecteam app, made by you as the account owner
-  (**your name → Integration Center → OAuth 2.0 → Create app**, named "Staff Access HR"), so your
-  time clock connection stays as it is. Give it **users.read**, plus **chat.write** and
-  **publishers.read** for chat messages, and **documents.read**, **documents.write** and
-  **attachments.write** for certificate copies. Leave the keys blank to use the Connecteam
-  connection above instead, but only if its app has these permissions too.
-- **Send Connecteam chat messages** (off at first). Needs Connecteam's Communications hub, and a
-  custom publisher named "Hot Lake HR" under **Settings → Feed settings → Custom publishers** in
-  Connecteam. See [Notifications](#notifications).
-- **Copy confirmed certificates to Connecteam** (off at first). Each card HR confirms also goes
-  onto the person's document in Connecteam with its expiry date, so Connecteam reminds them
-  before it runs out. Needs Connecteam's **HR & Skills hub on the Expert plan**. Google Drive
-  keeps every file either way.
-- **Test connection** checks both: whether chat messages can be sent as "Hot Lake HR", and
-  whether Connecteam's documents can be read. Each check gives a plain result.
-
-If Connecteam refuses chat or certificate copies (a missing permission or plan feature, or keys
-it doesn't accept), only that part stops, and the connection, the HR portal tab and HR settings
-say why. People still see everything in the portal's inbox, and messages wait. Fix it in
-Connecteam (or the keys here), then click **Save** or **Test connection** to start again. The
-time clock checks are never affected.
+Its reads count in a small share of their own inside Staff Access's limits (see [Staying within
+Connecteam's API limits](#staying-within-connecteams-api-limits)). The Connecteam connection
+shows how many of today's requests were the HR portal's, and the HR portal tab shows whether it's
+reading or waiting. If Connecteam refuses an HR request or says "too many requests", only the HR
+portal waits; the time clock checks are never affected. While the connection itself is stopped
+(Connecteam refused Staff Access's keys or a permission), the HR portal waits too, until it
+works again.
 
 ### Signing in
 
@@ -1871,12 +1877,12 @@ a new setup code).
 fewer), nobody is cut off: HR and the dashboard get a warning instead, and the next sync tries
 again.
 
-**Connecteam's request limits.** The HR portal has one small share inside Staff Access's, for
-reading people, chat messages and certificate copies together: at most 6 requests a minute and
-500 a day, and none once Staff Access has used half of its daily share, so clock checks always
-have room. Normal use is a few requests a day. If Connecteam refuses an HR request (a missing
-permission or plan feature), only that HR task stops, and if it says "too many requests", only
-the HR portal waits: Staff Access's own time clock checks keep running.
+**Connecteam's request limits.** The HR portal only reads, in one small share inside Staff
+Access's: at most 6 requests a minute and 500 a day, and none once Staff Access has used half of
+its day, so clock checks always have room. Normal use is a few requests a day. If Connecteam
+refuses an HR request (a missing permission or plan feature), only that HR task stops, and if it
+says "too many requests", only the HR portal waits: Staff Access's own time clock checks keep
+running.
 
 ### A person's page
 
@@ -1932,13 +1938,14 @@ added it sees). A file that isn't accepted never reaches Google Drive and is rem
 days. Nobody checks their own upload: an HR admin's own file is checked by another HR admin.
 
 **Restricted files (I-9, Reasonable accommodation).** Only HR admins see them; managers,
-directors and the employee never learn one exists, and they're never copied to Connecteam. On a
-person's page HR sees how many there are, and **Show restricted files** lists them. Every look is
-in the audit log. They're kept apart in Google Drive: in the **HR Restricted** shared drive if
-you picked one (see [The drives](#the-drives)), otherwise in a **Restricted** folder in the HR
-drive, and HR settings warns that every member of that drive can open it.
+directors and the employee never learn one exists. On a person's page HR sees how many there are,
+and **Show restricted files** lists them. Every look is in the audit log. They're kept apart in
+Google Drive: in the **HR Restricted** shared drive if you picked one (see [The
+drives](#the-drives)), otherwise in a **Restricted** folder in the HR drive, and HR settings warns
+that every member of that drive can open it.
 
-**Getting files to Google Drive (and Connecteam).** Each file is kept encrypted on the Home
+**Getting files to Google Drive.** Nothing is copied to Connecteam (the HR portal only reads
+from it): Google Drive keeps every file. Each file is kept encrypted on the Home
 Assistant computer until it's in Google Drive, then 30 more days for quick opening; after that
 it's fetched from Drive when someone opens it. Each file shows where it is, for HR: **Google
 Drive: Sent**, **Waiting** or **Needs attention**. If Google doesn't answer, the file is tried
@@ -1948,19 +1955,10 @@ isn't set up, or its script is out of date, files simply wait (without using up 
 to-do list says so. A migration file can't be made while files are waiting to reach Google Drive
 or waiting for HR.
 
-**Connecteam copies.** A kind can also be copied to a Connecteam document, but only while you've
-turned on **Copy confirmed certificates to Connecteam** (Settings → Connections → Connecteam for
-HR), and only for kinds the employee can see ("The employee, their managers, directors and HR"),
-since the employee sees it there; it keeps the latest file only. Restricted files never go. While
-HR's share of Connecteam requests is used up, copies wait. Problems only a person can fix ("not
-assigned this document's pack in Connecteam") go on **Needs attention** at once, with **Retry**
-and **Don't copy to Connecteam**.
-
 **Deleting.** HR deletes a file with a fresh 6-digit code (or PIN). It stays in the person's
 **Recycle bin** for 30 days and can be **Restored**; then it's removed from the computer and
-moved to the shared drive's trash, which Google empties 30 days later. Connecteam can't remove
-files for Staff Access, so a deleted file that was copied there becomes a to-do on **Needs
-attention**: remove it in Connecteam, then press **Done**. The audit log keeps the line.
+moved to the shared drive's trash, which Google empties 30 days later. The audit log keeps the
+line.
 
 **Legal hold.** On a person's page, HR can **Put on legal hold** (with a reason, and a fresh
 code). Nothing in that file can then be deleted (certificate photos included), the recycle bin
@@ -1976,8 +1974,8 @@ is renamed overnight. Folders are always found by their Connecteam ID, never by 
 people with the same name never get mixed up.
 
 **Needs attention** (HR admins, in the menu) lists files waiting for HR to check, uploads and PDFs
-that couldn't be sent or made, those still waiting to be tried again, copies to remove in
-Connecteam, records past the time they're kept, and legal holds. HR's own file is left off it:
+that couldn't be sent or made, those still waiting to be tried again, records past the time
+they're kept, and legal holds. HR's own file is left off it:
 another HR admin sees to it.
 
 #### PDFs of write-ups and reviews
@@ -2010,8 +2008,7 @@ and after they run out.
   Save**; until then HR's to-do list says so.
 - For each certificate HR can change how long it lasts, the days a new hire has, the heads-up
   days before it runs out (for example 60, 30, 14, 7), the message shown while it's lapsed, the
-  departments and individual people who need it, other certificates accepted in its place, and
-  the Connecteam document it's copied to.
+  departments and individual people who need it, and other certificates accepted in its place.
 - **Add a kind of certificate** (such as CPR and First Aid) at the bottom of the section. Untick
   **Track this certificate** to stop tracking one; its cards stay on file.
 - **Waive** a certificate for someone (on their page, HR only): a reason and an end date are
@@ -2048,8 +2045,8 @@ certificate rather than the permit, a temporary permit, someone under 21). HR th
 - **Confirm**, after correcting the date if it's wrong, with the issue date, card or permit
   number, "temporary permit", "under 21" and **Checked with OLCC** (or the issuer) as needed. The
   card then goes to the person's **Certificates** folder in Google Drive, named like
-  `2026-10-25 OLCC Service Permit - expires 2031-10-24.jpg`, and to Connecteam with its expiry
-  date if that copy is on. The old card is marked replaced, reminders start again, and the
+  `2026-10-25 OLCC Service Permit - expires 2031-10-24.jpg` (nothing goes to Connecteam). The
+  old card is marked replaced, reminders start again, and the
   person is told.
 - **Don't accept**, with a reason the person sees ("The photo is blurry. Retake it."). The upload
   never reaches their folder and is deleted after 30 days (kept while the person is under a
@@ -2073,20 +2070,13 @@ the person's page. Nothing else happens automatically: schedules aren't changed.
   about expired or missing cards every**, 1 to 14 days). The person gets one message per card;
   managers and HR get one message each listing how many.
 - **Heads-ups before a card runs out**, at each heads-up day (by default 6 months, 60, 30, 14
-  and 7 days for OLCC; 60, 30, 14 and 7 days for the others). For a card copied to Connecteam,
-  Connecteam itself reminds the person 30, 7 and 1 day before and on the day, so the portal only
-  sends them the earlier ones. Managers and HR get them in their daily summary.
+  and 7 days for OLCC; 60, 30, 14 and 7 days for the others), in the person's inbox. Managers
+  and HR get one message each listing how many.
 - **A new hire** is told once which cards they need and by when.
 
-**Connecteam.** Copies need **Copy confirmed certificates to Connecteam** on in **Settings →
-Connections → Connecteam for HR** (it's off at first; see [Connecteam for HR](#connecteam-for-hr)),
-and each certificate's Connecteam document chosen in HR settings (**Read Connecteam's documents**
-lists them; one with the same name is suggested). A card that has already expired isn't copied:
-Connecteam won't take past dates. While the copy is on, the nightly run also reads Connecteam's
-document list and where each person stands (about 2 requests a day, in HR's own request lane).
-Staff Access can't fetch a card someone added in Connecteam's own app, so HR gets a to-do:
-"Jane uploaded a card in Connecteam: approve or reject it there, and ask her to add it in the HR
-portal." Tell staff to add their cards in the HR portal.
+**Connecteam.** Cards are never copied to Connecteam (the HR portal only reads from it), so
+Connecteam doesn't remind anyone about them: the portal's own heads-ups do. Tell staff to add
+their cards in the HR portal.
 
 Once confirmed, a card's photo opens as the document it became (from this computer for 30 days,
 then from Google Drive), for the person and HR only, and every look is in the audit log. A
@@ -2436,22 +2426,12 @@ Reviews aren't linked to pay, and Connecteam's own "Performance" feature isn't u
 
 ### Notifications
 
-- **The portal's inbox** always works, for everyone, and the home page lists to-dos.
-- **Connecteam chat messages** are optional: tick **Send Connecteam chat messages** in
-  **Settings → Connections → Connecteam for HR** (see [Connecteam for HR](#connecteam-for-hr)).
-  They need the **chat.write** and **publishers.read** permissions (Connecteam's Communications
-  hub), and a custom publisher named "Hot Lake HR" in Connecteam. Without them, people see things
-  in the inbox only, and HR settings say why.
-- Messages never say what it's about, only that there's something new in the HR portal, with its
-  address.
-- Employees' messages wait out **quiet hours** (9 PM to 7 AM by default), and each person gets at
-  most one message a day unless it's urgent. Managers, directors and HR get urgent things straight
-  away and everything else in one **daily summary** (8 AM by default). HR sets these times in
-  **HR settings → Notifications**, in Pacific time.
-- Each message is sent once, however often the nightly run (2:15 AM Pacific) runs.
-- Each message is one Connecteam request. A message that can't be sent is tried again after 1
-  minute, 5, 30, 2 hours and 6 hours, then daily; after 8 tries HR sees it in **HR settings →
-  Notifications** with a **Retry** button, and on their to-do list.
+- Everything new goes into the person's **inbox** in the HR portal, on their home page, with
+  their to-do list. Nothing is sent outside the portal: the HR portal only reads from Connecteam,
+  so it sends no Connecteam chat messages.
+- Each note is added once, however often the nightly run (2:15 AM Pacific) runs.
+- Managers, directors and HR get one note each listing how many of their team's cards are
+  running out or expired, rather than one per card.
 
 **Who is told what**
 
@@ -2460,9 +2440,9 @@ Reviews aren't linked to pay, and Connecteam's own "Performance" feature isn't u
 | A document added by someone other than HR; one not accepted | HR; whoever added it |
 | An upload or PDF that keeps failing; records past the time they're kept | HR |
 | A recovery code used to sign in; a sign-in reset | HR; the person |
-| A card added (in the portal, or in Connecteam's own app) | HR |
+| A card added | HR |
 | A card confirmed; not accepted | The person; the person and whoever added it for them |
-| A card running out (heads-ups) | The person; managers and HR in their daily summary |
+| A card running out (heads-ups) | The person; managers and HR (one note listing how many) |
 | A card expired or missing (every 2 days) | The person, their managers and HR |
 | An incident or write-up sent to HR; returned | HR; the manager |
 | A step is due; a termination review | The manager and HR, straight away; HR only |
@@ -2480,12 +2460,12 @@ Reviews aren't linked to pay, and Connecteam's own "Performance" feature isn't u
 HR admins find these in the HR portal under **HR settings**, in this order:
 
 - **Roles** and managers' departments (who is primary), who must use an authenticator code, how
-  soon people are signed out, **Notifications** (quiet hours and the daily summary), which
+  soon people are signed out, **Notifications** (they're the portal's inbox only), which
   Connecteam profile fields hold the start date and direct manager, and **Records** (how long
   records of people who left are kept).
 - **Kinds of document** (see [Documents](#documents)).
-- **Certificates**: who needs which card, the kinds of certificate, reminders and their Connecteam
-  documents (see [Certificates](#certificates)).
+- **Certificates**: who needs which card, the kinds of certificate and reminders (see
+  [Certificates](#certificates)).
 - **Discipline**: the point system, its versions and the simulator (see [The point
   system](#the-point-system-discipline-setup)).
 - **Write-ups and probation**: days to appeal, the unsigned write-up reminder, "introductory
@@ -2532,12 +2512,11 @@ folder (`/data/hr`), apart from Staff Access's own.
 - **Keep the HR key out of backups** (HR settings → HR key) is off by default. Turning it on
   shows an **HR recovery key** once: 20 letters and numbers. **Print it and keep it in the
   safe.** The key itself is then left out of Home Assistant's backups, and the secrets that reach
-  HR's files and Connecteam (the Google script's Web app URL and secret, and the Connecteam for
-  HR Client Secret) are kept locked with it. A stolen backup on its own can't open the encrypted
-  details or reach the files in Google Drive. After a restore, the HR portal (and those two
-  connections) stays locked until you type the recovery key on the dashboard's HR portal tab
-  (**Unlock with the HR recovery key**). Turning the setting off puts the key back in backups,
-  and the secrets with it.
+  HR's files (the Google script's Web app URL and secret) are kept locked with it. A stolen
+  backup on its own can't open the encrypted details or reach the files in Google Drive. After a
+  restore, the HR portal (and its Google Drive connection) stays locked until you type the
+  recovery key on the dashboard's HR portal tab (**Unlock with the HR recovery key**). Turning the
+  setting off puts the key back in backups, and the secrets with it.
 - **Backups made before you turned the setting on still hold the HR key.** Turning it on only
   protects later backups: delete the older ones (or keep them as safely as before) once a new
   backup has been made.
@@ -2547,12 +2526,13 @@ folder (`/data/hr`), apart from Staff Access's own.
   get at everything. Keep that list short.
 
 **Moving to new hardware.** A migration file (Backup tab → Migrate) carries the HR portal too:
-its settings (including both HR connections: the Google script's Web app URL and secret, the
-drives, and the Connecteam for HR keys), its records and its key. With the key kept out of
-backups, only the locked copy travels, and the new install asks for the HR recovery key. A
-migration file can't be made while files are still waiting to reach Google Drive or Connecteam,
-or uploads and certificate photos are waiting for HR (they're only on this computer): the
-dashboard says which, so wait for them or check them, then try again. PDFs still to be made
+its settings (including the Google Drive connection: the script's Web app URL and secret, and
+the drives), its records and its key. A file from 0.10.0 to 0.10.3 may also carry the HR
+portal's own Connecteam keys and its chat and copy switches: they're ignored. With the key kept
+out of backups, only the locked copy travels, and the new install asks for the HR recovery key.
+A migration file can't be made while files are still waiting to reach Google Drive, or uploads
+and certificate photos are waiting for HR (they're only on this computer): the dashboard says
+which, so wait for them or check them, then try again. PDFs still to be made
 travel with the records and are made on the new computer. HR's records can be up to 64 MB in a
 migration file; a bigger one is refused when the file is made, in plain words. If HR's records
 can't be put in place on the new computer, the HR portal stays off there (it never starts empty),

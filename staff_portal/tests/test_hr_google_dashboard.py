@@ -263,13 +263,10 @@ def test_damaged_google_settings_in_a_migration_are_dropped():
 
 
 def test_hr_lane_is_set_up_and_quiet(tmp_path):
-    # The HR portal's Connecteam lane exists from the start, inside Staff Access's budget, and
-    # sends nothing on its own.
+    # The HR portal reads through Staff Access's one Connecteam connection, in a lane of its own,
+    # and asks nothing on its own.
     Portal(tmp_path)
-    assert main.hr_connecteam is main.ctapi.lane()
-    assert main.hr_connecteam.ct is main.connecteam
-    assert main.hr_connecteam.usage()["count"] == 0
-    assert main.hr_connecteam.status()["paused"] is None
-    # One HR lane: the HR people sync and these requests count in the same place.
-    assert main.hr_connecteam.usage() is not None and main.connecteam.hr_usage()["count"] == 0
-    assert main.hr_connecteam.get_settings() == {"client_id": "", "client_secret": "", "documents": False}
+    assert main.hr_service.connecteam is main.connecteam
+    assert main.connecteam.hr_usage()["count"] == 0
+    assert main.connecteam.hr_status()["paused"] is None
+    assert not hasattr(main, "hr_connecteam") and not hasattr(main, "ctapi")

@@ -516,9 +516,9 @@
         <p class="hint hr-conn-line">Google Drive (HR files): <span class="badge" id="hr-google-state"></span>
           <button class="linkish" type="button" data-goto="settings"
             data-open-conn="conn-google">Settings → Connections</button></p>
-        <p class="hint hr-conn-line">Connecteam for HR (optional): <span class="badge" id="hr-ct-state"></span>
+        <p class="hint hr-conn-line">Connecteam (read only, the same connection): <span class="badge" id="hr-ct-state"></span>
           <button class="linkish" type="button" data-goto="settings"
-            data-open-conn="conn-hr-connecteam">Settings → Connections</button></p>
+            data-open-conn="conn-connecteam">Settings → Connections</button></p>
       </fieldset>
       <fieldset id="hr-unlock" hidden>
         <legend>Unlock with the HR recovery key</legend>
@@ -649,8 +649,10 @@
                 Staff you add by hand aren't affected.</small></span></label>
               <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
                 <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
-                changed later). Copy the Client Secret straight away: Connecteam only shows it once, then paste its keys
-                here. API access needs Connecteam's Expert plan or higher.</p>
+                changed later: for other scopes, make a new app). Copy the Client Secret straight away: Connecteam
+                only shows it once, then paste its keys here. API access needs Connecteam's Expert plan or higher,
+                and the time clock needs the Operations hub. Staff Access and the HR portal only ever <b>read</b>
+                from Connecteam: no write permissions are needed.</p>
               <div class="row">
                 <label>Client ID<input name="connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
                 <label>Client Secret<input name="connecteam_client_secret" type="password" maxlength="200"
@@ -663,18 +665,25 @@
                 <label>Check the time clock every (minutes)<input name="connecteam_poll_minutes" type="number" min="30" max="240"></label>
               </div>
               <p class="hint">Connecteam limits API requests per account, shared with your other integrations
-                and reports (Expert plan: 10,000 a day). One check covers everyone and costs one request per
-                time clock. Staff Access checks on that schedule only while someone must be clocked in, plus
-                once when someone the last check didn't find clocked in signs in or uses a control (that check
-                replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With one
-                time clock that's about 24 requests a day plus a few at the start of shifts. It never uses more
-                than a fifth of your daily limit and pauses on its own if your account runs low.</p>
+                and reports (Expert plan: 100 a minute and 10,000 a day). One check covers everyone and costs one
+                request per time clock. Staff Access checks on that schedule only while someone must be clocked
+                in, plus once when someone the last check didn't find clocked in signs in or uses a control (that
+                check replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With
+                one time clock that's about 24 requests a day plus a few at the start of shifts. Staff Access never
+                uses more than 30 a minute and 5,000 a day (half of your daily limit), and pauses on its own if
+                your account runs low. The HR portal reads its people through this connection, inside that: at
+                most 6 a minute and 500 a day, and none once Staff Access has used half of its day, so clock checks
+                always have room.</p>
+              <p class="hint">If Connecteam refuses a request, automatic checks stop, with Connecteam's own words
+                below. They try again by themselves after 30 minutes, up to 3 times a day; Test connection shows
+                each step.</p>
               <label class="check-row" id="ct-clear-row" hidden><input type="checkbox" name="connecteam_clear_secret">
                 <span>Remove the saved Client Secret</span></label>
               <div class="ct-status">
                 <span id="ct-status" class="hint"></span>
                 <button class="btn" type="button" id="ct-test">Test connection</button>
               </div>
+              <ul class="conn-checks" id="ct-checks" hidden></ul>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
                 <span>Add everyone from Connecteam
                 <small>Every active Connecteam user becomes a staff member here, in the department whose
@@ -690,34 +699,6 @@
                 <button class="btn" type="button" id="ct-sync">Sync staff now</button>
               </div>
               <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam settings</button></div>
-            </form>
-          </details>
-          <details class="conn" id="conn-hr-connecteam">
-            <summary>
-              <span class="conn-head"><span class="conn-name">Connecteam for HR</span>
-                <span class="badge" data-conn-state></span></span>
-              <span class="conn-use" data-conn-use></span>
-            </summary>
-            <form id="hrct-form" class="conn-body">
-              <p class="hint">Optional. The HR portal only <b>reads</b> from Connecteam (its people, departments
-                and start dates): it sends no chat messages and copies nothing to Connecteam, so no write
-                permissions are needed. Leave the keys blank to use the Connecteam connection above, or give
-                the HR portal a read-only Connecteam app of its own (<b>users.read</b>).</p>
-              <div class="row">
-                <label>Client ID<input name="hr_connecteam_client_id" maxlength="200" autocomplete="off" spellcheck="false"></label>
-                <label>Client Secret<input name="hr_connecteam_client_secret" type="password" maxlength="500"
-                  autocomplete="new-password" spellcheck="false"></label>
-              </div>
-              <label class="check-row" id="hrct-clear-row" hidden><input type="checkbox" name="hr_connecteam_clear_secret">
-                <span>Remove the saved Client Secret</span></label>
-              <p class="hint">HR's Connecteam requests share a small allowance: at most 6 a minute and 500 a day,
-                and none once Staff Access has used half of its daily share, so clock checks always have room.</p>
-              <div class="ct-status">
-                <span id="hrct-status" class="hint"></span>
-                <button class="btn" type="button" id="hrct-test">Test connection</button>
-              </div>
-              <ul class="conn-checks" id="hrct-checks" hidden></ul>
-              <div class="form-actions"><button class="btn primary" type="submit">Save Connecteam for HR</button></div>
             </form>
           </details>
           <details class="conn" id="conn-google">

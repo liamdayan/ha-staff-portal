@@ -12,7 +12,7 @@ Where the key lives, in DATA_DIR/hr:
                                   (20 characters, shown once), which is in backups. After a
                                   restore, HR stays locked until the recovery key is typed in.
 
-While it's on, the settings that would reach Google Drive or Connecteam for HR (SEALED_SETTINGS,
+While it's on, the settings that would reach Google Drive for HR (SEALED_SETTINGS,
 in Staff Access's own database, which backups include) are sealed with the key too, so a stolen
 backup alone can't use them. Staff Access's Database opens them as it reads them.
 
@@ -49,7 +49,7 @@ FILE_WORKERS = 2                      # files sealed or opened at once (each in 
 
 # Settings in Staff Access's database that reach HR's files or Connecteam: sealed with the key
 # while it's kept out of backups, plain otherwise. A sealed one is SEALED_PREFIX and base64.
-SEALED_SETTINGS = ("hr_google_url", "hr_google_secret", "hr_connecteam_client_secret")
+SEALED_SETTINGS = ("hr_google_url", "hr_google_secret")
 SEALED_PREFIX = "hr-sealed:"
 SEALED_RE = re.compile(r"hr-sealed:[A-Za-z0-9+/]{40,4000}={0,2}")
 

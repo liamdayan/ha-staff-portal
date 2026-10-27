@@ -134,26 +134,12 @@ CREATE TABLE IF NOT EXISTS inbox (
     urgent INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     read_at REAL,
-    summarized INTEGER NOT NULL DEFAULT 0,
     once TEXT                            -- the same event never makes a second entry
 );
 CREATE INDEX IF NOT EXISTS inbox_person ON inbox (person_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS inbox_once ON inbox (person_id, once) WHERE once IS NOT NULL;
--- Connecteam chat messages waiting to go (they survive restarts and updates).
-CREATE TABLE IF NOT EXISTS outbox (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    person_id TEXT NOT NULL,
-    text TEXT NOT NULL,
-    urgent INTEGER NOT NULL DEFAULT 0,
-    day TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    due_at REAL NOT NULL,
-    tries INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'queued',
-    sent_at REAL,
-    error TEXT
-);
-CREATE INDEX IF NOT EXISTS outbox_due ON outbox (status, due_at);
+-- Gone since 0.10.4: Connecteam chat messages waiting to go (the portal inbox only now).
+DROP TABLE IF EXISTS outbox;
 """
 
 # Columns added after a table was first made: {table: {column: SQL type}}.
@@ -165,10 +151,7 @@ DEFAULTS = {
     # hr (HR admins only) or nobody.
     "totp_policy": "staff",
     "session_minutes": "15",              # signed out after this long without use (5 to 30)
-    "time_zone": "America/Los_Angeles",   # every date and quiet hour is in this time zone
-    "quiet_start": "21:00",               # employees' messages wait from here...
-    "quiet_end": "07:00",                 # ...until here
-    "summary_time": "08:00",              # managers' and HR's daily summary
+    "time_zone": "America/Los_Angeles",   # every date is in this time zone
     "start_field": "",                    # the Connecteam profile field holding the start date
     "manager_field": "",                  # ...and the direct manager ("" finds it by its name)
     "date_order": "mdy",                  # how Connecteam writes dates: mdy (US) or dmy

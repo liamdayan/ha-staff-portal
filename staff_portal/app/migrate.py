@@ -389,19 +389,15 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
 
 
 def _hr_settings(raw: dict) -> dict:
-    """The HR portal's settings in a migration file, checked (anything odd is left out)."""
+    """The HR portal's settings in a migration file, checked (anything odd is left out). A file
+    from 0.10.0 to 0.10.3 may also carry HR's own Connecteam keys, chat and copy switches: they're
+    ignored (HR reads through the one Connecteam connection now)."""
     found = {}
-    for key in ("hr_enabled", "hr_connecteam_chat", "hr_connecteam_documents"):
-        if raw.get(key) in ("0", "1"):
-            found[key] = raw[key]
+    if raw.get("hr_enabled") in ("0", "1"):
+        found["hr_enabled"] = raw["hr_enabled"]
     host = raw.get("hr_host")
     if isinstance(host, str) and HR_HOST_RE.match(host):
         found["hr_host"] = host
-    for key in ("hr_connecteam_client_id", "hr_connecteam_client_secret"):
-        value = raw.get(key)
-        if _sealed(value) or (isinstance(value, str) and len(value) <= 500
-                              and re.fullmatch(r"[\x21-\x7e]*", value)):
-            found[key] = value
     return found
 
 

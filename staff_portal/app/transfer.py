@@ -12,9 +12,9 @@ What files never contain:
 - Pending one-time setup codes. Restored phones still waiting for setup get new QR codes.
 - The Connecteam and TT Hotel secrets (and TT Hotel's sign-in), and the secret in the Door
   activity address. A restore keeps the ones saved.
-- Anything of the HR portal (hr/): its settings (on or off, its address, the Connecteam for HR
-  connection, and the Google Drive connection: its script's address and secret, and the
-  drives) and its records, which live in their own database. A restore leaves them as they are.
+- Anything of the HR portal (hr/): its settings (on or off, its address, and the Google Drive
+  connection: its script's address and secret, and the drives) and its records, which live in
+  their own database. A restore leaves them as they are.
 - The door list (it comes from TT Hotel). Only the door names, hiding and kind (public door,
   guest room or staff door) chosen here travel, and land on doors the system already has. A
   backup from before 0.9.0 has no kind, and leaves each door's as it is.

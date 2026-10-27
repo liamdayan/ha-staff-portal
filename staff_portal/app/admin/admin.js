@@ -2267,7 +2267,7 @@
     $("#wb-off-note").hidden = !!wb.enabled;
     renderTTStatus();
     renderConnecteam();
-    fillHrConnecteam();
+    showState($("#hr-ct-state"), hrCtState());
     renderGoogle();
   }
 
@@ -2332,7 +2332,9 @@
     const lines = [];
     if (!ct.enabled) lines.push("Turned off.");
     else {
-      lines.push(ct.halted ? `Stopped: ${ct.halted} Fix it, then save the settings or click Test connection.`
+      lines.push(ct.halted ? `Stopped: ${ct.halted} ` + (ct.retry_at
+        ? `It tries again by itself at ${untilText(ct.retry_at)}; or fix it, then save the settings or click Test connection.`
+        : "Fix it, then save the settings or click Test connection.")
         : ct.paused ? `Paused: ${ct.paused}`
         : ct.last_error ? `Problem: ${ct.last_error}`
         : ct.checked_at ? `Connected. Checked ${ago(ct.checked_at).toLowerCase()}; ${ct.clocked_in} clocked in.`
@@ -2342,6 +2344,9 @@
       let use = `Requests today: ${ct.used_today} (Staff Access stops at ${ct.daily_cap})`;
       if (ct.account_limit) use += `; your account has ${ct.account_left} of ${ct.account_limit} left`;
       lines.push(use + ".");
+      const hrLane = ct.hr || {};
+      lines.push(`HR portal: ${hrLane.used_today || 0} of them today (it stops at ${hrLane.daily_cap})` +
+        (hrLane.paused ? `. Waiting: ${hrLane.paused}` : state.hr?.status === "on" ? "." : "; it's off."));
     }
     $("#ct-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
     renderStaffSync();
@@ -2364,7 +2369,7 @@
   }
 
   window.addEventListener("beforeunload", (e) => {
-    if (connDirty.tt || connDirty.ct || hrctDirty || gdDirty) e.preventDefault();
+    if (connDirty.tt || connDirty.ct || gdDirty) e.preventDefault();
   });
 
   // "Settings → Connections" links elsewhere open that connection (data-goto shows the tab).
@@ -2374,14 +2379,20 @@
     $("summary", box).focus();
   }));
 
-  // Tests the saved keys, so Save first.
+  // Tests the saved keys, so Save first: each step (a token, users, the time clock, smart groups)
+  // with Connecteam's own words. It lifts a stop.
   $("#ct-test").addEventListener("click", () => run(async () => {
     if (connDirty.ct) throw new Error("Click Save Connecteam settings first: the test uses what's saved.");
+    const button = $("#ct-test");
+    button.disabled = true;
+    button.textContent = "Testing…";
     try {
       const r = await api("POST", "api/connecteam/test");
-      toast(`Connected: ${r.users} users, ${r.time_clocks} time clock${r.time_clocks === 1 ? "" : "s"}, ` +
-        `${r.clocked_in} clocked in now.`);
+      showChecks($("#ct-checks"), r.checks);
+      toast(r.ok ? "Connecteam works." : "Connecteam has a problem: see the list.", !r.ok);
     } finally {
+      button.disabled = false;
+      button.textContent = "Test connection";
       await load();
     }
   }));
@@ -7003,8 +7014,7 @@
     showState($("#hr-badge"), HR_STATES[d.status] || ["", ""]);
     // The two HR connections (Settings → Connections) say whether the HR portal is on.
     state.hr = { ...state.hr, status: d.status, connecteam: d.connecteam };
-    fillHrConnecteam();
-    renderGoogle();
+    renderConnections();
     const form = $("#hr-form");
     if (!form.dataset.dirty) {
       form.elements.hr_enabled.checked = d.enabled;
@@ -7173,78 +7183,22 @@
     });
   });
 
-  // Settings > Connections: Connecteam for HR (its own form, saved on its own).
-  const hrctForm = $("#hrct-form");
-  let hrctDirty = false;
-  hrctForm.addEventListener("input", () => { hrctDirty = true; });
-
-  // Whether it works, in a few words, with its badge color (the HR tab shows the same).
-  function hrctState(c) {
-    if (!state.connecteam?.enabled) return ["Not set up", ""];
-    if (c.paused) return ["Waiting", "pending"];
-    return [c.client_id && c.secret_set ? "Own read-only app" : "Uses the connection above",
-      state.hr?.status === "on" ? "active" : ""];
-  }
-
-  function fillHrConnecteam() {
+  // The HR portal's reads through the Connecteam connection, for its line on the HR tab.
+  function hrCtState() {
     const c = state.hr?.connecteam || {};
-    const f = hrctForm.elements;
-    if (!hrctDirty) {
-      f.hr_connecteam_client_id.value = c.client_id || "";
-      f.hr_connecteam_client_secret.value = "";
-      f.hr_connecteam_client_secret.placeholder = c.secret_set ? "Saved — leave blank to keep" : "Blank: the connection above";
-      f.hr_connecteam_clear_secret.checked = false;
-      $("#hrct-clear-row").hidden = !c.secret_set;
-    }
-    const connState = hrctState(c);
-    showConnection($("#conn-hr-connecteam"), connState, requestsText(c.used_today, "today", c.daily_cap));
-    showState($("#hr-ct-state"), connState);
-    $("#hrct-status").textContent = !state.connecteam?.enabled
-      ? "Turn on Connecteam above first: the HR portal uses it."
-      : c.paused ? c.paused
-          : state.hr?.status !== "on" ? "The HR portal is off, so nothing is sent until you turn it on (HR portal tab)."
-            : "";
-    $("#hrct-test").disabled = !state.connecteam?.enabled;
+    if (!state.connecteam?.enabled) return ["Connecteam off", ""];
+    if (state.connecteam.halted) return ["Stopped: access refused", "locked"];
+    if (c.paused) return ["Waiting", "pending"];
+    return ["Reads people", state.hr?.status === "on" ? "active" : ""];
   }
 
-  hrctForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const f = hrctForm.elements;
-    run(async () => {
-      await api("PUT", "api/hr/connecteam", { hr_connecteam_client_id: f.hr_connecteam_client_id.value,
-        hr_connecteam_client_secret: f.hr_connecteam_client_secret.value,
-        hr_connecteam_clear_secret: f.hr_connecteam_clear_secret.checked ? "1" : "0" });
-      hrctDirty = false;
-      await load();
-      fillHrConnecteam();
-    }, "Connecteam for HR saved.");
-  });
-
-  // Each check with a plain result (Test connection for both HR connections).
+  // Each check with a plain result (Test connection for Connecteam and Google Drive).
   function showChecks(list, checks) {
     list.replaceChildren(...checks.map((c) => h("li", { class: c.ok ? "ok" : "bad" },
       h("span", { class: "conn-mark", role: "img", "aria-label": c.ok ? "OK" : "Problem" }, c.ok ? "\u2713" : "\u2715"),
       h("span", null, h("b", null, c.check), ` ${c.detail}`))));
     list.hidden = false;
   }
-
-  // Tests what's saved: whether the HR portal can read Connecteam's people. It lifts a stop.
-  $("#hrct-test").addEventListener("click", () => run(async () => {
-    if (hrctDirty) throw new Error("Click Save Connecteam for HR first: the test uses what's saved.");
-    const button = $("#hrct-test");
-    button.disabled = true;
-    button.textContent = "Testing…";
-    try {
-      const r = await api("POST", "api/hr/connecteam/test");
-      state.hr = r.hr;
-      showChecks($("#hrct-checks"), r.checks);
-      const ok = r.checks.every((c) => c.ok);
-      toast(ok ? "Connecteam for HR works." : "Connecteam for HR has a problem: see the list.", !ok);
-    } finally {
-      button.textContent = "Test connection";
-      fillHrConnecteam();
-    }
-  }));
 
   // ---------------------------------------------------------------- start
 

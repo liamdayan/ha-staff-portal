@@ -3,11 +3,11 @@ themselves, and what happens to them over time.
 
 Kinds (HR settings): a name, who can see it (access.LEVELS), its Drive subfolder, who may add one
 (HR only; managers and directors too; or the employee too: anyone but HR waits for HR to check
-it), and whether it's copied to Connecteam (only while the owner has the Connecteam documents
-copy on). The defaults follow the owner's decisions. "I-9" and "Reasonable accommodation" are
+it). The defaults follow the owner's decisions. "I-9" and "Reasonable accommodation" are
 restricted: HR admins only (nobody else even learns one exists), stored apart (folders.py, and
-sealed with keys of their own here), every look logged, never copied to Connecteam. Whether a
-kind is restricted is fixed when it's made, because its files are stored apart.
+sealed with keys of their own here), every look logged. Whether a kind is restricted is fixed
+when it's made, because its files are stored apart. Nothing is copied to Connecteam (the HR
+portal only reads from it): Google Drive keeps every file.
 
 Other parts of the HR portal keep their own kinds here (register_kind): certificates, signed
 write-ups, final reviews. Those are left out of the Documents section, their part decides who
@@ -22,11 +22,10 @@ A file's life:
   byte (files.py), then kept encrypted on this computer (DATA_DIR/hr/files);
 - waiting: added by someone other than HR, it waits for HR to accept or reject it. A rejected
   one never reaches Drive and goes after 30 days;
-- active: on its way to Google Drive (and Connecteam where that's on) through the delivery
-  queue (delivery.py), then kept here 30 more days for quick viewing (Drive has the original);
+- active: on its way to Google Drive through the delivery queue (delivery.py), then kept here 30
+  more days for quick viewing (Drive has the original);
 - deleted: HR deleted it (a fresh code first). It's in the recycle bin for 30 days and can be
-  restored, then it's removed here and moved to the shared drive's trash. Where it was copied
-  to Connecteam, HR gets a to-do to remove it there (Connecteam's API can't). The audit line
+  restored, then it's removed here and moved to the shared drive's trash. The audit line
   stays. A legal hold on the person stops every deletion.
 - Records of people who left are listed for HR after the retention period (5 years, an HR
   setting), never deleted by themselves.
@@ -67,27 +66,21 @@ STATUS_WORDS = {"waiting": "Waiting for HR", "active": "Saved", "rejected": "Not
                 "deleted": "In the recycle bin", "gone": "Deleted"}
 SHOWN = ("waiting", "active", "rejected")
 HOLD_ON = "A legal hold is on for this person: nothing in their file can be deleted."
-COPIES_OFF = ("Connecteam copies are off. The owner turns them on in Home Assistant: Settings, "
-              "Connections, Connecteam for HR, Copy confirmed certificates to Connecteam.")
-COPY_SEEN = ("A Connecteam copy can be seen by the employee (and their managers in Connecteam), "
-             "so only kinds the employee can see are copied there. Choose “The employee, their "
-             "managers, directors and HR”, or turn the copy off.")
 NO_PDF = ("PDFs are made through Google Drive, which isn't set up yet. The owner connects it in "
           "Home Assistant: Settings, Connections, Google Drive (HR files). The PDF is made as "
           "soon as it is.")
 TOO_MANY_WAITING = (f"There are already {MAX_WAITING} uploads waiting for HR in this file. Add "
                     "more once HR has checked those.")
 
-# The kinds a new HR portal starts with: (key, name, who sees it, Drive subfolder, copied to
-# Connecteam, who may add one).
+# The kinds a new HR portal starts with: (key, name, who sees it, Drive subfolder, who may add one).
 BUILT_IN = (
-    (CERTIFICATES, "Certificates", "employee", "Certificates", 1, "employee"),
-    ("policies", "Signed policies", "employee", "Documents", 0, "hr"),
-    ("training", "Training records", "employee", "Documents", 0, "managers"),
-    ("hiring", "Hiring paperwork", "directors", "Documents", 0, "hr"),
-    ("other", "Other", "hr", "Documents", 0, "hr"),
-    ("i9", "I-9", RESTRICTED, "I-9", 0, "hr"),
-    ("accommodation", "Reasonable accommodation", RESTRICTED, "Reasonable accommodation", 0, "hr"),
+    (CERTIFICATES, "Certificates", "employee", "Certificates", "employee"),
+    ("policies", "Signed policies", "employee", "Documents", "hr"),
+    ("training", "Training records", "employee", "Documents", "managers"),
+    ("hiring", "Hiring paperwork", "directors", "Documents", "hr"),
+    ("other", "Other", "hr", "Documents", "hr"),
+    ("i9", "I-9", RESTRICTED, "I-9", "hr"),
+    ("accommodation", "Reasonable accommodation", RESTRICTED, "Reasonable accommodation", "hr"),
 )
 
 # Kinds other parts of the HR portal add (register_kind): {key: (name, level, subfolder)}.
@@ -108,8 +101,6 @@ CREATE TABLE IF NOT EXISTS doc_kinds (
     name TEXT NOT NULL,
     visibility TEXT NOT NULL,            -- access.LEVELS
     folder TEXT NOT NULL,                -- the Drive subfolder
-    connecteam INTEGER NOT NULL DEFAULT 0,   -- copied to Connecteam (while the copy is on)
-    ct_document INTEGER,                 -- ...to this Connecteam document
     uploaders TEXT NOT NULL DEFAULT 'hr',    -- UPLOADERS
     position INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
@@ -136,21 +127,18 @@ CREATE TABLE IF NOT EXISTS documents (
     stored INTEGER NOT NULL DEFAULT 1,   -- 1: an encrypted copy is on this computer
     keep_until REAL,                     -- ...until then (30 days after it reached Drive)
     drive_id TEXT,
-    drive_link TEXT,
-    ct_document INTEGER,                 -- the Connecteam copy: which document...
-    ct_expires TEXT,                     -- ...and its expiry date (certificates)
-    ct_copied_at REAL
+    drive_link TEXT
 );
 CREATE INDEX IF NOT EXISTS documents_person ON documents (person_id, status);
 CREATE INDEX IF NOT EXISTS documents_status ON documents (status);
--- Work for Google Drive and Connecteam, tried until it's done: a file to Drive, its Connecteam
--- copy, moving a deleted one to Drive's trash, renaming a person's folders, moving them to
--- Former employees, making a PDF another part asked for. It survives restarts and updates.
+-- Work for Google Drive, tried until it's done: a file to Drive, moving a deleted one to Drive's
+-- trash, renaming a person's folders, moving them to Former employees, making a PDF another part
+-- asked for. It survives restarts and updates.
 CREATE TABLE IF NOT EXISTS deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER,                 -- the file (a PDF: the one made, once it's made)
     person_id TEXT NOT NULL,
-    target TEXT NOT NULL,                -- drive, connecteam, trash, rename, former, pdf
+    target TEXT NOT NULL,                -- drive, trash, rename, former, pdf
     kind_key TEXT,                       -- pdf: the kind it's for (its part makes the HTML)...
     ref TEXT,                            -- ...and that part's record (a write-up, a review)
     status TEXT NOT NULL DEFAULT 'waiting',  -- waiting, done, attention, skipped
@@ -170,16 +158,10 @@ CREATE TABLE IF NOT EXISTS legal_holds (
     set_by_name TEXT,
     set_at REAL NOT NULL
 );
--- To-dos for HR about documents: remove_connecteam (a deleted file's copy, by hand).
-CREATE TABLE IF NOT EXISTS doc_todos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id INTEGER NOT NULL,
-    person_id TEXT NOT NULL,
-    what TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    done_at REAL,
-    done_by TEXT
-);
+-- Gone since 0.10.4 (the HR portal only reads from Connecteam): Connecteam copies still to be
+-- made, and the to-dos to remove a deleted file's copy there by hand.
+DELETE FROM deliveries WHERE target = 'connecteam';
+DROP TABLE IF EXISTS doc_todos;
 """
 
 notify.register_kind("document_waiting", "A document is waiting for HR to check it.")
@@ -195,14 +177,13 @@ def setup(db) -> None:
 
 def _ensure_kinds(db) -> None:
     now = time.time()
-    rows = [(key, name, level, folder, connecteam, uploaders)
-            for key, name, level, folder, connecteam, uploaders in BUILT_IN]
-    rows += [(key, name, level, folder, 0, "hr") for key, (name, level, folder) in REGISTERED.items()]
-    for position, (key, name, level, folder, connecteam, uploaders) in enumerate(rows):
+    rows = list(BUILT_IN)
+    rows += [(key, name, level, folder, "hr") for key, (name, level, folder) in REGISTERED.items()]
+    for position, (key, name, level, folder, uploaders) in enumerate(rows):
         db.conn.execute(
-            "INSERT OR IGNORE INTO doc_kinds (key, name, visibility, folder, connecteam, uploaders, "
-            "position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (key, name, level, folder, connecteam, uploaders, position * 10, now))
+            "INSERT OR IGNORE INTO doc_kinds (key, name, visibility, folder, uploaders, position, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (key, name, level, folder, uploaders, position * 10, now))
     db.conn.commit()
 
 
@@ -259,18 +240,16 @@ def owned_by(k: dict) -> str | None:
 
 
 def fixed_fields(k: dict) -> set[str]:
-    """What HR can't change on a kind: a restricted kind stays restricted, HR only and out of
-    Connecteam; a kind another part owns keeps that part's rules (HR can rename it and change its
-    Drive subfolder)."""
+    """What HR can't change on a kind: a restricted kind stays restricted and HR only; a kind
+    another part owns keeps that part's rules (HR can rename it and change its Drive
+    subfolder)."""
     if is_restricted(k) or owned_by(k):
-        return {"visibility", "uploaders", "connecteam", "ct_document"}
+        return {"visibility", "uploaders"}
     return set()
 
 
-def clean_kind(data: dict, current: dict | None = None, copies: bool = True) -> dict:
-    """The fields of a kind HR is adding or changing, checked. copies: whether the owner has the
-    Connecteam copy on (a kind's copy can only be turned on then). Raises ValueError (plain
-    words)."""
+def clean_kind(data: dict, current: dict | None = None) -> dict:
+    """The fields of a kind HR is adding or changing, checked. Raises ValueError (plain words)."""
     fixed = fixed_fields(current) if current else set()
     values = {}
     if "name" in data or current is None:
@@ -293,34 +272,7 @@ def clean_kind(data: dict, current: dict | None = None, copies: bool = True) -> 
         if who not in UPLOADERS:
             raise ValueError("Choose who may add one.")
         values["uploaders"] = who
-    if ("connecteam" in data or current is None) and "connecteam" not in fixed:
-        on = not restricted and data.get("connecteam") in (True, 1, "1")
-        if on and not copies and not (current and current["connecteam"]):
-            raise ValueError(COPIES_OFF)
-        values["connecteam"] = 1 if on else 0
-    if "ct_document" in data and "ct_document" not in fixed and not restricted:
-        doc = data.get("ct_document")
-        if doc in (None, "", 0):
-            values["ct_document"] = None
-        elif isinstance(doc, (int, str)) and not isinstance(doc, bool) and str(doc).isdigit() \
-                and 0 < int(doc) < 2**53:
-            values["ct_document"] = int(doc)
-        else:
-            raise ValueError("Choose the Connecteam document from the list.")
-    copied = values.get("connecteam", current["connecteam"] if current else 0)
-    level = values.get("visibility", (current or {}).get("visibility"))
-    if copied and level != "employee" and ("connecteam" in values or "visibility" in values):
-        raise ValueError(COPY_SEEN)
-    target = values["ct_document"] if "ct_document" in values else (current or {}).get("ct_document")
-    if copied and not target and "connecteam" not in fixed:
-        raise ValueError("Choose the Connecteam document these go to.")
     return values
-
-
-def goes_to_connecteam(k: dict | None) -> bool:
-    """Whether a kind's files go to Connecteam: turned on, and only for a kind the employee can
-    see (a kind set up before that was checked is never copied)."""
-    return bool(k and k["connecteam"] and k["visibility"] == "employee")
 
 
 def add_kind(db, values: dict) -> int:
@@ -331,10 +283,10 @@ def add_kind(db, values: dict) -> int:
         raise ValueError("There's already a kind with that name.")
     last = db.conn.execute("SELECT COALESCE(MAX(position), 0) FROM doc_kinds").fetchone()[0]
     cur = db.conn.execute(
-        "INSERT INTO doc_kinds (name, visibility, folder, connecteam, ct_document, uploaders, "
-        "position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (values["name"], values["visibility"], values["folder"], values.get("connecteam", 0),
-         values.get("ct_document"), values["uploaders"], last + 10, time.time()))
+        "INSERT INTO doc_kinds (name, visibility, folder, uploaders, position, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (values["name"], values["visibility"], values["folder"], values["uploaders"], last + 10,
+         time.time()))
     db.conn.commit()
     return cur.lastrowid
 
@@ -397,11 +349,6 @@ def shown_to(rel: str | None, doc: dict, k: dict) -> bool:
     if not can_see(rel, k):
         return False
     return doc["status"] in SHOWN or (doc["status"] == "deleted" and rel == "hr")
-
-
-def copies_on(settings: dict) -> bool:
-    """The owner's switch for Connecteam document copies (Settings, Connections)."""
-    return False   # the owner chose read-only Connecteam for HR: Google Drive keeps every file
 
 
 # ---------------------------------------------------------------- documents
@@ -542,11 +489,9 @@ def waiting_count(db, person_id) -> int:
 
 
 async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, doc_date: str,
-              viewer, rel: str, *, waiting: bool | None = None, ct_document: int | None = None,
-              ct_expires: str | None = None) -> dict:
+              viewer, rel: str, *, waiting: bool | None = None) -> dict:
     """A cleaned file (files.clean_upload) for someone's file. HR's go straight on their way to
-    Drive (activate, with ct_document and ct_expires for its Connecteam copy: a confirmed
-    certificate's); anyone else's wait for HR (waiting=True: HR's too). Returns the document.
+    Drive (activate); anyone else's wait for HR (waiting=True: HR's too). Returns the document.
     Raises ValueError when too many already wait in that file."""
     db = svc.db
     waiting = rel != "hr" if waiting is None else waiting
@@ -565,8 +510,7 @@ async def add(svc, person: dict, k: dict, data: bytes, mime: str, title: str, do
     db.conn.commit()
     doc = get(db, cur.lastrowid)
     if not waiting:
-        activate(db, doc, svc.main_settings(), viewer.id if viewer else None,
-                 ct_document=ct_document, ct_expires=ct_expires, now=now)
+        activate(db, doc, viewer.id if viewer else None, now=now)
     return get(db, doc["id"])
 
 
@@ -606,25 +550,17 @@ async def add_generated(svc, person, kind_key: str, data: bytes, mime: str, titl
         return by_upload_id(db, upload_id)
     db.conn.commit()
     doc = get(db, cur.lastrowid)
-    activate(db, doc, svc.main_settings(), actor_id, now=now)
+    activate(db, doc, actor_id, now=now)
     return get(db, doc["id"])
 
 
-def activate(db, doc: dict, settings: dict, actor_id=None, *, ct_document: int | None = None,
-             ct_expires: str | None = None, now: float | None = None) -> None:
-    """Accepted (or added by HR): on its way to Drive, and to Connecteam where the kind is copied
-    there and the owner has the copy on. ct_document and ct_expires: the Connecteam document and
-    expiry date for this file (certificates), else the kind's document."""
+def activate(db, doc: dict, actor_id=None, *, now: float | None = None) -> None:
+    """Accepted (or added by HR): on its way to Drive."""
     now = time.time() if now is None else now
-    k = kind(db, doc["kind_id"])
-    target = ct_document or (k["ct_document"] if k else None)
     db.conn.execute("UPDATE documents SET status = 'active', decided_by = COALESCE(decided_by, ?), "
-                    "decided_at = COALESCE(decided_at, ?), ct_document = ?, ct_expires = ? "
-                    "WHERE id = ?", (actor_id, now, target, ct_expires, doc["id"]))
+                    "decided_at = COALESCE(decided_at, ?) WHERE id = ?", (actor_id, now, doc["id"]))
     db.conn.commit()
     queue(db, doc["person_id"], "drive", doc["id"], now)
-    if goes_to_connecteam(k) and target and not doc["restricted"] and copies_on(settings):
-        queue(db, doc["person_id"], "connecteam", doc["id"], now)
 
 
 def reject(db, doc: dict, reason: str, actor_id, now: float | None = None) -> None:
@@ -637,40 +573,28 @@ def reject(db, doc: dict, reason: str, actor_id, now: float | None = None) -> No
 
 
 def delete(db, doc: dict, actor_id, now: float | None = None) -> None:
-    """Into the recycle bin. Work not done yet for it stops; a copy in Connecteam becomes a
-    to-do for HR. Raises ValueError under a legal hold."""
+    """Into the recycle bin. Work not done yet for it stops. Raises ValueError under a legal
+    hold."""
     if on_hold(db, doc["person_id"]):
         raise ValueError(HOLD_ON)
     now = time.time() if now is None else now
     db.conn.execute("UPDATE documents SET status = 'deleted', deleted_by = ?, deleted_at = ? "
                     "WHERE id = ?", (actor_id, now, doc["id"]))
     db.conn.execute("UPDATE deliveries SET status = 'skipped', error = 'Deleted' WHERE document_id "
-                    "= ? AND target IN ('drive', 'connecteam') AND status IN ('waiting', "
-                    "'attention')", (doc["id"],))
-    if doc["ct_copied_at"]:
-        db.conn.execute("INSERT INTO doc_todos (document_id, person_id, what, created_at) VALUES "
-                        "(?, ?, 'remove_connecteam', ?)", (doc["id"], doc["person_id"], now))
+                    "= ? AND target = 'drive' AND status IN ('waiting', 'attention')", (doc["id"],))
     db.conn.commit()
 
 
-def restore(db, doc: dict, settings: dict, now: float | None = None) -> None:
+def restore(db, doc: dict, now: float | None = None) -> None:
     """Out of the recycle bin: back as it was, and anything not yet done is done."""
     now = time.time() if now is None else now
     # Deleted before HR checked it, after HR rejected it (only those have a reason), or saved.
     status = "waiting" if doc["decided_at"] is None else "rejected" if doc["reason"] else "active"
     db.conn.execute("UPDATE documents SET status = ?, deleted_by = NULL, deleted_at = NULL "
                     "WHERE id = ?", (status, doc["id"]))
-    db.conn.execute("UPDATE doc_todos SET done_at = ?, done_by = 'restored' WHERE document_id = ? "
-                    "AND done_at IS NULL", (now, doc["id"]))
     db.conn.commit()
-    if status != "active":
-        return
-    if not doc["drive_id"]:
+    if status == "active" and not doc["drive_id"]:
         queue(db, doc["person_id"], "drive", doc["id"], now)
-    k = kind(db, doc["kind_id"])
-    if not doc["ct_copied_at"] and doc["ct_document"] and goes_to_connecteam(k) and \
-            not doc["restricted"] and copies_on(settings):
-        queue(db, doc["person_id"], "connecteam", doc["id"], now)
 
 
 # ---------------------------------------------------------------- PDFs (made by Google Drive)
@@ -783,7 +707,7 @@ def release_if_done(db, doc_id: int, now: float | None = None) -> None:
     """Every copy made: the one here is kept CACHE_DAYS more for quick viewing, then goes."""
     now = time.time() if now is None else now
     open_work = db.conn.execute(
-        "SELECT 1 FROM deliveries WHERE document_id = ? AND target IN ('drive', 'connecteam') AND "
+        "SELECT 1 FROM deliveries WHERE document_id = ? AND target = 'drive' AND "
         "status IN ('waiting', 'attention')", (doc_id,)).fetchone()
     if not open_work:
         db.conn.execute("UPDATE documents SET keep_until = ? WHERE id = ? AND status = 'active' "
@@ -799,18 +723,6 @@ def retry(db, delivery_id: int, now: float | None = None) -> bool:
     db.conn.commit()
     if changed:
         _poke()
-    return bool(changed)
-
-
-def skip(db, delivery_id: int) -> bool:
-    """HR's "Don't copy" on a Connecteam copy that needs attention: Drive keeps the file."""
-    changed = db.conn.execute("UPDATE deliveries SET status = 'skipped', error = 'Not copied: HR "
-                              "chose not to' WHERE id = ? AND status = 'attention' AND target = "
-                              "'connecteam'", (delivery_id,)).rowcount
-    db.conn.commit()
-    if changed:
-        row = db.conn.execute("SELECT document_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()
-        release_if_done(db, row[0])
     return bool(changed)
 
 
@@ -953,7 +865,7 @@ def remove_strays(db, folder: str, now: float) -> int:
 
 def migration_blocker(svc) -> str | None:
     """A migration file carries HR's database but not the files kept on this computer, so it
-    waits while any of them haven't reached Google Drive (or Connecteam) yet, or wait for HR.
+    waits while any of them haven't reached Google Drive yet, or wait for HR.
     Checked while HR is off too (reading its database on its own)."""
     if svc.running:
         return _blocker(svc.db.conn)
@@ -973,15 +885,14 @@ def migration_blocker(svc) -> str | None:
 
 def _blocker(conn) -> str | None:
     try:
-        going = conn.execute("SELECT COUNT(DISTINCT document_id) FROM deliveries WHERE target IN "
-                             "('drive', 'connecteam') AND status IN ('waiting', 'attention')"
-                             ).fetchone()[0]
+        going = conn.execute("SELECT COUNT(DISTINCT document_id) FROM deliveries WHERE target = "
+                             "'drive' AND status IN ('waiting', 'attention')").fetchone()[0]
         checking = conn.execute("SELECT COUNT(*) FROM documents WHERE status = 'waiting'").fetchone()[0]
     except sqlite3.OperationalError:   # the documents part never ran here
         return None
     if going:
         return (f"{going} HR file{' is' if going == 1 else 's are'} still waiting to reach Google "
-                "Drive or Connecteam. Wait until they're sent (the HR portal's Needs attention page "
+                "Drive. Wait until they're sent (the HR portal's Needs attention page "
                 "shows any that are stuck), then try again.")
     if checking:
         return (f"{checking} HR upload{' is' if checking == 1 else 's are'} waiting for HR to "

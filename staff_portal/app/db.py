@@ -440,13 +440,6 @@ DEFAULT_SETTINGS = {
     # The HR portal (hr/): off until the owner turns it on, and the address it answers on.
     "hr_enabled": "0",
     "hr_host": "",
-    # The optional HR Connecteam connection (hr/ctapi.py): a second Connecteam app ("" uses the
-    # one above), whether Connecteam chat messages are sent, and whether confirmed certificates
-    # are copied to Connecteam (HR & Skills hub on Expert; off until turned on).
-    "hr_connecteam_client_id": "",
-    "hr_connecteam_client_secret": "",
-    "hr_connecteam_chat": "0",
-    "hr_connecteam_documents": "0",
     # HR portal: Google Drive through the owner's Apps Script (hr/gdrive.py). The Web app URL, the
     # secret written into the script, the HR shared drive and the restricted one ("": a folder in
     # the HR drive), and what the last check found (internal).
@@ -455,7 +448,7 @@ DEFAULT_SETTINGS = {
     "hr_google_drive": "",
     "hr_google_restricted_drive": "",
     "hr_google_status": "{}",
-    # The HR portal's Connecteam requests today, in its own lane (internal: connecteam.hr_spend).
+    # The HR portal's Connecteam reads today, in its own lane (internal: connecteam.hr_spend).
     # All the hr_ settings are private: never in Staff Access's own backups or /api/state.
     "hr_connecteam_usage": "{}",
 }
@@ -465,10 +458,14 @@ DEFAULT_SETTINGS = {
 # (migrate.py), to another install of the add-on.
 PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_client_secret",
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
-                    "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_client_id",
-                    "hr_connecteam_client_secret", "hr_connecteam_chat", "hr_connecteam_documents",
-                    "hr_connecteam_usage", "hr_google_url", "hr_google_secret", "hr_google_drive",
+                    "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_usage",
+                    "hr_google_url", "hr_google_secret", "hr_google_drive",
                     "hr_google_restricted_drive", "hr_google_status")
+
+# Settings of older versions, removed when the add-on starts: the HR portal's own Connecteam app,
+# chat and certificate copies (0.10.0 to 0.10.3; it only reads, through the one connection, now).
+RETIRED_SETTINGS = ("hr_connecteam_client_id", "hr_connecteam_client_secret", "hr_connecteam_chat",
+                    "hr_connecteam_documents")
 
 ENROLL_TTL_DEFAULT = 72 * 3600
 ACTIVITY_KEEP_DAYS = 180
@@ -633,6 +630,7 @@ class Database:
             self.conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
             )
+        self.conn.executemany("DELETE FROM settings WHERE key = ?", [(k,) for k in RETIRED_SETTINGS])
         # Phones signed in before device_tokens existed (or set up by an older version).
         self.conn.execute(
             """INSERT OR IGNORE INTO device_tokens (token_hash, device_id, issued_at)

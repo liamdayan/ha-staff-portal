@@ -1,7 +1,7 @@
 """The HR portal from the Home Assistant dashboard (turning it on, HR admins and their setup QR
-code, the emergency controls, security events, the HR Connecteam connection), its Connecteam
-requests (its own lane, and HR errors never stopping Staff Access's clock checks), and HR in
-backups and migration files.
+code, the emergency controls, security events, its Connecteam line), its Connecteam reads (its
+own lane in the one connection, and HR errors never stopping Staff Access's clock checks), and HR
+in backups and migration files.
 
 Nothing here talks to a real Connecteam, Google, TT Hotel or Home Assistant: Connecteam is the
 fake in hr_helpers.
@@ -19,7 +19,7 @@ from hr_helpers import HR, FakeConnecteam, ct_user
 import connecteam  # noqa: E402
 import main  # noqa: E402
 import migrate  # noqa: E402
-from hr import audit, crypto, ctapi, gdrive, notify, signin  # noqa: E402
+from hr import audit, crypto, gdrive, signin  # noqa: E402
 from hr import service as hr_service_module  # noqa: E402
 from test_hr_google_dashboard import copy_script, google  # noqa: E402
 
@@ -108,35 +108,19 @@ def test_turning_hr_on_admins_setup_qr_and_emergency_controls(tmp_path):
     run(scenario())
 
 
-def test_hr_connecteam_connection_keeps_its_secret(tmp_path):
+def test_hr_reads_through_the_one_connecteam_connection(tmp_path):
     async def scenario():
         async with HR(tmp_path) as hr:
-            status, _ = await hr.admin_call("PUT", "/api/hr/connecteam", {
-                "hr_connecteam_client_id": "hr-app", "hr_connecteam_client_secret": "hr-secret",
-                "hr_connecteam_chat": "1"})
-            assert status == 200
+            lane = {"used_today": 0, "daily_cap": connecteam.HR_DAILY_CAP,
+                    "minute_cap": connecteam.HR_MINUTE_CAP, "paused": None, "paused_until": None}
             status, state = await hr.admin_call("GET", "/api/state")
-            assert state["hr"]["connecteam"] == {
-                "client_id": "hr-app", "secret_set": True, "chat": True, "documents": False,
-                "stopped": {"chat": None, "documents": None}, "paused": None,
-                "used_today": 0, "daily_cap": connecteam.HR_DAILY_CAP}
-            assert "hr-secret" not in json.dumps(state) and "hr_host" not in state["settings"]
-            await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_id": "hr-app",
-                                                              "hr_connecteam_client_secret": ""})
-            assert hr.db.settings()["hr_connecteam_client_secret"] == "hr-secret"
-            assert hr.svc.chat_wanted()
-            # hr/ctapi.py gets the HR app's keys, and certificate copies only once turned on.
-            assert main.hr_connecteam.get_settings() == {"client_id": "hr-app", "client_secret": "hr-secret",
-                                                         "documents": False}
-            await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_documents": "1"})
-            assert main.hr_connecteam.get_settings()["documents"] is True
-            # Without HR's own keys, Staff Access's Connecteam app is used (if it has the permissions).
-            await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_clear_secret": "1"})
-            assert hr.svc.chat_wanted() and main.hr_connecteam.get_settings()["client_secret"] == ""
-            hr.db.update_settings({"connecteam_enabled": "0"})
-            assert not hr.svc.chat_wanted() and hr.svc.chat_sender() is None
-            assert (await hr.admin_call("PUT", "/api/hr/connecteam",
-                                        {"hr_connecteam_client_secret": "bad secret"}))[0] == 400
+            assert state["hr"]["connecteam"] == lane and state["connecteam"]["hr"] == lane
+            status, data = await hr.admin_call("GET", "/api/hr")
+            assert data["connecteam"] == lane and "chat" not in data
+            # No keys of its own any more: those routes are gone.
+            assert (await hr.admin_call("PUT", "/api/hr/connecteam", {
+                "hr_connecteam_client_id": "hr-app", "hr_connecteam_client_secret": "hr-secret"}))[0] in (404, 405)
+            assert "hr_connecteam_client_id" not in hr.db.settings()
     run(scenario())
 
 
@@ -169,23 +153,15 @@ def test_hr_refusals_never_stop_the_clock_checks(tmp_path):
     async def scenario():
         async with FakeConnecteam([ANA], fields=FIELDS, clocked_in=[301]) as ct:
             async with HR(tmp_path) as hr:
-                ct.refuse.update({"/users/v1/custom-fields", "/publishers/v1/publishers"})
+                ct.refuse.add("/users/v1/custom-fields")
                 with pytest.raises(connecteam.HRRefused, match="HR portal"):
                     await main.connecteam.profile_fields()
-                # Chat through the HR connection's own app (hr/ctapi.py): refused, so only chat stops.
-                hr.db.update_settings({"hr_connecteam_client_id": "hr-app",
-                                       "hr_connecteam_client_secret": "hr-secret", "hr_connecteam_chat": "1"})
-                assert hr.svc.chat_sender() is ctapi.send_chat
-                with pytest.raises(ctapi.CTError, match="Communications hub") as err:
-                    await ctapi.send_chat(301, "You have something new in the HR portal.")
-                assert err.value.code == "not_allowed" and not err.value.budget
-                assert hr.svc.chat_sender() is None and "chat.write" in hr.svc.chat_problem()
-                main.connecteam._hr_recent.clear()
                 ct.refuse.add("/users/v1/users")
                 main.connecteam._hr_recent.clear()   # this minute's HR requests, aside
                 with pytest.raises(connecteam.HRRefused):
                     await main.connecteam.users(max_age=0, hr=True)
                 main.connecteam._hr_recent.clear()
+                ct.refuse.discard("/users/v1/custom-fields")   # a refusal costs a fresh token and a retry
                 assert await hr.svc.sync_people(fresh=True) is None
                 assert "refused" in hr.svc.sync_state["error"]
                 assert main.connecteam.halted is None
@@ -301,34 +277,6 @@ def test_nightly_run_reads_archived_users_and_fields(tmp_path):
     run(scenario())
 
 
-def test_messages_go_out_through_the_outbox(tmp_path):
-    async def scenario():
-        async with HR(tmp_path) as hr:
-            await hr.add_people(ANA)
-            sent = []
-
-            async def send_chat(user_id, text):
-                sent.append((user_id, text))
-            hr.db.update_settings({"hr_connecteam_client_id": "hr-app",
-                                   "hr_connecteam_client_secret": "hr-secret", "hr_connecteam_chat": "1"})
-            hr.svc.chat_sender = lambda: send_chat
-            hr.svc.refresh_chat()                       # as saving the connection does
-            hr.svc.sync_state["tried"] = time.time()    # no Connecteam here: no sync this time
-            hr.hdb.set_settings({"quiet_start": "00:00", "quiet_end": "00:00"})   # no quiet hours
-            notify.notify("301", "welcome", urgent=True)
-            await hr.svc.tick()
-            assert sent == [("301", "You have something new in the HR portal. Open it here: "
-                                    "https://hr.example.com")]
-            # Chat turned off: the inbox only.
-            hr.db.update_settings({"hr_connecteam_chat": "0"})
-            hr.svc.chat_sender = lambda: None
-            await hr.svc.tick()
-            notify.notify("301", "welcome", urgent=True)
-            assert hr.hdb.conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 1
-            assert notify.unread(hr.hdb, "301") == 2
-    run(scenario())
-
-
 # ---------------------------------------------------------------- backups and migration files
 
 def test_staff_access_backups_never_hold_hr(tmp_path):
@@ -336,12 +284,12 @@ def test_staff_access_backups_never_hold_hr(tmp_path):
         async with HR(tmp_path) as hr:
             await hr.add_people(ANA)
             hr.give("301", "hr_admin")
-            hr.db.update_settings({"hr_connecteam_client_secret": "hr-secret"})
+            hr.db.update_settings({"hr_google_secret": "s" * 43})
             status, backup = await hr.admin_call("GET", "/api/backup")
             assert status == 200
             text = json.dumps(backup)
             assert "hr_" not in json.dumps(backup["settings"]) and "Ana Lee" not in text
-            assert "hr-secret" not in text and "hr.example.com" not in text
+            assert "s" * 43 not in text and "hr.example.com" not in text
             # Restoring a Staff Access backup leaves HR as it was.
             status, _ = await hr.admin_call("POST", "/api/restore", {"backup": backup})
             assert status == 200
@@ -409,7 +357,7 @@ def test_hr_too_big_to_migrate_is_refused_and_a_failed_hr_restore_never_starts_e
 
 # ---------------------------------------------------------------- HR's secrets and the key
 
-SEALED = crypto.SEALED_SETTINGS   # the Google script's URL and secret, Connecteam for HR's secret
+SEALED = crypto.SEALED_SETTINGS   # the Google script's URL and secret
 
 
 def stored(path) -> dict:
@@ -429,10 +377,7 @@ def test_hr_secrets_are_sealed_while_the_key_is_kept_out_of_backups(tmp_path, mo
             async with google(monkeypatch, secret) as (fake, url):
                 status, _ = await hr.admin_call("PUT", "/api/hr-google", {"url": url, "drive": "0AHRdriveAAAAUk9PVA"})
                 assert status == 200
-                await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_id": "hr-app",
-                                                                  "hr_connecteam_client_secret": "hr-secret"})
-                plain = {"hr_google_url": url, "hr_google_secret": secret,
-                         "hr_connecteam_client_secret": "hr-secret"}
+                plain = {"hr_google_url": url, "hr_google_secret": secret}
                 assert {k: stored(hr.db.path)[k] for k in SEALED} == plain   # the default: in backups
                 code = await hr.svc.keep_key_out(True, "owner", "Owner")
                 # A backup now holds them only sealed with the key it doesn't have.
@@ -443,14 +388,15 @@ def test_hr_secrets_are_sealed_while_the_key_is_kept_out_of_backups(tmp_path, mo
                 assert {k: hr.db.settings()[k] for k in SEALED} == plain
                 status, reply = await hr.admin_call("POST", "/api/hr-google/check")
                 assert status == 200 and reply["problem"] is None and reply["google"]["url"] == url
-                assert hr.svc.google() is not None and main.hr_connecteam_settings()["client_secret"] == "hr-secret"
+                assert hr.svc.google() is not None
                 status, state = await hr.admin_call("GET", "/api/state")
-                assert state["hr"]["connecteam"]["secret_set"] and state["hr_google"]["set_up"]
+                assert state["hr_google"]["set_up"]
                 # Changed while it's on: sealed too. HR turned off: still read (the key is on disk).
-                await hr.admin_call("PUT", "/api/hr/connecteam", {"hr_connecteam_client_secret": "hr-secret-2"})
-                assert stored(hr.db.path)["hr_connecteam_client_secret"].startswith(crypto.SEALED_PREFIX)
+                hr.db.update_settings({"hr_google_url": url + "?v=2"})
+                assert stored(hr.db.path)["hr_google_url"].startswith(crypto.SEALED_PREFIX)
                 await hr.admin_call("PUT", "/api/hr/settings", {"hr_enabled": "0"})
-                assert hr.db.settings()["hr_connecteam_client_secret"] == "hr-secret-2"
+                assert hr.db.settings()["hr_google_url"] == url + "?v=2"
+                hr.db.update_settings({"hr_google_url": url})
                 assert gdrive.bridge_from_settings(hr.db.settings()).url == url
                 await hr.admin_call("PUT", "/api/hr/settings", {"hr_enabled": "1"})
 
@@ -468,8 +414,7 @@ def test_hr_secrets_are_sealed_while_the_key_is_kept_out_of_backups(tmp_path, mo
 
                 # Turned off again: plain, and still working.
                 await hr.svc.keep_key_out(False, "owner", "Owner")
-                assert {k: stored(hr.db.path)[k] for k in SEALED} == {**plain,
-                                                                     "hr_connecteam_client_secret": "hr-secret-2"}
+                assert {k: stored(hr.db.path)[k] for k in SEALED} == plain
                 status, reply = await hr.admin_call("POST", "/api/hr-google/check")
                 assert status == 200 and reply["problem"] is None
     run(scenario())
@@ -482,8 +427,7 @@ def test_sealed_hr_secrets_travel_in_a_migration_and_open_with_the_recovery_key(
             await old.add_people(ANA)
             await copy_script(old)
             secret = old.db.settings()["hr_google_secret"]
-            old.db.update_settings({"hr_google_url": url, "hr_google_drive": "0AHRdriveAAAAUk9PVA",
-                                    "hr_connecteam_client_secret": "hr-secret"})   # Google isn't asked
+            old.db.update_settings({"hr_google_url": url, "hr_google_drive": "0AHRdriveAAAAUk9PVA"})
             recovery = await old.svc.keep_key_out(True, "owner", "Owner")
             status, made = await old.admin_call("POST", "/api/migrate/create")
             assert status == 200
@@ -500,13 +444,10 @@ def test_sealed_hr_secrets_travel_in_a_migration_and_open_with_the_recovery_key(
             assert gdrive.bridge_from_settings(new.db.settings()) is None
             assert (await new.admin_call("POST", "/api/hr-google/script"))[0] == 409
             assert (await new.admin_call("PUT", "/api/hr-google", {"url": url}))[0] == 409
-            assert (await new.admin_call("PUT", "/api/hr/connecteam",
-                                         {"hr_connecteam_client_secret": "other"}))[0] == 409
             status, data = await new.admin_call("POST", "/api/hr/unlock-key", {"recovery_key": recovery})
             assert status == 200 and data["status"] == "on"
             s = new.db.settings()
-            assert (s["hr_google_url"], s["hr_google_secret"], s["hr_connecteam_client_secret"]) == (
-                url, secret, "hr-secret")
+            assert (s["hr_google_url"], s["hr_google_secret"]) == (url, secret)
             assert all(stored(new.db.path)[k].startswith(crypto.SEALED_PREFIX) for k in SEALED)
     run(scenario())
 

@@ -3,7 +3,8 @@ Cloudflare Tunnel at its own address, for employee files: documents, certificate
 probation, and performance reviews.
 
 It's off until the owner turns it on in the dashboard; while off it answers a plain "turned off"
-page, asks nothing of Connecteam or Google, and keeps nothing.
+page, asks nothing of Connecteam or Google, and keeps nothing. It only ever reads from Connecteam
+(people, profile fields, smart groups), through Staff Access's own connection.
 
   hrdb.py     its own SQLite database, DATA_DIR/hr/hr.db (people keyed by Connecteam user ID)
   crypto.py   the master key and AES-256-GCM for fields and files; the HR recovery key
@@ -12,18 +13,17 @@ page, asks nothing of Connecteam or Google, and keeps nothing.
   access.py   roles, who may see whom, visibility levels, and the rule on every route
   people.py   people from Connecteam's user list (hourly), with the safety catch
   audit.py    the audit log, chained so changes show up
-  notify.py   portal inbox, and Connecteam chat messages through a durable outbox
+  notify.py   the portal inbox (nothing is sent outside the portal)
   files.py    file type checks, cleaned images, safe file responses
   service.py  the running HR portal: start, stop, background work, dashboard actions
   server.py   the HR web app and its pages (web/)
-  ctapi.py    HR's own Connecteam requests: chat messages, certificate copies (HR's lane)
   gdrive.py   Google Drive through the owner's Apps Script (bridge.gs), and its OCR
   ocr_dates.py  the dates on a card, from the text Google read
   parts.py    imports every part below, so each adds itself (service.PARTS) before the service
   documents.py  kinds of document and who sees each, files, recycle bin, retention, legal holds,
                 and other parts' kinds and PDFs (register_kind, add_generated, queue_pdf)
   folders.py    each person's folders in Google Drive, found by ID and tag, never by name
-  delivery.py   the queue of work for Google Drive and Connecteam, and of PDFs to make (retries,
+  delivery.py   the queue of work for Google Drive, and of PDFs to make (retries,
                 Needs attention)
   docroutes.py  the Documents section, opening and adding files, Needs attention, kinds settings
   pdfdoc.py     plain, escaped HTML that Google Drive turns into PDFs (write-ups, reviews)

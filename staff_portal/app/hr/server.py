@@ -615,11 +615,6 @@ def hr_todos(svc: HRService, v: access.Viewer) -> list[dict]:
         found.append({"text": f"{counts[2]} {'people' if counts[2] != 1 else 'person'} back in "
                               "Connecteam or with access ended: allow sign-in again if they "
                               "should have it.", "link": "#/people?todo=access"})
-    stuck = db.conn.execute("SELECT COUNT(*) FROM outbox WHERE status = 'needs_attention'"
-                            ).fetchone()[0]
-    if stuck:
-        found.append({"text": f"{stuck} Connecteam message{'s' if stuck != 1 else ''} couldn't be "
-                              "sent. See HR settings, Notifications.", "link": "#/settings"})
     if db.setting("audit_check") == "failed":
         found.append({"text": "The last audit log check found a problem.", "link": "#/audit"})
     return found
@@ -998,7 +993,6 @@ async def api_start_date(request: web.Request):
 
 POLICIES = {"everyone": "Everyone", "staff": "HR admins, directors and managers",
             "hr": "HR admins only", "nobody": "Nobody"}
-TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 def people_choices(svc: HRService) -> list[dict]:
@@ -1041,13 +1035,6 @@ async def api_settings(request: web.Request):
     db = svc.db
     v = viewer_of(request)
     general = {k: db.setting(k) for k in hr_general_keys()}
-    stuck = [dict(r) for r in db.conn.execute(
-        "SELECT id, person_id, created_at, tries, error FROM outbox WHERE status = "
-        "'needs_attention' ORDER BY id DESC LIMIT 20")]
-    for m in stuck:
-        m["name"] = svc.person_name(m.pop("person_id"))
-    last_error = db.conn.execute("SELECT error FROM outbox WHERE error IS NOT NULL "
-                                 "ORDER BY id DESC LIMIT 1").fetchone()
     extra = {}
     for _, name, build in SETTINGS_SECTIONS:
         built = build(svc, v)
@@ -1058,14 +1045,12 @@ async def api_settings(request: web.Request):
         "fields": db.setting_json("ct_fields", []) or [],
         "departments": departments_list(svc), "people": people_choices(svc),
         "key": {"kept_out": svc.keyring.kept_out()},
-        "chat": {"on": svc.chat_wanted(), "ready": svc.chat_sender() is not None,
-                 "why": svc.chat_problem(), "last_error": last_error[0] if last_error else None, "stuck": stuck},
         "sections": extra, "me": v.id})
 
 
 def hr_general_keys() -> tuple[str, ...]:
-    return ("totp_policy", "session_minutes", "quiet_start", "quiet_end", "summary_time",
-            "start_field", "manager_field", "date_order", "retention_years")
+    return ("totp_policy", "session_minutes", "start_field", "manager_field", "date_order",
+            "retention_years")
 
 
 @rule("hr", sensitive=True)
@@ -1085,12 +1070,6 @@ async def api_settings_general(request: web.Request):
                 values[key] = max(lo, min(hi, int(data[key])))
             except (TypeError, ValueError):
                 return error(f"{what} must be a number.")
-    for key in ("quiet_start", "quiet_end", "summary_time"):
-        if key in data:
-            m = TIME_RE.match(str(data[key]).strip())
-            if not m:
-                return error("Times look like 21:00 (24-hour clock).")
-            values[key] = f"{int(m[1]):02d}:{m[2]}"
     field_ids = {str(f.get("id")) for f in svc.db.setting_json("ct_fields", []) or []}
     for key in ("start_field", "manager_field"):
         if key in data:
@@ -1171,14 +1150,6 @@ async def api_settings_key(request: web.Request):
     return web.json_response({"ok": True, "recovery_key": code})
 
 
-@rule("hr")
-async def api_message_retry(request: web.Request):
-    svc = svc_of(request)
-    if not notify.retry(svc.db, int(request.match_info["mid"])):
-        return error(NOT_FOUND, 404)
-    return web.json_response({"ok": True})
-
-
 # ---------------------------------------------------------------- audit log
 
 @rule("hr")
@@ -1253,7 +1224,6 @@ def make_app(svc: HRService) -> web.Application:
     r.add_put("/api/settings/general", api_settings_general)
     r.add_put("/api/settings/role", api_settings_role)
     r.add_post("/api/settings/key", api_settings_key)
-    r.add_post(r"/api/messages/{mid:\d{1,12}}/retry", api_message_retry)
     r.add_get("/api/audit", api_audit)
     r.add_post("/api/audit/check", api_audit_check)
     for adder in ROUTE_ADDERS:

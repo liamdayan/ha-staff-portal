@@ -1,5 +1,5 @@
 """The HR portal's parts working together, as they run for real: certificates and documents (a
-confirmed card reaches Google Drive and Connecteam through the delivery queue the service ticks),
+confirmed card reaches Google Drive through the delivery queue the service ticks),
 discipline and documents (a signed write-up's PDF through the documents part's PDF queue, once),
 reviews with probation and documents (the end-of-probation recommendation reaches HR's decision,
 and the final PDF reaches Drive), the review side panel with real certificate statuses and the
@@ -9,8 +9,8 @@ The point system is the real one (policy.py, points.py) with a small published p
 (tests/point_system.py): from an incident to its write-up's end date reaching the ledger, the
 totals dropping that day, a repeat's step, and the review side panel's real points.
 
-Google is the fake script (tests/fake_bridge.py) and Connecteam a fake server. Nothing here
-talks to a real Google, Connecteam, TT Hotel or Home Assistant.
+Google is the fake script (tests/fake_bridge.py). Nothing here talks to a real Google,
+Connecteam, TT Hotel or Home Assistant.
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from datetime import date, timedelta
 import point_system
 from fake_bridge import html_text
 from hr_helpers import HR, ct_user, queue_done
-from test_hr_certificates import DocsConnecteam, add, jpeg
+from test_hr_certificates import add, jpeg
 from test_hr_documents import google
 
 from hr import (certificates, delivery, discipline, documents, notify, parts, points, policy,  # noqa: E402
@@ -70,14 +70,12 @@ async def get(hr: HR, url: str, cookie: str):
 
 # ---------------------------------------------------------------- certificates and documents
 
-def test_a_confirmed_card_reaches_drive_and_connecteam_by_the_services_own_ticks(tmp_path, monkeypatch):
+def test_a_confirmed_card_reaches_drive_by_the_services_own_ticks(tmp_path, monkeypatch):
     async def scenario():
-        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake, DocsConnecteam() as ct:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await setup(hr)
             olcc = certificates.type_by_key(hr.hdb, "olcc")
-            certificates.update_type(hr.hdb, olcc["id"], {"groups": json.dumps(["501"]), "groups_confirmed": 1,
-                                                          "ct_document": 52114})
-            hr.db.update_settings({"hr_connecteam_documents": "1"})
+            certificates.update_type(hr.hdb, olcc["id"], {"groups": json.dumps(["501"]), "groups_confirmed": 1})
             status, data = await add(hr, s["ana"], "201", "olcc", jpeg())
             assert status == 200
             await certificates.settle(hr.svc)
@@ -85,12 +83,11 @@ def test_a_confirmed_card_reaches_drive_and_connecteam_by_the_services_own_ticks
             status, r, _ = await hr.call("POST", f"/api/people/201/certificates/{cid}/confirm",
                                          {"expires": "2029-06-14"}, s["hana"])
             assert status == 200, r
-            # One document, made in one call, with its Connecteam copy and expiry: no second
-            # activation, so its Drive and Connecteam work was queued once each.
+            # One document, made in one call: no second activation, so its Drive work was queued
+            # once (and nothing goes to Connecteam).
             card = certificates.get(hr.hdb, cid)
             doc = documents.get(hr.hdb, card["document_id"])
-            assert (doc["ct_document"], doc["ct_expires"]) == (52114, "2029-06-14")
-            assert sorted(d["target"] for d in documents.deliveries_of(hr.hdb, doc["id"])) == ["connecteam", "drive"]
+            assert [d["target"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["drive"]
             # Nothing calls the queue by hand: the service's own tick (documents' tick job) runs it.
             await delivery.settle(hr.svc)
             await hr.svc.tick(time.time() + 1)
@@ -99,9 +96,7 @@ def test_a_confirmed_card_reaches_drive_and_connecteam_by_the_services_own_ticks
             assert fake.names_in("Certificates") == [name]
             [folder] = [f for f in fake.files.values() if f["name"] == "Certificates"]
             assert fake.files[folder["parents"][0]]["name"] == "Lee, Ana (CT 201)"
-            assert [(u, d) for u, d, _ in ct.entries] == [(201, 52114)]
-            assert date.fromtimestamp(ct.entries[0][2]["expiresAt"]).year == 2029
-            assert [d["status"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["done", "done"]
+            assert [d["status"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["done"]
             # Ana opens her card's photo as the document it became, from here and, once this
             # computer's copy has gone, from Drive; her manager sees dates only.
             _, mine, _ = await hr.call("GET", "/api/people/201/certificates", cookie=s["ana"])

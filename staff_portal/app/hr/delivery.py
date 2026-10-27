@@ -1,10 +1,8 @@
-"""The delivery queue: work for Google Drive and Connecteam that must happen even if they're
-down for a while. Each piece of work is a row in deliveries (documents.py), so it survives
-restarts and add-on updates:
+"""The delivery queue: work for Google Drive that must happen even if it's down for a while. Each
+piece of work is a row in deliveries (documents.py), so it survives restarts and add-on updates:
 
   drive       a file to the person's folder in Drive (folders.py), tagged with its upload_id,
               so a retry after a timeout never makes a second copy;
-  connecteam  its copy on the person's Connecteam document (hr/ctapi.py, HR's request lane);
   trash       a file out of the recycle bin into the shared drive's trash;
   rename      a person's folders, after their name changed in Connecteam;
   former      a person's folders into Former employees (HR confirmed they've left);
@@ -15,37 +13,33 @@ restarts and add-on updates:
 
 One piece at a time, in the background. A failure is tried again after 1 minute, 5, 30, 2 hours,
 6 hours, then daily; after 8 tries it "needs attention" (HR's list, with Retry). Some things wait
-without using up a try: Google Drive not set up yet, the script needing a new version,
-Connecteam's lane being full or paused, or Connecteam's copies stopped until the owner fixes the
-HR connection. Problems only a person can fix (say, someone not assigned the document's pack in
-Connecteam) need attention at once, in plain words.
+without using up a try: Google Drive not set up yet, or the script needing a new version.
+Problems only a person can fix (say, a file too big for Drive) need attention at once, in plain
+words. Nothing goes to Connecteam: the HR portal only reads from it.
 """
 
 import asyncio
 import logging
 import time
 import weakref
-from datetime import date
 
-from . import audit, ctapi, documents, files, folders, gdrive, notify
+from . import audit, documents, files, folders, gdrive, notify
 
 log = logging.getLogger("staff_portal")
 
 MAX_TRIES = 8
+RETRY_AFTER = (60, 300, 1800, 7200, 21600)   # seconds before tries 2 to 6, then once a day
 WAIT_SETUP = 600        # Google Drive not set up, or its script out of date: look again then
-WAIT_BUSY = 300         # Connecteam's lane full or paused
 AT_ONCE = 5             # rows taken per look (one at a time)
 NO_GOOGLE = ("Google Drive isn't set up yet, so files wait here (encrypted). The owner connects "
              "it in Home Assistant: Settings, Connections, Google Drive (HR files).")
 LOST = "The file isn't on this computer any more, so it can't be sent. Add it again."
-COPY_OFF = "Not copied: the Connecteam documents copy is off."
 NO_MAKER = "The part of the HR portal that makes this PDF isn't running, so it waits."
-TARGET_WORDS = {"drive": "Google Drive", "connecteam": "Connecteam", "trash": "Drive's trash",
+TARGET_WORDS = {"drive": "Google Drive", "trash": "Drive's trash",
                 "rename": "Renaming a Drive folder", "former": "Moving a Drive folder",
                 "pdf": "Making a PDF"}
-CT_SETUP = ("stopped", "not_set_up")   # the HR connection itself: the owner fixes it, then it goes
 
-notify.register_kind("upload_stuck", "An upload to Google Drive or Connecteam needs attention.")
+notify.register_kind("upload_stuck", "An upload to Google Drive needs attention.")
 
 
 class Wait(Exception):
@@ -65,7 +59,7 @@ class Attention(Exception):
 
 
 class Skip(Exception):
-    """Nothing to do after all (the copy is off, the file was deleted)."""
+    """Nothing to do after all (the file was deleted)."""
 
 
 # ---------------------------------------------------------------- the worker
@@ -140,8 +134,8 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
     """Do one piece of work and record how it went. Returns its new status."""
     db = svc.db
     now = time.time() if now is None else now
-    work = {"drive": _drive, "connecteam": _connecteam, "trash": _trash, "rename": _rename,
-            "former": _former, "pdf": _pdf}.get(row["target"])
+    work = {"drive": _drive, "trash": _trash, "rename": _rename, "former": _former,
+            "pdf": _pdf}.get(row["target"])
     try:
         if work is None:
             raise Skip("Unknown work")
@@ -164,20 +158,6 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
         if err.code in ("not_allowed", "bad_reply"):
             await _heal(svc, row, err.code)
         return _failed(svc, row, err.message, err.code, now)
-    except ctapi.CTError as err:
-        if err.budget:
-            _set(db, row, "waiting", due_at=now + WAIT_BUSY, error=err.message, code=err.code)
-            return "waiting"
-        if err.code == "off":
-            _set(db, row, "skipped", error=COPY_OFF)
-            _release(db, row)
-            return "skipped"
-        if err.code in CT_SETUP or (err.code == "not_allowed" and _ct_stopped()):
-            _set(db, row, "waiting", due_at=now + WAIT_SETUP, error=err.message, code=err.code)
-            return "waiting"
-        if not err.retry:
-            return _stuck(svc, row, err.message, err.code, row["tries"] + 1)
-        return _failed(svc, row, err.message, err.code, now)
     except asyncio.CancelledError:
         raise
     except Exception as err:  # noqa: BLE001 - tried again later like any failure
@@ -189,13 +169,8 @@ async def deliver(svc, row: dict, now: float | None = None) -> str:
     return "done"
 
 
-def _ct_stopped() -> bool:
-    """Whether Connecteam refused the HR connection's copies as a whole (keys or permissions)."""
-    return bool(ctapi.default is not None and ctapi.default.stopped.get("documents"))
-
-
 def _release(db, row: dict) -> None:
-    if row["document_id"] and row["target"] in ("drive", "connecteam"):
+    if row["document_id"] and row["target"] == "drive":
         documents.release_if_done(db, row["document_id"])
 
 
@@ -211,9 +186,13 @@ def _failed(svc, row: dict, message: str, code: str, now: float) -> str:
     tries = row["tries"] + 1
     if tries >= MAX_TRIES:
         return _stuck(svc, row, message, code, tries)
-    _set(svc.db, row, "waiting", tries=tries, due_at=now + notify.retry_after(tries), error=message,
+    _set(svc.db, row, "waiting", tries=tries, due_at=now + retry_after(tries), error=message,
          code=code)
     return "waiting"
+
+
+def retry_after(tries: int) -> int:
+    return RETRY_AFTER[tries - 1] if tries <= len(RETRY_AFTER) else 86400
 
 
 def _stuck(svc, row: dict, message: str, code: str, tries: int) -> str:
@@ -285,28 +264,6 @@ async def _drive(svc, row: dict) -> None:
                                   "ct_user": str(doc["person_id"])})
     db.conn.execute("UPDATE documents SET drive_id = ?, drive_link = ? WHERE id = ?",
                     (result["id"], result["webViewLink"] or None, doc["id"]))
-    db.conn.commit()
-
-
-async def _connecteam(svc, row: dict) -> None:
-    db = svc.db
-    doc = _document(svc, row)
-    if doc["status"] != "active" or doc["restricted"] or not doc["ct_document"]:
-        raise Skip("Not copied")
-    if doc["ct_copied_at"]:
-        return
-    if not documents.copies_on(svc.main_settings()):
-        raise Skip(COPY_OFF)
-    data = await documents.load_copy(svc.folder, doc)
-    if data is None:
-        raise Attention(LOST, "lost")
-    expires = date.fromisoformat(doc["ct_expires"]) if doc["ct_expires"] else None
-    try:
-        await ctapi.lane().upload_certificate(doc["person_id"], int(doc["ct_document"]),
-                                              [(documents.file_name(doc), doc["mime"], data)], expires)
-    except ValueError as err:
-        raise Attention(str(err), "bad_request") from None
-    db.conn.execute("UPDATE documents SET ct_copied_at = ? WHERE id = ?", (time.time(), doc["id"]))
     db.conn.commit()
 
 

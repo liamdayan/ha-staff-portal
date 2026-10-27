@@ -24,7 +24,7 @@ from PIL import Image
 
 from hr_helpers import CHANGE, HR, READ, ct_user
 
-from hr import access, audit, crypto, ctapi, delivery, docroutes, documents, files, gdrive, notify, \
+from hr import access, audit, crypto, delivery, docroutes, documents, files, gdrive, notify, \
     pdfdoc, signin  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -56,7 +56,6 @@ def fresh_parts(monkeypatch):
     for name in ("REGISTERED", "CAN_OPEN", "PDF_MAKERS"):
         monkeypatch.setattr(documents, name, {})
     monkeypatch.setattr(documents, "OWNED", {documents.CERTIFICATES: "certificates"})
-    monkeypatch.setattr(docroutes, "ct_documents", {"at": 0.0, "list": None})
 
 
 async def people(hr) -> dict:
@@ -160,18 +159,19 @@ def test_kinds_start_with_the_owners_defaults_and_hr_changes_them(tmp_path):
             status, data, _ = await hr.call("GET", "/api/settings", cookie=s["hr"])
             box = data["sections"]["documents"]
             kinds = {k["key"]: k for k in box["kinds"]}
-            assert {key: (k["name"], k["visibility"], k["folder"], k["uploaders"], k["connecteam"])
+            assert {key: (k["name"], k["visibility"], k["folder"], k["uploaders"])
                     for key, k in kinds.items()} == {
-                "certificates": ("Certificates", "employee", "Certificates", "employee", 1),
-                "policies": ("Signed policies", "employee", "Documents", "hr", 0),
-                "training": ("Training records", "employee", "Documents", "managers", 0),
-                "hiring": ("Hiring paperwork", "directors", "Documents", "hr", 0),
-                "other": ("Other", "hr", "Documents", "hr", 0),
-                "i9": ("I-9", "restricted", "I-9", "hr", 0),
-                "accommodation": ("Reasonable accommodation", "restricted", "Reasonable accommodation", "hr", 0)}
+                "certificates": ("Certificates", "employee", "Certificates", "employee"),
+                "policies": ("Signed policies", "employee", "Documents", "hr"),
+                "training": ("Training records", "employee", "Documents", "managers"),
+                "hiring": ("Hiring paperwork", "directors", "Documents", "hr"),
+                "other": ("Other", "hr", "Documents", "hr"),
+                "i9": ("I-9", "restricted", "I-9", "hr"),
+                "accommodation": ("Reasonable accommodation", "restricted", "Reasonable accommodation", "hr")}
             assert kinds["i9"]["restricted"] and kinds["certificates"]["owned"] == "certificates"
-            assert set(kinds["i9"]["fixed"]) == {"visibility", "uploaders", "connecteam", "ct_document"}
-            assert box["copies_on"] is False and "every member of that drive" in box["restricted_warning"]
+            assert set(kinds["i9"]["fixed"]) == {"visibility", "uploaders"}
+            assert "copies_on" not in box and "connecteam" not in kinds["training"]
+            assert "every member of that drive" in box["restricted_warning"]
             assert box["drive"] and "isn't set up" in box["drive"]
 
             # HR adds a kind: its name, who sees it, its Drive folder and who may add one.
@@ -187,21 +187,18 @@ def test_kinds_start_with_the_owners_defaults_and_hr_changes_them(tmp_path):
                                          {"name": "Uniforms", "visibility": "directors"}, s["hr"])
             assert status == 200 and documents.kind(hr.hdb, r["id"])["visibility"] == "directors"
             # Restricted only when it's made (its files are kept apart), and a restricted kind
-            # stays restricted, HR's only and out of Connecteam whatever is asked.
+            # stays restricted and HR's only whatever is asked.
             status, err, _ = await hr.call("PUT", f"/api/documents/kinds/{r['id']}", {"visibility": "restricted"}, s["hr"])
             assert status == 400 and "only be restricted when it's made" in err["error"]
             i9 = kid(hr, "i9")
             status, _, _ = await hr.call("PUT", f"/api/documents/kinds/{i9}", {
-                "name": "Form I-9", "visibility": "employee", "uploaders": "employee", "connecteam": True,
-                "ct_document": 9}, s["hr"])
+                "name": "Form I-9", "visibility": "employee", "uploaders": "employee"}, s["hr"])
             k = documents.kind(hr.hdb, i9)
-            assert status == 200 and (k["name"], k["visibility"], k["uploaders"], k["connecteam"],
-                                      k["ct_document"]) == ("Form I-9", "restricted", "hr", 0, None)
+            assert status == 200 and (k["name"], k["visibility"], k["uploaders"]) == ("Form I-9", "restricted", "hr")
             status, r2, _ = await hr.call("POST", "/api/documents/kinds", {
-                "name": "Medical leave", "visibility": "restricted", "uploaders": "employee",
-                "connecteam": True}, s["hr"])
+                "name": "Medical leave", "visibility": "restricted", "uploaders": "employee"}, s["hr"])
             k = documents.kind(hr.hdb, r2["id"])
-            assert (k["visibility"], k["uploaders"], k["connecteam"]) == ("restricted", "hr", 0)
+            assert (k["visibility"], k["uploaders"]) == ("restricted", "hr")
             # Mistakes are refused in plain words.
             for body, words in (({"name": ""}, "1 to 60"), ({"name": "Other"}, "already a kind"),
                                 ({"name": "X", "folder": "../etc"}, "Drive folder name"),
@@ -209,31 +206,7 @@ def test_kinds_start_with_the_owners_defaults_and_hr_changes_them(tmp_path):
                                 ({"name": "Z", "uploaders": "anyone"}, "who may add")):
                 status, err, _ = await hr.call("POST", "/api/documents/kinds", body, s["hr"])
                 assert status == 400 and words in err["error"], (body, err)
-            # The Connecteam copy only while the owner's documents copy is on, and to a document.
             training = kid(hr, "training")
-            status, err, _ = await hr.call("PUT", f"/api/documents/kinds/{training}", {"connecteam": True}, s["hr"])
-            assert status == 400 and err["error"] == documents.COPIES_OFF
-            hr.db.update_settings({"hr_connecteam_documents": "1"})
-            status, err, _ = await hr.call("PUT", f"/api/documents/kinds/{training}", {"connecteam": True}, s["hr"])
-            assert status == 400 and "Connecteam document" in err["error"]
-            status, _, _ = await hr.call("PUT", f"/api/documents/kinds/{training}",
-                                         {"connecteam": True, "ct_document": "55"}, s["hr"])
-            assert status == 200 and documents.kind(hr.hdb, training)["ct_document"] == 55
-            # Only for kinds the employee can see: a copy in Connecteam is theirs to open.
-            for key, body in (("hiring", {"connecteam": True, "ct_document": "55"}),
-                              ("other", {"connecteam": True, "ct_document": "55"}),
-                              ("training", {"visibility": "managers"})):
-                status, err, _ = await hr.call("PUT", f"/api/documents/kinds/{kid(hr, key)}", body, s["hr"])
-                assert status == 400 and err["error"] == documents.COPY_SEEN, key
-            status, err, _ = await hr.call("POST", "/api/documents/kinds", {
-                "name": "Private notes", "visibility": "directors", "connecteam": True, "ct_document": "55"},
-                s["hr"])
-            assert status == 400 and err["error"] == documents.COPY_SEEN
-            assert documents.kind(hr.hdb, training)["visibility"] == "employee"
-            # A kind set up that way before this was checked is never copied.
-            hiring = documents.kind(hr.hdb, kid(hr, "hiring"))
-            assert not documents.goes_to_connecteam({**hiring, "connecteam": 1})
-            assert documents.goes_to_connecteam(documents.kind(hr.hdb, training))
             # Only HR admins, and only with a fresh code.
             for role in ("self", "manager", "director"):
                 status, _, _ = await hr.call("POST", "/api/documents/kinds", {"name": "Mine"}, s[role])
@@ -346,7 +319,6 @@ def test_restricted_files_are_hr_only_kept_apart_and_never_copied(tmp_path, monk
     async def scenario():
         async with HR(tmp_path) as hr, google(hr, monkeypatch) as fake:
             s = await people(hr)
-            hr.db.update_settings({"hr_connecteam_documents": "1"})
             i9 = kid(hr, "i9")
             # To anyone but HR the kind doesn't exist: the same answer as a made-up one.
             for role in ("self", "manager", "director"):
@@ -358,7 +330,7 @@ def test_restricted_files_are_hr_only_kept_apart_and_never_copied(tmp_path, monk
             did = r["document"]["id"]
             await delivery.settle(hr.svc)
             doc = documents.get(hr.hdb, did)
-            # No restricted drive picked: a "Restricted" folder in the HR drive, never Connecteam.
+            # No restricted drive picked: a "Restricted" folder in the HR drive.
             assert drive_path(fake, doc["drive_id"]) == ["HR Employee Files", "Restricted", "Diaz, Bo (CT 202)",
                                                          "I-9", "2026-01-05 I-9 form.pdf"]
             assert [d["target"] for d in deliveries(hr, did)] == ["drive"]
@@ -714,67 +686,29 @@ def test_waiting_for_google_uses_no_tries_and_the_queue_survives_a_restart(tmp_p
     run(scenario())
 
 
-class Lane:
-    """A stand-in for HR's Connecteam lane: records certificate copies, or raises what's queued."""
-
-    def __init__(self):
-        self.calls, self.errors = [], []
-        self.stopped = {"chat": None, "documents": None}
-
-    async def upload_certificate(self, user_id, document_id, pages, expires):
-        self.calls.append((user_id, document_id, [(n, m, len(d)) for n, m, d in pages], expires))
-        if self.errors:
-            raise self.errors.pop(0)
-        return {"status": "approved", "expires_at": None, "file_ids": ["f1"]}
-
-
-def test_connecteam_copies_wait_for_the_lane_and_only_while_the_copy_is_on(tmp_path, monkeypatch):
+def test_nothing_goes_to_connecteam_and_old_copies_are_dropped(tmp_path, monkeypatch):
+    """The HR portal only reads from Connecteam: files go to Google Drive alone. Copies an older
+    version still had waiting, and its to-dos to remove copies by hand, go when it starts."""
     async def scenario():
         async with HR(tmp_path) as hr, google(hr, monkeypatch):
             s = await people(hr)
-            lane = Lane()
-            monkeypatch.setattr(ctapi, "lane", lambda: lane)
-            monkeypatch.setattr(ctapi, "default", lane)
-            training = kid(hr, "training")
-            hr.db.update_settings({"hr_connecteam_documents": "1"})
-            await hr.call("PUT", f"/api/documents/kinds/{training}", {"connecteam": True, "ct_document": 55}, s["hr"])
-            # The lane is full, then Connecteam's copies are stopped: both wait without a try.
-            lane.errors = [ctapi.CTError("paused", "HR's share of Connecteam is used up for now.", True),
-                           ctapi.CTError("stopped", "Connecteam refused the certificate copy.")]
-            status, r = await upload(hr, s["hr"], "202", training, PDF, title="Food safety", day="2026-10-01")
-            did = r["document"]["id"]
-            await delivery.settle(hr.svc)
-            row = next(d for d in deliveries(hr, did) if d["target"] == "connecteam")
-            assert (row["status"], row["tries"], row["code"]) == ("waiting", 0, "paused")
-            await delivery.run_due(hr.svc, now=row["due_at"])
-            row = next(d for d in deliveries(hr, did) if d["target"] == "connecteam")
-            assert (row["status"], row["tries"], row["code"]) == ("waiting", 0, "stopped")
-            # A problem only a person can fix needs attention at once, with "Don't copy".
-            lane.errors = [ctapi.CTError("not_assigned", "This person isn't assigned this document's pack.")]
-            await delivery.run_due(hr.svc, now=row["due_at"])
-            row = next(d for d in deliveries(hr, did) if d["target"] == "connecteam")
-            assert row["status"] == "attention" and "pack" in row["error"]
-            assert documents.get(hr.hdb, did)["keep_until"] is None   # kept here until it's settled
-            status, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
-            assert att["stuck"][0]["can_skip"] is True
-            # Retry: it goes, with the date-first name, to the kind's Connecteam document.
-            await hr.call("POST", f"/api/deliveries/{row['id']}/retry", {}, s["hr"])
-            await delivery.settle(hr.svc)
-            assert lane.calls[-1] == ("202", 55, [("2026-10-01 Food safety.pdf", "application/pdf", len(PDF))], None)
-            assert documents.get(hr.hdb, did)["ct_copied_at"]
-            assert documents.get(hr.hdb, did)["keep_until"] > time.time() + 29 * DAY
-            # "Don't copy": Drive keeps the file.
-            lane.errors = [ctapi.CTError("expired", "This card has already expired.")]
-            status, r = await upload(hr, s["hr"], "202", training, PDF, title="Old")
-            await delivery.settle(hr.svc)
-            row = next(d for d in deliveries(hr, r["document"]["id"]) if d["target"] == "connecteam")
-            status, _, _ = await hr.call("POST", f"/api/deliveries/{row['id']}/skip", {}, s["hr"])
-            assert status == 200 and deliveries(hr, r["document"]["id"])[1]["status"] == "skipped"
-            # The owner turns the copy off: queued copies are dropped, new files aren't copied.
-            hr.db.update_settings({"hr_connecteam_documents": "0"})
-            status, r = await upload(hr, s["hr"], "202", training, PDF, title="New")
+            status, r = await upload(hr, s["hr"], "202", kid(hr, "training"), PDF, title="Food safety")
             await delivery.settle(hr.svc)
             assert [d["target"] for d in deliveries(hr, r["document"]["id"])] == ["drive"]
+            # What 0.10.3 may have left.
+            db = hr.hdb
+            db.conn.execute("INSERT INTO deliveries (document_id, person_id, target, due_at, created_at) "
+                            "VALUES (?, '202', 'connecteam', 0, 0)", (r["document"]["id"],))
+            db.conn.execute("CREATE TABLE doc_todos (id INTEGER PRIMARY KEY, document_id INTEGER, "
+                            "person_id TEXT, what TEXT, created_at REAL, done_at REAL, done_by TEXT)")
+            db.conn.commit()
+            documents.setup(db)
+            assert [d["target"] for d in deliveries(hr, r["document"]["id"])] == ["drive"]
+            assert not db.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'doc_todos'").fetchone()
+            status, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
+            assert status == 200 and "todos" not in att
+            assert (await hr.call("POST", "/api/deliveries/1/skip", {}, s["hr"]))[0] in (404, 405)
+            assert delivery.TARGET_WORDS.keys() == {"drive", "trash", "rename", "former", "pdf"}
     run(scenario())
 
 
@@ -840,22 +774,6 @@ def test_deleting_restoring_the_recycle_bin_and_legal_holds(tmp_path, monkeypatc
             assert (await open_file(hr, s["hr"], did))[0] == 404
             assert {"Deleted a document", "Restored a document", "Put a legal hold on a file",
                     "Lifted a legal hold"} <= set(actions(hr))
-            # A file copied to Connecteam: removing it there is a to-do for HR (Connecteam's API
-            # can't).
-            status, r = await upload(hr, s["hr"], "202", kid(hr, "training"), PDF, title="Copied")
-            other = r["document"]["id"]
-            hr.hdb.conn.execute("UPDATE documents SET ct_copied_at = ? WHERE id = ?", (time.time(), other))
-            hr.hdb.conn.commit()
-            status, r, _ = await hr.call("DELETE", f"/api/documents/{other}", cookie=s["hr"])
-            assert "Connecteam" in r["message"]
-            status, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
-            [todo] = att["todos"]
-            assert todo["name"] == "Bo Diaz" and "Remove its copy in Connecteam" in todo["what"]
-            status, home, _ = await hr.call("GET", "/api/home", cookie=s["hr"])
-            assert any("removed in Connecteam" in t["text"] for t in home["todos"])
-            assert (await hr.call("POST", f"/api/documents/todos/{todo['id']}/done", {}, s["hr"]))[0] == 200
-            status, att, _ = await hr.call("GET", "/api/documents/attention", cookie=s["hr"])
-            assert att["todos"] == []
     run(scenario())
 
 

@@ -1,8 +1,8 @@
 """The HR portal's certificates (app/hr/certificates.py): types and who needs them, deadlines from
 start dates, statuses, adding a card (the camera photo, HEIC refused, a back photo, a PDF), the
 date read by the fake Google script and HR's check screen, confirm and reject, the boards and their
-spreadsheet, waivers, reminders and their cadence, the daily Connecteam status check, and who may
-do what.
+spreadsheet, waivers, reminders and their cadence, nothing copied to Connecteam, and who may do
+what.
 
 Google is tests/fake_bridge.py and Connecteam a fake aiohttp server; nothing here talks to Google,
 Connecteam, TT Hotel or Home Assistant.
@@ -19,13 +19,11 @@ import time
 from datetime import date, timedelta
 
 import aiohttp
-from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from hr_helpers import CHANGE, HR, FakeConnecteam, ct_user
 
-import main  # noqa: E402
-from hr import certificates, ctapi, delivery, documents, gdrive, notify, signin  # noqa: E402
+from hr import certificates, delivery, documents, gdrive, notify, signin  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fake_bridge import HR_DRIVE, FakeBridge  # noqa: E402
@@ -142,49 +140,6 @@ async def google(hr: HR, monkeypatch):
     finally:
         await gdrive.close()
         await server.close()
-
-
-class DocsConnecteam(FakeConnecteam):
-    """The HR portal's fake Connecteam, with the Documents API (HR & Skills hub on Expert)."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.documents = [{"documentId": 52114, "name": "OLCC Service Permit", "documentType": "document",
-                           "expiration": {"type": "entry"}},
-                          {"documentId": 52115, "name": "Oregon Food Handler Card",
-                           "documentType": "document", "expiration": {"type": "entry"}}]
-        self.user_docs: list[dict] = []
-        self.entries: list[tuple[int, int, dict]] = []
-        self.stored: set[str] = set()
-        self.queries: list[list] = []
-
-    async def handle(self, request):
-        path = request.path
-        if path.startswith("/storage/"):
-            self.stored.add(path[9:])
-            await request.read()
-            return web.Response()
-        if path in self.refuse or path in self.too_many or not path.startswith(("/documents/", "/attachments/")):
-            return await super().handle(request)
-        self.calls.append(path)
-        if path == "/documents/v1/documents":
-            return web.json_response({"data": {"documents": self.documents}})
-        if path == "/documents/v1/user-documents":
-            self.queries.append(request.query.getall("documentIds"))
-            offset, limit = int(request.query["offset"]), int(request.query["limit"])
-            return web.json_response({"data": {"documents": self.user_docs[offset:offset + limit]}})
-        if path == "/attachments/v1/files/generate-upload-url":
-            file_id = f"9f1c2b3a-4d5e-4f60-8a7b-{len(self.stored) + 1:012d}"
-            return web.json_response({"data": {"fileId": file_id, "uploadFileUrl":
-                                               f"http://127.0.0.1:{self.port}/storage/{file_id}"}})
-        if path.startswith("/attachments/v1/files/complete-upload/"):
-            return web.json_response({"data": {}})
-        if path.startswith("/documents/v1/users/") and path.endswith("/entry"):
-            parts = path.split("/")
-            body = await request.json()
-            self.entries.append((int(parts[4]), int(parts[6]), body))
-            return web.json_response({"data": {"status": "approved", "expiresAt": body.get("expiresAt")}})
-        return web.json_response({"detail": "Not Found"}, status=404)
 
 
 # ---------------------------------------------------------------- types and statuses
@@ -373,7 +328,7 @@ def test_employee_adds_a_card_google_reads_it_hr_corrects_and_confirms(tmp_path,
             assert any("confirmed" in i["title"] for i in notify.inbox(hr.hdb, "301"))
             # It's a document now, on its way to Google Drive with the expiry in its name.
             doc = documents.get(hr.hdb, row["document_id"])
-            assert doc["status"] == "active" and doc["ct_expires"] == "2029-06-13"
+            assert doc["status"] == "active" and documents.title_of(doc).endswith("expires 2029-06-13")
             assert documents.title_of(doc) == "OLCC Service Permit - expires 2029-06-13"
             assert [d["target"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["drive"]
             await delivery.run_due(hr.svc)
@@ -714,45 +669,33 @@ def test_reminders_cadence_heads_ups_and_running_twice(tmp_path):
     run(scenario())
 
 
-def test_employees_get_only_early_heads_ups_for_cards_in_connecteam(tmp_path):
+def test_employees_get_every_heads_up_from_the_portal(tmp_path):
+    """Nothing is copied to Connecteam, so Connecteam doesn't remind anyone: the portal sends
+    every heads-up, the last ones too."""
     async def scenario():
         async with HR(tmp_path) as hr:
             await setup(hr)
             db = hr.hdb
-            card = put_card(hr, "303", "olcc", "2026-11-20")
-            kind = documents.kind_by_key(db, documents.CERTIFICATES)
-            cur = db.conn.execute(
-                "INSERT INTO documents (person_id, kind_id, title, doc_date, mime, size, upload_id, status, "
-                "added_at, ct_copied_at) VALUES ('303', ?, 't', '2026-10-01', 'image/jpeg', 1, 'u1', 'active', 0, 1)",
-                (kind["id"],))
-            db.conn.execute("UPDATE certificates SET document_id = ? WHERE id = ?", (cur.lastrowid, card))
+            put_card(hr, "303", "olcc", "2026-11-20")
             db.conn.commit()
-            assert certificates.reminders(db, date(2026, 10, 26))["ahead"] == 1      # 25 days: Connecteam's
-            assert [i for i in notify.inbox(db, "303") if i["kind"] == "cert_expiring"] == []
+            assert certificates.reminders(db, date(2026, 10, 26))["ahead"] == 1      # 25 days left
+            assert len([i for i in notify.inbox(db, "303") if i["kind"] == "cert_expiring"]) == 1
             assert len([i for i in notify.inbox(db, "307") if i["kind"] == "cert_expiring"]) == 1
     run(scenario())
 
 
 # ---------------------------------------------------------------- Connecteam
 
-def test_connecteam_copy_and_the_daily_status_check(tmp_path, monkeypatch):
+def test_cards_stay_in_drive_and_connecteam_is_never_asked(tmp_path, monkeypatch):
     async def scenario():
-        async with HR(tmp_path) as hr, google(hr, monkeypatch), DocsConnecteam() as fake:
+        async with HR(tmp_path) as hr, google(hr, monkeypatch), FakeConnecteam() as fake:
             sessions = await setup(hr)
             olcc = certificates.type_by_key(hr.hdb, "olcc")
-            # The copy is off: nothing is asked of Connecteam at night.
-            await certificates.nightly(hr.svc)
-            assert [c for c in fake.calls if c.startswith("/documents/")] == []
-            # HR reads Connecteam's documents to choose one (at most once a minute).
-            status, data, _ = await hr.call("POST", "/api/settings/certificates/connecteam-documents", {}, sessions["hana"])
-            assert status == 200 and [d["name"] for d in data["documents"]] == ["OLCC Service Permit", "Oregon Food Handler Card"]
-            assert (await hr.call("POST", "/api/settings/certificates/connecteam-documents", {}, sessions["hana"]))[0] == 429
             fresh(hr)
+            # An old client's Connecteam document is ignored.
             status, _, _ = await hr.call("PUT", f"/api/settings/certificates/types/{olcc['id']}",
-                                         {"ct_document": "52114"}, sessions["hana"])
-            assert status == 200 and certificates.type_by_key(hr.hdb, "olcc")["ct_document"] == 52114
-            hr.db.update_settings({"hr_connecteam_documents": "1"})
-            # A confirmed card goes to Connecteam with its expiry date...
+                                         {"ct_document": "52114", "lasts_years": "3"}, sessions["hana"])
+            assert status == 200 and "ct_document" not in certificates.type_by_key(hr.hdb, "olcc")
             status, data = await add(hr, sessions["ana"], "301", "olcc", jpeg())
             await certificates.settle(hr.svc)
             path = f"/api/people/301/certificates/{data['card']['id']}/confirm"
@@ -760,50 +703,26 @@ def test_connecteam_copy_and_the_daily_status_check(tmp_path, monkeypatch):
             assert status == 200
             await delivery.run_due(hr.svc)
             await delivery.settle(hr.svc)
-            assert [(u, d) for u, d, _ in fake.entries] == [(301, 52114)]
-            assert fake.entries[0][2]["expiresAt"] > time.time()
-            # ...an expired one doesn't (Connecteam refuses past dates): Drive and the portal keep it.
-            status, data = await add(hr, sessions["cy"], "303", "olcc", jpeg())
-            await certificates.settle(hr.svc)
-            path = f"/api/people/303/certificates/{data['card']['id']}/confirm"
-            yesterday = (certificates.today(hr.hdb) - timedelta(days=1)).isoformat()
-            status, _, _ = await hr.call("POST", path, {"expires": yesterday}, sessions["hana"])
-            assert status == 200
             doc = documents.get(hr.hdb, certificates.get(hr.hdb, data["card"]["id"])["document_id"])
             assert [d["target"] for d in documents.deliveries_of(hr.hdb, doc["id"])] == ["drive"]
-            # The daily status check (a new minute in HR's lane): Bo uploaded a card in
-            # Connecteam's own app; Ana's entry is the portal's own copy.
-            main.connecteam._hr_recent.clear()
-            ours = documents.get(hr.hdb, certificates.get(hr.hdb, certificates.status_of(hr.hdb, "301")[1]["card_id"])["document_id"])
-            fake.user_docs = [
-                {"userId": 301, "documentId": 52114, "status": "approved", "uploadedAt": int(ours["ct_copied_at"]) + 5},
-                {"userId": 302, "documentId": 52114, "status": "pendingApproval", "uploadedAt": int(time.time()) - 60},
-                {"userId": 303, "documentId": 52114, "status": "pendingUserUpload"}]
-            result = await certificates.connecteam_check(hr.svc)
-            assert result == {"rows": 3, "found": 1} and fake.queries[-1] == ["52114"]
-            assert any("Bo Diaz uploaded a OLCC Service Permit in Connecteam: approve or reject it there"
-                       in t["text"] for t in (await hr.call("GET", "/api/home", cookie=sessions["hana"]))[1]["todos"])
-            assert len([i for i in notify.inbox(hr.hdb, "307") if i["kind"] == "cert_connecteam"]) == 1
-            # Running it again finds nothing new.
-            assert (await certificates.connecteam_check(hr.svc))["found"] == 0
-            _, notes, _ = await hr.call("GET", "/api/certificates/connecteam", cookie=sessions["hana"])
-            assert len(notes["notes"]) == 1 and notes["copy_on"]
-            assert (await hr.call("POST", f"/api/certificates/connecteam/{notes['notes'][0]['id']}/done", {},
-                                  sessions["max"]))[0] == 403
-            status, _, _ = await hr.call("POST", f"/api/certificates/connecteam/{notes['notes'][0]['id']}/done", {},
-                                         sessions["hana"])
-            assert status == 200
-            _, notes, _ = await hr.call("GET", "/api/certificates/connecteam", cookie=sessions["hana"])
-            assert notes["notes"] == []
-            # HR's lane is full: the check waits and is tried again, never touching the clock checks.
-            main.connecteam.hr_paused_until = time.time() + 600
-            main.connecteam.hr_pause_reason = "busy"
-            assert await certificates.connecteam_check(hr.svc) is None
-            assert hr.hdb.setting("cert_ct_retry")
-            assert not main.connecteam.paused_until or main.connecteam.paused_until < time.time()
-            main.connecteam.hr_paused_until = 0.0
-            await certificates.tick(hr.svc, time.time() + certificates.CT_RETRY + 1)
-            assert hr.hdb.setting("cert_ct_retry") == ""
+            assert doc["drive_id"] and "ct_document" not in doc
+            await certificates.nightly(hr.svc)
+            await certificates.tick(hr.svc, time.time())
+            assert fake.calls == []
+            # The settings and the routes for Connecteam's documents are gone.
+            status, s, _ = await hr.call("GET", "/api/settings", cookie=sessions["hana"])
+            assert "connecteam" not in s["sections"]["certificates"]
+            assert "ct_document" not in s["sections"]["certificates"]["types"][0]
+            status, board, _ = await hr.call("GET", "/api/certificates/board", cookie=sessions["hana"])
+            assert status == 200 and "connecteam" not in board
+            assert (await hr.call("GET", "/api/certificates/connecteam", cookie=sessions["hana"]))[0] in (404, 405)
+            assert (await hr.call("POST", "/api/settings/certificates/connecteam-documents", {},
+                                  sessions["hana"]))[0] in (404, 405)
+            # An older version's to-dos about cards added in Connecteam's own app are gone.
+            hr.hdb.conn.execute("CREATE TABLE IF NOT EXISTS cert_ct_notes (id INTEGER PRIMARY KEY)")
+            hr.hdb.conn.commit()
+            certificates.setup(hr.svc)
+            assert not hr.hdb.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'cert_ct_notes'").fetchone()
     run(scenario())
 
 
@@ -824,7 +743,7 @@ def test_hr_adds_a_kind_of_certificate(tmp_path):
             path = f"/api/settings/certificates/types/{t['id']}"
             for bad in ({"lasts_years": "x"}, {"remind": "60, nine"}, {"remind": [1000]}, {"groups": ["999"]},
                         {"people": ["nobody"]}, {"accepts": ["cpr_and_first_aid"]}, {"reader": "x"},
-                        {"ct_document": "abc"}, {"name": ""}):
+                        {"name": ""}):
                 assert (await hr.call("PUT", path, bad, sessions["hana"]))[0] == 400, bad
             status, _, _ = await hr.call("PUT", path, {
                 "lasts_years": "2", "due_days": "14", "remind": "30, 7", "lapse_message": "May not lifeguard",
@@ -850,19 +769,4 @@ def test_off_by_default_and_inert(tmp_path):
             assert status == 503 and "turned off" in body
             assert not (tmp_path / "data" / "hr").exists()
             assert certificates.migration_blocker(hr.svc) is None
-    run(scenario())
-
-
-def test_the_status_check_reads_pages_within_hrs_lane(tmp_path):
-    async def scenario():
-        async with HR(tmp_path) as hr, DocsConnecteam() as fake:
-            await setup(hr)
-            fake.user_docs = [{"userId": 1000 + i, "documentId": 52114, "status": "approved"} for i in range(250)]
-            before = main.connecteam.hr_usage()["count"]
-            rows = await ctapi.lane().user_documents([52114, 52115, True, -1])
-            assert len(rows) == 250 and fake.queries == [["52114", "52115"], ["52114", "52115"]]
-            assert rows[0] == {"user_id": 1000, "document_id": 52114, "status": "approved",
-                               "uploaded_at": None, "expires_at": None}
-            assert main.connecteam.hr_usage()["count"] - before == 3          # a token and two pages
-            assert await ctapi.lane().user_documents([]) == []
     run(scenario())

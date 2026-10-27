@@ -14,7 +14,7 @@ import time
 
 from aiohttp import BodyPartReader, web
 
-from . import access, audit, ctapi, delivery, documents, files, folders, gdrive, notify, server
+from . import access, audit, delivery, documents, files, folders, gdrive, notify, server
 from .access import Refused, rule
 from .server import PERSON, RELATION, error, read_json, svc_of, viewer_of
 
@@ -22,7 +22,6 @@ UPLOAD_SECONDS = 180      # a phone on a slow connection may take a while
 FORM_EXTRA = 64 * 1024    # the form's other fields, around the file
 MAX_PARTS = 8
 FIELDS = ("kind", "title", "date")
-CT_DOCS_TTL = 600         # Connecteam's list of documents is reused this long (one request)
 MAX_REASON = 500
 NOT_HERE = server.NOT_FOUND
 RESTRICTED_SHOWN = "Restricted document"
@@ -34,9 +33,6 @@ RESTRICTED_WARNING = (
     "“HR Restricted”, in Home Assistant (Settings, Connections, Google Drive (HR files)).")
 DELIVERY_WORDS = {"done": "Sent", "waiting": "Waiting", "attention": "Needs attention",
                   "skipped": "Not sent"}
-TODO_WORDS = {"remove_connecteam": "Remove its copy in Connecteam by hand (Connecteam can't "
-                                   "remove files for Staff Access)."}
-ct_documents = {"at": 0.0, "list": None}
 
 
 # ---------------------------------------------------------------- helpers
@@ -72,15 +68,14 @@ def hr_sees(viewer, person_id, doc: dict, k: dict) -> bool:
 
 
 def deliveries_view(db, doc_id: int) -> list[dict]:
-    """The latest work for each copy of a file (Google Drive, Connecteam), for HR."""
+    """The latest work for sending a file to Google Drive, for HR."""
     latest = {}
     for d in documents.deliveries_of(db, doc_id):
-        if d["target"] in ("drive", "connecteam"):
+        if d["target"] == "drive":
             latest[d["target"]] = d
     return [{"id": d["id"], "target": d["target"], "word": delivery.TARGET_WORDS[d["target"]],
              "status": d["status"], "status_word": DELIVERY_WORDS.get(d["status"], d["status"]),
-             "error": d["error"] if d["status"] != "done" else None, "tries": d["tries"],
-             "can_skip": d["status"] == "attention" and d["target"] == "connecteam"}
+             "error": d["error"] if d["status"] != "done" else None, "tries": d["tries"]}
             for d in latest.values()]
 
 
@@ -313,7 +308,7 @@ async def api_accept(request: web.Request):
     if doc["status"] != "waiting":
         return error("It isn't waiting for HR any more.", 409)
     access.not_own_work(v, doc["added_by"])
-    documents.activate(svc.db, doc, svc.main_settings(), v.id)
+    documents.activate(svc.db, doc, v.id)
     audit.record(svc.db, "Accepted a document", actor_id=v.id, actor=v.name, target_id=person["id"],
                  target=person["name"], detail=k["name"], ip=svc.client_ip(request))
     return web.json_response({"ok": True, "message": "Accepted. It's on its way to Google Drive."})
@@ -359,10 +354,8 @@ async def api_delete(request: web.Request):
         return error(str(err), 409)
     audit.record(svc.db, "Deleted a document", actor_id=v.id, actor=v.name, target_id=person["id"],
                  target=person["name"], detail=k["name"], ip=svc.client_ip(request))
-    message = "In the recycle bin for 30 days, then it's removed."
-    if doc["ct_copied_at"]:
-        message += " Its copy in Connecteam has to be removed there by hand: see Needs attention."
-    return web.json_response({"ok": True, "message": message})
+    return web.json_response({"ok": True, "message": "In the recycle bin for 30 days, then it's "
+                                                     "removed."})
 
 
 @rule("hr")
@@ -371,7 +364,7 @@ async def api_restore(request: web.Request):
     doc, k, person = hr_doc(request)
     if doc["status"] != "deleted":
         return error("It isn't in the recycle bin.", 409)
-    documents.restore(svc.db, doc, svc.main_settings())
+    documents.restore(svc.db, doc)
     audit.record(svc.db, "Restored a document", actor_id=v.id, actor=v.name, target_id=person["id"],
                  target=person["name"], detail=k["name"], ip=svc.client_ip(request))
     return web.json_response({"ok": True, "message": "Restored."})
@@ -448,7 +441,7 @@ def _item(svc, viewer, row: dict) -> dict | None:
     return {"id": row["id"], "person_id": row["person_id"], "name": svc.person_name(row["person_id"]),
             "target": row["target"], "word": delivery.TARGET_WORDS.get(row["target"], row["target"]),
             "title": title, "error": row["error"], "tries": row["tries"],
-            "due_at": round(row["due_at"]), "can_skip": row["target"] == "connecteam"}
+            "due_at": round(row["due_at"])}
 
 
 @rule("hr")
@@ -467,15 +460,6 @@ async def api_attention(request: web.Request):
             entry = checks.setdefault(d["person_id"], {"person_id": d["person_id"], "count": 0,
                                                        "name": svc.person_name(d["person_id"])})
             entry["count"] += 1
-    todos = []
-    for t in db.conn.execute("SELECT * FROM doc_todos WHERE done_at IS NULL ORDER BY id"):
-        doc = documents.get(db, t["document_id"])
-        k = documents.kind(db, doc["kind_id"]) if doc else None
-        if doc and k and hr_sees(v, t["person_id"], doc, k):
-            todos.append({"id": t["id"], "person_id": t["person_id"],
-                          "name": svc.person_name(t["person_id"]),
-                          "title": f"{k['name']}: {documents.title_of(doc)}",
-                          "what": TODO_WORDS.get(t["what"], t["what"]), "created_at": round(t["created_at"])})
     holds = [{"person_id": r["person_id"], "name": svc.person_name(r["person_id"]),
               "since": round(r["set_at"]), "by": r["set_by_name"]}
              for r in db.conn.execute("SELECT * FROM legal_holds ORDER BY set_at")
@@ -483,7 +467,7 @@ async def api_attention(request: web.Request):
     retention = [{**r, "left_at": round(r["left_at"]), "due_at": round(r["due_at"])}
                  for r in documents.past_retention(db)]
     return web.json_response({"stuck": stuck, "waiting": waiting, "checks": list(checks.values()),
-                              "todos": todos, "holds": holds, "retention": retention,
+                              "holds": holds, "retention": retention,
                               "years": documents.retention_years(db), "drive": drive_note(svc)})
 
 
@@ -498,35 +482,6 @@ async def api_retry(request: web.Request):
                  target_id=row["person_id"], target=svc.person_name(row["person_id"]),
                  detail=delivery.TARGET_WORDS.get(row["target"]), ip=svc.client_ip(request))
     return web.json_response({"ok": True, "message": "It will be tried again now."})
-
-
-@rule("hr")
-async def api_skip(request: web.Request):
-    svc, v = svc_of(request), viewer_of(request)
-    did = int(request.match_info["dlv"])
-    row = svc.db.conn.execute("SELECT * FROM deliveries WHERE id = ?", (did,)).fetchone()
-    if not row or not documents.skip(svc.db, did):
-        return error(NOT_HERE, 404)
-    audit.record(svc.db, "Chose not to copy a file to Connecteam", actor_id=v.id, actor=v.name,
-                 target_id=row["person_id"], target=svc.person_name(row["person_id"]),
-                 ip=svc.client_ip(request))
-    return web.json_response({"ok": True, "message": "Not copied. Google Drive keeps the file."})
-
-
-@rule("hr")
-async def api_todo_done(request: web.Request):
-    svc, v = svc_of(request), viewer_of(request)
-    tid = int(request.match_info["tid"])
-    row = svc.db.conn.execute("SELECT * FROM doc_todos WHERE id = ? AND done_at IS NULL", (tid,)).fetchone()
-    if not row:
-        return error(NOT_HERE, 404)
-    svc.db.conn.execute("UPDATE doc_todos SET done_at = ?, done_by = ? WHERE id = ?",
-                        (time.time(), v.id, tid))
-    svc.db.conn.commit()
-    audit.record(svc.db, "Removed a file's copy in Connecteam", actor_id=v.id, actor=v.name,
-                 target_id=row["person_id"], target=svc.person_name(row["person_id"]),
-                 ip=svc.client_ip(request))
-    return web.json_response({"ok": True})
 
 
 @server.todo
@@ -547,10 +502,6 @@ def document_todos(svc, v: access.Viewer) -> list[dict]:
     if checks:
         found.append({"text": f"{checks} {plural(checks, 'document is', 'documents are')} waiting "
                               "for HR to check.", "link": "#/attention"})
-    todos = count("SELECT COUNT(*) FROM doc_todos WHERE done_at IS NULL")
-    if todos:
-        found.append({"text": f"{todos} deleted {plural(todos, 'file needs its copy', 'files need their copies')} "
-                              "removed in Connecteam by hand.", "link": "#/attention"})
     due = len(documents.past_retention(db))
     if due:
         found.append({"text": f"{due} former {plural(due, 'employee', 'employees')}' records are past "
@@ -576,7 +527,7 @@ def documents_settings(svc, v: access.Viewer) -> dict:
                        "fixed": sorted(documents.fixed_fields(k)), "count": counts.get(k["id"], 0)}
                       for k in documents.kinds(db)],
             "levels": access.LEVELS, "uploaders": documents.UPLOADERS,
-            "copies_on": documents.copies_on(settings), "drive": drive_note(svc),
+            "drive": drive_note(svc),
             "restricted_warning": None if apart else RESTRICTED_WARNING}
 
 
@@ -584,7 +535,7 @@ async def _kind_change(request: web.Request, current: dict | None):
     svc, v = svc_of(request), viewer_of(request)
     data = await read_json(request)
     try:
-        values = documents.clean_kind(data, current, documents.copies_on(svc.main_settings()))
+        values = documents.clean_kind(data, current)
         if current is None:
             kid = documents.add_kind(svc.db, values)
         else:
@@ -612,22 +563,6 @@ async def api_change_kind(request: web.Request):
     return await _kind_change(request, current)
 
 
-@rule("hr")
-async def api_ct_documents(request: web.Request):
-    """Connecteam's documents, to choose which one a kind is copied to (one request, reused for
-    10 minutes)."""
-    svc = svc_of(request)
-    if not documents.copies_on(svc.main_settings()):
-        return error(documents.COPIES_OFF, 409)
-    if ct_documents["list"] is None or time.time() - ct_documents["at"] > CT_DOCS_TTL:
-        try:
-            found = await ctapi.lane().list_documents()
-        except ctapi.CTError as err:
-            return error(err.message, 502)
-        ct_documents.update(at=time.time(), list=found)
-    return web.json_response({"documents": ct_documents["list"]})
-
-
 # ---------------------------------------------------------------- routes
 
 @server.add_routes
@@ -647,8 +582,5 @@ def routes(app: web.Application) -> None:
     r.add_post(did + "/restore", api_restore)
     r.add_get("/api/documents/attention", api_attention)
     r.add_post(r"/api/deliveries/{dlv:\d{1,12}}/retry", api_retry)
-    r.add_post(r"/api/deliveries/{dlv:\d{1,12}}/skip", api_skip)
-    r.add_post(r"/api/documents/todos/{tid:\d{1,12}}/done", api_todo_done)
     r.add_post("/api/documents/kinds", api_add_kind)
     r.add_put(r"/api/documents/kinds/{kid:\d{1,12}}", api_change_kind)
-    r.add_get("/api/documents/connecteam", api_ct_documents)

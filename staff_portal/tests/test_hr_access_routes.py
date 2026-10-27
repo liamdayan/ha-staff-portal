@@ -213,7 +213,7 @@ def test_hr_settings_roles_and_departments(tmp_path):
                                                                           "session_minutes": "45"}, admin)
             assert status == 200 and hr.hdb.setting("totp_policy") == "everyone"
             assert hr.hdb.setting("session_minutes") == "30"      # 5 to 30
-            assert (await hr.call("PUT", "/api/settings/general", {"quiet_start": "9pm"}, admin))[0] == 400
+            assert (await hr.call("PUT", "/api/settings/general", {"date_order": "ymd"}, admin))[0] == 400
             status, r, _ = await hr.call("POST", "/api/settings/key", {"keep_out": True}, admin)
             assert status == 200 and len(r["recovery_key"]) == 24 and hr.svc.keyring.kept_out()
             status, r, _ = await hr.call("POST", "/api/settings/key", {"keep_out": False}, admin)

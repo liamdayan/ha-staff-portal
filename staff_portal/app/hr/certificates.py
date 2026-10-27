@@ -4,8 +4,7 @@ certificates and any type HR adds; who needs each, the cards people hold, and wh
 Types (HR settings): a name, how long it lasts, the days a new hire has to get one, the heads-up
 days before it runs out, the message shown while it's lapsed ("May not serve alcohol"), the
 departments (Connecteam smart groups) and people who need it, other types accepted in its place
-(a food manager certificate for a Food Handler Card), and the Connecteam document a confirmed card
-is copied to (only while the owner has that copy on). The first setup suggests departments by
+(a food manager certificate for a Food Handler Card). The first setup suggests departments by
 their names ("Pub", "Front Desk"); nothing is required until HR confirms them. HR can waive a type
 for someone, with a reason and an end date.
 
@@ -14,10 +13,11 @@ team, or HR. The photo (or the course's PDF) is cleaned (files.py), a back photo
 front, and it's kept here encrypted while it waits for HR. A reduced copy (2 MB or less) is read by
 Google (svc.google().ocr) and ocr_dates suggests the dates. HR checks the photo against the text
 read, then confirms (or corrects) the date or rejects the card with a reason. Only a confirmed card
-becomes a document (documents.add, with its Connecteam document and expiry date), so a rejected
-upload never reaches the person's folder; it's deleted after 30 days, and so is the text read from
-a card. While Google isn't set up, HR types the date. The documents part's delivery queue takes
-a confirmed card to Drive and Connecteam, and opens its photo from then on (photo_url).
+becomes a document (documents.add), so a rejected upload never reaches the person's folder; it's
+deleted after 30 days, and so is the text read from a card. While Google isn't set up, HR types
+the date. The documents part's delivery queue takes
+a confirmed card to Drive, and opens its photo from then on (photo_url). Nothing is copied to
+Connecteam (the HR portal only reads from it): Google Drive keeps every card.
 
 Status, one per type someone needs (status_of): valid, expiring (inside the first heads-up), expired,
 due (a new hire still inside their days), missing, waiting (for HR) or waived. A type can flag the
@@ -25,9 +25,7 @@ person ("May not serve alcohol"): while it's lapsed, or until it's valid.
 
 Every night (daily_jobs, 2:15 AM Pacific; running it again the same day does nothing more):
 heads-ups before cards run out; reminders every N days (an HR setting, 2 by default) about lapsed
-or missing cards, to the person, their managers and HR; tidying up; and, while the Connecteam copy
-is on, the daily check of Connecteam's document statuses within HR's request lane (a card added in
-Connecteam's own app becomes a to-do for HR).
+or missing cards, to the person, their managers and HR; and tidying up.
 """
 
 import asyncio
@@ -47,7 +45,7 @@ from datetime import date, timedelta
 import aiohttp
 from aiohttp import web
 
-from . import (access, audit, crypto, ctapi, documents, files, gdrive, hrdb, notify, ocr_dates,
+from . import (access, audit, crypto, documents, files, gdrive, hrdb, notify, ocr_dates,
                people, server, service)
 from .access import rule
 from .server import PERSON, RELATION, error, read_json, svc_of, viewer_of
@@ -67,9 +65,6 @@ UPLOAD_SECONDS = 120     # a phone on a slow connection sending a 15 MB photo
 ADDS_A_DAY = 12          # cards added for one person in a day, at most
 MAX_TYPES = 30
 REMIND_EVERY = 2         # lapsed or missing: reminded every this many days (HR: 1 to 14)
-CT_SLACK = 900           # seconds: a Connecteam entry this close to our own copy is ours
-CT_RETRY = 900           # HR's Connecteam lane was full: the daily check tries again this soon
-LIST_GAP = 60            # Connecteam's document list, refreshed by HR at most this often
 STATUS_WORDS = {"valid": "Valid", "expiring": "Expiring", "expired": "Expired", "due": "Due",
                 "missing": "Missing", "waiting": "Waiting for HR", "waived": "Waived"}
 LAPSED = ("expired", "missing")
@@ -119,7 +114,6 @@ CREATE TABLE IF NOT EXISTS cert_types (
     people TEXT NOT NULL DEFAULT '[]',        -- people who need it too, JSON user IDs
     suggest TEXT NOT NULL DEFAULT '[]',       -- words in department names suggested at first
     groups_confirmed INTEGER NOT NULL DEFAULT 0,   -- 1: HR saved its departments
-    ct_document INTEGER,                      -- the Connecteam document a card is copied to
     active INTEGER NOT NULL DEFAULT 1,        -- 0: no longer tracked (its cards stay)
     position INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
@@ -186,20 +180,9 @@ CREATE TABLE IF NOT EXISTS cert_reminders (
     sent_day TEXT NOT NULL,
     PRIMARY KEY (person_id, type_key, stage)
 );
--- Cards added in Connecteam's own app, found by the daily status check: to-dos for HR.
-CREATE TABLE IF NOT EXISTS cert_ct_notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    person_id TEXT NOT NULL,
-    type_key TEXT NOT NULL,
-    ct_document INTEGER NOT NULL,
-    ct_status TEXT NOT NULL,
-    uploaded_at INTEGER NOT NULL,
-    expires_at INTEGER,
-    found_at REAL NOT NULL,
-    done_at REAL,
-    done_by TEXT,
-    UNIQUE (person_id, ct_document, uploaded_at)
-);
+-- Gone since 0.10.4 (the HR portal only reads from Connecteam): cards added in Connecteam's own
+-- app, found by a daily look at Connecteam's documents.
+DROP TABLE IF EXISTS cert_ct_notes;
 """
 
 notify.register_kind("cert_uploaded", "A card is waiting for you to check.")
@@ -209,7 +192,6 @@ notify.register_kind("cert_due", "You need a card soon.")
 notify.register_kind("cert_expiring", "A card runs out soon.")
 notify.register_kind("cert_lapsed", "A card has expired or is missing.")
 notify.register_kind("cert_team", "Cards need attention.")
-notify.register_kind("cert_connecteam", "A card was added in Connecteam's app.")
 
 
 # ---------------------------------------------------------------- dates and small helpers
@@ -387,14 +369,6 @@ def clean_type(db, data: dict, current: dict | None, groups: set, person_ids: se
         if chosen is None or len(chosen) > 300 or not {str(p) for p in chosen} <= person_ids:
             raise ValueError("Choose people from the list.")
         values["people"] = json.dumps(sorted({str(p) for p in chosen}))
-    if "ct_document" in data:
-        doc = data["ct_document"]
-        if doc in (None, "", 0):
-            values["ct_document"] = None
-        elif not isinstance(doc, bool) and str(doc).isdigit() and 0 < int(doc) < 2**53:
-            values["ct_document"] = int(doc)
-        else:
-            raise ValueError("Choose the Connecteam document from the list.")
     return values
 
 
@@ -620,7 +594,7 @@ def _drop(db, folder: str, card: dict) -> None:
 async def prepare(front: bytes, back: bytes | None = None) -> tuple[bytes, str]:
     """The card made safe (files.clean_upload): a photo re-encoded without metadata, or the PDF
     byte for byte. A back photo goes under the front, so the card is one picture everywhere
-    (Drive, Connecteam, and the copy Google reads). Raises files.FileRefused (Apple's HEIC:
+    (Drive, and the copy Google reads). Raises files.FileRefused (Apple's HEIC:
     retake the photo)."""
     data, mime = await files.clean_upload(front, files.PHOTO_LIMIT)
     if back is None:
@@ -883,8 +857,7 @@ def clean_confirm(data: dict, t: dict, on: date) -> dict:
 
 async def confirm(svc, card: dict, values: dict, viewer: access.Viewer) -> dict:
     """HR confirmed a waiting card (clean_confirm's values): it becomes a document on its way to
-    Google Drive (and to Connecteam with its expiry date, where that's on and it hasn't expired),
-    the card it replaces is marked replaced, reminders start again, and the person is told.
+    Google Drive, the card it replaces is marked replaced, reminders start again, and the person is told.
     Raises ValueError."""
     db = svc.db
     busy = _busy.setdefault(svc, set())
@@ -902,11 +875,9 @@ async def confirm(svc, card: dict, values: dict, viewer: access.Viewer) -> dict:
             raise ValueError(LOST)
         on = today(db)
         expires = values["expires"]
-        # Connecteam won't take a card that has already expired: Drive and the portal keep it.
         doc = await documents.add(svc, person, kind, data, card["mime"],
                                   f"{t['name']} - expires {expires.isoformat()}", on.isoformat(),
-                                  viewer, "hr", ct_expires=expires.isoformat(),
-                                  ct_document=t["ct_document"] if expires > on else None)
+                                  viewer, "hr")
         now = time.time()
         db.conn.execute("UPDATE certificates SET status = 'replaced', replaced_by = ?, replaced_at = ? "
                         "WHERE person_id = ? AND type_key = ? AND status = 'confirmed'",
@@ -1052,12 +1023,9 @@ def reminders(db, on: date) -> dict:
                 if stage is not None and not sent(p["id"], key, f"ahead{stage}:{s['card_id']}"):
                     mark(p["id"], key, f"ahead{stage}:{s['card_id']}")
                     counts["ahead"] += 1
-                    # Connecteam reminds people itself about a card copied there (30, 7 and 1
-                    # day before, and on the day): the portal only adds the earlier heads-ups.
-                    if stage > 30 or not _in_connecteam(db, s["card_id"]):
-                        notify.notify(p["id"], "cert_expiring", db=db, link="#/my-certificates",
-                                      title=f"Your {t['name']} runs out on {us(s['expires'])}.",
-                                      once=f"cert-ahead-{s['card_id']}-{stage}")
+                    notify.notify(p["id"], "cert_expiring", db=db, link="#/my-certificates",
+                                  title=f"Your {t['name']} runs out on {us(s['expires'])}.",
+                                  once=f"cert-ahead-{s['card_id']}-{stage}")
                     for pid in staff:
                         ahead_for[pid] = ahead_for.get(pid, 0) + 1
             if s["status"] == "due" and s["due"] and not sent(p["id"], key, "due"):
@@ -1078,12 +1046,6 @@ def reminders(db, on: date) -> dict:
                       title=f"{n} certificate{'s' if n != 1 else ''} run{'' if n != 1 else 's'} out "
                             "soon. See the certificate board.")
     return counts
-
-
-def _in_connecteam(db, card_id) -> bool:
-    card = get(db, card_id)
-    doc = documents.get(db, card["document_id"]) if card and card["document_id"] else None
-    return bool(doc and doc.get("ct_copied_at"))
 
 
 def tidy(svc, now: float | None = None) -> dict:
@@ -1120,92 +1082,18 @@ def tidy(svc, now: float | None = None) -> dict:
     return counts
 
 
-async def connecteam_check(svc, now: float | None = None) -> dict | None:
-    """The daily look at Connecteam's documents while the copy is on (HR's lane: about 2
-    requests): its document list for HR settings, then where each person stands on the documents
-    certificate types go to. A card someone added in Connecteam's own app (newer than the portal's
-    copy) becomes a to-do for HR, because the portal can't fetch the file. None when it's off or
-    Connecteam said no (the reason is kept for HR settings)."""
-    db = svc.db
-    now = time.time() if now is None else now
-    if not documents.copies_on(svc.main_settings()):
-        return None
-    mapped = {t["ct_document"]: t for t in types(db) if t["ct_document"]}
-    try:
-        lane = ctapi.lane()
-        listed = await lane.list_documents()
-        db.set_settings({"cert_ct_documents": json.dumps(listed[:300]), "cert_ct_listed_at": now,
-                         "cert_ct_error": ""})
-        rows = await lane.user_documents(sorted(mapped)) if mapped else []
-    except ctapi.CTError as err:
-        if not svc.running:
-            return None
-        retry = now + CT_RETRY if err.budget else ""
-        db.set_settings({"cert_ct_error": "" if err.budget else err.message, "cert_ct_retry": retry})
-        return None
-    if not svc.running:
-        return None
-    db.set_settings({"cert_ct_retry": "", "cert_ct_checked_at": now})
-    found = 0
-    for r in rows:
-        t, person = mapped.get(r["document_id"]), db.person(str(r["user_id"]))
-        if not t or not person or not r["uploaded_at"] or r["status"] not in ("pendingApproval", "approved"):
-            continue
-        ours = _copied_at(db, person["id"], t["key"])
-        if ours and r["uploaded_at"] <= ours + CT_SLACK:
-            continue
-        cur = db.conn.execute(
-            "INSERT OR IGNORE INTO cert_ct_notes (person_id, type_key, ct_document, ct_status, "
-            "uploaded_at, expires_at, found_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (person["id"], t["key"], r["document_id"], r["status"], r["uploaded_at"],
-             r["expires_at"], now))
-        db.conn.commit()
-        if cur.rowcount:
-            found += 1
-            for admin in _hr_admins(db):
-                notify.notify(admin, "cert_connecteam", db=db, link="#/certificates/connecteam",
-                              once=f"cert-ct-{cur.lastrowid}",
-                              title=f"{person['name']} added a {t['name']} in Connecteam's app.")
-    # A note is done once the portal's own copy is newer.
-    for note in [dict(r) for r in db.conn.execute("SELECT * FROM cert_ct_notes WHERE done_at IS NULL")]:
-        ours = _copied_at(db, note["person_id"], note["type_key"])
-        if ours and ours > note["uploaded_at"]:
-            db.conn.execute("UPDATE cert_ct_notes SET done_at = ?, done_by = 'copied' WHERE id = ?",
-                            (now, note["id"]))
-    db.conn.commit()
-    return {"rows": len(rows), "found": found}
-
-
-def _copied_at(db, person_id, type_key) -> float | None:
-    """When the portal last copied this person's card of this type to Connecteam."""
-    best = None
-    for (doc_id,) in db.conn.execute(
-            "SELECT document_id FROM certificates WHERE person_id = ? AND type_key = ? AND status IN "
-            "('confirmed', 'replaced') AND document_id IS NOT NULL", (person_id, type_key)):
-        doc = documents.get(db, doc_id)
-        if doc and doc.get("ct_copied_at"):
-            best = max(best or 0, doc["ct_copied_at"])
-    return best
-
-
 async def nightly(svc, now: float | None = None) -> None:
     """The nightly run's part for certificates (daily_jobs)."""
     db = svc.db
     reminders(db, today(db, now))
     tidy(svc, now)
-    await connecteam_check(svc, now)
 
 
 async def tick(svc, now: float) -> None:
-    """Every half minute: read cards waiting to be read, and try the daily Connecteam check again
-    when HR's lane was full."""
+    """Every half minute: read cards waiting to be read."""
     if svc.db.conn.execute("SELECT 1 FROM certificates WHERE status = 'waiting' AND read_state = "
                            "'pending' AND read_due <= ? LIMIT 1", (now,)).fetchone():
         kick(svc)
-    retry = svc.db.setting("cert_ct_retry")
-    if retry and now >= float(retry):
-        svc.db.set_settings({"cert_ct_retry": ""})
-        await connecteam_check(svc, now)
 
 
 # ---------------------------------------------------------------- migration files
@@ -1346,8 +1234,6 @@ def certificate_todos(svc, v: access.Viewer) -> list[dict]:
         if open_types:
             found.append({"text": "Confirm which departments need the " + " and the ".join(open_types)
                                   + " (HR settings, Certificates).", "link": "#/settings"})
-        for note in db.conn.execute("SELECT * FROM cert_ct_notes WHERE done_at IS NULL ORDER BY id LIMIT 20"):
-            found.append({"text": ct_note_text(db, dict(note)), "link": "#/certificates/connecteam"})
     if v.is_staff:
         problems = [r for r in board(db, v)["rows"] if r["person_id"] != v.id and
                     (r["status"] in LAPSED or r["flag"])]
@@ -1360,16 +1246,6 @@ def certificate_todos(svc, v: access.Viewer) -> list[dict]:
     return found
 
 
-def ct_note_text(db, note: dict) -> str:
-    p, t = db.person(note["person_id"]), type_by_key(db, note["type_key"])
-    name, kind = p["name"] if p else note["person_id"], t["name"] if t else "card"
-    if note["ct_status"] == "pendingApproval":
-        return (f"{name} uploaded a {kind} in Connecteam: approve or reject it there, and ask them "
-                "to add it in the HR portal.")
-    return (f"{name}'s {kind} was changed in Connecteam's app: ask them to add it in the HR portal "
-            "too.")
-
-
 @server.settings_section("certificates", 30)
 def certificates_settings(svc, v: access.Viewer) -> dict:
     db = svc.db
@@ -1379,16 +1255,11 @@ def certificates_settings(svc, v: access.Viewer) -> dict:
         shown.append({k: t[k] for k in (
             "id", "key", "name", "reader", "lasts_years", "due_days", "remind", "lapse_message",
             "flag_until_valid", "olcc", "accepts", "groups", "people", "groups_confirmed",
-            "ct_document", "active")} | {"suggested": suggested_groups(t, departments)
+            "active")} | {"suggested": suggested_groups(t, departments)
                                          if not t["groups_confirmed"] else []})
-    settings = svc.main_settings()
     return {"types": shown, "departments": departments, "readers": READERS,
             "people": [{"id": p["id"], "name": p["name"]} for p in db.people(archived=False)],
-            "remind_every": remind_every(db),
-            "connecteam": {"copy_on": documents.copies_on(settings),
-                           "documents": db.setting_json("cert_ct_documents", []) or [],
-                           "listed_at": float(db.setting("cert_ct_listed_at") or 0) or None,
-                           "error": db.setting("cert_ct_error") or None}}
+            "remind_every": remind_every(db)}
 
 
 # ---------------------------------------------------------------- routes
@@ -1644,8 +1515,6 @@ async def api_board(request: web.Request):
     if v.is_hr:
         extra["waiting"] = db.conn.execute("SELECT COUNT(*) FROM certificates WHERE status = "
                                            "'waiting' AND person_id != ?", (v.id,)).fetchone()[0]
-        extra["connecteam"] = db.conn.execute("SELECT COUNT(*) FROM cert_ct_notes WHERE done_at IS "
-                                              "NULL").fetchone()[0]
     return web.json_response({
         **found, **extra, "filters": f, "hr": v.is_hr, "within": list(WITHIN),
         "statuses": STATUS_WORDS, "types": [{"key": t["key"], "name": t["name"]} for t in types(db)],
@@ -1679,29 +1548,6 @@ async def api_waiting(request: web.Request):
         found.append({**card_view(db, dict(r), "hr", v), "person_id": r["person_id"],
                       "name": p["name"] if p else r["person_id"]})
     return web.json_response({"cards": found})
-
-
-@rule("hr")
-async def api_ct_notes(request: web.Request):
-    svc = svc_of(request)
-    db = svc.db
-    notes = [{"id": r["id"], "text": ct_note_text(db, dict(r)), "person_id": r["person_id"],
-              "found_at": round(r["found_at"]), "status": r["ct_status"]}
-             for r in db.conn.execute("SELECT * FROM cert_ct_notes WHERE done_at IS NULL ORDER BY id")]
-    return web.json_response({"notes": notes, "copy_on": documents.copies_on(svc.main_settings()),
-                              "checked_at": float(db.setting("cert_ct_checked_at") or 0) or None,
-                              "error": db.setting("cert_ct_error") or None})
-
-
-@rule("hr")
-async def api_ct_note_done(request: web.Request):
-    svc, v = svc_of(request), viewer_of(request)
-    changed = svc.db.conn.execute("UPDATE cert_ct_notes SET done_at = ?, done_by = ? WHERE id = ? "
-                                  "AND done_at IS NULL", (time.time(), v.id, int(request.match_info["nid"]))).rowcount
-    svc.db.conn.commit()
-    if not changed:
-        return error(server.NOT_FOUND, 404)
-    return web.json_response({"ok": True})
 
 
 def _choices(svc) -> tuple[set, set]:
@@ -1758,29 +1604,6 @@ async def api_type_save(request: web.Request):
     return web.json_response({"ok": True})
 
 
-_listed = weakref.WeakKeyDictionary()   # when HR last asked Connecteam for its documents
-
-
-@rule("hr")
-async def api_ct_documents(request: web.Request):
-    """Connecteam's documents, to choose which one a type's cards go to (one request, in HR's
-    lane, at most once a minute)."""
-    svc = svc_of(request)
-    db = svc.db
-    if time.time() - _listed.get(svc, 0.0) < LIST_GAP:
-        return error("Connecteam's list was just read. Try again in a minute.", 429)
-    _listed[svc] = time.time()
-    try:
-        listed = await ctapi.lane().list_documents()
-    except ctapi.CTError as err:
-        if svc.running:
-            db.set_settings({"cert_ct_error": err.message})
-        return error(err.message, 503 if err.retry else 409)
-    db.set_settings({"cert_ct_documents": json.dumps(listed[:300]), "cert_ct_listed_at": time.time(),
-                     "cert_ct_error": ""})
-    return web.json_response({"documents": listed[:300]})
-
-
 @server.add_routes
 def routes(app: web.Application) -> None:
     r = app.router
@@ -1798,9 +1621,6 @@ def routes(app: web.Application) -> None:
     r.add_get("/api/certificates/board", api_board)
     r.add_post("/api/certificates/export", api_export)
     r.add_get("/api/certificates/waiting", api_waiting)
-    r.add_get("/api/certificates/connecteam", api_ct_notes)
-    r.add_post(r"/api/certificates/connecteam/{nid:\d{1,12}}/done", api_ct_note_done)
     r.add_put("/api/settings/certificates", api_settings_save)
     r.add_post("/api/settings/certificates/types", api_type_add)
     r.add_put(r"/api/settings/certificates/types/{tid:\d{1,6}}", api_type_save)
-    r.add_post("/api/settings/certificates/connecteam-documents", api_ct_documents)

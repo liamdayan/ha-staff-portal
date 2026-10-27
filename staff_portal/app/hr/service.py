@@ -4,11 +4,10 @@ nothing kept (its web server just says it's turned off).
 
 Background work, every half minute while it runs:
 - people from Connecteam hourly (and, around sign-ins, at most every 5 minutes for someone new;
-  and soon again when HR's request lane had no room);
-- Connecteam chat messages that are due;
+  and soon again when HR's request lane had no room). The HR portal only reads from Connecteam,
+  through Staff Access's connection; its notifications are the portal's own inbox (notify.py);
 - once a day at 2:15 AM (HR's time zone): Connecteam's profile field names, its archived users,
   and the daily jobs other parts of the HR portal add (daily_jobs);
-- the daily summary for managers and HR at the time HR set;
 - hourly: forgetting ended sessions and setup codes;
 - the background work other parts add (tick_jobs), such as the documents' delivery queue.
 
@@ -29,7 +28,7 @@ from datetime import datetime
 
 from connecteam import ConnecteamError
 
-from . import access, audit, crypto, ctapi, gdrive, hrdb, notify, people, signin
+from . import access, audit, crypto, gdrive, hrdb, notify, people, signin
 
 log = logging.getLogger("staff_portal")
 
@@ -89,7 +88,7 @@ class HRService:
         self.throttle = signin.Throttle()
         self.sync_state = {"at": None, "error": None, "tried": 0.0, "result": None, "soon": False,
                            "soon_day": "", "soon_count": 0, "retry_at": None}
-        self.daily_state = {"day": None, "summary_day": None, "hourly": 0.0}
+        self.daily_state = {"day": None, "hourly": 0.0}
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         # Other parts of the HR portal hook in here:
@@ -125,34 +124,11 @@ class HRService:
         state = self.keyring.status()
         return state if state in ("locked", "lost") else "off"
 
-    def chat_wanted(self) -> bool:
-        """Whether the owner turned on Connecteam chat messages (Settings → Connections →
-        Connecteam for HR) with keys to send them: the HR connection's own app, or else Staff
-        Access's (hr/ctapi.py uses that when HR has none)."""
-        return False   # the owner chose no Connecteam chat: the portal's inbox only
-
-    def chat_problem(self) -> str | None:
-        """Why chat messages aren't going out although they're on: Connecteam refused them (a
-        missing permission or plan feature, or the keys), until the owner saves the connection
-        again or presses its Test."""
-        lane = ctapi.default
-        return lane.stopped["chat"] if self.chat_wanted() and lane is not None else None
-
-    def chat_sender(self):
-        """ctapi.send_chat while chat is on and Connecteam hasn't refused it; else None (the
-        portal inbox only, and queued messages wait)."""
-        if not self.chat_wanted() or ctapi.default is None or self.chat_problem():
-            return None
-        return ctapi.send_chat
-
     def google(self):
         """The Google Drive bridge for HR files (hr/gdrive.py), or None while HR isn't running or
         the owner hasn't set it up (Settings → Connections → Google Drive (HR files)). Its
         drives: gdrive.drive_ids(main_settings()), the HR drive first."""
         return gdrive.bridge_from_settings(self.main_settings()) if self.running else None
-
-    def refresh_chat(self) -> None:
-        notify.chat = self.chat_sender() if self.running else None
 
     # ------------------------------------------------------------ start and stop
 
@@ -169,8 +145,6 @@ class HRService:
         self.db = hrdb.current = hrdb.HRDatabase(self.folder)
         for hook in self.on_start:
             hook(self)
-        notify.url = self.url
-        self.refresh_chat()
         self.sync_state.update(tried=0.0, soon=False, retry_at=None)
         if background:
             self._task = asyncio.create_task(self.run())
@@ -192,7 +166,6 @@ class HRService:
         if self.db is not None:
             self.db.close()
         self.db = hrdb.current = None
-        notify.chat = None
         crypto.use(None)
         self.keyring.forget()
         self.throttle.clear()
@@ -218,7 +191,6 @@ class HRService:
         now = time.time() if now is None else now
         if not self.running:
             return
-        self.refresh_chat()
         local = datetime.fromtimestamp(now, notify._zone(self.db))
         day = local.date().isoformat()
         if self.daily_state["day"] is None:
@@ -232,11 +204,6 @@ class HRService:
         if now - self.daily_state["hourly"] >= 3600:
             self.daily_state["hourly"] = now
             signin.prune(self.db, now)
-        summary_at = notify._minutes(self.db.setting("summary_time"), 8 * 60)
-        if (self.db.setting("summary_day") != day and local.hour * 60 + local.minute >= summary_at):
-            self.db.set_settings({"summary_day": day})
-            notify.summaries(self.db, now)
-        await notify.send_due(self.db, now)
         for job in self.tick_jobs:
             try:
                 await job(self, now)
@@ -287,7 +254,7 @@ class HRService:
         except ConnecteamError as err:
             self.sync_state["error"] = str(err)
             if getattr(err, "budget", False):
-                # HR's lane was full (say, just after testing the HR connection): soon, not in an
+                # HR's lane was full or Staff Access's connection is stopped: soon, not in an
                 # hour, so turning HR on still brings its people in straight away.
                 paused = getattr(self.connecteam, "hr_paused_until", 0.0)
                 self.sync_state["retry_at"] = max(time.time() + BUSY_RETRY, paused + 1)
@@ -415,7 +382,7 @@ class HRService:
 
     async def keep_key_out(self, on: bool, actor_id, actor: str) -> str | None:
         code = await asyncio.to_thread(self.keyring.keep_out, on)
-        self.reseal()   # the Google and Connecteam secrets: sealed with the key, or plain again
+        self.reseal()   # the Google secrets: sealed with the key, or plain again
         audit.record(self.db, "Kept the HR key out of backups" if on else
                      "Put the HR key back in backups", actor_id=actor_id, actor=actor, security=True)
         return code

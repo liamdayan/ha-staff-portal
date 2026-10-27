@@ -269,38 +269,24 @@
           const r = await api("POST", `/api/deliveries/${i.id}/retry`, {});
           await again();
           return r;
-        }) }, "Retry"),
-        i.can_skip ? h("button", { type: "button", onclick: () => act(async () => {
-          const r = await api("POST", `/api/deliveries/${i.id}/skip`, {});
-          await again();
-          return r;
-        }) }, "Don't copy to Connecteam") : null))));
+        }) }, "Retry")))));
     const waiting = data.waiting.map((i) => h("li", null, h("div", { class: "item" },
       h("div", { class: "title" }, `${i.word}: `, personLink(i)),
       i.title ? h("div", { class: "sub" }, i.title) : null,
       h("div", { class: "muted small" }, [i.error, `Next try: ${when(i.due_at)}`].filter(Boolean).join(" · ")))));
     const checks = data.checks.map((c) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(c.person_id)}` },
       h("div", { class: "title" }, c.name), h("div", { class: "sub" }, `${plural(c.count, "file", "files")} to check`))));
-    const todos = data.todos.map((t) => h("li", null, h("div", { class: "item" },
-      h("div", { class: "title" }, personLink(t)), h("div", { class: "sub" }, t.title),
-      h("p", { class: "small" }, t.what),
-      h("div", { class: "actions" }, h("button", { type: "button", onclick: () => act(async () => {
-        const r = await api("POST", `/api/documents/todos/${t.id}/done`, {});
-        await again();
-        return r;
-      }, "Marked done.") }, "Done: removed in Connecteam")))));
     const retention = data.retention.map((r) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(r.id)}` },
       h("div", { class: "title" }, r.name),
       h("div", { class: "sub" }, `Left ${dateOf(r.left_at)} · ${plural(r.documents, "file", "files")} · past since ${dateOf(r.due_at)}`))));
     const holds = data.holds.map((x) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(x.person_id)}` },
       h("div", { class: "title" }, x.name), h("div", { class: "sub" }, `Since ${dateOf(x.since)}${x.by ? ` (${x.by})` : ""}`))));
     show(h("section", { class: "card" }, h("h1", null, "Needs attention"),
-      h("p", { class: "muted small" }, "Files waiting for HR, uploads to Google Drive or Connecteam that need a person, and records past the time they're kept."),
+      h("p", { class: "muted small" }, "Files waiting for HR, uploads to Google Drive that need a person, and records past the time they're kept."),
       data.drive ? h("p", { class: "warn small" }, data.drive) : null),
     card("Waiting for HR to check", null, checks),
     card("Couldn't be sent", "Tried 8 times, or something only a person can fix. Fix it, then press Retry.", stuck),
     data.waiting.length ? card("Waiting to be sent", "These are tried again by themselves.", waiting) : null,
-    card("Remove in Connecteam", "Deleted here, but Connecteam can't remove files for Staff Access: remove them in Connecteam, then mark them done.", todos),
     card("Past the time records are kept", `Former employees' records are kept ${plural(data.years, "year", "years")} after they leave, then listed here. Nothing is deleted by itself. Open someone to review and delete their files.`, retention),
     data.holds.length ? card("Legal holds", null, holds) : null);
   }
@@ -311,17 +297,6 @@
 
   H.registerSettings("documents", (box, data, again) => {
     const levelWord = (l) => data.levels[l] || l;
-    let ctDocs = null;
-    const loadCt = async () => {
-      if (ctDocs || !data.copies_on) return ctDocs;
-      try {
-        ctDocs = (await api("GET", "/api/documents/connecteam")).documents;
-      } catch (err) {
-        toast(err.message, true);
-      }
-      return ctDocs;
-    };
-
     async function kindDialog(k) {
       const fixed = new Set(k?.fixed || []);
       const name = h("input", { name: "name", value: k?.name || "", maxlength: "60", required: true });
@@ -331,32 +306,20 @@
       const folder = h("input", { name: "folder", value: k?.folder || "Documents", maxlength: "60" });
       const who = h("select", { name: "uploaders", disabled: fixed.has("uploaders") },
         Object.entries(data.uploaders).map(([u, word]) => h("option", { value: u, selected: (k?.uploaders || "hr") === u }, word)));
-      const copy = h("input", { type: "checkbox", name: "connecteam", checked: !!k?.connecteam,
-        disabled: fixed.has("connecteam") || (!data.copies_on && !k?.connecteam) });
-      const docs = await loadCt();
-      const ct = h("select", { name: "ct_document", disabled: fixed.has("ct_document") || !data.copies_on },
-        h("option", { value: "" }, "Choose the Connecteam document"),
-        (docs || []).map((d) => h("option", { value: d.id, selected: k?.ct_document === d.id }, d.name)),
-        k?.ct_document && !(docs || []).some((d) => d.id === k.ct_document) ? h("option", { value: k.ct_document, selected: true }, `Document ${k.ct_document}`) : null);
       const notes = [];
       if (k?.owned) notes.push(h("p", { class: "muted small" }, "Another part of the HR portal shows these and decides who sees them. You can rename it and change its Drive folder."));
-      else if (k?.restricted) notes.push(h("p", { class: "muted small" }, "Restricted: HR admins only, kept apart in Drive, never copied to Connecteam."));
+      else if (k?.restricted) notes.push(h("p", { class: "muted small" }, "Restricted: HR admins only, kept apart in Drive."));
       const choice = await openDialog(k ? `Change “${k.name}”` : "Add a kind of document", [
         ...notes,
         h("label", null, "Name", name),
         h("label", null, "Who can see it", h("small", null, k ? "Restricted can only be chosen when a kind is made." : "Restricted kinds are kept apart and can't be changed later."), level),
         h("label", null, "Google Drive folder", h("small", null, "In each person's folder. Files already in Drive stay where they are."), folder),
         h("label", null, "Who may add one", who),
-        h("label", { class: "check" }, copy, "Copy to Connecteam (latest file only, and the employee sees it there)"),
-        data.copies_on ? h("label", null, "Connecteam document", ct)
-          : h("p", { class: "muted small" }, "Connecteam copies are off. The owner turns them on in Home Assistant (Settings, Connections, Connecteam for HR)."),
       ], [{ label: "Cancel", value: "cancel" }, { label: k ? "Save" : "Add", value: "ok", class: "primary" }]);
       if (choice !== "ok") return;
       const body = { name: name.value, folder: folder.value };
       if (!fixed.has("visibility")) body.visibility = level.value;
       if (!fixed.has("uploaders")) body.uploaders = who.value;
-      if (!fixed.has("connecteam") && !copy.disabled) body.connecteam = copy.checked;
-      if (!fixed.has("ct_document") && data.copies_on) body.ct_document = ct.value;
       const r = await act(() => (k ? api("PUT", `/api/documents/kinds/${k.id}`, body) : api("POST", "/api/documents/kinds", body)), "Saved.");
       if (r) await again();
     }
@@ -369,7 +332,6 @@
         h("div", null, h("div", { class: "title" }, k.name, k.restricted ? h("span", { class: "badge" }, "Restricted") : null),
           h("div", { class: "sub" }, [levelWord(k.visibility), `Drive: ${k.folder}`,
             k.owned ? "Shown in its own section" : data.uploaders[k.uploaders],
-            k.connecteam && !k.restricted && !k.owned ? (data.copies_on ? "Copied to Connecteam" : "Connecteam copy (off)") : null,
             plural(k.count, "file", "files")].filter(Boolean).join(" · "))),
         h("button", { type: "button", class: "linkish", onclick: () => kindDialog(k) }, "Change"))))),
       h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: () => kindDialog(null) }, "Add a kind")));

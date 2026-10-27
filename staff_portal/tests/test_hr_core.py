@@ -377,72 +377,26 @@ def test_audit_lines_cut_off_the_end_show_up(tmp_path, db):
 
 # ---------------------------------------------------------------- notifications
 
-@pytest.fixture
-def chat():
-    sent = []
-    notify.chat = lambda pid, text: sent.append((pid, text))
-    notify.url = lambda: "https://hr.example.com"
-    yield sent
-    notify.chat = None
-
-
-def test_notifications_inbox_quiet_hours_and_one_a_day(db, chat):
+def test_notifications_are_the_portal_inbox(db):
     db.conn.execute("INSERT INTO people (id, name, added_at) VALUES ('1', 'Ana', 0), ('2', 'Max', 0)")
     db.set_role("2", "manager", True)
-    db.set_settings({"quiet_start": "00:00", "quiet_end": "23:59"})   # quiet nearly all day
     entry = notify.notify("1", "card_confirmed", db=db, once="card-9")
     assert entry and notify.unread(db, "1") == 1
     assert notify.notify("1", "card_confirmed", db=db, once="card-9") is None   # a repeat run
-    row = db.conn.execute("SELECT * FROM outbox").fetchone()
-    assert row["due_at"] > time.time() and "https://hr.example.com" in row["text"]
-    assert "card" not in row["text"].lower()                   # never the details
     notify.notify("1", "something_else", db=db)
-    assert db.conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 1   # one a day
-    notify.notify("1", "expired", urgent=True, db=db)
-    assert db.conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 2   # urgent goes too
-    # Managers: non-urgent things wait for the daily summary; urgent ones go now.
+    notify.notify("1", "expired", urgent=True, title="Your card expired.", db=db)
     notify.notify("2", "card_uploaded", db=db)
-    notify.notify("2", "card_uploaded_2", db=db)
-    assert db.conn.execute("SELECT COUNT(*) FROM outbox WHERE person_id = '2'").fetchone()[0] == 0
-    assert notify.summaries(db) == 1
-    summary = db.conn.execute("SELECT * FROM outbox WHERE person_id = '2'").fetchone()
-    assert "2 new items" in summary["text"] and summary["due_at"] <= time.time()
-    assert notify.summaries(db) == 0
-    assert run(notify.send_due(db)) == 1 and chat[0][0] == "2"
+    assert notify.unread(db, "1") == 3 and notify.unread(db, "2") == 1
+    newest = notify.inbox(db, "1")[0]
+    assert (newest["title"], newest["urgent"]) == ("Your card expired.", 1)
+    assert notify.inbox(db, "1")[1]["title"] == notify.GENERIC    # a kind with no title of its own
+    notify.mark_read(db, "1", newest["id"])
+    assert notify.unread(db, "1") == 2
     notify.mark_read(db, "1")
-    assert notify.unread(db, "1") == 0
-
-
-def test_messages_are_retried_then_need_attention(db):
-    db.conn.execute("INSERT INTO people (id, name, added_at) VALUES ('1', 'Ana', 0)")
-    calls = []
-
-    def failing(pid, text):
-        calls.append(pid)
-        raise RuntimeError("Missing permission chat.write")
-    notify.chat = failing
-    try:
-        notify.notify("1", "x", urgent=True, db=db)
-        now = time.time()
-        for i in range(notify.MAX_TRIES):
-            run(notify.send_due(db, now + 10 ** 7 * (i + 1)))
-        row = db.conn.execute("SELECT * FROM outbox").fetchone()
-        assert row["status"] == "needs_attention" and row["tries"] == 8 and "chat.write" in row["error"]
-        assert notify.retry_after(1) == 60 and notify.retry_after(5) == 21600 and notify.retry_after(6) == 86400
-
-        # A refusal by HR's request budget waits without counting a try.
-        class HRBusy(Exception):
-            pass
-
-        def busy(pid, text):
-            raise HRBusy("Staff Access has used half of its Connecteam requests for today")
-        notify.chat = busy
-        notify.retry(db, row["id"])
-        run(notify.send_due(db))
-        row = db.conn.execute("SELECT * FROM outbox").fetchone()
-        assert row["status"] == "queued" and row["tries"] == 0 and row["due_at"] > time.time()
-    finally:
-        notify.chat = None
+    assert notify.unread(db, "1") == 0 and notify.unread(db, "2") == 1
+    # Nothing is sent anywhere: no outbox, no chat.
+    assert not db.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'outbox'").fetchone()
+    assert not hasattr(notify, "chat") and not hasattr(notify, "send_due")
 
 
 # ---------------------------------------------------------------- files
