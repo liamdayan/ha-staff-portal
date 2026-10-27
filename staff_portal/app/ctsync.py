@@ -280,14 +280,38 @@ def _by(t: dict) -> str:
     return name[:60] if name and t.get("source") == "quick" else ""
 
 
-RECURRING = ("This task repeats in Connecteam, so it's changed there: mark it done in "
-             "Connecteam and it shows here within about 10 minutes.")
+RECURRING = ("This task repeats in Connecteam, so it's edited or deleted there. Its status "
+             "can be changed here: each repeat is a task of its own.")
 _logged_recurring: set[tuple] = set()
 
 
 def recurring(t: dict) -> bool:
-    """A task from a Connecteam recurring task: shown here, but changed only in Connecteam."""
+    """A repeat of a Connecteam recurring task (Connecteam lists each repeat as a task of its own,
+    days ahead): its status syncs both ways; it's edited or deleted only in Connecteam, where
+    that could touch the series."""
     return bool(t.get("ct_task_id")) and bool((_sync(t).get("seen") or {}).get("recurring"))
+
+
+def repeats_not_yet(today: str) -> set[int]:
+    """The repeats of Connecteam recurring tasks that don't show yet. Connecteam lists each
+    repeat as a task of its own, days ahead, and says nothing of which series it's in, so a
+    series is its board, title and person. A repeat shows from the day after the one before it
+    was due (a daily one each day; a weekly one the day after last week's), and the first of a
+    series straight away. today: "YYYY-MM-DD" in the property's zone."""
+    series: dict[tuple, list[tuple[str, int]]] = {}
+    for r in _db().conn.execute(
+            "SELECT id, ct_board_id, title, assigned_id, due_date, ct_sync FROM tasks WHERE "
+            "ct_task_id IS NOT NULL AND due_date IS NOT NULL AND ct_sync LIKE '%\"recurring\":true%'"):
+        if (_sync(dict(r)).get("seen") or {}).get("recurring"):
+            key = (r["ct_board_id"], r["title"].strip().lower(), r["assigned_id"])
+            series.setdefault(key, []).append((r["due_date"], r["id"]))
+    hidden = set()
+    for repeats in series.values():
+        repeats.sort()
+        for (before, _), (due, task_id) in zip(repeats, repeats[1:]):
+            if due > today and before >= today:   # the one before isn't past its day yet
+                hidden.add(task_id)
+    return hidden
 
 
 def _log_recurring(board_id: str, r: dict) -> None:
@@ -449,9 +473,6 @@ async def _push(t: dict) -> bool:
         return await _push_form(t)
     if not on():
         return False   # waits until the sync is on again
-    if recurring(t):   # changed only in Connecteam (the routes refuse changes; this is a backstop)
-        _save(t["id"], clear_pending=True, pending_was=t["ct_pending"])
-        return False
     sync, (to_ct, _) = _sync(t), _links()
     mapped = {b["board_id"]: b for b in boards()}
     if sync.get("creating"):

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.10
+
+- **Recurring Connecteam tasks, now that we've seen how they come through:** Connecteam lists
+  each repeat as a task of its own, days ahead. Each repeat now shows from the day after the one
+  before it was due (a daily task: one a day; a weekly one: the day after last week's was due),
+  instead of every upcoming repeat at once. A series is its board, title and person.
+- **A repeat's status syncs both ways again** (Done here completes that day's repeat only, and it
+  stays recurring). Editing or deleting one is still done in Connecteam, where it could change
+  the whole series.
+
 ## 0.12.9
 
 - **Recurring tasks from Connecteam show in the staff app, marked "Repeats · Connecteam",** and

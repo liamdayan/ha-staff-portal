@@ -4746,7 +4746,7 @@
         t.mine ? "You" : t.assigned_name) : null,
       t.source === "form" ? h("span", { class: "tk-tag" }, tkIcon("form"), t.form_name || "Form") : null,
       t.photos?.length ? h("span", { class: "tk-tag" }, tkIcon("photo"), String(t.photos.length)) : null,
-      t.connecteam ? h("span", { class: "tk-tag tk-ct", title: t.ct_recurring ? "Repeats in Connecteam: changed there" : "In Connecteam" },
+      t.connecteam ? h("span", { class: "tk-tag tk-ct", title: t.ct_recurring ? "Repeats in Connecteam: edited there" : "In Connecteam" },
         tkIcon("sync"), t.ct_recurring ? "Repeats · Connecteam" : "Connecteam") : null,
     ];
     const card = h("article", { class: `tk-card ${t.status}${t.priority === "urgent" ? " is-urgent" : ""}${overdue ? " is-overdue" : ""}`,
@@ -4800,10 +4800,6 @@
   // meanwhile, theirs stays and the screen catches up.
   async function tkSetStatus(t, status) {
     if (!tk || status === t.status) return;
-    if (t.ct_recurring) {   // repeats in Connecteam: changed there (it can't say what Done does)
-      toast("This task repeats in Connecteam, so mark it done there. It shows here within about 10 minutes.");
-      return;
-    }
     const state = tk;
     state.pending.set(t.id, status);
     tkDraw();
@@ -4921,7 +4917,7 @@
         ? `From the ${t.form_name || "Connecteam"} form · ${tkWhen(t.created_at)}`
         : t.source === "connecteam" ? `In Connecteam · ${tkWhen(t.created_at)}`
           : `By ${t.made_by_me ? "you" : t.created_by || "someone"} · ${tkWhen(t.created_at)}`),
-      t.connecteam ? row("sync", "Connecteam", t.ct_recurring ? "Repeats in Connecteam: change it there"
+      t.connecteam ? row("sync", "Connecteam", t.ct_recurring ? "Repeats in Connecteam: this day's status syncs; edit it there"
         : "Changes go both ways") : null,
       t.ct_note ? h("p", { class: "tk-ct-note" }, t.ct_note) : null);
     const link = t.source_url ? h("a", { class: "tk-source-link", href: t.source_url, target: "_blank", rel: "noopener noreferrer" },

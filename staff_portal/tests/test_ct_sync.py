@@ -1039,27 +1039,49 @@ def test_the_staff_app_lists_finished_tasks_for_two_days():
     assert tasks.LIST_FINISHED_DAYS == 2
 
 
-def test_a_recurring_connecteam_task_is_shown_but_changed_only_there(tmp_path):
-    """Connecteam's API can't say how a recurring task repeats or whether completing it
-    completes the series, so it shows here (marked) and changes come only from Connecteam."""
+def test_a_recurring_connecteam_task_shows_each_repeat_on_its_day(tmp_path):
+    """Connecteam lists each repeat of a recurring task as a task of its own, days ahead: each
+    shows from its day, its status syncs both ways, and it's edited or deleted only in
+    Connecteam (that could touch the series)."""
     async def scenario():
         p, ct = synced(tmp_path)
-        weekly = {**ct_task("r1", "Check the fire doors", [7]), "type": "recurring"}
-        ct.board_tasks["501"] = [weekly]
+        day = 86400
+        now = int(time.time())
+        today = {**ct_task("r1", "Check the fire doors", [7], due=now + 3600), "type": "recurring"}
+        later = {**ct_task("r2", "Check the fire doors", [7], due=now + 3 * day), "type": "recurring"}
+        ct.board_tasks["501"] = [today, later]
         async with p, ct:
             await poll(p)
             ana = await p.sign_in(p.ana)
-            seen = (await p.listed(ana))["Check the fire doors"]
-            assert seen["ct_recurring"] is True and seen["can_edit"] is False
-            for method, path, body in (("POST", f"/api/tasks/{seen['id']}/status", {"status": "done"}),
-                                       ("PUT", f"/api/tasks/{seen['id']}", {"title": "x"}),
-                                       ("DELETE", f"/api/tasks/{seen['id']}", None)):
-                status, answer = await p.call(method, path, ana, body)
+            status, body = await p.call("GET", "/api/tasks", ana)
+            shown = [t for t in body["tasks"] if t["title"] == "Check the fire doors"]
+            assert len(shown) == 1 and shown[0]["ct_recurring"] is True and shown[0]["can_edit"] is False
+            tid = shown[0]["id"]
+            for method, path, sent_body in (("PUT", f"/api/tasks/{tid}", {"title": "x"}),
+                                            ("DELETE", f"/api/tasks/{tid}", None)):
+                status, answer = await p.call(method, path, ana, sent_body)
                 assert status == 409 and "repeats in Connecteam" in answer["error"], (method, path)
+            # Done here completes that repeat only, keeping its type.
+            status, _ = await p.call("POST", f"/api/tasks/{tid}/status", ana, {"status": "done"})
             await sent(p)
-            assert not writes(ct)
-            # Done in Connecteam shows here, as for any task.
-            weekly["status"] = "completed"
+            assert status == 200 and today["status"] == "completed" and later["status"] == "published"
+            assert writes(ct, "PUT")[-1][2]["type"] == "recurring"
+    run(scenario())
+
+
+def test_a_weekly_repeat_shows_the_day_after_the_last_one_was_due(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        now, day = int(time.time()), 86400
+        ct.board_tasks["501"] = [
+            {**ct_task("w1", "Clean the vents", [7], due=now - day), "type": "recurring"},
+            {**ct_task("w2", "Clean the vents", [7], due=now + 6 * day), "type": "recurring"},
+            {**ct_task("w3", "Clean the vents", [7], due=now + 13 * day), "type": "recurring"}]
+        async with p, ct:
             await poll(p)
-            assert p.db.task(seen["id"])["status"] == "done"
+            ana = await p.sign_in(p.ana)
+            status, body = await p.call("GET", "/api/tasks", ana)
+            dues = sorted(t["due_date"] for t in body["tasks"] if t["title"] == "Clean the vents")
+            # Last week's was due yesterday, so next week's shows now; the one after waits.
+            assert len(dues) == 2
     run(scenario())

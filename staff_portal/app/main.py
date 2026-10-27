@@ -3116,9 +3116,11 @@ async def api_tasks(request: web.Request):
     device, member, manager = task_caller(request)
     departments = task_departments()
     since = time.time() - tasks.LIST_FINISHED_DAYS * 86400
+    today = datetime.now(report_zone()).date().isoformat()
+    waiting = ctsync.repeats_not_yet(today)
     body = {"tasks": [task_view(t, member, manager, departments)
                       for t in db.tasks_for(member, since, manager)
-                      if tasks.can_see(t, member, manager, departments)],
+                      if tasks.can_see(t, member, manager, departments) and t["id"] not in waiting],
             "departments": [{"id": k, "name": v} for k, v in departments.items()],
             "me": {"id": member["id"], "name": member["name"],
                    "department_ids": [i for i in member["department_ids"] if i in departments],
@@ -3190,8 +3192,6 @@ async def api_task_status(request: web.Request):
     """Anyone who sees a task may change its status; it's saved at once, in its history."""
     device, member, manager = task_caller(request, change=True)
     task = visible_task(request.match_info["id"], member, manager)
-    if ctsync.recurring(task):
-        return bad_request(ctsync.RECURRING, 409, task=task_view(task, member, manager, task_departments()))
     data = await read_json(request)
     try:
         status = tasks.clean_status(data, task)
