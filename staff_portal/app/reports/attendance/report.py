@@ -181,6 +181,19 @@ def abs_minutes(value, day, tz):
     return day_number(when.date()) * 1440 + when.hour * 60 + when.minute
 
 
+def _bare(value) -> bool:
+    """A clock time with no date of its own ("06:30", "6:30 AM")."""
+    if isinstance(value, dt.time):
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        dt.datetime.fromisoformat(value.strip())
+        return False
+    except ValueError:
+        return True
+
+
 def _hours(value):
     try:
         v = float(value)
@@ -227,8 +240,8 @@ def timesheet_rows(rows, tz) -> list[dict]:
         if day is None:
             continue
         end = abs_minutes(r.get("clock_out"), day, tz)
-        if start is not None and end is not None and end <= start:
-            end += 1440  # out past midnight, given as a bare time
+        if start is not None and end is not None and end < start and _bare(r.get("clock_out")):
+            end += 1440  # out past midnight, given as a bare time (ctdata always gives the date)
         sched_start = abs_minutes(r.get("sched_start"), day, tz)
         sched_end = abs_minutes(r.get("sched_end"), day, tz)
         kind, job = _text(r.get("type"), NAME_LEN), _text(r.get("job"), NAME_LEN)

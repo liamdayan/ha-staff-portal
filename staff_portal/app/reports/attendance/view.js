@@ -369,6 +369,20 @@
     return blocks.filter(b => b.anchor >= lo && b.anchor < hi).sort((a, b) => a.anchor - b.anchor);
   }
 
+  // A block's break time: gaps between its work punches, and breaks taken with Connecteam's Break
+  // button (their own rows, inside the shift: ctdata never puts them on the work row), counted
+  // once where the two overlap. A break still going counts up to now.
+  function breakTime(p, ps, NOW) {
+    const first = ps[0].in, last = ps[ps.length - 1].out ?? NOW;
+    const spans = [];
+    for (let i = 1; i < ps.length; i++) { const prev = ps[i - 1].out; if (prev != null && ps[i].in > prev) spans.push([prev, ps[i].in]); }
+    for (const x of p.punches) if (x.isBreak) { const a = Math.max(x.in, first), e = Math.min(x.out ?? NOW, last); if (e > a) spans.push([a, e]); }
+    spans.sort((a, b) => a[0] - b[0]);
+    let total = 0, upTo = -Infinity;
+    for (const [a, e] of spans) { const s = Math.max(a, upTo); if (e > s) total += e - s; upTo = Math.max(upTo, e); }
+    return total;
+  }
+
   // Hourly team checks (e.g. tub temperatures): each time slot in which someone matching the form's job or title
   // was clocked in for at least 30 minutes needs one submission from anyone. A missed slot counts against
   // everyone who was on that job for 15 minutes or more of it. Overnight (10p–6a) can use a longer interval.
@@ -467,9 +481,7 @@
           rec.worked.add(d);
           b.firstIn = ps[0].in;
           b.lastOut = ps[ps.length - 1].out;
-          let gaps = 0;
-          for (let i = 1; i < ps.length; i++) { const prev = ps[i - 1].out; if (prev != null && ps[i].in > prev) gaps += ps[i].in - prev; }
-          b.brk = ps.reduce((a, x) => a + (x.brk || 0), 0) + gaps;
+          b.brk = ps.reduce((a, x) => a + (x.brk || 0), 0) + breakTime(p, ps, NOW);
           b.segments = ps.length;
           const punchJobs = [...new Set(ps.map(x => x.job).filter(Boolean))];
           b.job = s && s.job ? s.job : punchJobs.join(" · ");

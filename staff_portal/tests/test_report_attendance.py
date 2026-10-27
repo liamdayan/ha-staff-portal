@@ -130,8 +130,10 @@ def test_form_list_only_for_managers_who_ask():
 def test_rows_are_normalized():
     _, ctx = sample()
     d = run(ctx)
-    maya = next(t for t in d["timesheets"] if t["uid"] == "1")
-    assert maya["in"] % 1440 == 6 * 60 + 12 and maya["out"] % 1440 == 14 * 60 + 31 and maya["brk"] == 30
+    maya, lunch = [t for t in d["timesheets"] if t["uid"] == "1"]
+    assert maya["in"] % 1440 == 6 * 60 + 12 and maya["out"] % 1440 == 14 * 60 + 31 and maya["brk"] == 0
+    # A lunch taken with the Break button is its own row, as ctdata gives it.
+    assert lunch["type"] == "break" and lunch["brk"] == 30 and maya["in"] < lunch["in"] < maya["out"]
     assert maya["day"] == rep.day_number(dt.date(2026, 10, 12)) and maya["job"] == "Front Desk"
     priya = next(t for t in d["timesheets"] if t["uid"] == "5")
     assert priya["in"] is None and priya["hours"] == 7.5 and priya["type"].startswith("Time off")
@@ -287,6 +289,36 @@ def test_view_tells_people_with_the_same_name_apart(tmp_path):
     rows = {r["key"]: r for r in out["rows"]}
     assert rows["u8"]["formsMissed"] == 0 and rows["u7"]["formsMissed"] == 1  # credited by ID
     assert rows["u7"]["sick"] is None and out["balUnmatched"] == ["Ty Nguyen"]  # not guessed
+
+
+@need_node
+def test_view_counts_breaks_taken_with_the_break_button(tmp_path):
+    """ctdata puts a manual break on its own row inside the shift. It counts as lunch and isn't
+    worked time; a shift split around the same break doesn't count it twice."""
+    def row(day, a, b, kind="shift", brk=0):
+        return dict(user_id="7", name="Ann Lee", date=f"2026-10-{day}", clock_in=f"2026-10-{day}T{a}",
+                    clock_out=f"2026-10-{day}T{b}", break_minutes=brk, job="Break" if kind == "break" else "Spa",
+                    type=kind)
+    ct = FakeCt([row(12, "08:00", "16:30"), row(12, "12:00", "12:30", "break", 30),
+                 row(13, "08:00", "12:00"), row(13, "12:00", "12:30", "break", 30), row(13, "12:30", "16:30")])
+    out = view(tmp_path, run(FakeCtx(ct)))
+    ann = by_name(out)["Ann Lee"]
+    assert ann["lunch"] == [] and "No lunch" not in ann["flags"]
+    assert ann["workedMin"] == 2 * 8 * 60
+
+
+@need_node
+def test_view_a_clock_in_and_out_in_the_same_minute_is_a_blip(tmp_path):
+    """Times with a date are never moved a day on: a 20-second punch stays a blip, not 24 hours."""
+    ct = FakeCt([dict(user_id="7", name="Ann Lee", date="2026-10-13", clock_in="2026-10-13T09:00",
+                      clock_out="2026-10-13T09:00", break_minutes=0, job="Spa", type="shift")],
+                [dict(user_id="7", name="Ann Lee", date="2026-10-13", start="2026-10-13T09:00",
+                      end="2026-10-13T17:00", job="Spa", title="")])
+    d = run(FakeCtx(ct))
+    assert d["timesheets"][0]["out"] == d["timesheets"][0]["in"]
+    ann = by_name(view(tmp_path, d))["Ann Lee"]
+    assert ann["workedMin"] == 0 and ann["missed"] == 1
+    assert ann["flags"] == ["No-show · 8h", "Clocked in and out at once"]
 
 
 @need_node

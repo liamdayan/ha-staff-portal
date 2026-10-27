@@ -56,10 +56,24 @@ def at(day, hhmm):
     return dt.datetime(2026, 10, day, h, m, tzinfo=LA).isoformat()
 
 
-def punch(uid, name, day, start, end, brk=30, job="", type="shift"):
+def punch(uid, name, day, start, end, brk=0, job="", type="shift"):
     return dict(user_id=uid, name=name, date=f"2026-10-{day:02d}", clock_in=at(day, start),
                 clock_out=at(day, end) if end else None, break_minutes=brk, job=job, type=type,
                 hours=None, sched_start=None, sched_end=None)
+
+
+def worked(uid, name, day, start, end, brk=30, job=""):
+    """A shift as ctdata gives it: the work row from clock-in to clock-out (break_minutes 0),
+    and a lunch taken with Connecteam's Break button as a row of its own ("break") inside it,
+    from mid-shift."""
+    rows = [punch(uid, name, day, start, end, job=job)]
+    if brk:
+        h, m = map(int, start.split(":"))
+        mid = h * 60 + m + 4 * 60
+        rows.append(punch(uid, name, day, f"{mid // 60:02d}:{mid % 60:02d}",
+                          f"{(mid + brk) // 60:02d}:{(mid + brk) % 60:02d}", brk=brk, job="Break",
+                          type="break"))
+    return rows
 
 
 def shift(uid, name, day, start, end, job, title="", draft=False, open=False):
@@ -94,12 +108,12 @@ def sample(**kw):
     """Maya late, Dev early, Lena (Rose in Gusto, by alias) a short lunch and a missed tub check,
     Jonah a no-show his sick leave can't cover, Priya off sick, Sam clean but a new hire."""
     ts = [
-        punch("1", "Maya Ortiz", 12, "06:12", "14:31", job="Front Desk"),
-        punch("2", "Dev Patel", 13, "14:00", "22:00", job="Front Desk"),
-        punch("3", "Lena Brooks", 14, "14:00", "21:00", brk=15, job="Thermal Pub"),
-        dict(punch("5", "Priya Shah", 16, "08:30", None, brk=0, type="Time off - Sick leave"),
+        *worked("1", "Maya Ortiz", 12, "06:12", "14:31", job="Front Desk"),
+        *worked("2", "Dev Patel", 13, "14:00", "22:00", job="Front Desk"),
+        *worked("3", "Lena Brooks", 14, "14:00", "21:00", brk=15, job="Thermal Pub"),
+        dict(punch("5", "Priya Shah", 16, "08:30", None, type="Time off - Sick leave"),
              clock_in=None, hours=7.5),
-        punch("6", "Sam Whitaker", 17, "09:00", "17:30", job="Maintenance"),
+        *worked("6", "Sam Whitaker", 17, "09:00", "17:30", job="Maintenance"),
     ]
     shifts = [
         shift("1", "Maya Ortiz", 12, "06:00", "14:30", "Front Desk"),
