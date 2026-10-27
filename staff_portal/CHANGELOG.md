@@ -9,12 +9,6 @@
   username, the PIN as the password and the authenticator code as a one-time code, and the
   password manager can offer to save them after signing in.
 
-## 0.12.19
-
-- **Won't do is gone from tasks:** a task is To do, In progress or Done. To get rid of one, delete
-  it (it goes to the bin, and is archived in Connecteam). Tasks already marked Won't do keep it
-  until they leave the list, and a form's status values map only to To do, In progress or Done.
-
 ## 0.12.18
 
 - **Tasks are checked in Connecteam every 3 minutes during business hours** (9 AM to 6 PM, your
