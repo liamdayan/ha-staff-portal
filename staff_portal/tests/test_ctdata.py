@@ -465,10 +465,12 @@ def test_time_off_as_connecteam_documents_it(tmp_path):
     assert hours == [8, 7.5, 7.5, 7.5, 2]
 
 
-def test_time_off_without_time_off_read_has_no_policy_names(tmp_path):
+@pytest.mark.parametrize("answer", ["refuse", "gone"])
+def test_time_off_without_time_off_read_has_no_policy_names(tmp_path, answer):
+    """Refused, or not there at all (404): the timesheets still come, with "Time off"."""
     p = setup(tmp_path)
     ct = fake()
-    ct.refuse.add("/time-off/v1/policy-types")
+    getattr(ct, answer).add("/time-off/v1/policy-types")
     ct.activities = {1: [ct_activity(8, time_offs=[{
         "id": "t1", "policyTypeId": "pt", "isAllDay": True, "duration": {"value": 8, "units": "hours"},
         "start": {"timestamp": at("2026-10-20", "00:00")}, "end": {"timestamp": at("2026-10-21", "00:00")}}])]}

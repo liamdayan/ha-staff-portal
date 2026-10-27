@@ -161,9 +161,10 @@ async def _kept(key: tuple, max_age: float, fetch):
         return value
 
 
-async def _optional(name: str, fetch, empty):
+async def _optional(name: str, fetch, empty, lenient: bool = False):
     """A list reports can do without (job names): empty when Connecteam refuses it, and not
-    asked again for LISTS_TTL."""
+    asked again for LISTS_TTL. lenient: empty whatever went wrong (time off policy names, which
+    some plans don't have at all), so it never stops the rest."""
     if time.time() - _refused.get(name, 0) < LISTS_TTL:
         return empty
     try:
@@ -171,6 +172,9 @@ async def _optional(name: str, fetch, empty):
     except Unavailable as err:
         if "refused" in str(err):
             _refused[name] = time.time()
+            return empty
+        if lenient:
+            log.info("Reports: no %s from Connecteam: %s", name, err)
             return empty
         raise
 
@@ -309,7 +313,8 @@ async def _policies() -> dict[str, str]:
         data = await _ask("/time-off/v1/policy-types")
         return {str(p["id"]): _short(p.get("name"), 80) for p in _list(data, "policyTypes")
                 if p.get("id") is not None}
-    return await _optional("policies", lambda: _kept(("policies",), LISTS_TTL, fetch), {})
+    return await _optional("policies", lambda: _kept(("policies",), LISTS_TTL, fetch), {},
+                           lenient=True)
 
 
 # ---------------------------------------------------------------- timesheets

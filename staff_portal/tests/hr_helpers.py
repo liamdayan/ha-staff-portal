@@ -73,6 +73,7 @@ class FakeConnecteam:
         self.asked: list[tuple[str, dict]] = []
         self.refuse: set[str] = set()
         self.too_many: set[str] = set()
+        self.gone: set[str] = set()      # paths answered 404 (a feature the plan doesn't have)
         self.calls: list[str] = []
         self.tokens: list[str] = []
         self.port = free_port()
@@ -86,6 +87,8 @@ class FakeConnecteam:
         self.asked.append((path, dict(request.query)))
         if path in self.refuse or any(p.endswith("*") and path.startswith(p[:-1]) for p in self.refuse):
             return web.json_response({"detail": "Missing scope"}, status=403)
+        if path in self.gone:
+            return web.json_response({"error": "not here"}, status=404)
         if path in self.too_many:
             return web.json_response({"detail": "Too many requests"}, status=429,
                                      headers={"Retry-After": "120"})
