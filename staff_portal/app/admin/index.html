@@ -20,6 +20,7 @@
   <button role="tab" data-tab="staff">Staff</button>
   <button role="tab" data-tab="roles">Roles</button>
   <button role="tab" data-tab="wristbands">Wristbands</button>
+  <button role="tab" data-tab="tasks">Tasks</button>
   <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
@@ -349,6 +350,28 @@
       </table>
     </div>
     <button class="btn more" id="wb-more-jobs" hidden>Show older</button>
+  </section>
+
+  <section id="tab-tasks" class="tab" hidden>
+    <div class="section-head"><h2>Tasks</h2></div>
+    <p class="hint tk-intro">Everyone signed in with their own PIN has a <b>Tasks</b> list in the staff
+      app: tasks for their department, for Everyone, and tasks given to them. Anyone can add a quick task
+      and change a task's status. Only the person who made a task, or someone whose role has <b>Manage
+      tasks</b> (on the <button class="linkish" data-goto="roles">Roles</button> tab), can edit or delete it.</p>
+    <div class="settings">
+      <fieldset>
+        <legend>Tasks from Connecteam forms</legend>
+        <p class="hint">Each new submission of a form chosen here becomes one task, with its answers in the
+          notes. Forms are checked every 10 minutes. Only submissions sent after you choose a form become
+          tasks, and none becomes a task twice.</p>
+        <p class="hint" id="tk-ct-off" hidden>Turn on Connecteam in <button class="linkish" type="button"
+          data-goto="settings" data-open-conn="conn-connecteam">Settings → Connections</button> first.</p>
+        <div id="tk-forms" class="cards"></div>
+        <div class="tk-pick" id="tk-pick">
+          <button class="btn" type="button" id="tk-add-form">Choose a form</button>
+        </div>
+      </fieldset>
+    </div>
   </section>
 
   <section id="tab-layout" class="tab" hidden>

@@ -1287,6 +1287,55 @@ The Client Secret is never shown again after saving (leave the box blank to keep
 included in backups. After restoring a backup on a new system, enter it again (a migration file
 brings it across, encrypted).
 
+## Tasks
+
+Everyone who signs in with their own PIN (on a shared or role-based phone or computer) has a
+**Tasks** list in the staff app, next to the pages. It's each department's to-do list. A kiosk
+phone nobody signs in to has no tasks.
+
+**Who sees what.** People see the tasks for their department (the one set on the Staff tab, or
+by its Connecteam smart group), the tasks for **Everyone**, the tasks given to them, and the
+tasks they made. Anyone who sees a task can change its status. Only the person who made a task,
+or someone whose role has **Manage tasks** (Roles tab → the role → Tasks), can edit or delete it.
+On a shared kiosk computer, someone without a role of their own gets the computer's role here.
+All of this is checked by the add-on on every request, not by the phone.
+
+**A task** has a title, optional notes, a department (or Everyone), optionally a person it's
+given to, an optional due date and time, Normal or Urgent, and a status: **To do**, **In
+progress**, **Done** or **Won't do**. Each task keeps who made it, when, where it came from (a
+quick task or a Connecteam form) and a history of every change.
+
+**On the phone.** Tasks are listed by status, with coloured status chips, and urgent and overdue
+tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes to your own
+department unless you pick another (or Everyone), a person, or a due date. Tap a task's status
+chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
+computer) for **Won't do** and **Reopen**. Tap a task to see its notes and history, and to edit
+or delete it. The filters show only **Mine**, one department, or one status. Done tasks fold
+away after a day (**Show older**). On a tablet or computer the list becomes a board with a column
+for each status. The list updates by itself every few seconds.
+
+**The bin.** A deleted task goes to the **Bin** (at the bottom of the list) for 30 days, where
+the person who made it, or a manager, can put it back. Finished tasks are kept for a year.
+
+**Tasks from Connecteam forms.** On the dashboard's **Tasks** tab, **Choose a form** lists your
+Connecteam forms. For each one you pick:
+
+- which department its tasks go to (or Everyone);
+- which question's answer becomes the task's title (**List its questions** reads them from the
+  last month's submissions). Leave it blank for "Form name: who sent it";
+- whether the person who sent it gets the task (when they're linked to Connecteam here).
+
+Each new submission becomes one task, with every answer in its notes. Only submissions sent after
+you chose the form count, and none becomes a task twice, even after its task is deleted. Each
+form is checked every 10 minutes, and nothing is asked of Connecteam while no form is chosen.
+The checks use the reports share of Staff Access's Connecteam allowance, so they never hold up the
+time clock checks; if Connecteam can't be reached or the allowance is used up, the form's card
+says so and it tries again later. Staff Access's Connecteam app needs permission to read forms.
+
+**Backups.** Full backups and migration files carry the tasks (with their history and the bin),
+the forms that make tasks, and each role's Manage tasks. A backup from before tasks leaves the
+tasks here as they are.
+
 ## Seeing staff actions in Home Assistant
 
 Every staff action is always recorded in **Staff Access → Activity**. You can also have them show

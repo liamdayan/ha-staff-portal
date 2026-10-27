@@ -8,3 +8,7 @@ import sys
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app")
 if APP not in sys.path:
     sys.path.insert(0, APP)
+# Stand-ins for modules built alongside (ctdata), last on the path: the real one wins once it's in.
+STANDINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standins")
+if STANDINS not in sys.path:
+    sys.path.append(STANDINS)

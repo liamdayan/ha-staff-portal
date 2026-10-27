@@ -901,3 +901,16 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .archive-kiosk-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
 .archive-kiosk-row small { color: var(--muted); }
 .badge.archived { color: var(--muted); }
+
+/* Tasks tab: Connecteam forms that make tasks */
+.tk-intro { max-width: 720px; margin-bottom: 14px; }
+.tk-form-card { display: grid; gap: 10px; box-shadow: var(--shadow), inset 0 0 0 1px var(--line); }
+.tk-form-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tk-form-head strong { font-size: 16px; }
+.tk-form-card .hint { margin: 0; }
+.tk-form-card label > span { display: grid; gap: 2px; }
+.tk-form-tools { display: flex; justify-content: flex-end; margin-top: -4px; }
+.tk-form-error { color: var(--danger) !important; }
+.tk-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.role-check { margin: 6px 0 4px; font-weight: 600; font-size: 14px; }
+.role-check small { font-weight: 400; }

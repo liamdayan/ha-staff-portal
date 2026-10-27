@@ -232,6 +232,7 @@
     activeDrag = false;
     stopPolling();
     wbReset();
+    tkReset();
     session.del(WB_JOB_KEY);
   }
 
@@ -617,9 +618,9 @@
   // view: which layout page is open, and which group card's detail screen (if any).
   // The open page is remembered by its ID, so changing which pages a phone has doesn't
   // silently switch staff to a different page. tool: a tool open instead of a page
-  // ("wristbands"), or null.
+  // ("wristbands" or "tasks"), or null.
   const view = { pageId: session.get("page"), detail: null,
-    tool: session.get("tool") === "wristbands" ? "wristbands" : null };
+    tool: ["wristbands", "tasks"].includes(session.get("tool")) ? session.get("tool") : null };
   let lastData = null;
 
   // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
@@ -708,8 +709,9 @@
     // tool that's all this person has opens by itself.
     const tools = toolsFor(data);
     if (view.tool && !tools.includes(view.tool)) {
-      if (wb) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
+      if (wb || tk) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
       wbReset();
+      tkReset();
       view.tool = null;
       session.del("tool");
     }
@@ -1052,6 +1054,7 @@
       return;
     }
     if (view.tool) wbAway();
+    if (tk) tkCloseSheet(true);
     view.tool = null;
     session.del("tool");
     view.pageId = id;
@@ -1151,21 +1154,31 @@
 
   // Screens beside the pages that don't come from the layout. Wristbands is offered only on a
   // front-desk computer with a card encoder, to someone allowed to make at least one kind of
-  // card. The server says so with every poll, and checks again on every Wristbands request.
-  const TOOL_NAMES = { wristbands: "Wristbands" };
+  // card; Tasks to anyone signed in with their own PIN. The server says so with every poll, and
+  // checks again on every request.
+  const TOOL_NAMES = { wristbands: "Wristbands", tasks: "Tasks" };
   const TOOL_PAUSE_MS = 60000;   // after the server turns a tool down, how long before offering it again
   let toolsPaused = 0;
 
   function toolsFor(data) {
-    return !PREVIEW && data?.wristbands && Date.now() >= toolsPaused ? ["wristbands"] : [];
+    if (PREVIEW) return [];
+    return [data?.wristbands && Date.now() >= toolsPaused ? "wristbands" : null,
+      data?.tasks && Date.now() >= tkPaused ? "tasks" : null].filter(Boolean);
   }
 
   function openTool(name) {
     if (view.tool === name) {
       // Already open: back to its first screen, the way a tab bar's current tab does.
-      if (wb && wb.screen !== "home") wbBack();
+      if (name === "wristbands" && wb && wb.screen !== "home") wbBack();
+      if (name === "tasks") window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
+    if (wbHolding()) {
+      wbLeave().then((ok) => { if (ok) openTool(name); });
+      return;
+    }
+    if (view.tool === "wristbands") wbAway();
+    if (tk) tkCloseSheet(true);
     view.tool = name;
     view.detail = null;
     session.set("tool", name);
@@ -1181,6 +1194,7 @@
       return;
     }
     wbAway();
+    if (tk) tkCloseSheet(true);
     view.tool = null;
     session.del("tool");
     history.replaceState(null, "", "/");
@@ -1220,8 +1234,11 @@
   function buildTool(data, into) {
     // A stand-in tile, so polls don't rebuild the screen (render rebuilds whenever there are no
     // tiles, which would wipe a form being typed in). Each poll lets the tool update itself.
-    into.set(`tool:${view.tool}`, { refresh: () => wbPoll() });
-    const content = wbState().root;   // kept across redraws, so what's typed survives them
+    const tasks = view.tool === "tasks";
+    into.set(`tool:${view.tool}`, { refresh: () => (tasks ? tkPoll() : wbPoll()) });
+    // Kept across redraws, so what's typed survives them.
+    const content = tasks ? tkState().root : wbState().root;
+    if (tasks) tkDraw();   // a phone turned sideways, say: the right layout for the new width
     if (isDesk()) {
       const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" },
         toolNav(), data.layout ? pageNav(data.layout.pages, -1) : areaNav(data.entities));
@@ -1409,6 +1426,10 @@
   // Phone back button / swipe closes the detail screen instead of leaving the app, and goes
   // back to the list from a Wristbands screen.
   window.addEventListener("popstate", (ev) => {
+    if (tk?.sheet && !ev.state?.tk) {   // Back closes a task's sheet
+      tkCloseSheet(true);
+      return;
+    }
     if (view.tool === "wristbands" && wb && wb.screen !== "home" && !ev.state?.wb) {
       wbPopped();
       return;
@@ -4176,6 +4197,612 @@
   document.addEventListener("click", (e) => {
     if (controlsLocked() && e.target.closest?.("article.tile.controllable")) lockedNudge();
   });
+
+  // ---------------------------------------------------------------- tasks
+
+  // Each department's to-do list. Everyone signed in with their own PIN has it: tasks for their
+  // department, for Everyone, and given to them. One tap on a status chip moves a task on; a long
+  // press (or right click) on it offers every status. Phones get a list grouped by status, wider
+  // screens a board. The server checks every request; what's offered here is only a guide.
+  const TK_STATUS = {
+    todo: { name: "To do", short: "To do" },
+    doing: { name: "In progress", short: "Doing" },
+    done: { name: "Done", short: "Done" },
+    wont: { name: "Won't do", short: "Won't do" },
+  };
+  const TK_NEXT = { todo: "doing", doing: "done", done: "todo", wont: "todo" };
+  const TK_COLUMNS = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"]];
+  const TK_FOLD_MS = 24 * 3600 * 1000;   // finished tasks fold away after a day
+  const TK_HOLD_MS = 450;                // a press this long on a chip opens its menu
+  const TK_FILTER_KEY = "tk_filter";
+  // Line icons (24px grid, drawn with currentColor).
+  const TK_ICONS = {
+    todo: '<circle cx="12" cy="12" r="8"/>',
+    doing: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/>',
+    done: '<circle cx="12" cy="12" r="8" fill="currentColor" stroke="none"/><path d="M8.2 12.3l2.6 2.6 5-5.2" stroke="var(--tk-check)" stroke-width="2.2"/>',
+    wont: '<circle cx="12" cy="12" r="8"/><path d="M6.6 17.4L17.4 6.6"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    flag: '<path d="M6 21V4.5M6 4.5h10.5l-2 4 2 4H6"/>',
+    clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    person: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c.9-3.6 3.6-5.5 7-5.5s6.1 1.9 7 5.5"/>',
+    form: '<rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M9 8.5h6M9 12h6M9 15.5h3.5"/>',
+    team: '<circle cx="9" cy="9" r="3"/><circle cx="16.5" cy="10" r="2.5"/><path d="M3.5 19c.7-3 2.8-4.6 5.5-4.6s4.8 1.6 5.5 4.6M15 14.6c2.6-.3 4.6 1.2 5.3 4.4"/>',
+    bin: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>',
+    chevron: '<path d="M9 6l6 6-6 6"/>',
+    link: '<path d="M14 4.5h5.5V10M19.5 4.5L11 13M17 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1H10"/>',
+  };
+
+  function tkIcon(name, cls = "tk-icon") {
+    const span = h("span", { class: cls, "aria-hidden": "true" });
+    span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ` +
+      `stroke-linecap="round" stroke-linejoin="round">${TK_ICONS[name]}</svg>`;
+    return span;
+  }
+
+  // The Tasks screen's state, from when it's first opened. Forgotten at sign-out (leaveDashboard).
+  let tk = null;
+
+  function tkState() {
+    if (!tk) {
+      let saved = {};
+      try { saved = JSON.parse(session.get(TK_FILTER_KEY) || "{}"); } catch { /* damaged */ }
+      tk = {
+        root: h("div", { class: "tk" }),
+        data: null, v: null, loading: false, seq: 0, minute: 0, people: null,
+        filter: { mine: !!saved.mine, dept: saved.dept ?? "all", status: saved.status || "all" },
+        showOlder: new Set(), sheet: null, pending: new Map(),
+      };
+      fill(tk.root, h("div", { class: "wb-loading" }, h("div", { class: "spinner", "aria-label": "Loading" })));
+      tkLoad();
+    }
+    return tk;
+  }
+
+  function tkReset() {
+    if (!tk) return;
+    tkCloseSheet(true);
+    tk = null;
+  }
+
+  // The server says this person has no tasks here: back to the pages, saying why.
+  function tkNoAccess(text) {
+    toast(text || "Tasks aren't available here.", true);
+    tkReset();
+    tkPaused = Date.now() + TOOL_PAUSE_MS;
+    view.tool = null;
+    session.del("tool");
+    rerender();
+  }
+  let tkPaused = 0;
+
+  // A failed request: sign-in problems go to their own screens; anything else is said in a toast.
+  // Returns true when the screen is gone.
+  function tkFailed(res, fallback) {
+    if (res.status !== 0 && handleAuthError(res)) return true;
+    if (res.status === 403 && !res.data.task && /sign in/i.test(res.data.error || "")) {
+      tkNoAccess(res.data.error);
+      return true;
+    }
+    toast(res.status === 0 ? "Can't connect. Check the connection and try again." : res.data.error || fallback, true);
+    return false;
+  }
+
+  // With each dashboard poll while Tasks is on screen.
+  function tkPoll() {
+    if (tk && !tk.loading) tkLoad(true);
+  }
+
+  async function tkLoad(quiet) {
+    const state = tk;
+    state.loading = true;
+    const res = await api("GET", "/api/tasks" + (state.v && quiet ? `?v=${encodeURIComponent(state.v)}` : ""));
+    if (tk !== state) return;
+    state.loading = false;
+    if (res.status !== 200) {
+      if (quiet && res.status === 0) return;   // the dashboard's own poll reports a lost connection
+      tkFailed(res, "Tasks couldn't be loaded.");
+      if (!state.data && tk === state) fill(state.root, tkEmpty("Tasks couldn't be loaded", "Try again in a moment."));
+      return;
+    }
+    const minute = Math.floor(Date.now() / 60000);
+    if (res.data.unchanged && minute === state.minute) return;
+    if (!res.data.unchanged) {
+      state.data = res.data;
+      state.v = res.data.v;
+    }
+    state.minute = minute;
+    tkDraw();
+  }
+
+  // ---- what's shown
+
+  function tkSaveFilter() {
+    session.set(TK_FILTER_KEY, JSON.stringify(tk.filter));
+  }
+
+  // The tasks the filters let through, with changes still on their way filled in.
+  function tkShown() {
+    const f = tk.filter;
+    return tk.data.tasks.map((t) => (tk.pending.has(t.id) ? { ...t, status: tk.pending.get(t.id) } : t))
+      .filter((t) => (!f.mine || t.mine) &&
+        (f.dept === "all" || (f.dept === "everyone" ? t.department_id == null : String(t.department_id) === String(f.dept))) &&
+        (f.status === "all" || t.status === f.status));
+  }
+
+  const tkFinished = (t) => t.status === "done" || t.status === "wont";
+
+  // When a task is due, as a time here (a day without a time: the end of that day), or null.
+  function tkDueAt(t) {
+    if (!t.due_date) return null;
+    const [y, m, d] = t.due_date.split("-").map(Number);
+    const [hh, mm] = (t.due_time || "23:59").split(":").map(Number);
+    return new Date(y, m - 1, d, hh, mm, t.due_time ? 0 : 59);
+  }
+
+  const tkOverdue = (t) => !tkFinished(t) && !!t.due_date && tkDueAt(t) < new Date();
+
+  function tkClock(hhmm) {
+    const [hh, mm] = hhmm.split(":").map(Number);
+    return new Date(2000, 0, 1, hh, mm).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  function tkDueText(t) {
+    const at = tkDueAt(t);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const day = new Date(at);
+    day.setHours(0, 0, 0, 0);
+    const diff = Math.round((day - today) / 86400000);
+    const name = diff === 0 ? "Today" : diff === 1 ? "Tomorrow" : diff === -1 ? "Yesterday"
+      : at.toLocaleDateString([], { weekday: diff > 1 && diff < 7 ? "long" : "short", month: "short", day: "numeric",
+        year: at.getFullYear() === today.getFullYear() ? undefined : "numeric" })
+        .replace(/^(\w+), (\w+ \d+)$/, (all, wd, md) => (diff > 1 && diff < 7 ? wd : all));
+    return t.due_time ? `${name}, ${tkClock(t.due_time)}` : name;
+  }
+
+  function tkWhen(seconds) {
+    const at = new Date(seconds * 1000);
+    const same = at.toDateString() === new Date().toDateString();
+    const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return same ? `Today ${time}` : `${at.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+  }
+
+  const tkInitial = (name) => (name || "?").trim().charAt(0).toUpperCase() || "?";
+
+  function tkEmpty(title, text) {
+    return h("div", { class: "tk-empty" }, tkIcon("done", "tk-empty-icon"), h("strong", null, title), h("span", null, text));
+  }
+
+  // Redraw the screen from tk.data (the open sheet stays as it is).
+  function tkDraw() {
+    if (!tk?.data) return;
+    const data = tk.data;
+    const shown = tkShown();
+    const open = data.tasks.filter((t) => !tkFinished(t));
+    const urgent = open.filter((t) => t.priority === "urgent").length;
+    const overdue = open.filter(tkOverdue).length;
+    const mine = open.filter((t) => t.mine).length;
+    const stats = [
+      [String(open.length), "open", ""],
+      urgent ? [String(urgent), "urgent", "urgent"] : null,
+      overdue ? [String(overdue), "overdue", "overdue"] : null,
+      mine ? [String(mine), "for you", "mine"] : null,
+    ].filter(Boolean);
+    const wide = isDesk();
+    const head = h("div", { class: "tk-head" },
+      wide ? null : h("h1", { class: "page-title tk-title" }, "Tasks"),
+      h("div", { class: "tk-stats" }, stats.map(([n, label, cls]) =>
+        h("span", { class: `tk-stat ${cls}` }, h("b", null, n), ` ${label}`))));
+    const board = h("div", { class: "tk-board" }, TK_COLUMNS.map(([status, name]) => tkColumn(status, name, shown)));
+    const nothing = !data.tasks.length
+      ? tkEmpty("Nothing to do yet", "Tap + Quick task to add the first one.")
+      : !shown.length ? tkEmpty("No tasks match", "Try another filter.") : null;
+    fill(tk.root, head, tkFilters(), nothing || board,
+      data.bin ? h("button", { class: "tk-bin-link", type: "button", onclick: tkOpenBin },
+        tkIcon("bin"), `Bin (${data.bin})`) : null,
+      wide ? null : h("button", { class: "tk-fab", type: "button", onclick: () => tkOpenForm(null) },
+        tkIcon("plus"), "Quick task"));
+  }
+
+  // Mine, department and status.
+  function tkFilters() {
+    const f = tk.filter;
+    const depts = tk.data.departments;
+    const used = new Set(tk.data.tasks.map((t) => t.department_id));
+    const deptSelect = h("select", { class: "tk-filter-select", "aria-label": "Department" },
+      h("option", { value: "all" }, "Department"),
+      h("option", { value: "everyone" }, "Everyone"),
+      depts.filter((d) => used.has(d.id) || d.id === tk.data.me.department_id)
+        .map((d) => h("option", { value: String(d.id) }, d.name)));
+    deptSelect.value = [...deptSelect.options].some((o) => o.value === String(f.dept)) ? String(f.dept) : "all";
+    deptSelect.addEventListener("change", () => { f.dept = deptSelect.value; tkSaveFilter(); tkDraw(); });
+    const statusSelect = h("select", { class: "tk-filter-select", "aria-label": "Status" },
+      h("option", { value: "all" }, "Status"),
+      Object.entries(TK_STATUS).map(([k, s]) => h("option", { value: k }, s.name)));
+    statusSelect.value = f.status;
+    statusSelect.addEventListener("change", () => { f.status = statusSelect.value; tkSaveFilter(); tkDraw(); });
+    return h("div", { class: "tk-filters", role: "group", "aria-label": "Filters" },
+      h("button", { class: f.mine ? "tk-filter on" : "tk-filter", type: "button", "aria-pressed": f.mine ? "true" : "false",
+        onclick: () => { f.mine = !f.mine; tkSaveFilter(); tkDraw(); } }, tkIcon("person"), "Mine"),
+      h("label", { class: f.dept !== "all" ? "tk-filter on" : "tk-filter" }, tkIcon("team"), deptSelect),
+      h("label", { class: f.status !== "all" ? "tk-filter on" : "tk-filter" }, tkIcon("todo"), statusSelect),
+      isDesk() ? h("button", { class: "tk-add-wide", type: "button", onclick: () => tkOpenForm(null) },
+        tkIcon("plus"), "Quick task") : null);
+  }
+
+  // One status's group of tasks: a section of the list on a phone, a column on the board.
+  // Done holds Won't do too; finished tasks older than a day fold away.
+  function tkColumn(status, name, shown) {
+    const items = shown.filter((t) => (status === "done" ? tkFinished(t) : t.status === status));
+    if (status === "done") items.sort((a, b) => b.status_at - a.status_at);
+    const cutoff = Date.now() - TK_FOLD_MS;
+    const recent = status === "done" ? items.filter((t) => t.status_at * 1000 >= cutoff) : items;
+    const older = items.length - recent.length;
+    const showAll = tk.showOlder.has(status);
+    const list = showAll ? items : recent;
+    return h("section", { class: `tk-col tk-col-${status}${items.length ? "" : " is-empty"}`, "aria-label": name },
+      h("h2", { class: "tk-col-head" }, h("span", { class: `tk-dot ${status}`, "aria-hidden": "true" }),
+        h("span", { class: "tk-col-name" }, name), h("span", { class: "tk-count" }, String(items.length))),
+      h("div", { class: "tk-cards" },
+        list.length ? list.map(tkCard)
+          : h("p", { class: "tk-col-empty" }, status === "done" && older ? "Nothing finished today." : "Nothing here."),
+        older ? h("button", { class: "tk-older", type: "button", onclick: () => {
+          if (showAll) tk.showOlder.delete(status); else tk.showOlder.add(status);
+          tkDraw();
+        } }, showAll ? "Hide older" : `Show ${older} older`) : null));
+  }
+
+  function tkCard(t) {
+    const overdue = tkOverdue(t);
+    const meta = [
+      t.priority === "urgent" ? h("span", { class: "tk-tag urgent" }, tkIcon("flag"), "Urgent") : null,
+      t.due_date ? h("span", { class: overdue ? "tk-tag overdue" : "tk-tag" }, tkIcon("clock"),
+        overdue ? `Overdue · ${tkDueText(t)}` : tkDueText(t)) : null,
+      h("span", { class: "tk-tag" }, tkIcon("team"), t.department),
+      t.assigned_name ? h("span", { class: t.mine ? "tk-tag tk-who mine" : "tk-tag tk-who" },
+        h("span", { class: "tk-avatar", "aria-hidden": "true" }, tkInitial(t.assigned_name)),
+        t.mine ? "You" : t.assigned_name) : null,
+      t.source === "form" ? h("span", { class: "tk-tag" }, tkIcon("form"), t.form_name || "Form") : null,
+    ];
+    const card = h("article", { class: `tk-card ${t.status}${t.priority === "urgent" ? " is-urgent" : ""}${overdue ? " is-overdue" : ""}`,
+      "data-id": String(t.id) },
+      h("button", { class: "tk-card-main", type: "button", onclick: () => tkOpenTask(t.id) },
+        h("span", { class: "tk-card-title" }, t.title),
+        t.notes ? h("span", { class: "tk-card-notes" }, t.notes.split("\n").find((l) => l.trim()) || "") : null,
+        h("span", { class: "tk-meta" }, meta)),
+      tkChip(t));
+    return card;
+  }
+
+  // The status chip: a tap moves the task on, a long press (or right click) offers every status.
+  function tkChip(t) {
+    const s = TK_STATUS[t.status] || TK_STATUS.todo;
+    const chip = h("button", { class: `tk-chip ${t.status}`, type: "button",
+      "aria-label": `${s.name}. Tap for ${TK_STATUS[TK_NEXT[t.status]].name}; hold for more.`,
+      title: `${s.name} · tap for ${TK_STATUS[TK_NEXT[t.status]].name}, hold for more` },
+    tkIcon(t.status, "tk-chip-icon"), h("span", { class: "tk-chip-text" }, s.short));
+    let timer = null;
+    let held = false;
+    chip.addEventListener("pointerdown", (ev) => {
+      if (ev.button > 0) return;
+      held = false;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        held = true;
+        if (navigator.vibrate) navigator.vibrate(10);
+        tkStatusMenu(t);
+      }, TK_HOLD_MS);
+    });
+    for (const type of ["pointerup", "pointerleave", "pointercancel"]) {
+      chip.addEventListener(type, () => clearTimeout(timer));
+    }
+    chip.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      clearTimeout(timer);
+      held = true;
+      tkStatusMenu(t);
+    });
+    chip.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (held) { held = false; return; }
+      if (t.status === "wont") return tkStatusMenu(t);
+      tkSetStatus(t, TK_NEXT[t.status]);
+    });
+    return chip;
+  }
+
+  // Change a task's status: shown straight away, saved at once. If someone else changed it
+  // meanwhile, theirs stays and the screen catches up.
+  async function tkSetStatus(t, status) {
+    if (!tk || status === t.status) return;
+    const state = tk;
+    state.pending.set(t.id, status);
+    tkDraw();
+    tkRedrawSheet(t.id);
+    const res = await api("POST", `/api/tasks/${t.id}/status`, { status, from: t.status });
+    if (tk !== state) return;
+    state.pending.delete(t.id);
+    if (res.status === 200) {
+      tkPut(res.data.task);
+      if (status === "done") toast(`Done: ${t.title}`);
+    } else {
+      if (res.data.task) tkPut(res.data.task);
+      if (tkFailed(res, "Couldn't change the status.")) return;
+      tkDraw();
+    }
+    tkRedrawSheet(t.id);
+    state.v = null;   // the next poll brings the whole list again
+  }
+
+  // Put a task the server sent back into the list.
+  function tkPut(task) {
+    if (!tk?.data) return;
+    const list = tk.data.tasks;
+    const at = list.findIndex((x) => x.id === task.id);
+    if (at >= 0) list[at] = task; else list.unshift(task);
+    tkDraw();
+  }
+
+  // ---- sheets: a task, the quick task form, the status menu and the bin
+
+  function tkSheet(kind, id, title, body, { wide = false, label, big = false } = {}) {
+    tkCloseSheet(true);
+    const close = h("button", { class: "tk-sheet-close", type: "button", "aria-label": "Close", onclick: () => tkCloseSheet() },
+      tkIcon("close"));
+    const panel = h("div", { class: wide ? "tk-sheet wide" : "tk-sheet", role: "dialog", "aria-modal": "true",
+      "aria-label": label || title || "Task" },
+    h("div", { class: "tk-grabber", "aria-hidden": "true" }),
+    h("div", { class: "tk-sheet-head" }, title ? h("h2", { class: big ? "tk-detail-title" : null }, title) : h("span"), close),
+    h("div", { class: "tk-sheet-body" }, body));
+    const scrim = h("div", { class: "tk-scrim", onclick: (ev) => { if (ev.target === scrim) tkCloseSheet(); } }, panel);
+    scrim.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); tkCloseSheet(); }
+    });
+    document.body.append(scrim);
+    document.body.classList.add("tk-sheet-open");
+    tk.sheet = { kind, id, el: scrim, panel, returnTo: document.activeElement };
+    // Back closes it: an entry of its own (one sheet replacing another reuses it).
+    if (history.state?.tk) history.replaceState({ tk: kind }, "", "/");
+    else history.pushState({ tk: kind }, "", "/");
+    requestAnimationFrame(() => {
+      (panel.querySelector("[data-autofocus]") || close).focus({ preventScroll: true });
+    });
+    return panel;
+  }
+
+  // fromBack: Back was pressed (its history entry is gone already), or the screen is going.
+  function tkCloseSheet(fromBack) {
+    const sheet = tk?.sheet;
+    if (!sheet) return;
+    tk.sheet = null;
+    sheet.el.remove();
+    document.body.classList.remove("tk-sheet-open");
+    if (!fromBack && history.state?.tk) history.back();
+    if (sheet.returnTo?.isConnected) sheet.returnTo.focus({ preventScroll: true });
+  }
+
+  function tkStatusMenu(t) {
+    const current = tk.pending.get(t.id) || t.status;
+    const choice = (status, label) => h("button", {
+      class: `tk-menu-item ${status}${status === current ? " current" : ""}`, type: "button",
+      disabled: status === current,
+      onclick: () => { tkCloseSheet(); tkSetStatus({ ...t, status: current }, status); },
+    }, tkIcon(status, "tk-chip-icon"), h("span", null, label), status === current ? h("small", null, "Now") : null);
+    const finished = current === "done" || current === "wont";
+    tkSheet("menu", t.id, t.title, [
+      h("div", { class: "tk-menu" },
+        finished ? choice("todo", "Reopen") : choice("todo", "To do"),
+        choice("doing", "In progress"), choice("done", "Done"), choice("wont", "Won't do")),
+    ], { label: `Status of ${t.title}` });
+  }
+
+  async function tkOpenTask(id) {
+    const state = tk;
+    const res = await api("GET", `/api/tasks/${id}`);
+    if (tk !== state) return;
+    if (res.status !== 200) {
+      if (!tkFailed(res, "That task couldn't be opened.") && res.status === 404) tkLoad();
+      return;
+    }
+    tkShowTask(res.data.task, res.data.history);
+  }
+
+  // The open task's sheet again, after its status changed (it keeps its history).
+  function tkRedrawSheet(id) {
+    if (tk?.sheet?.kind !== "task" || tk.sheet.id !== id) return;
+    const task = tk.data.tasks.find((x) => x.id === id);
+    if (task) tkShowTask(task, tk.sheet.history, true);
+  }
+
+  function tkShowTask(t, history, again) {
+    const status = tk.pending.get(t.id) || t.status;
+    const overdue = tkOverdue({ ...t, status });
+    const row = (icon, label, value, cls) => h("div", { class: `tk-fact ${cls || ""}` }, tkIcon(icon),
+      h("span", { class: "tk-fact-label" }, label), h("span", { class: "tk-fact-value" }, value));
+    const statusRow = h("div", { class: "tk-status-row", role: "group", "aria-label": "Status" },
+      Object.entries(TK_STATUS).map(([k, s]) => h("button", {
+        class: `tk-status-btn ${k}${k === status ? " on" : ""}`, type: "button", "aria-pressed": k === status ? "true" : "false",
+        onclick: () => tkSetStatus({ ...t, status }, k) }, tkIcon(k, "tk-chip-icon"), s.name)));
+    const facts = h("div", { class: "tk-facts" },
+      row("team", "For", t.department),
+      row("person", "Given to", t.assigned_name ? (t.mine ? `${t.assigned_name} (you)` : t.assigned_name) : "Anyone"),
+      t.due_date ? row("clock", "Due", overdue ? `${tkDueText(t)} · overdue` : tkDueText(t), overdue ? "overdue" : "") : null,
+      t.priority === "urgent" ? row("flag", "Priority", "Urgent", "urgent") : null,
+      row(t.source === "form" ? "form" : "plus", "Made", t.source === "form"
+        ? `From the ${t.form_name || "Connecteam"} form · ${tkWhen(t.created_at)}`
+        : `By ${t.made_by_me ? "you" : t.created_by || "someone"} · ${tkWhen(t.created_at)}`));
+    const link = t.source_url ? h("a", { class: "tk-source-link", href: t.source_url, target: "_blank", rel: "noopener noreferrer" },
+      tkIcon("link"), "Open in Connecteam") : null;
+    const notes = t.notes ? h("div", { class: "tk-notes" }, t.notes) : null;
+    const trail = (history || []).slice().reverse().map((e) => h("li", null,
+      h("span", { class: `tk-dot ${e.to_status || "todo"}`, "aria-hidden": "true" }),
+      h("span", { class: "tk-trail-text" }, tkHistoryText(e)),
+      h("time", null, tkWhen(e.at))));
+    const actions = t.can_edit ? h("div", { class: "tk-sheet-actions" },
+      h("button", { class: "btn tk-danger", type: "button", onclick: () => tkDelete(t) }, "Delete"),
+      h("button", { class: "btn primary", type: "button", onclick: () => tkOpenForm(t) }, "Edit")) : null;
+    const body = [statusRow, facts, link, notes,
+      trail.length ? h("details", { class: "tk-trail", open: again ? tk.sheet?.panel.querySelector(".tk-trail")?.open : null },
+        h("summary", null, `History (${trail.length})`), h("ol", null, trail)) : null,
+      actions];
+    if (again && tk.sheet?.kind === "task") {
+      fill(tk.sheet.panel.querySelector(".tk-sheet-body"), body);
+    } else {
+      tkSheet("task", t.id, t.title, body, { label: t.title, big: true });
+    }
+    tk.sheet.history = history;
+  }
+
+  function tkHistoryText(e) {
+    const who = e.by_name || "Someone";
+    if (e.action === "created") return `${who} added it`;
+    if (e.action === "edited") return `${who} changed it`;
+    if (e.action === "deleted") return `${who} deleted it`;
+    if (e.action === "restored") return `${who} put it back`;
+    const to = TK_STATUS[e.to_status]?.name || "?";
+    return e.from_status && (e.from_status === "done" || e.from_status === "wont") && e.to_status === "todo"
+      ? `${who} reopened it` : `${who}: ${TK_STATUS[e.from_status]?.name || "?"} → ${to}`;
+  }
+
+  async function tkDelete(t) {
+    if (!window.confirm(`Delete “${t.title}”? It stays in the bin for 30 days.`)) return;
+    const state = tk;
+    const res = await api("DELETE", `/api/tasks/${t.id}`);
+    if (tk !== state) return;
+    if (res.status !== 200) return void tkFailed(res, "Couldn't delete the task.");
+    tkCloseSheet();
+    toast("Deleted. It's in the bin for 30 days.");
+    state.v = null;
+    tkLoad();
+  }
+
+  async function tkPeople() {
+    if (tk.people) return tk.people;
+    const res = await api("GET", "/api/tasks/people");
+    if (res.status === 200 && tk) tk.people = res.data.people;
+    return tk?.people || [];
+  }
+
+  // The quick task form, or editing a task (t). A title is all it needs; the rest is optional.
+  async function tkOpenForm(t) {
+    const state = tk;
+    if (!state?.data) return;
+    const people = await tkPeople();
+    if (tk !== state) return;
+    const me = state.data.me;
+    const f = t ? { title: t.title, notes: t.notes, dept: t.department_id, who: t.assigned_id,
+      date: t.due_date || "", time: t.due_time || "", urgent: t.priority === "urgent" }
+      : { title: "", notes: "", dept: me.department_id, who: null, date: "", time: "", urgent: false };
+    const title = h("input", { class: "field tk-title-input", type: "text", maxlength: "120", value: f.title,
+      placeholder: "What needs doing?", "aria-label": "Title", enterkeyhint: "done", autocomplete: "off", "data-autofocus": "" });
+    const dept = h("select", { class: "field", "aria-label": "Department" },
+      h("option", { value: "" }, "Everyone"),
+      state.data.departments.map((d) => h("option", { value: String(d.id) }, d.name)));
+    dept.value = f.dept == null ? "" : String(f.dept);
+    const who = h("select", { class: "field", "aria-label": "Given to" });
+    const fillPeople = () => {
+      const chosen = who.value || (f.who == null ? "" : String(f.who));
+      const d = dept.value ? Number(dept.value) : null;
+      const inDept = people.filter((p) => d != null && p.department_id === d);
+      const others = people.filter((p) => !inDept.includes(p));
+      who.replaceChildren(h("option", { value: "" }, "Anyone"),
+        inDept.length ? h("optgroup", { label: state.data.departments.find((x) => x.id === d)?.name || "Department" },
+          inDept.map((p) => h("option", { value: String(p.id) }, p.id === me.id ? `${p.name} (you)` : p.name))) : null,
+        others.length ? h("optgroup", { label: inDept.length ? "Everyone else" : "People" },
+          others.map((p) => h("option", { value: String(p.id) }, p.id === me.id ? `${p.name} (you)` : p.name))) : null);
+      if (t?.assigned_id && !people.some((p) => p.id === t.assigned_id)) {
+        who.append(h("option", { value: String(t.assigned_id) }, t.assigned_name || "Someone"));
+      }
+      who.value = chosen;
+    };
+    fillPeople();
+    dept.addEventListener("change", fillPeople);
+    const dueDate = h("input", { class: "field", type: "date", value: f.date, "aria-label": "Due date" });
+    const dueTime = h("input", { class: "field", type: "time", value: f.time, "aria-label": "Due time", disabled: !f.date });
+    dueDate.addEventListener("input", () => { dueTime.disabled = !dueDate.value; if (!dueDate.value) dueTime.value = ""; });
+    const quick = (label, days) => h("button", { class: "tk-quick-date", type: "button", onclick: () => {
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      dueDate.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      dueDate.dispatchEvent(new Event("input"));
+    } }, label);
+    const urgent = h("button", { class: f.urgent ? "tk-urgent-toggle on" : "tk-urgent-toggle", type: "button",
+      "aria-pressed": f.urgent ? "true" : "false" }, tkIcon("flag"), "Urgent");
+    urgent.addEventListener("click", () => {
+      const on = urgent.getAttribute("aria-pressed") !== "true";
+      urgent.setAttribute("aria-pressed", on ? "true" : "false");
+      urgent.classList.toggle("on", on);
+    });
+    const notes = h("textarea", { class: "field tk-notes-input", rows: "3", maxlength: "4000",
+      placeholder: "Notes (optional)", "aria-label": "Notes" });
+    notes.value = f.notes;
+    const error = h("p", { class: "wb-error", role: "alert", hidden: true });
+    const save = h("button", { class: "btn primary tk-save", type: "submit" }, t ? "Save" : "Add task");
+    const form = h("form", { class: "tk-form", novalidate: true },
+      title,
+      h("div", { class: "tk-form-grid" },
+        h("label", { class: "tk-field" }, h("span", null, "For"), dept),
+        h("label", { class: "tk-field" }, h("span", null, "Given to"), who)),
+      h("div", { class: "tk-field" }, h("span", null, "Due"),
+        h("div", { class: "tk-due" }, dueDate, dueTime),
+        h("div", { class: "tk-quick-dates" }, quick("Today", 0), quick("Tomorrow", 1), urgent)),
+      notes, error,
+      h("div", { class: "tk-sheet-actions" },
+        h("button", { class: "btn", type: "button", onclick: () => tkCloseSheet() }, "Cancel"), save));
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      if (!title.value.trim()) {
+        error.textContent = "Give the task a title.";
+        error.hidden = false;
+        title.setAttribute("aria-invalid", "true");
+        title.focus();
+        return;
+      }
+      save.disabled = true;
+      const body = { title: title.value, notes: notes.value, department_id: dept.value ? Number(dept.value) : null,
+        assigned_id: who.value ? Number(who.value) : null, due_date: dueDate.value, due_time: dueTime.value,
+        priority: urgent.getAttribute("aria-pressed") === "true" ? "urgent" : "normal" };
+      const res = await api(t ? "PUT" : "POST", t ? `/api/tasks/${t.id}` : "/api/tasks", body);
+      if (tk !== state) return;
+      save.disabled = false;
+      if (res.status !== 200) {
+        if (res.status === 400) {
+          error.textContent = res.data.error || "Check the task and try again.";
+          error.hidden = false;
+        } else tkFailed(res, "Couldn't save the task.");
+        return;
+      }
+      tkCloseSheet();
+      tkPut(res.data.task);
+      state.v = null;
+      toast(t ? "Saved." : "Task added.");
+    });
+    tkSheet("form", t?.id ?? null, t ? "Edit task" : "Quick task", form, { label: t ? "Edit task" : "Quick task" });
+  }
+
+  async function tkOpenBin() {
+    const state = tk;
+    const res = await api("GET", "/api/tasks/bin");
+    if (tk !== state) return;
+    if (res.status !== 200) return void tkFailed(res, "The bin couldn't be opened.");
+    const list = res.data.tasks.map((t) => h("li", { class: "tk-bin-row" },
+      h("div", { class: "tk-bin-text" }, h("strong", null, t.title),
+        h("small", null, `Deleted by ${t.deleted_by || "someone"} · ${tkWhen(t.deleted_at)}`)),
+      h("button", { class: "btn", type: "button", onclick: async (ev) => {
+        ev.currentTarget.disabled = true;
+        const put = await api("POST", `/api/tasks/${t.id}/restore`);
+        if (tk !== state) return;
+        if (put.status !== 200) return void tkFailed(put, "Couldn't put it back.");
+        toast("Put back.");
+        state.v = null;
+        await tkLoad();
+        if (tk === state && tk.sheet?.kind === "bin") tkOpenBin();
+      } }, "Put back")));
+    tkSheet("bin", null, "Bin", [
+      h("p", { class: "muted tk-bin-hint" }, `Deleted tasks stay here for ${res.data.days} days.`),
+      list.length ? h("ul", { class: "tk-bin" }, list) : h("p", { class: "muted" }, "The bin is empty.")]);
+  }
 
   // ---------------------------------------------------------------- wiring
 

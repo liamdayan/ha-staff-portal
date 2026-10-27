@@ -394,6 +394,7 @@
       if ((name === "roles" || name === "layout") && !entities) loadEntities();
       if (name === "roles" && wristbandsOn() && !wbDoors) loadDoors();
       if (name === "wristbands") openWristbands();
+      if (name === "tasks") openTasks();
       if (name === "layout") renderLayoutEditor();
       if (name === "backup") loadSafetyBackups();
       if (name === "hr") openHr();
@@ -1610,8 +1611,8 @@
     // wristbands is a nested object, so it's copied in full; undefined (an older add-on) is
     // never sent, which leaves the saved value as it is.
     return role && { kind: "role", id, name: role.name, entities: { ...role.entities }, areas: { ...role.areas },
-      pages: role.layout_pages ?? null, wristbands: clone(role.wristbands), dirty: false, filter: "", area: "",
-      onlySelected: false };
+      pages: role.layout_pages ?? null, wristbands: clone(role.wristbands), manage_tasks: !!role.manage_tasks,
+      dirty: false, filter: "", area: "", onlySelected: false };
   }
 
   function personEditing(id) {
@@ -1945,7 +1946,7 @@
     });
     const { filters, listBox, drawList } = deviceListSection();
     const body = () => ({ name: editing.name, entities: editing.entities, areas: editing.areas,
-      layout_pages: editing.pages, wristbands: editing.wristbands });
+      layout_pages: editing.pages, wristbands: editing.wristbands, manage_tasks: editing.manage_tasks });
 
     const save = h("button", { class: "btn primary", id: "save-role", disabled: !editing.dirty }, "Save role");
     save.addEventListener("click", () => run(async () => {
@@ -1999,10 +2000,25 @@
         markEditing();
       }),
       ...wristbandSection(),
+      ...roleTasksSection(),
       areaSection(drawList),
       deviceFold(filters, listBox));
     updateCount();
     drawList();
+  }
+
+  // Manage tasks: people with this role may edit and delete anyone's tasks they can see.
+  function roleTasksSection() {
+    const box = h("input", { type: "checkbox", checked: editing.manage_tasks });
+    box.addEventListener("change", () => {
+      editing.manage_tasks = box.checked;
+      markEditing();
+    });
+    return [h("h3", { class: "editor-sub" }, "Tasks"),
+      h("label", { class: "check-row role-check" }, box,
+        h("span", null, "Manage tasks",
+          h("small", { class: "hint" }, "Edit and delete anyone's tasks they can see in the staff app, not just " +
+            "their own. Everyone can add tasks and change a task's status.")))];
   }
 
   function renderPersonEditor() {
@@ -2060,6 +2076,130 @@
     updateCount();
     drawList();
   }
+
+  // ---------------------------------------------------------------- tasks from forms
+
+  // Connecteam forms whose new submissions become tasks: where each one's tasks go, which answer
+  // becomes the title, and whether the person who sent it gets the task.
+  let taskForms = null;
+  let ctForms = null;   // Connecteam's forms, once asked for (Choose a form)
+
+  async function openTasks() {
+    try {
+      taskForms = await api("GET", "api/tasks/forms");
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    renderTaskForms();
+  }
+
+  function taskDeptSelect(value, label) {
+    const select = h("select", { "aria-label": label },
+      h("option", { value: "" }, "Everyone"),
+      state.departments.map((d) => h("option", { value: String(d.id) }, d.name)));
+    if (value != null && !state.departments.some((d) => d.id === value)) {
+      select.append(h("option", { value: String(value) }, "A deleted department"));
+    }
+    select.value = value == null ? "" : String(value);
+    return select;
+  }
+
+  function renderTaskForms() {
+    const list = $("#tk-forms");
+    $("#tk-ct-off").hidden = !!taskForms.connecteam;
+    if (!taskForms.forms.length) {
+      list.replaceChildren(h("div", { class: "empty small" }, "No forms yet. Choose one, like a maintenance " +
+        "request or a room inspection, and each new submission becomes a task."));
+      return;
+    }
+    list.replaceChildren(...taskForms.forms.map((f) => taskFormCard(f)));
+  }
+
+  function taskFormStatus(f) {
+    if (f.last_error) return h("p", { class: "hint tk-form-error" }, `Last check ${ago(f.last_check)}: ${f.last_error}`);
+    return h("p", { class: "hint" }, `${f.made} task${f.made === 1 ? "" : "s"} made · ` +
+      (f.last_check ? `checked ${ago(f.last_check).toLowerCase()}` : "not checked yet") +
+      ` · only submissions from ${new Date(f.picked_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })} on`);
+  }
+
+  function taskFormCard(f, isNew) {
+    const dept = taskDeptSelect(f.department_id, `Department for ${f.name}`);
+    const listId = `tk-q-${f.form_id}`;
+    const question = h("input", { type: "text", maxlength: "200", value: f.title_question || "",
+      placeholder: `${f.name}: name of the person who sent it`, list: listId,
+      "aria-label": `Question used as the title for ${f.name}` });
+    const options = h("datalist", { id: listId });
+    const load = h("button", { type: "button", class: "btn subtle" }, "List its questions");
+    load.addEventListener("click", () => run(async () => {
+      load.disabled = true;
+      try {
+        const { questions } = await api("GET", `api/tasks/forms/${encodeURIComponent(f.form_id)}/questions`);
+        options.replaceChildren(...questions.map((q) => h("option", { value: q })));
+        if (!questions.length) return toast("No submissions in the last month to read questions from.");
+        question.focus();
+      } finally {
+        load.disabled = false;
+      }
+    }));
+    const assign = h("input", { type: "checkbox", checked: !!f.assign_submitter });
+    const save = h("button", { type: "button", class: "btn primary" }, isNew ? "Start making tasks" : "Save");
+    save.addEventListener("click", () => run(async () => {
+      const { forms } = await api("PUT", `api/tasks/forms/${encodeURIComponent(f.form_id)}`, {
+        name: f.name, department_id: dept.value ? Number(dept.value) : null,
+        title_question: question.value, assign_submitter: assign.checked });
+      taskForms.forms = forms;
+      renderTaskForms();
+    }, isNew ? `New submissions of ${f.name} now become tasks.` : "Saved."));
+    const remove = h("button", { type: "button", class: "btn danger" }, isNew ? "Cancel" : "Stop");
+    remove.addEventListener("click", () => run(async () => {
+      if (isNew) return renderTaskForms();
+      if (!await askConfirm(`Stop making tasks from ${f.name}? Tasks already made stay.`, "Stop")) return false;
+      const { forms } = await api("DELETE", `api/tasks/forms/${encodeURIComponent(f.form_id)}`);
+      taskForms.forms = forms;
+      renderTaskForms();
+    }, isNew ? null : "Stopped."));
+    return h("div", { class: "card tk-form-card" },
+      h("div", { class: "tk-form-head" }, h("strong", null, f.name), h("span", { class: "badge" }, `Form ${f.form_id}`)),
+      isNew ? h("p", { class: "hint" }, "Only submissions sent from now on become tasks.") : taskFormStatus(f),
+      h("div", { class: "row" },
+        h("label", null, "Tasks go to", dept),
+        h("label", null, h("span", null, "Title ", h("small", null, "The answer to this question. Blank: form name and who sent it.")),
+          question, options)),
+      h("div", { class: "tk-form-tools" }, load),
+      h("label", { class: "check-row" }, assign,
+        h("span", null, "Give the task to the person who sent it",
+          h("small", null, "When they're linked to Connecteam here. Otherwise it's for anyone in the department."))),
+      h("div", { class: "card-actions" }, remove, save));
+  }
+
+  $("#tk-add-form").addEventListener("click", () => run(async () => {
+    const pick = $("#tk-pick");
+    const button = $("#tk-add-form");
+    button.disabled = true;
+    try {
+      ctForms = (await api("GET", "api/connecteam/forms")).forms;
+    } finally {
+      button.disabled = false;
+    }
+    const chosen = new Set(taskForms.forms.map((f) => f.form_id));
+    const left = ctForms.filter((f) => !chosen.has(f.id));
+    if (!left.length) return toast(ctForms.length ? "Every form is chosen already." : "Connecteam has no forms yet.");
+    const select = h("select", { "aria-label": "Connecteam form" }, left.map((f) => h("option", { value: f.id }, f.name || `Form ${f.id}`)));
+    const next = h("button", { type: "button", class: "btn primary" }, "Next");
+    const cancel = h("button", { type: "button", class: "btn subtle" }, "Cancel");
+    const reset = () => pick.replaceChildren(button);
+    cancel.addEventListener("click", reset);
+    next.addEventListener("click", () => {
+      const form = left.find((f) => f.id === select.value);
+      reset();
+      $("#tk-forms").querySelector(".empty")?.remove();
+      $("#tk-forms").prepend(taskFormCard({ form_id: form.id, name: form.name || `Form ${form.id}`,
+        department_id: null, title_question: "", assign_submitter: 0 }, true));
+    });
+    pick.replaceChildren(h("label", { class: "inline-select" }, "Form", select), next, cancel);
+    select.focus();
+  }));
 
   // A page choice in words ("Tubs, Pool staff (group), More"; "" for none).
   function choiceNames(choice) {

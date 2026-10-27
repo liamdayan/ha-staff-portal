@@ -48,6 +48,7 @@ from db import (ACTIVITY_MAX_ROWS, CARD_STATES, LOCKOUT_METHODS, LOCKOUT_STATUSE
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
+import tasks as task_rules
 from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean_permissions,
                         door_kind, permission_choice)
 
@@ -430,7 +431,7 @@ def export_roles(db, version: str) -> dict:
          "areas": {area_names[a]: lvl for a, lvl in r["areas"].items() if a in area_names},
          "pages": _page_names(layout, r["layout_pages"]),
          # Door IDs are TT Hotel's own, the same on any system using the same TT Hotel account.
-         "wristbands": r["wristbands"]}
+         "wristbands": r["wristbands"], "manage_tasks": bool(r["manage_tasks"])}
         for r in db.roles()])
 
 
@@ -515,10 +516,12 @@ def _import_roles(db, rows: list, mode: str) -> dict:
         # Files from before roles had pages (or wristbands) leave a replaced role's as they are.
         pages = _page_ids(layout, raw["pages"], result["missing_pages"]) if "pages" in raw else _KEEP
         wristbands = _stored_wristbands(raw["wristbands"]) if "wristbands" in raw else _KEEP
+        manage_tasks = (1 if raw["manage_tasks"] in (1, True) else 0) if "manage_tasks" in raw else _KEEP
         if match and mode == "replace":
             _write_role(db, match["id"], match["name"], entities, areas)
             _write_pages(db, "roles", match["id"], pages)
             _write_wristbands(db, "roles", match["id"], wristbands)
+            _write_manage_tasks(db, match["id"], manage_tasks)
             result["replaced"] += 1
             continue
         if match:
@@ -526,6 +529,7 @@ def _import_roles(db, rows: list, mode: str) -> dict:
         role_id = _write_role(db, None, name, entities, areas)
         _write_pages(db, "roles", role_id, pages)
         _write_wristbands(db, "roles", role_id, wristbands)
+        _write_manage_tasks(db, role_id, manage_tasks)
         existing[name.lower()] = {"id": role_id, "name": name}
         result["added"] += 1
     result["missing_areas"] = sorted(result["missing_areas"])
@@ -550,6 +554,12 @@ def _write_wristbands(db, table: str, row_id: int, stored) -> None:
     assert table in ("roles", "staff")
     if stored is not _KEEP:
         db.conn.execute(f"UPDATE {table} SET wristbands = ? WHERE id = ?", (stored, row_id))
+
+
+def _write_manage_tasks(db, role_id: int, manage) -> None:
+    """Set whether a role may Manage tasks, without committing (_KEEP: leave it)."""
+    if manage is not _KEEP:
+        db.conn.execute("UPDATE roles SET manage_tasks = ? WHERE id = ?", (manage, role_id))
 
 
 def import_staff(db, data, mode: str) -> dict:
@@ -780,7 +790,7 @@ def make_backup(db, branding, version: str) -> dict:
         areas=rows("SELECT id, name, sort_order, created_at FROM areas"),
         area_entities=rows("SELECT area_id, entity_id FROM area_entities"),
         area_ha_areas=rows("SELECT area_id, ha_area_id FROM area_ha_areas"),
-        roles=rows("SELECT id, name, created_at, layout_pages, wristbands FROM roles"),
+        roles=rows("SELECT id, name, created_at, layout_pages, wristbands, manage_tasks FROM roles"),
         role_entities=rows("SELECT role_id, entity_id, level FROM role_entities"),
         role_areas=rows("SELECT role_id, area_id, level FROM role_areas"),
         devices=rows("""SELECT id, name, kind, role_id, status, token_hash, pin_hash, signin_mode,
@@ -799,8 +809,26 @@ def make_backup(db, branding, version: str) -> dict:
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
         wristband_doors=rows("SELECT lock_id, name, hidden, kind FROM wb_doors"),
+        tasks=tasks_section(db),
         **log_sections(db),
     )
+
+
+def tasks_section(db) -> dict:
+    """Tasks (with their history, the bin too), the forms that make them and the submissions
+    already seen, as a backup carries them (tasks.clean_backup_section reads them back)."""
+    rows = lambda sql, *args: [dict(r) for r in db.conn.execute(sql, args)]
+    newest = "SELECT id FROM tasks ORDER BY id DESC LIMIT ?"
+    return {
+        "tasks": rows(f"SELECT * FROM tasks WHERE id IN ({newest}) ORDER BY id", task_rules.MAX_TASKS),
+        "history": rows(f"""SELECT task_id, at, by_id, by_name, action, from_status, to_status
+                            FROM task_history WHERE task_id IN ({newest}) ORDER BY id DESC LIMIT ?""",
+                        task_rules.MAX_TASKS, task_rules.MAX_HISTORY)[::-1],
+        "forms": rows("""SELECT form_id, name, department_id, title_question, assign_submitter,
+                         picked_at, last_ok FROM task_forms"""),
+        "seen": [list(r) for r in db.conn.execute(
+            "SELECT form_id, submission_id FROM task_form_seen ORDER BY seen_at DESC LIMIT ?",
+            (task_rules.MAX_HISTORY,))]}
 
 
 def log_sections(db) -> dict:
@@ -898,7 +926,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
         # Backups from before wristbands have none: roles make none, people follow their role.
         roles.append({"id": role_id, "name": name, "created_at": _time(row.get("created_at"), time.time()),
                       "layout_pages": _stored_pages(row.get("layout_pages")),
-                      "wristbands": _stored_wristbands(row.get("wristbands"))})
+                      "wristbands": _stored_wristbands(row.get("wristbands")),
+                      # Backups from before tasks: no one manages tasks.
+                      "manage_tasks": 1 if row.get("manage_tasks") in (1, True) else 0})
     role_ids = {r["id"] for r in roles}
     role_entities = {(r["role_id"], r["entity_id"]): _level(r["entity_id"], r["level"])
                      for r in _rows(data, "role_entities", MAX_LINK_ROWS)
@@ -1054,6 +1084,8 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             "staff_entities": staff_entities, "staff_areas": staff_areas,
             "phone_orders": phone_orders, "wristband_doors": wristband_doors,
             "departments": departments, "needs_setup": needs_setup,
+            # Backups from before tasks have none: None leaves the ones here as they are.
+            "tasks": task_rules.clean_backup_section(data.get("tasks"), time.time()),
             "logs": clean_logs(data),
             "exported_at": _time(data.get("exported_at"), time.time())}
 
