@@ -18,7 +18,7 @@ from test_migrate_and_backup_logs import Fresh
 from test_reports_server import go, setup, share  # noqa: F401 - setup is a fixture
 from test_staffcards_server import FLOOR_ONE, FakeConnecteam, by_name, connecteam_on, ct_user, sync
 from test_tasks import Tasks
-from test_wristbands_server import Portal, run
+from test_wristbands_server import Portal, fake_area_layout, fake_states, run
 
 import main  # noqa: E402
 import transfer  # noqa: E402
@@ -508,3 +508,128 @@ def test_the_hr_portal_leaves_hidden_groups_out():
             return {"8": "Pool"}
     assert hr_server.departments_list(Service()) == [{"group": "5", "name": "Front Desk"},
                                                      {"group": "8", "name": "Pool"}]
+
+
+# ---------------------------------------------------------------- start page per department
+
+LAYOUT = {"pages": [{"id": "lobby", "name": "Lobby", "items": []},
+                    {"id": "pool", "name": "Pool", "items": []}], "show_unplaced": True}
+
+
+def test_start_page_comes_from_the_first_department_that_sets_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "area_layout", fake_area_layout)
+    monkeypatch.setattr(main.ha, "states", fake_states)
+
+    async def scenario():
+        p = Portal(tmp_path)
+        p.db.set_layout(LAYOUT)
+        leaves = p.db.create_department("Female", smart_group_id="3")
+        desk = p.db.create_department("Front Desk", start_page="page:pool")
+        house = p.db.create_department("Housekeeping", start_page="tool:tasks")
+        p.db.update_staff(p.ana, department_ids=[house, leaves, desk])
+        shown = {"pages": [{"id": "lobby"}, {"id": "pool"}]}
+        offered = {"tasks": True, "reports": False, "wristbands": False}
+        async with p:
+            ana = p.db.staff(p.ana)
+            # Female leaves it alone; Front Desk is above Housekeeping.
+            assert main.start_for(ana, shown, offered) == {"page": "pool"}
+            # Hidden, it gives nothing: the next one that sets one counts.
+            p.db.update_department(desk, hidden=1)
+            assert main.start_for(ana, shown, offered) == {"tool": "tasks"}
+            p.db.update_department(desk, hidden=0)
+            # A page or tool they can't see here: as always (not the next department's).
+            assert main.start_for(ana, {"pages": [{"id": "lobby"}]}, offered) is None
+            p.db.update_department(desk, start_page="tool:reports")
+            assert main.start_for(ana, shown, offered) is None
+            assert main.start_for(ana, shown, {**offered, "reports": True}) == {"tool": "reports"}
+            assert main.start_for(None, shown, offered) is None
+            # The staff app is told, with their data: Tasks (Front Desk's Pool page isn't one of
+            # Ana's pages on this computer, so Housekeeping's doesn't count either).
+            who = await p.sign_in(p.ana)
+            status, body = await p.call("GET", "/api/entities", who)
+            assert status == 200 and body["start"] is None
+            p.db.update_department(desk, start_page=None)
+            status, body = await p.call("GET", "/api/entities", who)
+            assert body["start"] == {"tool": "tasks"}
+            # Set from the dashboard: pages of the layout and the three tools only.
+            for bad in ("page:gone", "tool:settings", "lobby", 5):
+                status, reply = await p.admin_call("PUT", f"/api/departments/{house}", {"start_page": bad})
+                assert status == 400, bad
+            assert (await p.admin_call("PUT", f"/api/departments/{house}", {"start_page": "page:lobby"}))[0] == 200
+            assert (await p.admin_call("PUT", f"/api/departments/{house}", {"start_page": None}))[0] == 200
+            assert p.db.department(house)["start_page"] is None
+    run(scenario())
+
+
+def test_a_removed_start_page_is_left_alone(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        p.db.set_layout(LAYOUT)
+        desk = p.db.create_department("Front Desk", start_page="page:pool")
+        house = p.db.create_department("Housekeeping", start_page="tool:tasks")
+        p.db.update_staff(p.ana, department_ids=[desk, house])
+        shown = {"pages": [{"id": "lobby"}, {"id": "pool"}]}
+        async with p:
+            p.db.set_layout({**LAYOUT, "pages": LAYOUT["pages"][:1]})   # Pool deleted
+            # Front Desk now leaves it alone, so Housekeeping's counts.
+            assert main.start_for(p.db.staff(p.ana), shown, {"tasks": True}) == {"tool": "tasks"}
+            status, state = await p.admin_call("GET", "/api/state")
+            flags = {d["name"]: d["start_page_removed"] for d in state["departments"]}
+            assert flags == {"Front Desk": True, "Housekeeping": False}
+            # Saving the department unchanged keeps it; it can't be picked anew.
+            assert (await p.admin_call("PUT", f"/api/departments/{desk}", {"name": "Desk",
+                                                                          "start_page": "page:pool"}))[0] == 200
+            assert (await p.admin_call("PUT", f"/api/departments/{house}", {"start_page": "page:pool"}))[0] == 400
+    run(scenario())
+
+
+def test_start_pages_in_backups_and_files(tmp_path):
+    async def scenario():
+        p = Portal(tmp_path)
+        p.db.set_layout(LAYOUT)
+        desk = p.db.create_department("Front Desk", start_page="page:pool")
+        async with p:
+            status, backup = await p.admin_call("GET", "/api/backup")
+            assert backup["departments"][0]["start_page"] == "page:pool"
+            p.db.update_department(desk, start_page=None)
+            assert (await p.admin_call("POST", "/api/restore", {"backup": backup}))[0] == 200
+            assert p.db.department(desk)["start_page"] == "page:pool"
+            # Damaged, or from before start pages: left alone.
+            backup["departments"][0]["start_page"] = "<b>x</b>"
+            assert (await p.admin_call("POST", "/api/restore", {"backup": backup}))[0] == 200
+            assert p.db.department(desk)["start_page"] is None
+            p.db.update_department(desk, start_page="tool:reports")
+            file = transfer.export_departments(p.db, main.VERSION)
+            assert file["departments"][0]["start_page"] == "tool:reports"
+            p.db.update_department(desk, start_page=None)
+            transfer.import_departments(p.db, file, "replace")
+            assert p.db.department(desk)["start_page"] == "tool:reports"
+    run(scenario())
+
+
+def test_a_choice_made_in_this_sign_in_beats_the_start_page(tmp_path):
+    """The staff app's startChoice, run in node: the start page opens once per sign-in, never over
+    a page or tool chosen in it, and only when it can be opened."""
+    import os
+    import re
+    import shutil
+    import subprocess
+    import pytest
+    if not shutil.which("node"):
+        pytest.skip("no node")
+    here = os.path.dirname(os.path.abspath(__file__))
+    source = open(os.path.join(here, "..", "app", "staff", "app.js"), encoding="utf-8").read()
+    fn = re.search(r"  function startChoice\(.*?\n  }\n", source, re.S).group(0)
+    script = fn + """
+const eq = (a, b, what) => { if (JSON.stringify(a) !== JSON.stringify(b)) { console.error(what, JSON.stringify(a)); process.exit(1); } };
+const tools = ["tasks"], pages = ["lobby", "pool"];
+eq(startChoice({ page: "pool" }, null, "s1", tools, pages), { page: "pool" }, "first time in this sign-in");
+eq(startChoice({ page: "pool" }, "s1", "s1", tools, pages), null, "chosen (or applied) in this sign-in");
+eq(startChoice({ page: "pool" }, "s1", "s2", tools, pages), { page: "pool" }, "the next person's sign-in");
+eq(startChoice({ tool: "tasks" }, "device", "s3", tools, pages), { tool: "tasks" }, "a tool");
+eq(startChoice({ tool: "reports" }, null, "s4", tools, pages), null, "a tool not offered");
+eq(startChoice({ page: "gone" }, null, "s5", tools, pages), null, "a page not here");
+eq(startChoice(null, null, "s6", tools, pages), null, "none set");
+"""
+    done = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr

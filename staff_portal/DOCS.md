@@ -991,6 +991,9 @@ Maintenance…). Each one has:
   clocked in to sign in), **Doesn't need to clock in**, or **Each person's own setting**. Someone
   whose own setting you've changed by hand keeps theirs (see **Clocking in, by department or
   person** in [the Connecteam section](#add-everyone-from-connecteam)).
+- **Start page**: where the staff app opens when someone in it signs in (a page of the layout,
+  Tasks, Reports or Wristbands), from the first of their departments that sets one, unless it's
+  something they can't see there or they already opened something else since signing in.
 - **Key card**: what a key card made with **Make key card** opens (every door, whole buildings,
   whole floors or single doors, like a staff card), how many days it lasts, and whether it opens
   doors that are deadbolted from inside.

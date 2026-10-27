@@ -1249,6 +1249,7 @@ async def api_entities(request: web.Request):
         phone_layout = apply_phone_order(phone_layout, order)
     else:
         entities = apply_auto_order(entities, order)
+    offer_reports = bool(visible_reports(member))
     return web.json_response({
         "entities": entities,
         "layout": phone_layout,
@@ -1265,9 +1266,13 @@ async def api_entities(request: web.Request):
         "encoder_local": offer_wristbands and encoder_mode(device) == "local",
         # Whether to offer Reports: someone signed in may see at least one (each report checks
         # again on every request).
-        "reports": bool(visible_reports(member)),
+        "reports": offer_reports,
         # Tasks: for anyone signed in with their own PIN (each request checks again).
         "tasks": bool(member),
+        # Their department's start page, for the app to open at sign-in (unless something was
+        # already chosen in this sign-in).
+        "start": start_for(member, phone_layout, {"wristbands": offer_wristbands,
+                                                  "reports": offer_reports, "tasks": bool(member)}),
     })
 
 
@@ -3369,8 +3374,11 @@ def departments_view(ordered: list[dict] | None = None) -> list[dict]:
     Connecteam has in it, when known (from the last smart group list read; this never asks
     Connecteam)."""
     groups = connecteam.known_groups()
+    ids = layout_page_ids()
     return [{**d, "smart_group_name": (groups.get(d["smart_group_id"]) or {}).get("name"),
-             "smart_group_users": (groups.get(d["smart_group_id"]) or {}).get("users")}
+             "smart_group_users": (groups.get(d["smart_group_id"]) or {}).get("users"),
+             # Its start page was a layout page that's been deleted: it's left alone now.
+             "start_page_removed": bool(d["start_page"]) and not start_page_alive(d["start_page"], ids)}
             for d in (db.departments() if ordered is None else ordered)]
 
 
@@ -4321,7 +4329,42 @@ def clean_department(data: dict, current: dict | None) -> dict:
         fields["card_lockout"] = 1 if data["card_lockout"] in (True, 1, "1", "on") else 0
     if "clock_in" in data:
         fields["clock_in"] = transfer.clock_in_rule(data["clock_in"])
+    if "start_page" in data:
+        fields["start_page"] = transfer.start_page(data["start_page"])
+        if (fields["start_page"] or "").startswith("page:") and fields["start_page"] != (
+                current or {}).get("start_page") and not start_page_alive(fields["start_page"]):
+            raise ValueError("That page isn't in the layout any more. Choose another.")
     return fields
+
+
+def layout_page_ids() -> set[str]:
+    return {str(p.get("id")) for p in db.layout().get("pages", []) if isinstance(p, dict)}
+
+
+def start_page_alive(value: str | None, page_ids: set[str] | None = None) -> bool:
+    """Whether a department's start page is still there: a tool always is; a layout page until
+    it's deleted (then the department leaves the start page alone)."""
+    if not value or not value.startswith("page:"):
+        return bool(value)
+    return value[5:] in (layout_page_ids() if page_ids is None else page_ids)
+
+
+def start_for(member: dict | None, phone_layout: dict | None, offered: dict) -> dict | None:
+    """Where the staff app opens for this person ({"page": id} or {"tool": name}): the start
+    page of the first of their departments that sets one (hidden ones and removed pages left
+    out). None when none does, or it's a page or tool they can't see here: the app opens as
+    it always has. offered: {tool: whether it's offered}."""
+    if not member:
+        return None
+    ids = layout_page_ids()
+    dept = db.giving_department(member, "start_page", keep=lambda v: start_page_alive(v, ids))
+    if not dept:
+        return None
+    kind, _, name = dept["start_page"].partition(":")
+    if kind == "tool":
+        return {"tool": name} if offered.get(name) else None
+    pages = (phone_layout or {}).get("pages") or []
+    return {"page": name} if any(p.get("id") == name for p in pages) else None
 
 
 # What a department's clock-in rule says, for the activity log.

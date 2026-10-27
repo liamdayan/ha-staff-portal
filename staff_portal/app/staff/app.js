@@ -622,6 +622,10 @@
   // ("wristbands", "tasks" or "reports"), or null.
   const view = { pageId: session.get("page"), detail: null,
     tool: ["wristbands", "tasks", "reports"].includes(session.get("tool")) ? session.get("tool") : null };
+  // The sign-in a page or tool was last chosen in (or the start page applied in): a department's
+  // start page opens once per sign-in, and never over something chosen in it.
+  const START_KEY = "start_for";
+  const signInMark = () => session.get(SESSION_KEY) || "device";
   let lastData = null;
 
   // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
@@ -695,9 +699,32 @@
     return shown;
   }
 
+  // Where to open: their department's start page (the server sends it only when they can see
+  // it), once per sign-in (mark), and never over a page or tool chosen in it (chosenIn: the
+  // sign-in the last choice was made in). One they can't open here: null, as it always was.
+  function startChoice(start, chosenIn, mark, tools, pageIds) {
+    if (!start || chosenIn === mark) return null;
+    if (start.tool && tools.includes(start.tool)) return { tool: start.tool };
+    if (start.page && pageIds.includes(start.page)) return { page: start.page };
+    return null;
+  }
+
   function render(data) {
     data.entities = data.entities.map(withExpected);
     lastData = data;
+    // Their department's start page, once per sign-in.
+    const start = startChoice(data.start, session.get(START_KEY), signInMark(), toolsFor(data),
+      (data.layout?.pages || []).map((p) => p.id));
+    session.set(START_KEY, signInMark());
+    if (start?.tool) {
+      view.tool = start.tool;
+      session.set("tool", start.tool);
+    } else if (start?.page) {
+      view.tool = null;
+      session.del("tool");
+      view.pageId = start.page;
+      session.set("page", start.page);
+    }
     lock.enabled = !!data.control_lock;
     lock.minutes = data.control_lock_minutes || 10;
     const byId = new Map(data.entities.map((e) => [e.entity_id, e]));
@@ -1062,6 +1089,7 @@
     view.pageId = id;
     view.detail = null;
     session.set("page", id);
+    session.set(START_KEY, signInMark());
     history.replaceState(null, "", "/");
     window.scrollTo(0, 0);
     rerender();
@@ -1188,6 +1216,7 @@
     view.tool = name;
     view.detail = null;
     session.set("tool", name);
+    session.set(START_KEY, signInMark());
     history.replaceState(null, "", "/");
     window.scrollTo(0, 0);
     rerender();

@@ -455,6 +455,9 @@ MIGRATIONS = {
         # 1 = hidden: it gives nothing (no role, key card, clock-in rule, reports or tasks), it's
         # in no list to pick from, and the sync never makes it again. Its people stay in it.
         "hidden": "INTEGER NOT NULL DEFAULT 0",
+        # The staff app's start page for people in it: "page:<layout page ID>" or "tool:tasks",
+        # "tool:reports", "tool:wristbands"; NULL = left alone (the first page, as always).
+        "start_page": "TEXT",
     },
 }
 
@@ -610,10 +613,10 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
 STAFF_OFF = ("disabled", "archived")
 STAFF_ON = "status NOT IN ('disabled', 'archived')"
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
-                     "card_lockout", "clock_in", "group_named", "group_gone", "hidden"}
+                     "card_lockout", "clock_in", "group_named", "group_gone", "hidden", "start_page"}
 # What a department may give its people. Each comes from the first of their departments, in the
 # Staff tab's order, that sets it (Database.giving_department); hidden ones give nothing.
-DEPARTMENT_GIVES = ("role_id", "card_access", "clock_in")
+DEPARTMENT_GIVES = ("role_id", "card_access", "clock_in", "start_page")
 # Connecteam's own smart groups for everyone: their departments are made hidden (by name,
 # ignoring capitals), and installs from before hiding hide theirs once.
 BUILT_IN_GROUPS = ("all users group", "all admins group")
@@ -1063,18 +1066,20 @@ class Database:
         return [d["id"] for d in (self.departments() if ordered is None else ordered)
                 if d["id"] in mine and not d["hidden"]]
 
-    def giving_department(self, member: dict, what: str,
-                          ordered: list[dict] | None = None) -> dict | None:
-        """The department this person gets `what` from (role_id, card_access or clock_in): the
-        first of theirs, in the Staff tab's order, that sets it. Hidden ones are skipped, and so
-        is one whose role was deleted. Their own settings, set by hand, are the caller's."""
+    def giving_department(self, member: dict, what: str, ordered: list[dict] | None = None,
+                          keep=None) -> dict | None:
+        """The department this person gets `what` from (role_id, card_access, clock_in or
+        start_page): the first of theirs, in the Staff tab's order, that sets it. Hidden ones are
+        skipped, and so is one whose role was deleted (or whose value keep(value) turns down: a
+        start page that was removed). Their own settings, set by hand, are the caller's."""
         assert what in DEPARTMENT_GIVES
         mine = set(department_list(member.get("department_ids")))
         roles = ({r[0] for r in self.conn.execute("SELECT id FROM roles")}
                  if what == "role_id" else None)
         return next((d for d in (self.departments() if ordered is None else ordered)
                      if d["id"] in mine and not d["hidden"] and d[what] is not None
-                     and (roles is None or d[what] in roles)), None)
+                     and (roles is None or d[what] in roles) and (keep is None or keep(d[what]))),
+                    None)
 
     def department_clock_ins(self) -> dict[int, int]:
         """{department ID: its clock-in rule} for the departments that set one (1 or 0) and
@@ -1691,11 +1696,11 @@ class Database:
                 c.executemany(
                     """INSERT INTO departments (id, name, sort_order, smart_group_id, role_id,
                        card_access, card_days, card_lockout, created_at, clock_in, group_named,
-                       group_gone, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       group_gone, hidden, start_page) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [(d["id"], d["name"], d["sort_order"], d["smart_group_id"], d["role_id"],
                       d["card_access"], d["card_days"], d["card_lockout"], d["created_at"],
                       d.get("clock_in"), d.get("group_named", 0), d.get("group_gone", 0),
-                      d.get("hidden", 0))
+                      d.get("hidden", 0), d.get("start_page"))
                      for d in snap["departments"]])
             else:
                 by_name = {r["name"].casefold(): r["id"] for r in snap["roles"]}

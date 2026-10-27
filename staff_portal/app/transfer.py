@@ -222,6 +222,29 @@ def clean_card_access(raw) -> list[dict] | None:
     return cleaned
 
 
+START_TOOLS = ("tasks", "reports", "wristbands")
+START_PAGE_RE = re.compile(r"^page:[A-Za-z0-9_-]{1,32}$")   # a layout page's ID (layout.ID_RE)
+
+
+def start_page(value) -> str | None:
+    """A department's start page: "page:<ID>" or "tool:<name>", or None (left alone). Raises
+    ValueError for anything else."""
+    if value in (None, ""):
+        return None
+    value = str(value)
+    if START_PAGE_RE.match(value) or value in {f"tool:{t}" for t in START_TOOLS}:
+        return value
+    raise ValueError("Choose a start page from the list.")
+
+
+def _file_start_page(value) -> str | None:
+    """A start page from a file: damaged means left alone."""
+    try:
+        return start_page(value)
+    except ValueError:
+        return None
+
+
 def hidden_by_default(name: str, group, role_id, card_access, clock_in) -> int:
     """Whether a department from a file from before hiding is hidden: Connecteam's groups for
     everyone are, while they follow their smart group and give nothing (as db hides them once)."""
@@ -499,7 +522,7 @@ def export_departments(db, version: str) -> dict:
          "card_access": d["card_access"], "card_days": d["card_days"],
          "card_lockout": bool(d["card_lockout"]),
          "clock_in": None if d["clock_in"] is None else bool(d["clock_in"]),
-         "hidden": bool(d["hidden"])}
+         "hidden": bool(d["hidden"]), "start_page": d["start_page"]}
         for d in db.departments()])
 
 
@@ -780,6 +803,9 @@ def _import_departments(db, rows: list, mode: str) -> dict:
             if hidden is not None:
                 db.conn.execute("UPDATE departments SET hidden = ? WHERE id = ?",
                                 (hidden, match["id"]))
+            if "start_page" in raw:
+                db.conn.execute("UPDATE departments SET start_page = ? WHERE id = ?",
+                                (_file_start_page(raw["start_page"]), match["id"]))
             dept_id = match["id"]
             result["replaced"] += 1
         else:
@@ -789,11 +815,12 @@ def _import_departments(db, rows: list, mode: str) -> dict:
                 "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM departments").fetchone()[0]
             dept_id = db.conn.execute(
                 """INSERT INTO departments (name, sort_order, smart_group_id, role_id, card_access,
-                   card_days, card_lockout, created_at, clock_in, hidden)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   card_days, card_lockout, created_at, clock_in, hidden, start_page)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (name, order, *values, time.time(), clock_in,
                  hidden if hidden is not None else hidden_by_default(name, group, role_id,
-                                                                    values[2], clock_in))).lastrowid
+                                                                    values[2], clock_in),
+                 _file_start_page(raw.get("start_page")))).lastrowid
             existing[name.lower()] = {"id": dept_id, "name": name, "smart_group_id": group}
             result["added"] += 1
         if group:
@@ -841,7 +868,7 @@ def make_backup(db, branding, version: str) -> dict:
                       department_set FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
                             card_days, card_lockout, created_at, clock_in, group_named,
-                            group_gone, hidden FROM departments"""),
+                            group_gone, hidden, start_page FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
@@ -1009,7 +1036,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                 # Backups from before hiding: Connecteam's groups for everyone are hidden, as
                 # an install from then hides its own once.
                 "hidden": (1 if row["hidden"] in (1, True) else 0) if "hidden" in row
-                else hidden_by_default(name, group, role_id, card_access, clock_in)})
+                else hidden_by_default(name, group, role_id, card_access, clock_in),
+                # Backups from before start pages: left alone.
+                "start_page": _file_start_page(row.get("start_page"))})
     department_ids = {d["id"] for d in departments or []}
     flag = lambda value: 1 if value in (1, True) else 0
 

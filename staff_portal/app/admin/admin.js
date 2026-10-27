@@ -4362,14 +4362,24 @@
     const twin = d.smart_group_id && known(d) && state.departments.some((x) => x.id !== d.id
       && x.smart_group_id && known(x) === known(d));
     const users = smartGroups?.find((g) => g.id === d.smart_group_id)?.users ?? d.smart_group_users;
+    const start = d.start_page && !d.start_page_removed ? `Start page: ${startPageName(d.start_page)}` : null;
     const sets = [role ? `Role: ${role.name}` : null,
       d.card_access == null ? null : `Key card: ${accessSummary(d.card_access)}, ${plural(d.card_days, "day")}` +
         (d.card_lockout ? ", opens deadbolted doors" : ""),
-      d.clock_in == null ? null : d.clock_in ? "Clock-in required" : "No clock-in needed"].filter(Boolean);
+      d.clock_in == null ? null : d.clock_in ? "Clock-in required" : "No clock-in needed", start].filter(Boolean);
     return [people(d.staff_count || 0),
       d.smart_group_id ? `Connecteam: ${name}` + (twin ? ` (group ${d.smart_group_id}` +
         (users == null ? ")" : `, ${people(users)} there)`) : "") : "Added by hand",
-      ...(sets.length ? sets : ["Sets nothing"])].join(" · ");
+      ...(sets.length ? sets : ["Sets nothing"]),
+      d.start_page_removed ? "Start page: (removed page)" : null].filter(Boolean).join(" · ");
+  }
+
+  // A department's start page ("page:<id>" or "tool:<name>") as the owner knows it.
+  const START_TOOLS = { tasks: "Tasks", reports: "Reports", wristbands: "Wristbands" };
+  function startPageName(value) {
+    const [kind, id] = [value.slice(0, value.indexOf(":")), value.slice(value.indexOf(":") + 1)];
+    if (kind === "tool") return START_TOOLS[id] || id;
+    return (state.layout?.pages || []).find((p) => p.id === id)?.name || "(removed page)";
   }
 
   // Hidden smart groups stay folded under the list unless opened (kept open while this page is).
@@ -4461,6 +4471,13 @@
     form.elements["name"].value = d ? d.name : "";
     fillRoleOptions(form.elements["role_id"], d ? d.role_id : null, "Leave their role as it is");
     form.elements["clock_in"].value = d?.clock_in == null ? "" : String(Number(d.clock_in));
+    // Start page: left alone, a page of the layout, or a tool.
+    const startSelect = form.elements["start_page"];
+    startSelect.replaceChildren(h("option", { value: "" }, "Left alone (their first page)"),
+      ...(state.layout?.pages || []).map((p) => h("option", { value: `page:${p.id}` }, p.name)),
+      ...Object.entries(START_TOOLS).map(([id, name]) => h("option", { value: `tool:${id}` }, name)),
+      d?.start_page_removed ? h("option", { value: d.start_page }, "(removed page): left alone") : null);
+    startSelect.value = d?.start_page || "";
 
     // Smart groups come from Connecteam (cached by the add-on for hours), only when asked for.
     const groupSelect = form.elements["smart_group_id"];
@@ -4542,6 +4559,7 @@
       const body = { name, smart_group_id: groupSelect.value || null,
         role_id: form.elements["role_id"].value ? Number(form.elements["role_id"].value) : null,
         clock_in: form.elements["clock_in"].value === "" ? null : form.elements["clock_in"].value === "1",
+        start_page: startSelect.value || null,
         card_access: hasCard.checked ? access : null };
       if (hasCard.checked) {
         body.card_days = days;
