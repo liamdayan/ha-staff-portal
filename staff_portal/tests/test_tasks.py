@@ -594,23 +594,96 @@ def test_forms_through_the_real_ctdata_and_the_reports_lane(tmp_path):
 def test_form_checks_stay_within_their_share_of_the_reports_lane():
     """Checks look back an hour before the last good one, not a day, so one page usually does;
     and they're spread out as forms are added, so all of them stay under FORM_DAILY_REQUESTS a
-    day (under a third of the lane) however many are chosen."""
+    day (half of the lane) however many are chosen."""
     import connecteam
     zone = ZoneInfo("America/Los_Angeles")
     now = 1_800_000_000
     form = {"picked_at": now - 5 * 86400, "last_ok": now - 600}
     assert tasks.form_range(form, now, zone)[0].timestamp() == now - 600 - 3600
     assert tasks.form_range({**form, "last_ok": None}, now, zone)[0].timestamp() == now - 5 * 86400
-    assert tasks.FORM_DAILY_REQUESTS <= 0.3 * connecteam.REPORTS_DAILY_CAP
+    assert tasks.FORM_DAILY_REQUESTS == 1500 and tasks.FORM_DAILY_REQUESTS <= 0.5 * connecteam.REPORTS_DAILY_CAP
+    plan = tasks.CHECK_PLAN
     for count in range(1, tasks.MAX_FORMS + 1):
-        every = tasks.form_interval(count)
-        assert every >= tasks.FORM_CHECK_SECONDS and every % 60 == 0
-        assert count * 86400 / every <= tasks.FORM_DAILY_REQUESTS
-    assert [tasks.form_interval(n) // 60 for n in (1, 2, 3, 7, 50)] == [10, 10, 15, 34, 240]
-    assert tasks.form_requests_a_day(0) == 0 and tasks.form_requests_a_day(1) == 144
-    # Due by the stretched interval: with 7 forms, 10 minutes isn't enough.
-    assert not tasks.form_due({"last_check": now - 601}, now, 7)
-    assert tasks.form_due({"last_check": now - 34 * 60}, now, 7) and tasks.form_due({}, now, 7)
+        busy, quiet = tasks.check_minutes(count, plan)
+        assert busy >= plan["busy"] and quiet >= plan["quiet"]
+        assert tasks.form_requests_a_day(count, plan) <= tasks.FORM_DAILY_REQUESTS
+    # 1 or 2 a round: the plan as set. More: both stretched alike (whole minutes).
+    assert [tasks.check_minutes(n) for n in (1, 2, 7, 8, 50)] == [(3, 30), (3, 30), (3, 30), (4, 34), (21, 210)]
+    assert tasks.form_requests_a_day(0) == 0 and tasks.form_requests_a_day(1) == 210
+    assert tasks.form_requests_a_day(2) == 420 and tasks.form_requests_a_day(2, extra=24) == 444
+    # Due by the interval at the time.
+    assert not tasks.form_due({"last_check": now - 170}, now, 180)
+    assert tasks.form_due({"last_check": now - 180}, now, 180) and tasks.form_due({}, now, 180)
+
+
+def test_checks_follow_business_hours_in_the_propertys_zone():
+    """Every 3 minutes from 9 AM to 6 PM where the property is, every 30 outside; the Tasks tab's
+    settings are kept and checked, and hours may run past midnight."""
+    plan = tasks.CHECK_PLAN
+    assert plan == {"start": "09:00", "end": "18:00", "busy": 3, "quiet": 30}
+    pacific = ZoneInfo("America/Los_Angeles")
+    at = lambda h, m=0: datetime(2026, 10, 27, h, m, tzinfo=pacific)
+    assert [tasks.form_interval(2, plan, at(h, m)) // 60 for h, m in
+            ((8, 59), (9, 0), (12, 0), (17, 59), (18, 0), (23, 0), (3, 0))] == [30, 3, 3, 3, 30, 30, 30]
+    assert tasks.form_interval(2, plan) == 180   # no time given: business hours
+    # Its own times.
+    late = {"start": "22:00", "end": "06:00", "busy": 5, "quiet": 60}
+    assert [tasks.form_interval(1, late, at(h)) // 60 for h in (23, 2, 6, 12)] == [5, 5, 60, 60]
+    assert tasks.form_requests_a_day(1, late) == 8 * 12 + 16
+    # What's typed.
+    assert tasks.clean_check_plan({"start": "07:30", "end": "19:00", "busy": "5", "quiet": 45}) == {
+        "start": "07:30", "end": "19:00", "busy": 5, "quiet": 45}
+    for bad in ({"start": "9", "end": "18:00", "busy": 3, "quiet": 30},
+                {"start": "09:00", "end": "09:00", "busy": 3, "quiet": 30},
+                {"start": "09:00", "end": "18:00", "busy": 0, "quiet": 30},
+                {"start": "09:00", "end": "18:00", "busy": 3, "quiet": 241},
+                {"start": "09:00", "end": "18:00", "busy": 2.5, "quiet": 30},
+                {"start": "09:00", "end": "18:00", "busy": True, "quiet": 30}, None):
+        with pytest.raises(tasks.TaskError):
+            tasks.clean_check_plan(bad)
+    assert tasks.check_plan("") == tasks.check_plan("{bad") == tasks.check_plan(None) == plan
+    assert tasks.check_plan(json.dumps(late)) == late
+
+
+def test_the_checks_run_on_the_schedule_set_on_the_tasks_tab(tmp_path, monkeypatch):
+    """A form is checked every 3 minutes in Pacific business hours and every 30 outside them (by
+    the property's clock, not the add-on's), and the Tasks tab's schedule is what counts."""
+    import ctsync
+    async def scenario():
+        p = Tasks(tmp_path)
+        ct = FakeCt(monkeypatch)
+        p.db.update_settings({"connecteam_enabled": "1", "wb_time_zone": "America/Los_Angeles"})
+        pacific = ZoneInfo("America/Los_Angeles")
+        async with p:
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Maintenance"})
+            clock = [datetime(2026, 10, 27, 10, 0, tzinfo=pacific).timestamp()]
+            monkeypatch.setattr(main.time, "time", lambda: clock[0])
+
+            async def checks(minutes, step):
+                ct.calls.clear()
+                p.db.conn.execute("UPDATE task_forms SET last_check = ?", (clock[0] - 3600,))
+                for _ in range(minutes // step):
+                    await main.check_task_forms()
+                    clock[0] += step * 60
+                return len([c for c in ct.calls if c[0] == "55"])
+            assert ctsync.check_every(1, clock[0]) == 180
+            assert await checks(30, 1) == 10          # 10:00 to 10:30 PT: every 3 minutes
+            clock[0] = datetime(2026, 10, 27, 19, 0, tzinfo=pacific).timestamp()
+            assert ctsync.check_every(1, clock[0]) == 1800
+            assert await checks(90, 1) == 3           # 7 PM to 8:30 PM: every 30
+            # 6 PM there is 1 AM UTC: still out of hours by the property's clock.
+            assert ctsync.check_every(1, datetime(2026, 10, 28, 1, 0, tzinfo=timezone.utc).timestamp()) == 1800
+            # The owner's own schedule.
+            status, body = await p.admin_call("PUT", "/api/tasks/schedule",
+                                              {"start": "18:00", "end": "23:00", "busy": 10, "quiet": 60})
+            assert status == 200 and body["schedule"] == {"start": "18:00", "end": "23:00", "busy": 10, "quiet": 60}
+            assert (body["check_minutes"], body["quiet_minutes"]) == (10, 60)
+            assert await checks(60, 1) == 6           # 8:30 PM to 9:30 PM: every 10 now
+            status, body = await p.admin_call("PUT", "/api/tasks/schedule", {"start": "18:00", "end": "18:00",
+                                                                             "busy": 10, "quiet": 60})
+            assert status == 400 and "different time" in body["error"]
+            assert p.db.activity()[0]["action"] == "Changed when tasks are checked in Connecteam"
+    run(scenario())
 
 
 def test_the_dashboard_says_what_form_checks_cost(tmp_path, monkeypatch):
@@ -619,12 +692,17 @@ def test_the_dashboard_says_what_form_checks_cost(tmp_path, monkeypatch):
         FakeCt(monkeypatch)
         async with p:
             status, body = await p.admin_call("GET", "/api/tasks/forms")
-            assert (body["check_minutes"], body["requests_a_day"], body["lane_a_day"]) == (10, 0, 2000)
+            assert (body["check_minutes"], body["quiet_minutes"], body["requests_a_day"], body["lane_a_day"],
+                    body["checks_a_day"]) == (3, 30, 0, 3000, 1500)
+            assert body["schedule"] == {"start": "09:00", "end": "18:00", "busy": 3, "quiet": 30}
             for form_id in ("55", "56", "57"):
                 status, body = await p.admin_call("PUT", f"/api/tasks/forms/{form_id}", {"name": form_id})
-            assert (body["check_minutes"], body["requests_a_day"]) == (15, 288)
-            status, body = await p.admin_call("DELETE", "/api/tasks/forms/57")
-            assert (body["check_minutes"], body["requests_a_day"]) == (10, 288)
+            assert (body["check_minutes"], body["quiet_minutes"], body["requests_a_day"]) == (3, 30, 630)
+            for form_id in range(60, 68):
+                status, body = await p.admin_call("PUT", f"/api/tasks/forms/{form_id}", {"name": str(form_id)})
+            # 11 forms: spread out to stay within 1,500 a day.
+            assert (body["check_minutes"], body["quiet_minutes"]) == (5, 47)
+            assert body["requests_a_day"] <= 1500
     run(scenario())
 
 

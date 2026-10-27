@@ -3273,9 +3273,10 @@ async def api_restore_task(request: web.Request):
     return web.json_response({"ok": True})
 
 
-# Tasks from Connecteam forms: every form chosen on the dashboard is checked every 10 minutes, or
-# less often as more are chosen (tasks.form_interval), through ctdata in the reports lane of the
-# Connecteam budget. Nothing is asked while no form is chosen.
+# Tasks from Connecteam forms: every form chosen on the dashboard is checked on the Tasks tab's
+# schedule (every 3 minutes in business hours and 30 outside them, or less often as more are
+# chosen: ctsync.check_every), through ctdata in the reports lane of the Connecteam budget.
+# Nothing is asked while no form is chosen.
 tasks_purged = [0.0]
 
 
@@ -3283,8 +3284,8 @@ async def check_task_forms(force: bool = False) -> int:
     """Turn new submissions of the chosen forms into tasks. Returns how many were made."""
     now = time.time()
     chosen = db.task_forms()
-    weight = ctsync.poll_weight(chosen)
-    forms = [f for f in chosen if force or tasks.form_due(f, now, weight)]
+    every = ctsync.check_every(ctsync.poll_weight(chosen), now)
+    forms = [f for f in chosen if force or tasks.form_due(f, now, every)]
     if not forms:
         return 0
     if not connecteam_settings()[0]:
@@ -3301,8 +3302,9 @@ async def check_task_forms(force: bool = False) -> int:
     for form in forms:
         start, end = tasks.form_range(form, now, zone)
         follow = tasks.follow_of(form)
-        if follow:   # a followed form reads back FORM_LOOKBACK_DAYS, a month at a time, afresh
-            start = datetime.fromtimestamp(now - tasks.FORM_LOOKBACK_DAYS * 86400, zone).date()
+        if follow:   # a followed form reads back to its oldest open task, afresh
+            start = datetime.fromtimestamp(tasks.follow_since(
+                form, now, db.oldest_open_submission(form["form_id"])), zone)
             ctdata.forget_submissions(form["form_id"])
         read_at = time.time()
         try:
@@ -5689,6 +5691,8 @@ def clean_settings(data: dict, current: dict) -> dict:
     for key in BOOL_SETTINGS:
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
+    if "task_checks" in data:   # from a backup (the Tasks tab saves it on its own)
+        values["task_checks"] = json.dumps(tasks.check_plan(data["task_checks"]))
     if "tunnel_addresses" in data:
         values["tunnel_addresses"] = ", ".join(parse_tunnel_addresses(data["tunnel_addresses"]))
     if "connecteam_region" in data:
@@ -7837,18 +7841,19 @@ def task_forms_view() -> list[dict]:
 
 
 def task_forms_body() -> dict:
-    """The chosen forms, and what checking them and the Connecteam boards costs: how often, and
-    about how many of the reports lane's Connecteam requests a day (they share
-    tasks.FORM_DAILY_REQUESTS), and the task sync's state."""
-    weight = ctsync.poll_weight(db.task_forms())
+    """The chosen forms, and what checking them and the Connecteam boards costs: the schedule,
+    how often (in business hours and outside them), and about how many of the reports lane's
+    Connecteam requests a day (they share tasks.FORM_DAILY_REQUESTS), and the task sync's state."""
+    weight, plan, extra = ctsync.poll_weight(db.task_forms()), ctsync.plan(), ctsync.extra_a_day()
+    busy, quiet = tasks.check_minutes(weight, plan, extra)
     departments = task_departments()
     sync = ctsync.status()
     sync["boards"] = [{**b, "department": "Everyone" if b["department_id"] is None
                        else departments.get(b["department_id"], "Old department")}
                       for b in sync["boards"]]
-    return {"forms": task_forms_view(), "check_minutes": tasks.form_interval(weight) // 60,
-            "requests_a_day": tasks.form_requests_a_day(weight),
-            "checks_a_day": tasks.FORM_DAILY_REQUESTS,
+    return {"forms": task_forms_view(), "schedule": plan, "check_minutes": busy, "quiet_minutes": quiet,
+            "requests_a_day": tasks.form_requests_a_day(weight, plan, extra),
+            "checks_a_day": tasks.FORM_DAILY_REQUESTS, "zone": str(report_zone()),
             "lane_a_day": connecteam_module.REPORTS_DAILY_CAP, "sync": sync}
 
 
@@ -7912,6 +7917,19 @@ async def admin_save_task_sync(request: web.Request):
     db.log(admin_name(request), "Turned on the Connecteam task sync" if data.get("enabled") is True
            else "Turned off the Connecteam task sync",
            detail=", ".join(b["name"] or b["board_id"] for b in ctsync.boards()))
+    return web.json_response(task_forms_body())
+
+
+async def admin_save_task_schedule(request: web.Request):
+    """When forms and boards are checked: business hours and how often in and outside them."""
+    data = await read_json(request)
+    try:
+        plan = tasks.clean_check_plan(data)
+    except tasks.TaskError as err:
+        return bad_request(str(err))
+    db.update_settings({"task_checks": json.dumps(plan)})
+    db.log(admin_name(request), "Changed when tasks are checked in Connecteam",
+           detail=f"{plan['start']} to {plan['end']}: every {plan['busy']} min; otherwise every {plan['quiet']} min")
     return web.json_response(task_forms_body())
 
 
@@ -7988,6 +8006,7 @@ def admin_app() -> web.Application:
     app.router.add_get("/api/tasks/sync", admin_task_sync)
     app.router.add_put("/api/tasks/sync", admin_save_task_sync)
     app.router.add_get("/api/tasks/sync/boards", admin_task_sync_boards)
+    app.router.add_put("/api/tasks/schedule", admin_save_task_schedule)
     app.router.add_post("/api/tasks/sync/test", admin_test_task_sync)
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)

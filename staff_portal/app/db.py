@@ -343,6 +343,10 @@ MIGRATIONS = {
         # A task from a form sent to several departments: all of them (JSON list, the first also
         # in department_id). NULL: just department_id (tasks.departments_of).
         "department_ids": "TEXT",
+        "submitted_at": "REAL",          # a form task: when its submission was sent (NULL: unknown)
+    },
+    "task_ct_boards": {
+        "drafts_read": "REAL",           # its drafts were last listed at (ctsync.DRAFT_EVERY)
     },
     "task_history": {
         "note": "TEXT",                  # where a change came from ("in Connecteam")
@@ -596,6 +600,8 @@ DEFAULT_SETTINGS = {
     "ct_tasks_on": "0",
     "ct_tasks_note": "",
     "ct_tasks_usage": "{}",
+    # When forms and boards are checked (JSON {start, end, busy, quiet}; "": tasks.CHECK_PLAN).
+    "task_checks": "",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -1303,7 +1309,7 @@ class Database:
     # Columns a new task may also be given (a form's or Connecteam's): its own status, and the
     # Connecteam sync's.
     TASK_EXTRAS = ("ct_task_id", "ct_board_id", "ct_sync", "ct_status", "photos", "manager_note",
-                   "department_ids")
+                   "department_ids", "submitted_at")
 
     def add_task(self, fields: dict, by: dict | None, at: float, commit: bool = True,
                  note: str | None = None) -> int:
@@ -1381,7 +1387,8 @@ class Database:
     def set_task_form(self, form_id: str, fields: dict, now: float) -> None:
         """Choose a form, or change its settings (fields: tasks.clean_form's). A form chosen now
         only makes tasks from submissions sent from now on; changing its settings doesn't move
-        that."""
+        that. Following a field (or another) starts afresh: the next check reads the whole month
+        back (tasks.follow_since)."""
         ids = tasks.departments_of(fields)
         self.conn.execute(
             """INSERT INTO task_forms (form_id, name, department_id, department_ids, title_question,
@@ -1389,7 +1396,8 @@ class Database:
                ON CONFLICT (form_id) DO UPDATE SET name = excluded.name,
                department_id = excluded.department_id, department_ids = excluded.department_ids,
                title_question = excluded.title_question,
-               assign_submitter = excluded.assign_submitter, follow = excluded.follow""",
+               assign_submitter = excluded.assign_submitter, follow = excluded.follow,
+               last_ok = CASE WHEN task_forms.follow IS excluded.follow THEN task_forms.last_ok END""",
             (form_id, fields["name"], ids[0] if ids else None, json.dumps(ids),
              fields["title_question"], fields["assign_submitter"], now, fields.get("follow")))
         self.conn.commit()
@@ -1413,6 +1421,14 @@ class Database:
     def delete_task_form(self, form_id: str) -> None:
         self.conn.execute("DELETE FROM task_forms WHERE form_id = ?", (form_id,))
         self.conn.commit()
+
+    def oldest_open_submission(self, form_id: str) -> float | None:
+        """When the oldest submission of a form whose task is still open was sent (0 when one's
+        time isn't known; None when none is open)."""
+        row = self.conn.execute(
+            "SELECT COUNT(*), MIN(COALESCE(submitted_at, 0)) FROM tasks WHERE form_id = ? AND "
+            "source = 'form' AND deleted_at IS NULL AND status IN ('todo', 'doing')", (form_id,)).fetchone()
+        return row[1] if row[0] else None
 
     def task_form_checked(self, form_id: str, now: float, error: str | None) -> None:
         self.conn.execute(
@@ -1729,7 +1745,7 @@ class Database:
                    "assigned_name", "due_date", "due_time", "priority", "status", "status_at", "status_by", "created_at",
                    "created_by_id", "created_by_name", "source", "form_id", "form_name",
                    "submission_id", "source_url", "updated_at", "deleted_at", "deleted_by",
-                   "ct_task_id", "ct_board_id", "ct_status", "photos", "manager_note")
+                   "ct_task_id", "ct_board_id", "ct_status", "photos", "manager_note", "submitted_at")
         c.executemany(f"INSERT INTO tasks ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
                       [tuple(t.get(k) for k in columns) for t in section["tasks"]])
         c.executemany("""INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status,

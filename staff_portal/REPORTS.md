@@ -174,7 +174,8 @@ Shared classes in the app's styles, light and dark: `rp-card`, `rp-toolbar`, `rp
 ## 4. The rules
 
 - **Budget.** Connecteam is only asked through `ctx.ct`, which has its own lane (shared with
-  tasks from forms): at most 40 requests a minute and 2,000 a day, none once Staff Access has used
+  tasks from forms and boards): at most 40 requests a minute and 3,000 a day (tasks plan about 1,500
+  of them), none once Staff Access has used
   half its daily share, and never the clock checks' last 10 of a minute. When the minute is full,
   `ctx.ct` waits for room (up to about a minute) rather than failing. Ask for the range the person
   is looking at, not more. Never ask Connecteam (or anything else) directly, and don't fetch

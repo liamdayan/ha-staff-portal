@@ -28,7 +28,7 @@ as it can:
 - The list of time clocks and the user list are cached.
 - Hard caps of its own, counted across restarts: MINUTE_CAP requests a minute and DAILY_CAP a
   day (never more than DAILY_SHARE of the account's daily limit, so the account's other
-  integrations always keep the other half).
+  integrations always keep the rest: 1,000 a day on Expert).
 - It reads Connecteam's x-ratelimit headers and pauses when the account (not just this add-on)
   is running low, honors 429s with exponential backoff, and backs off after errors.
 - A refused key or permission (401 or 403, after one try with a fresh token) stops automatic
@@ -54,11 +54,12 @@ Staff Access has used REPORTS_STOP_SHARE of its daily cap. A refusal raises Repo
 "too many requests" pauses only that lane (reports_too_many); the clock checks carry on.
 
 How the shares add up (Expert: 100 a minute and 10,000 a day for the whole account): Staff
-Access takes at most 60 a minute and 5,000 a day. Inside that, the HR lane takes at most 6 a
-minute and 500 a day and the reports lane 40 a minute and 2,000 a day; both stop once Staff
-Access has used half of its day, and together they never take the last CLOCK_MINUTE_KEEP (10)
-of a minute. So the clock checks always have at least 10 a minute and 2,500 a day, and the
-account's other integrations keep 40 a minute and 5,000 a day.
+Access takes at most 60 a minute and 9,000 a day (the owner's choice). Inside that, the HR lane
+takes at most 6 a minute and 500 a day and the reports lane (reports, and tasks: their checks are
+planned at about 1,500 a day, with at most 200 changes sent) 40 a minute and 3,000 a day; both
+stop once Staff Access has used half of its day, and together they never take the last
+CLOCK_MINUTE_KEEP (10) of a minute. So the clock checks always have at least 10 a minute and
+4,500 a day, and the account's other integrations keep 40 a minute and 1,000 a day.
 """
 
 import asyncio
@@ -80,8 +81,8 @@ STALE_MARGIN = 15 * 60       # trust the last answer this long past the next che
 FORCE_GAP = 30               # an on-demand check (sign-in or control) at most this often
 SKIP_WINDOW = 20 * 60        # an on-demand check this close before an hourly check replaces it
 MINUTE_CAP = 60              # requests a minute, at most (Expert allows 100 for the whole account)
-DAILY_CAP = 5000             # requests a day, at most...
-DAILY_SHARE = 0.5            # ...and never more than this share of the account's daily limit
+DAILY_CAP = 9000             # requests a day, at most...
+DAILY_SHARE = 0.9            # ...and never more than this share of the account's daily limit
 POLL_SHARE = 0.15            # ...of which regular checks are planned to use at most this much
 DEFAULT_DAY_LIMIT = 10_000   # Expert plan, until Connecteam's headers say otherwise
 LOW_DAY_SHARE = 0.10         # pause when the account has less than this share left today
@@ -100,7 +101,7 @@ HR_MINUTE_CAP = 6            # the HR portal's lane: requests a minute...
 HR_DAILY_CAP = 500           # ...and a day...
 HR_STOP_SHARE = 0.5          # ...and none once Staff Access has used this share of its daily cap
 REPORTS_MINUTE_CAP = 40      # reports and tasks (ctdata.py): requests a minute...
-REPORTS_DAILY_CAP = 2000     # ...and a day...
+REPORTS_DAILY_CAP = 3000     # ...and a day...
 REPORTS_STOP_SHARE = 0.5     # ...and none once Staff Access has used this share of its daily cap
 CLOCK_MINUTE_KEEP = 10       # HR and reports together never take the last this many of a minute
 FIELDS_TTL = 24 * 3600       # how long the list of profile fields (custom fields) is reused

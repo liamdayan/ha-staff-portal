@@ -437,10 +437,13 @@ def test_dates_follow_the_property_zone_across_midnight(tmp_path):
 
 
 def test_the_lane_maths_leaves_the_clock_checks_room(tmp_path):
-    """Reports (40 a minute, 2,000 a day) and HR (6 and 500) fit inside Staff Access's 60 and
-    5,000, and together never take the clock checks' last 10 of a minute."""
-    assert (connecteam.REPORTS_MINUTE_CAP, connecteam.REPORTS_DAILY_CAP) == (40, 2000)
-    assert (connecteam.MINUTE_CAP, connecteam.DAILY_CAP) == (60, 5000)
+    """Reports and tasks (40 a minute, 3,000 a day) and HR (6 and 500) fit inside Staff Access's 60
+    and 9,000, stop at half of its day (so the clock checks keep 4,500), and together never take
+    the clock checks' last 10 of a minute."""
+    assert (connecteam.REPORTS_MINUTE_CAP, connecteam.REPORTS_DAILY_CAP) == (40, 3000)
+    assert (connecteam.MINUTE_CAP, connecteam.DAILY_CAP) == (60, 9000)
+    assert connecteam.DAILY_CAP * (1 - connecteam.REPORTS_STOP_SHARE) >= 4500
+    assert connecteam.HR_STOP_SHARE <= 0.5 and connecteam.REPORTS_STOP_SHARE <= 0.5
     assert connecteam.CLOCK_MINUTE_KEEP >= 10
     assert connecteam.REPORTS_MINUTE_CAP <= connecteam.MINUTE_CAP - connecteam.CLOCK_MINUTE_KEEP
     assert (connecteam.REPORTS_DAILY_CAP + connecteam.HR_DAILY_CAP

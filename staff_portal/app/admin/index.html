@@ -392,12 +392,31 @@
         <p class="hint">Each new submission of a form chosen here becomes one task, with its answers in the
           notes, for each department you tick (or Everyone). Only submissions sent after you choose a form
           become tasks, and none becomes a task twice. Changing a form's departments moves its open tasks too.</p>
-        <p class="hint" id="tk-cost"></p>
         <p class="hint" id="tk-ct-off" hidden>Turn on Connecteam in <button class="linkish" type="button"
           data-goto="settings" data-open-conn="conn-connecteam">Settings → Connections</button> first.</p>
         <div id="tk-forms" class="cards"></div>
         <div class="tk-pick" id="tk-pick">
           <button class="btn" type="button" id="tk-add-form">Choose a form</button>
+        </div>
+      </fieldset>
+      <fieldset id="tk-schedule">
+        <legend>Checking Connecteam</legend>
+        <p class="hint">How often the forms above and the synced boards are checked for new and changed
+          tasks: often in business hours, less often the rest of the day. Times are in <span id="tk-zone">the
+          property's time zone</span>.</p>
+        <div class="row">
+          <label>Business hours start <input type="time" id="tk-start" required></label>
+          <label>Business hours end <input type="time" id="tk-end" required></label>
+        </div>
+        <div class="row">
+          <label>In business hours <small>Minutes between checks</small>
+            <input type="number" id="tk-busy" min="1" max="240" step="1" required></label>
+          <label>Outside business hours <small>Minutes between checks</small>
+            <input type="number" id="tk-quiet" min="1" max="240" step="1" required></label>
+        </div>
+        <p class="hint" id="tk-cost"></p>
+        <div class="card-actions">
+          <button class="btn primary" type="button" id="tk-schedule-save">Save</button>
         </div>
       </fieldset>
     </div>
@@ -731,7 +750,7 @@
                 in, plus once when someone the last check didn't find clocked in signs in or uses a control (that
                 check replaces the next scheduled one if it's within 20 minutes of it). Reading never checks. With
                 one time clock that's about 24 requests a day plus a few at the start of shifts. Staff Access never
-                uses more than 30 a minute and 5,000 a day (half of your daily limit), and pauses on its own if
+                uses more than 60 a minute and 9,000 a day (90% of your daily limit), and pauses on its own if
                 your account runs low. The HR portal reads its people through this connection, inside that: at
                 most 6 a minute and 500 a day, and none once Staff Access has used half of its day, so clock checks
                 always have room.</p>

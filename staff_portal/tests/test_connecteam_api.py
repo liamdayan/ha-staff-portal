@@ -420,14 +420,22 @@ def test_the_accounts_own_limits_pause_everyone(monkeypatch):
 
 
 def test_the_caps_and_how_the_shares_add_up():
+    """9,000 a day for Staff Access (the owner's choice, of Expert's 10,000), and the lanes inside it."""
     ct = Connecteam(lambda: (True, "a", "b", "global", 60), lambda: True, (dict, lambda u: None), "t")
-    assert ct.daily_cap() == 5000                     # Expert: 10,000 a day
+    assert ct.daily_cap() == 9000                     # Expert: 10,000 a day, 1,000 left for others
     ct.limits["day_limit"] = 20_000
-    assert ct.daily_cap() == 5000                     # Enterprise: still 5,000
+    assert ct.daily_cap() == 9000                     # Enterprise: still 9,000
     ct.limits["day_limit"] = 100
-    assert ct.daily_cap() == 50                       # SBP: half of 100
-    assert connecteam.MINUTE_CAP == 60 and connecteam.DAILY_CAP == 5000
-    reports = (4, 300)                                # the reports lane planned for 0.11.0
-    assert connecteam.MINUTE_CAP - connecteam.HR_MINUTE_CAP - reports[0] >= 20
-    assert connecteam.DAILY_CAP - connecteam.HR_DAILY_CAP - reports[1] >= 4200
+    assert ct.daily_cap() == 90                       # SBP: 90% of 100
+    assert connecteam.MINUTE_CAP == 60 and connecteam.DAILY_CAP == 9000
+    assert 10_000 - connecteam.DAILY_CAP >= 1000      # the account's other integrations
+    # HR and reports stop at half of the day, so the clock checks keep at least 4,500; both lanes
+    # fit under that half together.
+    half = connecteam.DAILY_CAP * max(connecteam.HR_STOP_SHARE, connecteam.REPORTS_STOP_SHARE)
+    assert connecteam.DAILY_CAP - half >= 4500
+    assert connecteam.HR_DAILY_CAP + connecteam.REPORTS_DAILY_CAP <= half
+    assert (connecteam.MINUTE_CAP - connecteam.HR_MINUTE_CAP - connecteam.REPORTS_MINUTE_CAP
+            >= connecteam.CLOCK_MINUTE_KEEP)
     assert connecteam.MINUTE_CAP <= 100 - connecteam.LOW_MINUTE_LEFT - 30   # the account keeps room
+    # The clock checks' own plan (15% of the account's day) fits in what's left to them.
+    assert connecteam.DEFAULT_DAY_LIMIT * connecteam.POLL_SHARE <= connecteam.DAILY_CAP - half

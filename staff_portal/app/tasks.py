@@ -32,13 +32,18 @@ MAX_QUESTION = 200
 BIN_DAYS = 30            # deleted tasks can be put back for this long
 KEEP_FINISHED_DAYS = 365 # finished tasks are kept this long, then dropped
 LIST_FINISHED_DAYS = 2   # the staff app lists finished tasks from this far back (they stay kept)
-FORM_CHECK_SECONDS = 600 # each form chosen on the dashboard is checked this often, at most...
-FORM_DAILY_REQUESTS = 300  # ...and all of them together ask about this many times a day (under a
-                         # third of the reports lane's 1,000), so the checks are spread out more
-                         # as forms are added: up to 2 forms every 10 minutes, 5 every 24
+# When forms and boards are checked: business hours (from start to end, in the property's time
+# zone) every `busy` minutes, other times every `quiet` minutes. Set on the dashboard's Tasks tab.
+CHECK_PLAN = {"start": "09:00", "end": "18:00", "busy": 3, "quiet": 30}
+MIN_CHECK_MINUTES = 1
+MAX_CHECK_MINUTES = 240
+FORM_DAILY_REQUESTS = 1500  # all checks together are planned to ask about this many times a day at
+                         # most (the reports lane has 3,000): more forms or boards stretch both
+                         # intervals alike. 1 board and 1 form: about 444 a day
 FORM_OVERLAP = 3600      # a check looks back this far before the last good one (a submission
                          # sent from a phone that was offline arrives late)
 FORM_LOOKBACK_DAYS = 31  # the most a check reaches back (after the add-on was off a while)
+FOLLOW_RECENT_DAYS = 2   # a followed form with nothing open reads back this far for new ones
 MAX_FORMS = 50
 MAX_FORM_DEPARTMENTS = 50  # a form's departments
 MAX_PHOTOS = 20          # photo links kept on a task
@@ -355,7 +360,8 @@ def task_from_submission(form: dict, sub: dict, staff_by_ct: dict[str, dict],
             "assigned_name": person["name"][:MAX_NAME] if person else None,
             "due_date": None, "due_time": None, "priority": "normal",
             "source": "form", "form_id": form["form_id"], "form_name": form["name"],
-            "submission_id": str(sub.get("id"))[:80], "source_url": clean_url(sub.get("url"))}
+            "submission_id": str(sub.get("id"))[:80], "source_url": clean_url(sub.get("url")),
+            "submitted_at": when}
 
 
 def clean_url(value) -> str | None:
@@ -377,20 +383,98 @@ def form_range(form: dict, now: float, zone) -> tuple[datetime, date]:
     return datetime.fromtimestamp(since, zone), datetime.fromtimestamp(now, zone).date()
 
 
-def form_interval(count: int) -> int:
-    """Seconds between a form's checks when `count` forms make tasks: every 10 minutes, or
-    longer so that all of them stay within FORM_DAILY_REQUESTS a day (whole minutes)."""
-    spread = -(-max(count, 1) * 86400 // FORM_DAILY_REQUESTS)
-    return max(FORM_CHECK_SECONDS, -(-spread // 60) * 60)
+def follow_since(form: dict, now: float, oldest: float | None) -> float:
+    """How far back a followed form's check reads (a Unix time): to the oldest of its tasks still
+    open (oldest: when it was sent; 0 when one's time isn't known), or FOLLOW_RECENT_DAYS for new
+    ones when none is, and FORM_OVERLAP before the last good check after a gap; never more than
+    FORM_LOOKBACK_DAYS. Its first check (or the first after following changed) reads them all, so
+    every open submission of the last month becomes a task. So a check is usually one request."""
+    floor = now - FORM_LOOKBACK_DAYS * 86400
+    if not form.get("last_ok"):
+        return floor
+    since = min(now - FOLLOW_RECENT_DAYS * 86400, form["last_ok"] - FORM_OVERLAP)
+    if oldest is not None:
+        since = min(since, oldest - FORM_OVERLAP)
+    return max(floor, since)
 
 
-def form_requests_a_day(count: int) -> int:
-    """About how many Connecteam requests the checks make a day (one page each)."""
-    return round(count * 86400 / form_interval(count)) if count else 0
+def _clock(text) -> int | None:
+    """"HH:MM" as minutes after midnight (None when it isn't a time)."""
+    text = str(text or "").strip()
+    if not TIME_RE.match(text):
+        return None
+    return int(text[:2]) * 60 + int(text[3:])
 
 
-def form_due(form: dict, now: float, count: int = 1) -> bool:
-    return now - (form.get("last_check") or 0) >= form_interval(count)
+def clean_check_plan(data) -> dict:
+    """The check schedule typed on the Tasks tab. Raises TaskError."""
+    if not isinstance(data, dict):
+        raise TaskError("Set when to check Connecteam.")
+    start, end = _clock(data.get("start")), _clock(data.get("end"))
+    if start is None or end is None:
+        raise TaskError("Business hours need a start and an end time.")
+    if start == end:
+        raise TaskError("Business hours must end at a different time than they start.")
+    plan = {"start": str(data["start"]).strip(), "end": str(data["end"]).strip()}
+    for key, name in (("busy", "In business hours"), ("quiet", "Outside business hours")):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip().isdigit():
+            value = int(value.strip())
+        if type(value) is not int or not MIN_CHECK_MINUTES <= value <= MAX_CHECK_MINUTES:
+            raise TaskError(f"{name}: check every {MIN_CHECK_MINUTES} to {MAX_CHECK_MINUTES} minutes.")
+        plan[key] = value
+    return plan
+
+
+def check_plan(raw) -> dict:
+    """The stored schedule (JSON), or CHECK_PLAN when there's none or it's damaged."""
+    try:
+        return clean_check_plan(json.loads(raw) if isinstance(raw, str) else raw)
+    except (TaskError, TypeError, ValueError):
+        return dict(CHECK_PLAN)
+
+
+def in_hours(plan: dict, local: datetime) -> bool:
+    """Whether a local time (the property's) is in business hours. An end before the start
+    runs past midnight."""
+    start, end, now = _clock(plan["start"]), _clock(plan["end"]), local.hour * 60 + local.minute
+    return start <= now < end if start < end else (now >= start or now < end)
+
+
+def _hours_minutes(plan: dict) -> int:
+    return (_clock(plan["end"]) - _clock(plan["start"])) % 1440
+
+
+def check_minutes(count: int, plan: dict = CHECK_PLAN, extra: int = 0) -> tuple[int, int]:
+    """Minutes between checks (in business hours, outside them) when a round of checks takes
+    `count` requests: the plan's, or both stretched alike (whole minutes) so that all of them,
+    with `extra` requests a day on top, stay within FORM_DAILY_REQUESTS."""
+    hours = _hours_minutes(plan)
+    rounds = hours / plan["busy"] + (1440 - hours) / plan["quiet"]
+    stretch = max(1.0, max(count, 1) * rounds / max(1, FORM_DAILY_REQUESTS - extra))
+    return -int(-plan["busy"] * stretch // 1), -int(-plan["quiet"] * stretch // 1)
+
+
+def form_interval(count: int, plan: dict = CHECK_PLAN, local: datetime | None = None,
+                  extra: int = 0) -> int:
+    """Seconds between a form's (or board's) checks at a local time (the property's; None: in
+    business hours)."""
+    busy, quiet = check_minutes(count, plan, extra)
+    return 60 * (busy if local is None or in_hours(plan, local) else quiet)
+
+
+def form_requests_a_day(count: int, plan: dict = CHECK_PLAN, extra: int = 0) -> int:
+    """About how many Connecteam requests the checks make a day (count each round), extra too."""
+    if not count:
+        return 0
+    busy, quiet = check_minutes(count, plan, extra)
+    hours = _hours_minutes(plan)
+    return round(count * (hours / busy + (1440 - hours) / quiet)) + extra
+
+
+def form_due(form: dict, now: float, every: int) -> bool:
+    """Whether a form is due: `every` seconds since its last check (form_interval's)."""
+    return now - (form.get("last_check") or 0) >= every
 
 
 # ---------------------------------------------------------------- tasks in backups
@@ -501,7 +585,8 @@ def clean_backup_section(raw, now: float) -> dict | None:
             "ct_status": str(row.get("ct_status") or "")[:80] if CT_ID_RE.match(
                 str(row.get("ct_status") or "")) else None,
             "photos": clean_photos(row.get("photos")),
-            "manager_note": clean_text(row.get("manager_note"), MAX_NOTES, lines=True) or None})
+            "manager_note": clean_text(row.get("manager_note"), MAX_NOTES, lines=True) or None,
+            "submitted_at": _when(row.get("submitted_at"), now) if form_id else None})
     history = []
     for row in rows("history", MAX_HISTORY):
         if not isinstance(row, dict) or row.get("task_id") not in ids:

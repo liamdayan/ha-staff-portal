@@ -407,7 +407,7 @@ def test_the_reports_tab(setup):
             listed = {r["key"]: r for r in body["reports"]}
             assert "template" not in listed
             assert listed["hours"]["enabled"] is False and listed["hours"]["view"] == []
-            assert body["lane"]["daily_cap"] == 2000 and body["lane"]["minute_cap"] == 40
+            assert body["lane"]["daily_cap"] == 3000 and body["lane"]["minute_cap"] == 40
             await share(p, view=[p.front, p.kitchen], manage=[p.kitchen])
             listed = {r["key"]: r for r in (await p.admin_call("GET", "/api/reports"))[1]["reports"]}
             assert listed["hours"]["enabled"] and listed["hours"]["view"] == [p.front, p.kitchen]

@@ -3,7 +3,8 @@ form tasks that follow a submission's manager field (its status), both ways.
 
 Quick Tasks (Connecteam's Tasks API; scopes in brackets):
 - boards:  GET    /tasks/v1/taskboards                                  [quick_tasks.read]
-- read:    GET    /tasks/v1/taskboards/{board}/tasks?status=all         [quick_tasks.read]
+- read:    GET    /tasks/v1/taskboards/{board}/tasks?status=published   [quick_tasks.read]
+           (and status=draft, and ?taskIds=...&status=all for linked tasks that left the list)
 - create:  POST   /tasks/v1/taskboards/{board}/tasks                    [quick_tasks.write]
 - change:  PUT    /tasks/v1/taskboards/{board}/tasks/{task}             [quick_tasks.write]
 - delete:  DELETE /tasks/v1/taskboards/{board}/tasks/{task}             [quick_tasks.delete, optional]
@@ -28,12 +29,19 @@ both changed the same field the newer wins. Connecteam gives no change times, so
 counts as made when its board was last read before (the earliest it can have been); a change
 here that's waiting to be sent (ct_pending) and is newer wins. Either way the history says so.
 
-Connecteam has no reference field and no "changed since", so each read takes the whole board
-(status=all, 100 a page). A create that may have half-arrived (a timeout) is kept as "creating"
-and found again on the next read by its title and assignees before it's ever sent twice.
+Connecteam has no "changed since", so each check reads the board's open tasks (status=published,
+100 a page: usually one request, however many finished tasks pile up). Drafts (unassigned) are
+listed too when the board has open linked drafts, on its first read, and otherwise once every
+DRAFT_EVERY (new ones made in Connecteam). A linked task that was open and isn't in that list is
+looked up by its ID (taskIds, status=all, LOOKUP_BATCH at a time): completed, archived, or gone
+(deleted) when it isn't found. Only a whole read and a good lookup ever take a task as gone.
+Connecteam has no reference field either: a create that may have half-arrived (a timeout) is
+kept as "creating", and the next read of its board takes the whole board (status=all) to find it
+by its title and assignees before it's ever sent twice.
 
 Every request goes through the reports lane (connecteam.py, reports=True) and is counted here
-too: board reads are planned with the form checks within tasks.FORM_DAILY_REQUESTS a day,
+too: board reads are planned with the form checks on the Tasks tab's schedule (business hours
+and the rest of the day, tasks.CHECK_PLAN), within tasks.FORM_DAILY_REQUESTS a day,
 changes are sent as they happen (at most WRITE_DAILY_CAP a day; the rest wait). A refusal or a
 "too many requests" pauses only this sync, with the reason on the Tasks tab, and it tries again
 later; the clock checks carry on. Nothing is asked while the sync is off, and a restore turns it
@@ -58,7 +66,9 @@ FIELDS = ("title", "notes", "due", "users", "done", "archived")
 PAGE = 100                 # tasks a page (Connecteam's most)
 MAX_PAGES = 20             # pages read from one board, at most (2,000 tasks)
 MAX_BOARDS = 20
-WRITE_DAILY_CAP = 200      # changes sent a day, at most (inside the reports lane's 1,000)
+LOOKUP_BATCH = 50          # linked tasks looked up by ID in one request
+DRAFT_EVERY = 3600         # a board's drafts are listed at least this often (new ones made there)
+WRITE_DAILY_CAP = 200      # changes sent a day, at most (inside the reports lane's 3,000)
 PUSH_BATCH = 30            # changes sent in one go
 REFUSED_WAIT = 30 * 60     # a refusal pauses the sync this long (or until Save or Test)
 MAX_BACKOFF = 3600
@@ -681,11 +691,28 @@ async def _note_field(form_id) -> str | None:
 
 # ---------------------------------------------------------------- changes made in Connecteam
 
+def plan() -> dict:
+    """The check schedule set on the Tasks tab."""
+    return tasks.check_plan(_db().settings().get("task_checks"))
+
+
+def extra_a_day() -> int:
+    """Requests a day on top of the planned rounds: each board's drafts, listed every DRAFT_EVERY."""
+    return len(boards()) * (86400 // DRAFT_EVERY) if on() else 0
+
+
+def check_every(weight: int, now: float | None = None) -> int:
+    """Seconds between checks of each form and board now (the schedule in the property's zone,
+    stretched to fit tasks.FORM_DAILY_REQUESTS)."""
+    local = datetime.fromtimestamp(time.time() if now is None else now, _zone())
+    return tasks.form_interval(weight, plan(), local, extra_a_day())
+
+
 async def poll_due(weight: int) -> None:
-    """Read the boards that are due (each every tasks.form_interval(weight))."""
+    """Read the boards that are due (each every check_every(weight))."""
     if not on() or time.time() < paused_until:
         return
-    every = tasks.form_interval(weight)
+    every = check_every(weight)
     async with _guard():
         for b in boards():
             if time.time() - (b["last_poll"] or 0) < every:
@@ -698,13 +725,15 @@ async def poll_due(weight: int) -> None:
                 log.info("Task sync: board %s: %s", b["board_id"], err)
 
 
-async def _list(board_id: str) -> tuple[list[dict], bool, int]:
-    """Every task on a board: (tasks, whether that's all of them, pages read). A reply without
-    a list of tasks is an error, never an empty board."""
+async def _list(board_id: str, status: str = "all", ids=()) -> tuple[list[dict], bool, int]:
+    """A board's tasks in a status (all, published or draft), or those of some IDs: (tasks,
+    whether that's all of them, pages read). A reply without a list of tasks is an error, never
+    an empty board."""
     found, offset = [], 0
     for page_no in range(1, MAX_PAGES + 1):
         data = await _ask("GET", f"/tasks/v1/taskboards/{board_id}/tasks",
-                          [("status", "all"), ("limit", str(PAGE)), ("offset", str(offset))])
+                          [*(("taskIds", i) for i in ids), ("status", status), ("limit", str(PAGE)),
+                           ("offset", str(offset))])
         page = data.get("tasks")
         if not isinstance(page, list):
             raise ConnecteamError("Connecteam sent an unexpected list of tasks.")
@@ -718,12 +747,68 @@ async def _list(board_id: str) -> tuple[list[dict], bool, int]:
     return found, False, MAX_PAGES
 
 
+def _was_open(t: dict) -> bool:
+    """A linked task last seen open in Connecteam (or not seen yet, after a restore)."""
+    seen = _sync(t).get("seen")
+    return seen is None or not (seen.get("done") or seen.get("archived"))
+
+
+async def _read(b: dict, linked: list[dict], creating: bool) -> dict:
+    """One check's read of a board: {tasks, complete, pages (what a check usually takes, for the
+    plan), checked (linked tasks that are gone when they aren't among the tasks), drafts (listed)}.
+    A create that may have arrived, in any status, needs the whole board (status=all); so does a
+    lookup Connecteam won't take. Otherwise its open tasks, then the linked ones that were open
+    and aren't there, by ID. A partial read stops there and checks nothing."""
+    board_id = b["board_id"]
+
+    async def whole() -> dict:
+        found, complete, pages = await _list(board_id)
+        return {"tasks": found, "complete": complete, "pages": pages, "drafts": False,
+                "checked": {t["ct_task_id"] for t in linked}}
+    if creating:
+        return await whole()
+    found, complete, pages = await _list(board_id, "published")
+    result = {"tasks": found, "complete": False, "pages": pages, "drafts": False, "checked": set()}
+    if not complete:
+        return result
+    open_drafts = any(_was_open(t) and _sync(t).get("seen") and not _sync(t)["seen"].get("users")
+                      for t in linked)
+    if open_drafts or b["last_ok"] is None or time.time() - (b["drafts_read"] or 0) >= DRAFT_EVERY:
+        more, complete, n = await _list(board_id, "draft")
+        found += more
+        result["drafts"] = True
+        result["pages"] += n if open_drafts else 0
+        if not complete:
+            return result
+    have = {str(r["id"]) for r in found}
+    wanted = [t["ct_task_id"] for t in linked if t["ct_task_id"] not in have and _was_open(t)]
+    for start in range(0, len(wanted), LOOKUP_BATCH):
+        part = wanted[start:start + LOOKUP_BATCH]
+        try:
+            more, complete, _ = await _list(board_id, "all", part)
+        except Rejected as err:   # (a 404 too: whether a board or a task, the whole read tells)
+            log.info("Task sync: board %s: looking tasks up by ID: %s; reading the whole board",
+                     board_id, err)
+            return await whole()
+        if not complete:
+            return result
+        found += [r for r in more if str(r["id"]) in part and str(r["id"]) not in have]
+        have |= set(part)
+    return {**result, "complete": True, "checked": set(wanted)}
+
+
 async def _poll(b: dict) -> None:
     """Read one board and bring its changes here (call inside _guard())."""
     db, now = _db(), time.time()
     board_id = b["board_id"]
+    linked = [dict(r) for r in db.conn.execute(
+        "SELECT * FROM tasks WHERE ct_task_id IS NOT NULL AND ct_board_id = ?", (board_id,))]
+    creating = [dict(r) for r in db.conn.execute(
+        "SELECT * FROM tasks WHERE ct_task_id IS NULL AND ct_sync LIKE '%\"creating\"%'")]
+    creating = [t for t in creating if _sync(t).get("board") == board_id and _sync(t).get("creating")]
     try:
-        remote, complete, pages = await _list(board_id)
+        read = await _read(b, linked, bool(creating))
+        remote, complete, pages = read["tasks"], read["complete"], read["pages"]
     except Rejected as err:
         db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_error = ? WHERE board_id = ?",
                         (now, ("That board isn't in Connecteam any more." if err.status == 404
@@ -743,11 +828,8 @@ async def _poll(b: dict) -> None:
     to_ct, to_staff = _links()
     seen_ids = {r[0] for r in db.conn.execute("SELECT ct_task_id FROM task_ct_seen")}
     # Creates that may have arrived: found by title and assignees, never made twice.
-    for t in [dict(r) for r in db.conn.execute(
-            "SELECT * FROM tasks WHERE ct_task_id IS NULL AND ct_sync LIKE '%\"creating\"%'")]:
+    for t in creating:
         sync = _sync(t)
-        if sync.get("board") != board_id or not sync.get("creating"):
-            continue
         base = sync.get("base") or sa_view(t, to_ct)
         match = next((cid for cid, r in by_id.items() if cid not in seen_ids
                       and _key("title", ct_view(r)["title"]) == _key("title", base["title"])
@@ -763,9 +845,7 @@ async def _poll(b: dict) -> None:
         elif complete:
             _save(t["id"], ct_sync={"board": board_id})   # never arrived: made when next sent
     # Tasks linked here: their changes, or their deletion.
-    linked = [dict(r) for r in db.conn.execute(
-        "SELECT * FROM tasks WHERE ct_task_id IS NOT NULL AND ct_board_id = ?", (board_id,))]
-    if complete and not remote and linked and not await _board_listed(board_id):
+    if complete and not remote and read["checked"] and not await _board_listed(board_id):
         # An empty board that isn't among Connecteam's boards (deleted or archived): its tasks
         # here stay as they are, rather than every one going to the bin.
         db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_error = ? WHERE board_id = ?",
@@ -783,12 +863,15 @@ async def _poll(b: dict) -> None:
                 _save(t["id"], ct_sync=sync)
                 t = {**t, "ct_sync": json.dumps(sync)}
             _reconcile(t, ct_view(r), ct_time, to_ct, to_staff)
-        elif complete and not (_sync(t).get("seen") or {}).get("archived"):
-            # Gone from the whole board (an archived one may simply not be listed).
+        elif (complete and t["ct_task_id"] in read["checked"]
+              and not (_sync(t).get("seen") or {}).get("archived")):
+            # Gone from the whole board or not found by its ID (an archived one may simply not
+            # be listed).
             if not t["deleted_at"]:
                 _bin(t, now, True)
             _gone(t, board_id)
-    # New ones: tasks here. The first read takes only open ones, not the board's whole past.
+    # New ones: tasks here. The first read takes only open ones, not the board's whole past
+    # (later ones read only open ones, unless a create is being looked for).
     first = b["last_ok"] is None
     for cid, r in by_id.items():
         if cid in seen_ids:
@@ -798,7 +881,8 @@ async def _poll(b: dict) -> None:
             _import(b, cid, v, to_ct, to_staff)
         _seen_ct(cid, board_id)
     db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_ok = ?, last_error = NULL, "
-                    "pages = ? WHERE board_id = ?", (now, now, pages, board_id))
+                    "pages = ?, drafts_read = CASE WHEN ? THEN ? ELSE drafts_read END WHERE board_id = ?",
+                    (now, now, pages, read["drafts"], now, board_id))
     db.conn.commit()
 
 
@@ -911,11 +995,12 @@ def _bin(t: dict, now: float, deleted: bool, note: str = IN_CT) -> None:
 
 async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zone, now: float,
                              read_at: float | None = None) -> int:
-    """A followed form's submissions (FORM_LOOKBACK_DAYS of them, older than the form's choosing
-    too): one that isn't done becomes a task in the status its manager field maps to, and a
-    task's status follows the field's. A status changed here and not yet sent wins when it's
-    newer than the field's last change, and a read that began before a task's status was last
-    written there (read_at) says nothing about it. Returns how many tasks were made."""
+    """A followed form's submissions (back to its oldest open task, at most FORM_LOOKBACK_DAYS,
+    older than the form's choosing too: tasks.follow_since): one that isn't done becomes a task
+    in the status its manager field maps to, and a task's status follows the field's. A status
+    changed here and not yet sent wins when it's newer than the field's last change, and a read
+    that began before a task's status was last written there (read_at) says nothing about it.
+    Returns how many tasks were made."""
     follow = tasks.follow_of(form)
     db = _db()
     made, new, marked = 0, [], []
@@ -945,6 +1030,9 @@ async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zo
             if (fresh["photos"], fresh["manager_note"]) != (t["photos"], t["manager_note"]):
                 db.conn.execute("UPDATE tasks SET photos = ?, manager_note = ? WHERE id = ?",
                                 (fresh["photos"], fresh["manager_note"], t["id"]))
+            if t["submitted_at"] is None:   # made before it was kept: the next read can be shorter
+                db.conn.execute("UPDATE tasks SET submitted_at = ? WHERE id = ?",
+                                (tasks.submitted_time(sub.get("submitted_at"), zone), t["id"]))
             if option_id == (t["ct_status"] or "") or (
                     read_at is not None and (_sync(t).get("wrote") or 0) > read_at):
                 continue   # the same, or read before the last write there (the next read tells)
@@ -971,9 +1059,10 @@ async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zo
 
 def poll_weight(forms: list[dict]) -> int:
     """How many requests a round of checks takes, for planning them (tasks.form_interval): one
-    for a form's new submissions, two for a followed form (it reads back FORM_LOOKBACK_DAYS,
-    a month at a time), and each board's pages when the sync is on."""
-    weight = sum(2 if form.get("follow") else 1 for form in forms)
+    for each form (a followed form reads back only to its oldest open task: tasks.follow_since),
+    and what each board's check usually takes when the sync is on (its open tasks' pages, and its
+    drafts when it has open ones). Drafts listed now and then are extra_a_day's."""
+    weight = len(forms)
     if on():
         weight += sum(max(1, b["pages"] or 1) for b in boards())
     return weight

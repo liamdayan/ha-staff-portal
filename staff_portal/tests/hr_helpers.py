@@ -86,6 +86,8 @@ class FakeConnecteam:
         self.board_tasks: dict[str, list[dict]] = {}
         self.writes: list[tuple] = []
         self.hang_up: set[str] = set()
+        self.task_reads: list[tuple] = []   # each board read: (board, status, taskIds)
+        self.hide_archived = False   # lists leave archived tasks out (only a lookup by ID shows them)
         self.scope = "users.read time_clock.read"
         self.next_id = 100
         self.port = free_port()
@@ -184,8 +186,14 @@ class FakeConnecteam:
         board, task_id = m.groups()
         items = self.board_tasks.setdefault(board, [])
         if request.method == "GET" and not task_id:
-            wanted = request.query.get("status", "all")
-            return self.page(request, "tasks", [t for t in items if wanted in ("all", t["status"])])
+            # One status (all by default) and, when given, only those IDs (taskIds, repeated).
+            wanted, ids = request.query.get("status", "all"), request.query.getall("taskIds", [])
+            self.task_reads.append((board, wanted, ids))
+            if wanted not in ("all", "draft", "published", "completed"):
+                return web.json_response({"detail": "Invalid status"}, status=422)
+            return self.page(request, "tasks", [t for t in items if wanted in ("all", t["status"])
+                                                and (not ids or t["id"] in ids)
+                                                and not (self.hide_archived and t["isArchived"] and not ids)])
         body = await request.json() if request.method in ("POST", "PUT") else None
         self.writes.append((request.method, path, body))
         if request.method + "!" in self.hang_up:

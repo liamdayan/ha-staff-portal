@@ -190,8 +190,10 @@ def test_connecteam_tasks_come_here_and_their_changes_follow(tmp_path):
             ana = await p.sign_in(p.ana)
             seen = (await p.listed(ana))["Check the boiler"]
             assert seen["source"] == "connecteam" and seen["connecteam"] is True
-            # New ones after that come, finished ones too; text is capped as typed text is.
-            ct.board_tasks["501"].append(ct_task("c4", "x" * 500, [], status="completed"))
+            # New open ones after that come; text is capped as typed text is. Each read takes only
+            # open tasks, so one made and finished between two reads doesn't come.
+            ct.board_tasks["501"].append(ct_task("c4", "x" * 500, [11]))
+            ct.board_tasks["501"].append(ct_task("c5", "Made and finished", [7], status="completed"))
             # Changes: title, description, due date, assignees.
             remote = ct.board_tasks["501"][0]
             remote.update(title="Check the boiler again", userIds=[9], dueDate=1_800_000_000,
@@ -201,8 +203,9 @@ def test_connecteam_tasks_come_here_and_their_changes_follow(tmp_path):
             assert (after["title"], after["notes"], after["assigned_id"]) == (
                 "Check the boiler again", "Line 1\nLine 2", p.dee)
             assert (after["due_date"], after["due_time"]) == ctsync.due_parts(1_800_000_000, main.report_zone())
-            long = p.db.conn.execute("SELECT * FROM tasks WHERE source = 'connecteam' AND status = 'done'").fetchone()
+            long = p.db.conn.execute("SELECT * FROM tasks WHERE source = 'connecteam' AND title LIKE 'xxx%'").fetchone()
             assert len(long["title"]) == tasks.MAX_TITLE and long["assigned_id"] is None
+            assert not p.db.conn.execute("SELECT 1 FROM tasks WHERE title = 'Made and finished'").fetchone()
             assert not writes(ct)   # nothing sent back
     run(scenario())
 
@@ -344,11 +347,43 @@ def test_a_create_that_timed_out_is_never_made_twice(tmp_path):
 # ---------------------------------------------------------------- the budget
 
 def test_polls_share_the_form_checks_budget():
-    weight = lambda forms, pages: forms + pages
-    for forms, pages in ((0, 1), (2, 1), (3, 5), (50, 20)):
-        every = tasks.form_interval(weight(forms, pages))
-        assert every >= 600 and weight(forms, pages) * 86400 / every <= tasks.FORM_DAILY_REQUESTS
-    assert ctsync.WRITE_DAILY_CAP + tasks.FORM_DAILY_REQUESTS <= connecteam.REPORTS_DAILY_CAP / 2
+    """Boards and forms together stay within the planned 1,500 a day (each board's hourly drafts
+    on top of the rounds included), and the checks and the changes sent leave reports 1,300 of
+    their lane's 3,000."""
+    plan = tasks.CHECK_PLAN
+    for forms, boards in ((0, 1), (1, 1), (2, 1), (3, 5), (50, 20)):
+        extra = boards * 24
+        busy, quiet = tasks.check_minutes(forms + boards, plan, extra)
+        assert busy >= plan["busy"] and quiet >= plan["quiet"]
+        assert tasks.form_requests_a_day(forms + boards, plan, extra) <= tasks.FORM_DAILY_REQUESTS
+    assert tasks.form_requests_a_day(2, plan, 24) == 444    # 1 board and 1 (followed) form
+    assert ctsync.WRITE_DAILY_CAP + tasks.FORM_DAILY_REQUESTS <= connecteam.REPORTS_DAILY_CAP * 0.6
+
+
+def test_the_tasks_tab_shows_the_schedule_and_what_it_costs(tmp_path):
+    """One board and one followed form: every 3 minutes from 9 to 6 and every 30 outside, two
+    requests a round, plus the board's drafts hourly: about 444 Connecteam requests a day."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        p.db.update_settings({"wb_time_zone": "America/Los_Angeles"})
+        ct.forms = [maintenance_form()]
+        async with p, ct:
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_id": p.house, "follow": FOLLOW})
+            assert body["schedule"] == {"start": "09:00", "end": "18:00", "busy": 3, "quiet": 30}
+            assert (body["check_minutes"], body["quiet_minutes"], body["requests_a_day"]) == (3, 30, 444)
+            assert (body["checks_a_day"], body["lane_a_day"], body["zone"]) == (1500, 3000, "America/Los_Angeles")
+            # Turned off, the board isn't counted.
+            status, body = await p.admin_call("PUT", "/api/tasks/sync", {"enabled": False, "boards": [
+                {"board_id": "501", "name": "Front desk board", "department_id": p.desk}]})
+            assert body["requests_a_day"] == 210
+            # Hours set on the tab count: 8 to 8, every 5, otherwise every 60, with the board again.
+            await p.admin_call("PUT", "/api/tasks/sync", {"enabled": True, "boards": [
+                {"board_id": "501", "name": "Front desk board", "department_id": p.desk}]})
+            status, body = await p.admin_call("PUT", "/api/tasks/schedule",
+                                              {"start": "08:00", "end": "20:00", "busy": 5, "quiet": 60})
+            assert body["requests_a_day"] == 2 * (144 + 12) + 24
+    run(scenario())
 
 
 def test_a_refusal_or_too_many_pauses_only_the_sync(tmp_path):
@@ -356,7 +391,7 @@ def test_a_refusal_or_too_many_pauses_only_the_sync(tmp_path):
         p, ct = synced(tmp_path)
         async with p, ct:
             status, body = await p.admin_call("GET", "/api/tasks/sync")
-            assert body["checks_a_day"] == 300 and body["requests_a_day"] == 144
+            assert body["checks_a_day"] == 1500 and body["requests_a_day"] == 210 + 24
             ct.too_many.add("/tasks/v1/taskboards/501/tasks")
             await poll(p)
             status, body = await p.admin_call("GET", "/api/tasks/sync")
@@ -571,6 +606,91 @@ def test_a_followed_form_shows_open_submissions_and_follows_their_status(tmp_pat
             await ctsync.settle()
             assert writes(ct)[-1][2]["managerFields"][0]["status"] == done
     run(scenario())
+
+
+def test_a_followed_form_reads_back_only_to_its_oldest_open_task(tmp_path):
+    """Its first check reads the month (31 days); later ones back to the oldest open task (an hour
+    before it), or two days when none is open, never more than 31 days; each is one request, read
+    afresh, so a status changed to Done there is Done here at the next check."""
+    async def scenario():
+        p, ct = synced(tmp_path, on=False)
+        p.db.update_settings({"wb_time_zone": "UTC"})
+        ct.forms = [maintenance_form()]
+        now = int(time.time())
+        working = {"statusOptionId": "o1", "name": "Working on it", "color": "#f5a623"}
+        done = {"statusOptionId": "o2", "name": "Done", "color": "#7ed321"}
+        tap = lambda text: [{"questionId": "q1", "questionType": "openEnded", "value": text,
+                             "wasSubmittedEmpty": False}]
+        subs = [ct_submission("s1", 55, 7, now - 20 * 86400, tap("Old leak")),
+                ct_submission("s2", 55, 7, now - 10 * 86400, tap("Fixed")),
+                ct_submission("s3", 55, 7, now - 5 * 86400, tap("Lamp"))]
+        subs[0]["managerFields"] = status_field(working, now - 3600)
+        subs[1]["managerFields"] = status_field(done, now - 3600)
+        subs[2]["managerFields"] = status_field()
+        ct.submissions = {55: subs}
+        path = "/forms/v1/forms/55/form-submissions"
+
+        async def check():
+            """One check now: (requests, the moment it read from)."""
+            p.db.conn.execute("UPDATE task_forms SET last_check = NULL")
+            mark = len(ct.asked)
+            await main.check_task_forms()
+            asked = [q for where, q in ct.asked[mark:] if where == path]
+            return len(asked), int(asked[0]["submittingStartTimestamp"]) if asked else None
+        async with p, ct:
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Maintenance Request",
+                                                              "department_id": p.house, "title_question": "Problem", "follow": FOLLOW})
+            n, since = await check()
+            assert n == 1 and abs(since - (now - 31 * 86400)) < 5   # the first: the month
+            rows = {r["title"]: dict(r) for r in p.db.conn.execute("SELECT * FROM tasks")}
+            assert set(rows) == {"Old leak", "Lamp"}
+            assert rows["Old leak"]["submitted_at"] == now - 20 * 86400 - (now - 20 * 86400) % 60
+            # Then back to the oldest open one (an hour before it), one request each time, afresh.
+            n, since = await check()
+            assert n == 1 and abs(since - rows["Old leak"]["submitted_at"] + 3600) < 5
+            subs[0]["managerFields"] = status_field(done, now)
+            n, _ = await check()
+            assert n == 1 and p.db.task(rows["Old leak"]["id"])["status"] == "done"   # Done there: Done here
+            n, since = await check()
+            assert abs(since - (rows["Lamp"]["submitted_at"] - 3600)) < 5
+            # Nothing open: the last two days, for new ones.
+            subs[2]["managerFields"] = status_field(done, now)
+            await check()
+            assert p.db.task(rows["Lamp"]["id"])["status"] == "done"
+            n, since = await check()
+            assert n == 1 and abs(since - (now - 2 * 86400)) < 5
+            # An open one older than the month, or one whose time isn't known: the month at most.
+            cy = await p.sign_in(p.cy)
+            await p.call("POST", f"/api/tasks/{rows['Lamp']['id']}/status", cy, {"status": "todo"})
+            await ctsync.settle()
+            p.db.conn.execute("UPDATE tasks SET submitted_at = ? WHERE id = ?", (now - 60 * 86400, rows["Lamp"]["id"]))
+            n, since = await check()
+            assert abs(since - (now - 31 * 86400)) < 5
+            p.db.conn.execute("UPDATE tasks SET submitted_at = NULL WHERE id = ?", (rows["Lamp"]["id"],))
+            n, since = await check()
+            assert abs(since - (now - 31 * 86400)) < 5
+            assert p.db.task(rows["Lamp"]["id"])["submitted_at"] == rows["Lamp"]["submitted_at"]   # kept again
+            # Following another field (or again) reads the month once more.
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Maintenance Request",
+                                                              "department_id": p.house, "title_question": "Problem", "follow": None})
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Maintenance Request",
+                                                              "department_id": p.house, "title_question": "Problem", "follow": FOLLOW})
+            n, since = await check()
+            assert abs(since - (now - 31 * 86400)) < 5
+    run(scenario())
+
+
+def test_how_far_back_a_followed_form_reads():
+    now = 1_800_000_000
+    day = 86400
+    form = {"last_ok": now - 300}
+    assert tasks.follow_since({"last_ok": None}, now, None) == now - 31 * day
+    assert tasks.follow_since(form, now, None) == now - 2 * day
+    assert tasks.follow_since(form, now, now - 5 * day) == now - 5 * day - 3600
+    assert tasks.follow_since(form, now, now - 3600) == now - 2 * day          # newer than two days
+    assert tasks.follow_since(form, now, 0) == now - 31 * day                  # a time not known
+    assert tasks.follow_since(form, now, now - 90 * day) == now - 31 * day     # the cap
+    assert tasks.follow_since({"last_ok": now - 4 * day}, now, None) == now - 4 * day - 3600   # after a gap
 
 
 def test_the_follow_setting_is_checked():
@@ -802,6 +922,149 @@ def test_a_bad_partial_or_missing_board_read_never_bins_tasks(tmp_path, monkeypa
             ct.boards.append({"id": 501, "name": "Front desk board", "isArchived": True})
             await poll(p)
             assert p.db.task(t["id"])["deleted_at"] is None
+    run(scenario())
+
+
+def board_reads(ct, since=0):
+    """Board 501's reads since a point: (status, taskIds or None) of each, in order. The ones a
+    task's change asks for itself (its kept fields) don't come up here: nothing is changed."""
+    return [(status, ids or None) for board, status, ids in ct.task_reads[since:] if board == "501"]
+
+
+def test_each_read_takes_open_tasks_and_looks_up_the_ones_that_left(tmp_path):
+    """A check reads the board's open tasks only (one request however many finished ones pile up);
+    a linked task that was open and left the list is looked up by ID in one request: completed is
+    Done, archived is the bin, and not found is deleted. Then it isn't asked about again."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        ct.hide_archived = True
+        ct.board_tasks["501"] = [ct_task(f"old{i}", f"Old {i}", [7], status="completed") for i in range(250)]
+        ct.board_tasks["501"] += [ct_task(f"c{i}", f"Open {i}", [7]) for i in range(3)]
+        async with p, ct:
+            await poll(p)   # the first read: open ones and drafts
+            assert board_reads(ct) == [("published", None), ("draft", None)]
+            ids = {r["ct_task_id"]: r["id"] for r in p.db.conn.execute("SELECT * FROM tasks")}
+            assert set(ids) == {"c0", "c1", "c2"}
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None)]   # 250 finished ones cost nothing
+            # Completed, archived and deleted there.
+            done, archived, deleted = ct.board_tasks["501"][250:]
+            done["status"], archived["isArchived"] = "completed", True
+            ct.board_tasks["501"].remove(deleted)
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None), ("all", ["c0", "c1", "c2"])]
+            rows = {cid: p.db.task(i) for cid, i in ids.items()}
+            assert rows["c0"]["status"] == "done" and rows["c0"]["deleted_at"] is None
+            assert rows["c1"]["deleted_at"] and rows["c1"]["ct_task_id"] == "c1"
+            assert rows["c2"]["deleted_at"] and rows["c2"]["ct_task_id"] is None
+            assert history(p, ids["c2"])[-1] == ("Someone in Connecteam", "deleted", None, "in Connecteam")
+            # Known to be finished now: the next read is one request again.
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None)]
+            assert ctsync.boards()[0]["pages"] == 1
+    run(scenario())
+
+
+def test_lookups_go_50_at_a_time_and_a_failed_one_never_bins(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        ct.board_tasks["501"] = [ct_task(f"c{i}", f"Open {i}", [7]) for i in range(120)]
+        async with p, ct:
+            await poll(p)
+            assert p.db.conn.execute("SELECT COUNT(*) FROM tasks WHERE ct_task_id IS NOT NULL").fetchone()[0] == 120
+            gone = ct.board_tasks["501"][:]
+            real = ct.quick_tasks
+
+            async def odd(request, path):   # a lookup answered without a list of tasks
+                if request.method == "GET" and "taskIds" in request.query:
+                    return web.json_response({"data": {}})
+                return await real(request, path)
+            ct.quick_tasks = odd
+            ct.board_tasks["501"].clear()
+            await poll(p)
+            assert p.db.conn.execute("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL").fetchone()[0] == 0
+            # A lookup Connecteam won't take: the whole board is read instead (as before).
+            async def refused(request, path):
+                if request.method == "GET" and "taskIds" in request.query:
+                    return web.json_response({"detail": "Invalid taskIds"}, status=400)
+                return await real(request, path)
+            ct.quick_tasks = refused
+            ct.board_tasks["501"] = gone[:]
+            gone[0]["status"] = "completed"
+            mark = len(ct.task_reads)
+            await poll(p)
+            # Two pages of open ones, the lookup (refused before the fake lists it), then the whole
+            # board's two pages.
+            assert [s for s, _ in board_reads(ct, mark)] == ["published", "published", "all", "all"]
+            assert p.db.task(p.db.conn.execute("SELECT id FROM tasks WHERE ct_task_id = 'c0'").fetchone()[0])["status"] == "done"
+            assert p.db.conn.execute("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL").fetchone()[0] == 0
+            # All the rest deleted there: looked up 50 at a time, then binned.
+            ct.quick_tasks = real
+            ct.board_tasks["501"].clear()
+            mark = len(ct.task_reads)
+            await poll(p)
+            lookups = [ids for _, ids in board_reads(ct, mark) if ids]
+            assert [len(ids) for ids in lookups] == [50, 50, 19]
+            assert sorted(sum(lookups, [])) == sorted(f"c{i}" for i in range(1, 120))
+            assert p.db.conn.execute("SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL").fetchone()[0] == 119
+    run(scenario())
+
+
+def test_drafts_are_read_while_the_board_has_open_ones_and_hourly_otherwise(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            await poll(p)
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None)]
+            # A draft made in Connecteam comes within the hour.
+            ct.board_tasks["501"].append(ct_task("d1", "Unassigned", [], status="draft"))
+            p.db.conn.execute("UPDATE task_ct_boards SET drafts_read = ?", (time.time() - ctsync.DRAFT_EVERY,))
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None), ("draft", None)]
+            assert p.db.conn.execute("SELECT title FROM tasks").fetchone()[0] == "Unassigned"
+            # While it's open, the board's drafts are read with each check (and planned for).
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None), ("draft", None)]
+            assert ctsync.boards()[0]["pages"] == 2
+            # A draft deleted there: it's no longer in the drafts, so it's looked up and binned.
+            ct.board_tasks["501"].clear()
+            await poll(p)
+            row = p.db.conn.execute("SELECT * FROM tasks").fetchone()
+            assert row["deleted_at"] and row["ct_task_id"] is None
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None)]
+    run(scenario())
+
+
+def test_a_draft_create_that_timed_out_is_found_by_reading_the_whole_board(tmp_path):
+    """A create that may have arrived could be a draft (or anything): the next read takes the whole
+    board (status=all) to find it, then reads go back to open tasks only."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            await poll(p)
+            ana = await p.sign_in(p.ana)
+            ct.hang_up.add("POST")
+            t = await p.add(ana, title="Nobody's yet", assigned_id=p.dee)   # Dee isn't linked: a draft
+            await ctsync.settle()
+            ct.hang_up.clear()
+            [made] = ct.board_tasks["501"]
+            assert made["status"] == "draft"
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("all", None)]
+            assert p.db.task(t["id"])["ct_task_id"] == made["id"] and len(writes(ct, "POST")) == 1
+            mark = len(ct.task_reads)
+            await poll(p)
+            assert board_reads(ct, mark) == [("published", None), ("draft", None)]   # an open draft here
     run(scenario())
 
 

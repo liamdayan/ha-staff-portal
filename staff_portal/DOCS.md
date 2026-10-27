@@ -1402,9 +1402,9 @@ a small, steady share:
   signed in), so a wrong PIN, or someone just holding a phone, never costs a request. They happen
   at most every 30 seconds (less often while Connecteam is failing) and stop once three quarters
   of the day's share is used, keeping the rest for the hourly checks.
-- Its own hard limits: 60 requests a minute, and 5,000 a day (never more than half of your
-  account's daily limit, so your other integrations always keep the other half), counted across
-  add-on restarts. At the cap it pauses until midnight UTC.
+- Its own hard limits: 60 requests a minute, and 9,000 a day (never more than 90% of your
+  account's daily limit, so your other integrations always keep 1,000 a day on Expert), counted
+  across add-on restarts. At the cap it pauses until midnight UTC.
 - It reads Connecteam's rate-limit headers. If your account (from any integration) has less than
   10% of its daily requests left, or is close to the per-minute limit, Staff Access pauses until
   the limit resets.
@@ -1422,16 +1422,17 @@ a small, steady share:
   request, or says "too many requests" to one, only the HR portal waits: the time clock checks
   carry on.
 - Reports and tasks have a share of their own in the same way: at most 40 requests a minute and
-  2,000 a day, and none once Staff Access has used half of its day. Nothing is asked until
+  3,000 a day, and none once Staff Access has used half of its day. Nothing is asked until
   someone opens a report (or a form's tasks are due), and the same month is asked again at most
-  every 10 minutes. Forms that make tasks use at most about 300 of the 2,000 (see
-  [Tasks](#tasks)), so reports keep the rest. If Connecteam refuses a report's request or says "too many requests", only
+  every 10 minutes. Task checks (forms and boards) are planned at about 1,500 of the 3,000 at
+  most, and changes the task sync sends at most 200 (see [Tasks](#tasks)), so reports keep the
+  rest. If Connecteam refuses a report's request or says "too many requests", only
   reports and tasks wait; the time clock checks carry on. See [Reports](#reports).
 - How the shares add up (Expert: 100 a minute and 10,000 a day for your whole account): Staff
-  Access takes at most 60 a minute and 5,000 a day; inside that, the HR portal at most 6 and 500,
-  and reports and tasks at most 40 and 2,000. Together, those two never take the last 10 of a
-  minute. So the time clock always keeps at least 10 a minute and 2,500 a day, and your other
-  integrations keep 40 a minute and 5,000 a day.
+  Access takes at most 60 a minute and 9,000 a day; inside that, the HR portal at most 6 and 500,
+  and reports and tasks at most 40 and 3,000. Together, those two never take the last 10 of a
+  minute, and they stop at half of Staff Access's day. So the time clock always keeps at least 10
+  a minute and 4,500 a day, and your other integrations keep 40 a minute and 1,000 a day.
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
 Open **Connecteam** for how many your account has left (once Connecteam has answered), how many
@@ -1599,12 +1600,15 @@ Connecteam forms. For each one you pick:
 Each new submission becomes one task, with every answer in its notes. Only submissions sent after
 you chose the form count, and none becomes a task twice, even after its task is deleted.
 
-**What the checks cost.** Each check is usually one Connecteam request (it reads what was sent
-since an hour before the last good check). With one or two forms, each is checked every 10
-minutes (144 requests a day per form). With more, each is checked less often, so all of them
-together use at most about 300 requests a day of the 2,000 reports and tasks share: 3 forms every
-15 minutes, 5 every 24, 10 every 48, 50 every 4 hours. The Tasks tab shows how often and about how
-many requests a day. Nothing is asked of Connecteam while no form is chosen, and reading the
+**When Connecteam is checked, and what it costs.** Forms and the synced boards are checked on a
+schedule you set on the Tasks tab (**Checking Connecteam**): in business hours, 9 AM to 6 PM in
+the property's time zone, every 3 minutes, and outside them every 30 minutes. Each check of a
+form or board is usually one Connecteam request (a form reads what was sent since an hour before
+the last good check). With one form and one board that's about 180 checks in business hours and
+30 outside, so about 444 requests a day (with each board's drafts read once an hour). With many
+forms or boards, both intervals stretch alike, so all the checks together stay within about
+1,500 requests a day of the 3,000 reports and tasks share. The Tasks tab shows how often and
+about how many requests a day. Nothing is asked of Connecteam while no form is chosen, and reading the
 form list costs a few more a day. The checks use the reports share of Staff Access's Connecteam
 allowance, so they never hold up the time clock checks; if Connecteam can't be reached or the allowance is used up, the form's card
 says so and it tries again later. Staff Access's Connecteam app needs the **forms.read**
@@ -1615,7 +1619,7 @@ Maintenance Request with "Working on it" and "Done"), its tasks can follow it. O
 click **Follow a manager field**, pick the field, and choose the task status for each of its
 values (and for no value chosen yet: To do or In progress). Then:
 
-- every submission from the last month that isn't done shows as one task for the form's
+- every submission from the last month (31 days) that isn't done shows as one task for the form's
   departments, even ones sent before you chose the form. Done ones don't show;
 - when its status changes in Connecteam, the task follows: Done there is Done here. An In
   progress task here stays In progress while Connecteam has no status yet;
@@ -1626,7 +1630,9 @@ values (and for no value chosen yet: To do or In progress). Then:
 - the manager's **Note** shows on the task, read only.
 
 These tasks are for everyone in the form's departments, and stay with their form: they aren't made as Quick
-Tasks. A followed form is read a month at a time, so it counts as two in the cost below.
+Tasks. Each check of a followed form reads back to its oldest open task (or the last two days
+when none is open, never more than 31 days), afresh, so it's one request like any other form's.
+Its first check after you choose the field reads the whole month.
 
 **Photos.** Photos sent with a form (and image files) show on its task in the staff app: tap one
 to see it big. The add-on fetches each photo from Connecteam itself, only from Connecteam's own
@@ -1658,8 +1664,9 @@ From then on:
   unassigned draft can't be archived in Connecteam, so it's deleted there instead and made again
   if it's reopened or put back;
 - tasks made on those boards in Connecteam show up here for the board's department, given to
-  the linked person. The first read of a board takes only its open tasks, not its whole past.
-  Archived or deleted in Connecteam, a task goes to the bin here;
+  the linked person. Each read takes only a board's open tasks, not its whole past (one made and
+  finished in Connecteam between two checks doesn't come here). Archived or deleted in
+  Connecteam, a task goes to the bin here;
 - when the same thing is changed on both sides before they've caught up, the newer change wins,
   and the task's history says where each change came from. A change that came from Connecteam is
   never sent back;
@@ -1668,11 +1675,15 @@ From then on:
 - tasks made before the sync was turned on, and tasks from forms, stay here only.
 
 Changes are sent as they're made (at most 200 a day; more wait for the next day). The boards are
-read for changes on the same schedule as the forms, and share their about 300 requests a day: each
-board costs one request a read per 100 tasks on it. If Connecteam refuses a permission or asks for
-fewer requests, only the sync pauses, with the reason on the Tasks tab, and it tries again later;
-**Test** or **Save** tries again at once. The time clock checks always carry on. Nothing is asked
-while the sync is off.
+read for changes on the same schedule as the forms, and share their budget: each read costs one
+request per 100 open tasks on the board, however many finished ones pile up. A board's drafts
+(tasks nobody is assigned to) are read with it while it has open ones linked here, and otherwise
+once an hour. A linked task that was open and has left the list is looked up by its ID (one
+request for up to 50) to tell completed from archived or deleted. A task finished on both sides
+isn't read again, so deleting it in Connecteam later leaves it here. If Connecteam refuses a
+permission or asks for fewer requests, only the sync pauses, with the reason on the Tasks tab,
+and it tries again later; **Test** or **Save** tries again at once. The time clock checks always
+carry on. Nothing is asked while the sync is off.
 
 **Backups.** Full backups and migration files carry the tasks (with their history and the bin),
 the forms that make tasks, each role's Manage tasks, the sync's boards and each task's Connecteam

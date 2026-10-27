@@ -2379,6 +2379,7 @@
     }
     syncBoards = taskForms.sync.boards.map((b) => ({ ...b }));
     $("#tk-sync-on").checked = taskForms.sync.enabled;
+    renderSchedule();
     renderTaskForms();
     renderSync();
   }
@@ -2500,24 +2501,52 @@
     return { box, value };
   }
 
-  // What checking the forms and the synced boards costs: they're checked less often as more are
-  // chosen, so together they never use more than about 300 of the 2,000 Connecteam requests a
-  // day reports and tasks share. Changes the sync sends are on top, at most write_cap a day.
+  // What checking the forms and the synced boards costs: they're checked on the schedule set
+  // below (often in business hours, less often outside them), and less often as more are chosen,
+  // so together they stay within about checks_a_day of the lane_a_day Connecteam requests a day
+  // reports and tasks share. Changes the sync sends are on top, at most write_cap a day.
   function taskFormsCost() {
     const n = taskForms.forms.length;
     const sync = taskForms.sync;
     const boards = sync.enabled ? sync.boards.length : 0;
+    const plan = taskForms.schedule;
+    const every = (m) => `${m} minute${m === 1 ? "" : "s"}`;
     const sends = sync.enabled ? ` The sync also sends each change as it's made (${sync.usage.writes || 0} today, ` +
       `at most ${sync.write_cap} a day).` : "";
-    if (!n && !boards) return "Each form is checked every 10 minutes. Up to 2 forms are checked that often; " +
-      "with more, each is checked less often, so they use at most about 300 Connecteam requests a day.";
+    const when = `every ${every(taskForms.check_minutes)} from ${clockText(plan.start)} to ${clockText(plan.end)}, ` +
+      `every ${every(taskForms.quiet_minutes)} the rest of the day`;
+    if (!n && !boards) return `Each form and board is checked ${when}. With many, each is checked less often, ` +
+      `so together they use at most about ${taskForms.checks_a_day.toLocaleString()} Connecteam requests a day.`;
     const what = [n ? `${n} form${n === 1 ? "" : "s"}` : "", boards ? `${boards} Connecteam board${boards === 1 ? "" : "s"}` : ""]
       .filter(Boolean).join(" and ");
-    return `${what}: each checked every ${taskForms.check_minutes} minutes, about ${taskForms.requests_a_day} ` +
-      `Connecteam requests a day (forms and boards share about ${taskForms.checks_a_day}), of the ` +
+    const stretched = taskForms.check_minutes > plan.busy || taskForms.quiet_minutes > plan.quiet;
+    return `${what}: each checked ${when}, about ${taskForms.requests_a_day.toLocaleString()} ` +
+      `Connecteam requests a day (forms and boards share at most about ${taskForms.checks_a_day.toLocaleString()}), of the ` +
       `${taskForms.lane_a_day.toLocaleString()} reports and tasks share (the time clock checks have their own).` +
-      sends + (n + boards > 2 ? " Each one you add makes the checks a little less frequent." : "");
+      sends + (stretched ? " With this many, the checks are spread out more than the times set above." : "");
   }
+
+  // "18:00" as the dashboard's clock shows times ("6:00 PM").
+  function clockText(hhmm) {
+    const [hour, minute] = hhmm.split(":").map(Number);
+    return new Date(2000, 0, 1, hour, minute).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  function renderSchedule() {
+    const plan = taskForms.schedule;
+    $("#tk-start").value = plan.start;
+    $("#tk-end").value = plan.end;
+    $("#tk-busy").value = String(plan.busy);
+    $("#tk-quiet").value = String(plan.quiet);
+    $("#tk-zone").textContent = taskForms.zone ? `the property's time zone (${taskForms.zone})` : "the property's time zone";
+  }
+
+  $("#tk-schedule-save").addEventListener("click", () => run(async () => {
+    Object.assign(taskForms, await api("PUT", "api/tasks/schedule", { start: $("#tk-start").value,
+      end: $("#tk-end").value, busy: Number($("#tk-busy").value), quiet: Number($("#tk-quiet").value) }));
+    renderSchedule();
+    renderTaskForms();
+  }, "Saved."));
 
   function renderTaskForms() {
     const list = $("#tk-forms");

@@ -130,10 +130,12 @@ def _write_months() -> None:
 
 
 def forget_submissions(form_id) -> None:
-    """Drop the copies kept of a form's submissions by month, so the next read asks again (a
-    form that follows a manager field must see its statuses as they are now)."""
-    kind = f"submissions:{str(form_id).strip()}"
-    for key in [k for k in _cache if k and k[0] == kind]:
+    """Drop the copies kept of a form's submissions (by month, and a task source's reads since a
+    time), so the next read asks again (a form that follows a manager field must see its
+    statuses as they are now)."""
+    form_id = str(form_id).strip()
+    for key in [k for k in _cache if k and (k[0] == f"submissions:{form_id}"
+                                            or (k[0] == "submissions" and k[1] == form_id))]:
         _cache.pop(key, None)
 
 
