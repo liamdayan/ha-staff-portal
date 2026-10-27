@@ -75,16 +75,17 @@ class StubCt:
 class FakeCtx:
     """What a report's data(ctx, params) gets, without the add-on: ct (a StubCt), uploads(key)
     from {key: [{name, text, uploaded_at, by}]} (newest first), settings, person, departments,
-    tz, today and manage."""
+    staff, tz, today and manage."""
 
     def __init__(self, ct=None, uploads=None, settings=None, person=None, departments=(),
-                 tz="America/Los_Angeles", today=None, manage=False):
+                 tz="America/Los_Angeles", today=None, manage=False, staff=()):
         self.ct = ct or StubCt()
         self._uploads = dict(uploads or {})
         self.settings = dict(settings or {})
         self.person = person or {"id": 1, "name": "Ana", "connecteam_user_id": None,
                                  "departments": []}
         self.departments = list(departments)
+        self.staff = list(staff)
         self.tz = ZoneInfo(tz)
         self.today = today or datetime.now(self.tz).date()
         self.manage = manage

@@ -2410,6 +2410,9 @@ def report_context(report, member: dict, manage: bool) -> "reports_kit.Context":
                 "departments": [{"id": dept["id"], "name": dept["name"]}] if dept else []},
         departments=[{"id": d["id"], "name": d["name"], "smart_group_id": d["smart_group_id"]}
                      for d in db.departments()],
+        staff=[dict(r) for r in db.conn.execute(
+            "SELECT connecteam_user_id, department_id FROM staff WHERE connecteam_user_id IS NOT NULL "
+            "AND department_id IS NOT NULL")],
         tz=report_zone(), manage=manage)
 
 

@@ -292,18 +292,23 @@ def user_names(users) -> dict:
     return {u: n for u, n in ((_user_id(r), _name(r)) for r in users or [] if isinstance(r, dict)) if u and n}
 
 
-def department_map(departments, users) -> dict:
-    """{Connecteam user ID: Staff Access department {id, name}}. A department follows a
-    Connecteam smart group, and users() lists each person's groups; someone in several mapped
-    groups gets the first department, as Staff Access does."""
-    mapped = [d for d in departments or [] if isinstance(d, dict) and d.get("smart_group_id")
-              and d.get("name")]
+def department_map(departments, users, staff=()) -> dict:
+    """{Connecteam user ID: Staff Access department {id, name}}. First the department someone
+    linked to Connecteam has here (staff: [{connecteam_user_id, department_id}], set by hand or
+    by sync); else by smart group: a department follows one, and users() lists each person's
+    groups, someone in several getting the first department, as Staff Access does."""
+    named = {d.get("id"): d for d in departments or [] if isinstance(d, dict) and d.get("name")}
+    mapped = [d for d in named.values() if d.get("smart_group_id")]
     found = {}
+    for s in staff or []:
+        d = named.get(s.get("department_id")) if isinstance(s, dict) else None
+        if d and s.get("connecteam_user_id") not in (None, ""):
+            found[str(s["connecteam_user_id"])[:40]] = dict(id=d.get("id"), name=_text(d["name"], NAME_LEN))
     for r in users or []:
         uid = _user_id(r) if isinstance(r, dict) else None
         groups = {str(g) for g in r.get("groups") or []} if uid else set()
         d = next((d for d in mapped if str(d["smart_group_id"]) in groups), None)
-        if d:
+        if d and uid not in found:
             found[uid] = dict(id=d.get("id"), name=_text(d["name"], NAME_LEN))
     return found
 
@@ -579,7 +584,7 @@ async def data(ctx, params) -> dict:
         u = max(uploads, key=lambda u: u.get("uploaded_at") or 0)
         gusto = dict(name=_text(u.get("name"), 200), text=str(u.get("text") or ""),
                      uploaded_at=u.get("uploaded_at"), by=_text(u.get("by"), NAME_LEN))
-    dept_of = department_map(ctx.departments, users)
+    dept_of = department_map(ctx.departments, users, getattr(ctx, "staff", ()))
     now = getattr(ctx, "now", None) or dt.datetime.now(tz)
     found = dict(
         period=kind, start=start.isoformat(), end=end.isoformat(),

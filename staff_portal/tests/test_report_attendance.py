@@ -178,6 +178,22 @@ def test_departments_from_smart_groups():
                                                       "8": dict(id=2, name="Pub")}
 
 
+def test_departments_chosen_here_come_first():
+    """Someone linked to Connecteam has the department they have here (set by hand, maybe one
+    with no smart group); smart groups only for those not linked."""
+    settings = dict(who_sees="own")
+    staff = [dict(connecteam_user_id="5", department_id=3), dict(connecteam_user_id="4", department_id=1),
+             dict(connecteam_user_id="9", department_id=99)]
+    _, ctx = sample(staff=staff, settings=settings,
+                    person={"id": 5, "name": "Spa lead", "departments": [{"id": 3, "name": "Spa"}]})
+    d = run(ctx)
+    assert d["departments"] == {"5": "Spa"} and {t["uid"] for t in d["timesheets"]} == {"5"}
+    _, ctx = sample(staff=staff, manage=True)
+    d = run(ctx)
+    assert d["departments"] == {"1": "Front Office", "2": "Front Office", "4": "Front Office",
+                                "5": "Spa", "6": "Maintenance"}
+
+
 def test_a_refusal_pauses_only_that_part():
     _, ctx = sample(fail={"timesheets", "form_submissions"})
     d = run(ctx)

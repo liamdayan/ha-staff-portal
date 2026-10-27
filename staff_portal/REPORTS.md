@@ -61,16 +61,18 @@ REPORT = dict(
 | `ctx.settings` | the report's settings: the declared defaults, with what managers saved over them |
 | `ctx.person` | `{id, name, connecteam_user_id, departments: [{id, name}]}` |
 | `ctx.departments` | every department: `[{id, name, smart_group_id}]` (Connecteam smart groups) |
+| `ctx.staff` | each person linked to Connecteam and their department here: `[{connecteam_user_id, department_id}]` |
 | `ctx.tz` | the property's time zone (a `ZoneInfo`) |
 | `ctx.today` | today's date there |
 | `ctx.manage` | whether this person may manage the report |
 | `ctx.report` | the report's own details (key, name, uploads, settings declared) |
 
-A person's department in Connecteam terms: `await ctx.ct.users()` gives each Connecteam user's
-smart `groups`, and each department in `ctx.departments` follows one smart group
-(`smart_group_id`, or None). Someone in several mapped groups belongs to the first department in
-the list, as Staff Access itself does. `app/reports/attendance/report.py` (`department_map`) does
-exactly this.
+A Connecteam user's department here: first `ctx.staff`, the department of the staff member
+linked to that Connecteam user (chosen by hand or by sync). For people not linked, `await
+ctx.ct.users()` gives each Connecteam user's smart `groups`, and each department in
+`ctx.departments` follows one smart group (`smart_group_id`, or None); someone in several mapped
+groups belongs to the first department in the list, as Staff Access itself does.
+`app/reports/attendance/report.py` (`department_map`) does exactly this.
 
 ### ctx.ct: Connecteam
 

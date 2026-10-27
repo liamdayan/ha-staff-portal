@@ -352,16 +352,18 @@ def restore_uploads(data_dir: str, cleaned: dict, known: dict[str, Report]) -> i
 class Context:
     """What a report's data(ctx, params) gets: ct (ctdata), uploads(key), settings, person
     {id, name, departments: [{id, name}], connecteam_user_id}, departments [{id, name,
-    smart_group_id}], tz (a ZoneInfo), today (a date there) and manage (whether this person may
+    smart_group_id}], staff [{connecteam_user_id, department_id}] (the department each linked
+    person has here), tz (a ZoneInfo), today (a date there) and manage (whether this person may
     manage the report)."""
 
     def __init__(self, *, ct, report: Report, data_dir: str, settings: dict, person: dict,
-                 departments: list[dict], tz, manage: bool = False):
+                 departments: list[dict], tz, manage: bool = False, staff=()):
         self.ct = ct
         self.report = report
         self.settings = settings
         self.person = person
         self.departments = departments
+        self.staff = list(staff)
         self.tz = tz
         self.today = datetime.now(tz).date()
         self.manage = manage

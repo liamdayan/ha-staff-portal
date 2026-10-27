@@ -35,9 +35,9 @@ class FakeCt(StubCt):
 
 class FakeCtx(BaseCtx):
     def __init__(self, ct, settings=None, uploads=None, departments=None, today=dt.date(2026, 10, 20),
-                 now=None, tz="America/Los_Angeles", manage=False, person=None):
+                 now=None, tz="America/Los_Angeles", manage=False, person=None, staff=()):
         super().__init__(ct=ct, uploads=uploads, settings=settings, departments=departments or [],
-                         tz=tz, today=today, manage=manage,
+                         tz=tz, today=today, manage=manage, staff=staff,
                          person=person or {"id": 1, "name": "Liam Test", "connecteam_user_id": "1",
                                            "departments": [{"id": 1, "name": "Front Office"}]})
         self.now = now or dt.datetime(2026, 10, 20, 9, 0, tzinfo=self.tz)

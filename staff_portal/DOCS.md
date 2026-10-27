@@ -1390,8 +1390,9 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   name column is read (never a Manager or Approved by column). The Leave balances tab lists anyone
   who didn't match; add the pair under **Rules → Name matches** (one per line, Gusto name =
   Connecteam name).
-- **Departments.** Each person shows under their Staff Access department: the first department
-  whose Connecteam smart group they're in (Connecteam's user list says which groups). People
+- **Departments.** Each person shows under their Staff Access department: the one they have on
+  the Staff tab when they're linked to Connecteam (chosen by hand or by sync, with or without a
+  smart group), otherwise the first department whose Connecteam smart group they're in. People
   without one show under their Gusto title.
 - **Who can see whom.** On the **Rules** tab, people who manage the report choose:
   - **Everyone sees all departments** (the default): everyone who may view the report sees
@@ -1400,7 +1401,7 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
     their own department (their timesheets, schedules, forms and Gusto rows), and the name matches
     for them. People who manage the report still see everyone. The add-on leaves the others out
     before anything is sent, so they can't be seen by any means. Someone whose department isn't
-    known (no smart group) is only shown to managers.
+    known (not linked here and in no smart group) is only shown to managers.
 - **Rules and required forms.** The **Rules** tab holds the grace minutes, the lunch rule (Oregon:
   30 minutes for shifts of 6 hours or more), the low-balance flags, when someone needs action,
   which jobs are checked for early clock-outs, and the name matches. Under **Required forms**, pick
