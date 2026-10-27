@@ -1,6 +1,7 @@
 """Tasks: a to-do list for each department in the staff app.
 
-A task belongs to a department or to Everyone, may be assigned to one person, and has a status:
+A task belongs to a department or to Everyone (a form's tasks to each of the form's departments),
+may be assigned to one person, and has a status:
 To do, In progress, Done or Won't do. Quick tasks are added by people in the staff app; others
 come from Connecteam forms chosen on the dashboard (one task per submission), and from
 Connecteam's Quick Tasks when the task sync is on (ctsync.py). A form may follow one of its
@@ -39,6 +40,7 @@ FORM_OVERLAP = 3600      # a check looks back this far before the last good one 
                          # sent from a phone that was offline arrives late)
 FORM_LOOKBACK_DAYS = 31  # the most a check reaches back (after the add-on was off a while)
 MAX_FORMS = 50
+MAX_FORM_DEPARTMENTS = 50  # a form's departments
 MAX_PHOTOS = 20          # photo links kept on a task
 MAX_URL = 2000
 MAX_OPTIONS = 30         # a followed manager field's status options
@@ -59,18 +61,40 @@ class TaskError(ValueError):
 
 # ---------------------------------------------------------------- who sees and edits
 
+def departments_of(row: dict) -> list[int]:
+    """A task's or form's departments, in order ([]: Everyone). A task from a form sent to several
+    keeps them all in department_ids (JSON; NULL when it has one), with the first in department_id
+    too; a form keeps its list there always."""
+    raw = row.get("department_ids")
+    try:
+        ids = raw if isinstance(raw, list) else json.loads(raw or "null")
+    except (TypeError, ValueError):
+        ids = None
+    if isinstance(ids, list) and ids and all(type(i) is int for i in ids):
+        return ids
+    return [] if row.get("department_id") is None else [row["department_id"]]
+
+
+def stored_departments(ids: list[int]) -> dict:
+    """The department columns a task is stored with: the first, and all of them when several."""
+    return {"department_id": ids[0] if ids else None,
+            "department_ids": json.dumps(ids) if len(ids) > 1 else None}
+
+
 def can_see(task: dict, person: dict, manager: bool = False, live=None) -> bool:
     """People see tasks for any of their departments (person["department_ids"]: the ones not
-    hidden), tasks for Everyone, tasks assigned to them, and tasks they made. A task whose
-    department no longer exists or is hidden (not in live, the department IDs shown) is seen by
-    those two and by anyone who may Manage tasks, to move it on."""
+    hidden), tasks for Everyone, tasks assigned to them, and tasks they made. A task in several
+    departments is seen in each. A task whose departments no longer exist or are hidden (not in
+    live, the department IDs shown) is seen by those two and by anyone who may Manage tasks, to
+    move it on."""
     if task.get("deleted_at"):
         return False
-    dept = task["department_id"]
-    return (dept is None
-            or (dept in (person.get("department_ids") or ()) and (live is None or dept in live))
+    depts = departments_of(task)
+    shown = [d for d in depts if live is None or d in live]
+    mine = person.get("department_ids") or ()
+    return (not depts or any(d in mine for d in shown)
             or task["assigned_id"] == person["id"] or task["created_by_id"] == person["id"]
-            or (manager and live is not None and dept not in live))
+            or (manager and live is not None and not shown))
 
 
 def can_edit(task: dict, person: dict, manager: bool, live=None) -> bool:
@@ -137,7 +161,9 @@ def clean_task(data: dict, departments: dict[int, str], people: dict[int, str],
                old: dict | None = None) -> dict:
     """The fields of a new or edited task, checked. departments: {id: name} that exist;
     people: {id: name} of people who may be assigned (signed-in staff who aren't turned off).
-    old: the task being edited; a field left out keeps its value. Raises TaskError."""
+    old: the task being edited; a field left out keeps its value. A task in several departments
+    (from a form) keeps them while its department_id is left as it is; another makes it that one
+    department's. Raises TaskError."""
     old = old or {}
     pick = lambda key, default=None: data[key] if key in data else old.get(key, default)
     title = clean_text(pick("title"), MAX_TITLE)
@@ -158,8 +184,9 @@ def clean_task(data: dict, departments: dict[int, str], people: dict[int, str],
         raise TaskError("Pick Normal or Urgent.")
     assigned_name = (people.get(assigned_id) or old.get("assigned_name") or "")[:MAX_NAME] \
         if assigned_id is not None else None
+    several = old.get("department_ids") if department_id == old.get("department_id") else None
     return {"title": title, "notes": clean_text(pick("notes", ""), MAX_NOTES, lines=True),
-            "department_id": department_id, "assigned_id": assigned_id,
+            "department_id": department_id, "department_ids": several, "assigned_id": assigned_id,
             "assigned_name": assigned_name, "due_date": due_date, "due_time": due_time,
             "priority": priority}
 
@@ -178,14 +205,19 @@ def clean_status(data: dict, task: dict) -> str:
 # ---------------------------------------------------------------- tasks from Connecteam forms
 
 def clean_form(data: dict, departments: dict[int, str]) -> dict:
-    """A form's task settings from the dashboard: where its tasks go, which answer becomes the
-    title ("" = "Form name: submitter"), whether the person who sent it gets the task, and the
-    manager field its tasks follow (clean_follow; None: none)."""
-    department_id = _id(data.get("department_id"))
-    if department_id is not None and department_id not in departments:
+    """A form's task settings from the dashboard: the departments its tasks go to (department_ids,
+    in the order of departments; none: Everyone; a lone department_id is read too), which answer
+    becomes the title ("" = "Form name: submitter"), whether the person who sent it gets the
+    task, and the manager field its tasks follow (clean_follow; None: none)."""
+    raw = data["department_ids"] if "department_ids" in data else [data.get("department_id")]
+    if not isinstance(raw, (list, type(None))) or len(raw or ()) > MAX_FORM_DEPARTMENTS:
+        raise TaskError("Pick the departments again.")
+    wanted = {i for i in map(_id, raw or ()) if i is not None}
+    if wanted - set(departments):
         raise TaskError("That department doesn't exist any more.")
+    ids = [d for d in departments if d in wanted]
     name = clean_text(data.get("name"), MAX_FORM_NAME)
-    return {"name": name, "department_id": department_id,
+    return {"name": name, "department_ids": ids, "department_id": ids[0] if ids else None,
             "title_question": clean_text(data.get("title_question"), MAX_QUESTION),
             "assign_submitter": 1 if data.get("assign_submitter") in (1, True, "1") else 0,
             "follow": clean_follow(data.get("follow"))}
@@ -318,7 +350,7 @@ def task_from_submission(form: dict, sub: dict, staff_by_ct: dict[str, dict],
     return {"title": title, "notes": clean_text("\n".join(lines), MAX_NOTES, lines=True),
             "photos": clean_photos(sub.get("photos")),
             "manager_note": clean_text("\n".join(n for n in notes if n), MAX_NOTES, lines=True) or None,
-            "department_id": form["department_id"],
+            **stored_departments(departments_of(form)),
             "assigned_id": person["id"] if person else None,
             "assigned_name": person["name"][:MAX_NAME] if person else None,
             "due_date": None, "due_time": None, "priority": "normal",
@@ -372,6 +404,27 @@ def _flag_id(value):
     return value
 
 
+def _flag_ids(value, department_id):
+    """A task's or form's departments from a backup (department_ids, JSON text or a list, with
+    department_id its first): the list, [department_id] when a backup from before them has none,
+    or damaged (False)."""
+    if department_id is False:
+        return False
+    if value is None:
+        return [] if department_id is None else [department_id]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return False
+    if not isinstance(value, list) or len(value) > MAX_FORM_DEPARTMENTS:
+        return False
+    if not value:
+        return [] if department_id is None else False
+    ids = list(dict.fromkeys(_flag_id(v) for v in value))
+    return ids if None not in ids and False not in ids and ids[0] == department_id else False
+
+
 def _when(value, now: float) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < now + 86400:
         return None
@@ -381,7 +434,8 @@ def _when(value, now: float) -> float | None:
 def clean_backup_section(raw, now: float) -> dict | None:
     """The tasks section of a backup or migration file, checked as strictly as typing it in.
     None: the file has none (a backup from before tasks), and the ones here stay. A task whose
-    department can't be read is left out rather than becoming a task for Everyone."""
+    department (or any of its departments) can't be read is left out rather than becoming a task
+    for Everyone."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -398,10 +452,10 @@ def clean_backup_section(raw, now: float) -> dict | None:
         if not isinstance(row, dict):
             continue
         task_id = _flag_id(row.get("id"))
-        department_id = _flag_id(row.get("department_id"))
+        departments = _flag_ids(row.get("department_ids"), _flag_id(row.get("department_id")))
         created_at = _when(row.get("created_at"), now)
         title = clean_text(row.get("title"), MAX_TITLE)
-        if not task_id or task_id in ids or department_id is False or not created_at or not title:
+        if not task_id or task_id in ids or departments is False or not created_at or not title:
             continue
         ids.add(task_id)
         assigned_id = _flag_id(row.get("assigned_id")) or None
@@ -425,7 +479,7 @@ def clean_backup_section(raw, now: float) -> dict | None:
         tasks.append({
             "id": task_id, "title": title,
             "notes": clean_text(row.get("notes"), MAX_NOTES, lines=True),
-            "department_id": department_id, "assigned_id": assigned_id,
+            **stored_departments(departments), "assigned_id": assigned_id,
             "assigned_name": clean_text(row.get("assigned_name"), MAX_NAME) or None
             if assigned_id else None,
             "due_date": due_date, "due_time": due_time,
@@ -465,9 +519,10 @@ def clean_backup_section(raw, now: float) -> dict | None:
     forms, form_ids = [], set()
     for row in rows("forms", MAX_FORMS):
         form_id = str(row.get("form_id") or "") if isinstance(row, dict) else ""
-        department_id = _flag_id(row.get("department_id")) if form_id else False
+        departments = _flag_ids(row.get("department_ids"), _flag_id(row.get("department_id"))) \
+            if form_id else False
         picked_at = _when(row.get("picked_at"), now) if form_id else None
-        if not FORM_ID_RE.match(form_id) or form_id in form_ids or department_id is False or not picked_at:
+        if not FORM_ID_RE.match(form_id) or form_id in form_ids or departments is False or not picked_at:
             continue
         form_ids.add(form_id)
         try:
@@ -476,7 +531,8 @@ def clean_backup_section(raw, now: float) -> dict | None:
             follow = None
         forms.append({"form_id": form_id, "name": clean_text(row.get("name"), MAX_FORM_NAME),
                       "follow": follow,
-                      "department_id": department_id,
+                      "department_ids": departments,
+                      "department_id": departments[0] if departments else None,
                       "title_question": clean_text(row.get("title_question"), MAX_QUESTION),
                       "assign_submitter": 1 if row.get("assign_submitter") in (1, True) else 0,
                       "picked_at": picked_at, "last_ok": _when(row.get("last_ok"), now)})

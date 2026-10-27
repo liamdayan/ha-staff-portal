@@ -3089,13 +3089,20 @@ def task_people() -> dict[int, dict]:
                                      "ORDER BY name COLLATE NOCASE")}
 
 
+def department_label(ids: list[int], departments: dict[int, str]) -> str:
+    """Departments' names, short: "Everyone", "Maintenance, Front Desk", or the first two and
+    how many more."""
+    names = list(dict.fromkeys(departments.get(d) or db.department_name(d) or "Old department"
+                               for d in ids))
+    return ", ".join(names[:2]) + (f" +{len(names) - 2}" if len(names) > 2 else "") or "Everyone"
+
+
 def task_view(t: dict, member: dict, manager: bool, departments: dict[int, str]) -> dict:
     """A task as the staff app shows it. Text is sent as text; the page never treats it as HTML."""
-    dept = t["department_id"]
+    depts = tasks.departments_of(t)
     return {"id": t["id"], "title": t["title"], "notes": t["notes"],
-            "department_id": dept,
-            "department": "Everyone" if dept is None else departments.get(dept)
-            or db.department_name(dept) or "Old department",
+            "department_id": t["department_id"], "department_ids": depts,
+            "department": department_label(depts, departments),
             "assigned_id": t["assigned_id"], "assigned_name": t["assigned_name"],
             "mine": t["assigned_id"] == member["id"],
             "due_date": t["due_date"], "due_time": t["due_time"], "priority": t["priority"],
@@ -4573,13 +4580,13 @@ async def admin_reorder_departments(request: web.Request):
 def department_forms_refusal(dept: dict) -> web.Response | None:
     """Deleting or hiding a department a task form (or a Connecteam board) sends its tasks to: they'd go nowhere, so
     another department is picked for the form first (409). None: nothing in the way."""
-    forms = [f["name"] for f in db.task_forms() if f["department_id"] == dept["id"]]
+    forms = [f["name"] for f in db.task_forms() if dept["id"] in tasks.departments_of(f)]
     forms += [f"The Connecteam board {b['name']}" for b in ctsync.boards()
               if b["department_id"] == dept["id"]]
     if not forms:
         return None
     return bad_request(f"{', '.join(forms)} still sends its tasks to {dept['name']}. On the "
-                       "Tasks tab, pick another department for it (or Everyone) first.", 409)
+                       "Tasks tab, pick other departments for it (or Everyone) first.", 409)
 
 
 async def admin_delete_department(request: web.Request):
@@ -7776,8 +7783,8 @@ async def admin_guard(request: web.Request, handler):
 
 def task_forms_view() -> list[dict]:
     departments = task_departments()
-    return [{**f, "department": "Everyone" if f["department_id"] is None
-             else departments.get(f["department_id"], "Old department")}
+    return [{**f, "department_ids": tasks.departments_of(f),
+             "department": department_label(tasks.departments_of(f), departments)}
             for f in db.task_forms()]
 
 
@@ -7879,19 +7886,25 @@ async def admin_save_task_form(request: web.Request):
     old = db.task_form(form_id)
     if not old and len(db.task_forms()) >= tasks.MAX_FORMS:
         return bad_request(f"At most {tasks.MAX_FORMS} forms can make tasks.")
+    had = tasks.departments_of(old) if old else []
     try:
-        # It may keep the department it has, even once that's hidden (so its other settings
-        # can still be saved).
-        kept = {old["department_id"]: ""} if old and old["department_id"] is not None else {}
-        fields = tasks.clean_form(data, {**kept, **task_departments()})
+        # It may keep the departments it has, even once hidden (so its other settings can still
+        # be saved). In the Staff tab's order.
+        fields = tasks.clean_form(data, {d["id"]: d["name"] for d in db.departments()
+                                         if not d["hidden"] or d["id"] in had})
     except tasks.TaskError as err:
         return bad_request(str(err))
     fields["name"] = fields["name"] or (old or {}).get("name") or f"Form {form_id}"
     if "follow" not in data:
         fields["follow"] = (old or {}).get("follow")   # left as it was
-    db.set_task_form(form_id, fields, time.time())
+    now = time.time()
+    db.set_task_form(form_id, fields, now)
+    # Its open tasks go where it now sends them (finished ones stay where they were).
+    moved = db.move_form_tasks(form_id, fields["department_ids"], now) \
+        if old and had != fields["department_ids"] else 0
     db.log(admin_name(request), "Changed a form that makes tasks" if old
-           else "Chose a form to make tasks", detail=fields["name"])
+           else "Chose a form to make tasks", detail=fields["name"] + (
+               f"; {moved} open task{'' if moved == 1 else 's'} moved to its departments" if moved else ""))
     return web.json_response(task_forms_body())
 
 

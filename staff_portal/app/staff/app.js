@@ -4603,12 +4603,17 @@
     session.set(TK_FILTER_KEY, JSON.stringify(tk.filter));
   }
 
-  // The tasks the filters let through, with changes still on their way filled in.
+  // A task's departments (a form's task may be in several; none: Everyone).
+  const tkDepts = (t) => t.department_ids || (t.department_id == null ? [] : [t.department_id]);
+
+  // The tasks the filters let through, with changes still on their way filled in. A department
+  // lets through a task in any of its departments.
   function tkShown() {
     const f = tk.filter;
     return tk.data.tasks.map((t) => (tk.pending.has(t.id) ? { ...t, status: tk.pending.get(t.id) } : t))
       .filter((t) => (!f.mine || t.mine) &&
-        (f.dept === "all" || (f.dept === "everyone" ? t.department_id == null : String(t.department_id) === String(f.dept))) &&
+        (f.dept === "all" || (f.dept === "everyone" ? t.department_id == null
+          : tkDepts(t).some((d) => String(d) === String(f.dept)))) &&
         (f.status === "all" || t.status === f.status));
   }
 
@@ -4691,7 +4696,7 @@
   function tkFilters() {
     const f = tk.filter;
     const depts = tk.data.departments;
-    const used = new Set(tk.data.tasks.map((t) => t.department_id));
+    const used = new Set(tk.data.tasks.flatMap(tkDepts));
     const deptSelect = h("select", { class: "tk-filter-select", "aria-label": "Department" },
       h("option", { value: "all" }, "All departments"),
       h("option", { value: "everyone" }, "Only tasks for Everyone"),
@@ -5044,14 +5049,16 @@
     const dept = h("select", { class: "field", "aria-label": "Department" },
       h("option", { value: "" }, "Everyone"),
       state.data.departments.map((d) => h("option", { value: String(d.id) }, d.name)),
-      // A task's own department, hidden or gone since, stays as it is unless changed.
-      t && t.department_id != null && !state.data.departments.some((d) => d.id === t.department_id)
+      // A task's own department, hidden or gone since, stays as it is unless changed; so do a
+      // form task's several departments.
+      t && tkDepts(t).length > 1 ? h("option", { value: "keep" }, t.department)
+        : t && t.department_id != null && !state.data.departments.some((d) => d.id === t.department_id)
         ? h("option", { value: String(t.department_id) }, t.department) : null);
-    dept.value = f.dept == null ? "" : String(f.dept);
+    dept.value = t && tkDepts(t).length > 1 ? "keep" : f.dept == null ? "" : String(f.dept);
     const who = h("select", { class: "field", "aria-label": "Given to" });
     const fillPeople = () => {
       const chosen = who.value || (f.who == null ? "" : String(f.who));
-      const d = dept.value ? Number(dept.value) : null;
+      const d = dept.value === "keep" ? f.dept : dept.value ? Number(dept.value) : null;
       const inDept = people.filter((p) => d != null && (p.department_ids || []).includes(d));
       const others = people.filter((p) => !inDept.includes(p));
       who.replaceChildren(h("option", { value: "" }, "Anyone"),
@@ -5108,7 +5115,8 @@
         return;
       }
       save.disabled = true;
-      const body = { title: title.value, notes: notes.value, department_id: dept.value ? Number(dept.value) : null,
+      const body = { title: title.value, notes: notes.value,
+        ...(dept.value === "keep" ? {} : { department_id: dept.value ? Number(dept.value) : null }),
         assigned_id: who.value ? Number(who.value) : null, due_date: dueDate.value, due_time: dueTime.value,
         priority: urgent.getAttribute("aria-pressed") === "true" ? "urgent" : "normal" };
       const res = await api(t ? "PUT" : "POST", t ? `/api/tasks/${t.id}` : "/api/tasks", body);

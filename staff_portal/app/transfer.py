@@ -891,8 +891,8 @@ def tasks_section(db) -> dict:
         "history": rows(f"""SELECT task_id, at, by_id, by_name, action, from_status, to_status, note
                             FROM task_history WHERE task_id IN ({newest}) ORDER BY id DESC LIMIT ?""",
                         task_rules.MAX_TASKS, task_rules.MAX_HISTORY)[::-1],
-        "forms": rows("""SELECT form_id, name, department_id, title_question, assign_submitter,
-                         picked_at, last_ok, follow FROM task_forms"""),
+        "forms": rows("""SELECT form_id, name, department_id, department_ids, title_question,
+                         assign_submitter, picked_at, last_ok, follow FROM task_forms"""),
         "seen": [list(r) for r in db.conn.execute(
             "SELECT form_id, submission_id FROM task_form_seen ORDER BY seen_at DESC LIMIT ?",
             (task_rules.MAX_HISTORY,))],

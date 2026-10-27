@@ -1022,8 +1022,8 @@ are matched by name).
 (no role, key card, clock-in rule, reports or tasks), isn't offered anywhere (the staff app, the
 dashboard and the HR portal), and is never made again by the sync. Its people stay in it. Hidden
 departments are folded away under the list, in **Hidden smart groups**, each with **Show** to bring
-it back as it was. A department used by a task form can't be hidden (or deleted) until you pick
-another department for the form on the Tasks tab. Departments you made by hand (no smart group)
+it back as it was. A department used by a task form can't be hidden (or deleted) until you take
+it out of the form's departments on the Tasks tab. Departments you made by hand (no smart group)
 keep **Delete**, and so does one whose smart group was removed in Connecteam. Hiding and showing
 are in **Activity**, and hidden departments stay hidden in backups and migration files.
 
@@ -1537,7 +1537,8 @@ or someone whose role has **Manage tasks** (Roles tab → the role → Tasks), c
 On a shared kiosk computer, someone without a role of their own gets the computer's role here.
 All of this is checked by the add-on on every request, not by the phone.
 
-**A task** has a title, optional notes, a department (or Everyone), optionally a person it's
+**A task** has a title, optional notes, a department (or Everyone; a form's task can be in several),
+optionally a person it's
 given to, an optional due date and time, Normal or Urgent, and a status: **To do**, **In
 progress**, **Done** or **Won't do**. Each task keeps who made it, when, where it came from (a
 quick task or a Connecteam form) and a history of every change.
@@ -1556,15 +1557,19 @@ the person who made it, or a manager who could see it (its department, Everyone,
 them), can put it back. Finished tasks are kept for a year.
 
 **Deleting a department.** A department can't be deleted while a form still sends its tasks
-there, or a Connecteam board's tasks belong to it: pick another department for the form or
-board first. Tasks already in a deleted department show
+there, or a Connecteam board's tasks belong to it: take it out of the form's departments (or pick
+another department for the board) first. Tasks already in a deleted department show
 as **Old department**: the people who made them or were given them still see them, and so does
 anyone whose role has **Manage tasks**, so they can move them to another department.
 
 **Tasks from Connecteam forms.** On the dashboard's **Tasks** tab, **Choose a form** lists your
 Connecteam forms. For each one you pick:
 
-- which department its tasks go to (or Everyone);
+- which departments its tasks go to (tick any number, or Everyone). A task in several departments
+  is one task: everyone in any of them sees it, a department filter in the staff app finds it,
+  and its card names them ("Maintenance, Front Desk"). Changing the departments moves the form's
+  open tasks (To do and In progress, followed ones too) to the new ones; finished ones stay
+  where they were. Editing a task in the staff app keeps its departments unless you pick one;
 - which question's answer becomes the task's title (**List its questions** reads them from the
   form in Connecteam). Leave it blank for "Form name: who sent it";
 - whether the person who sent it gets the task (when they're linked to Connecteam here).
@@ -1588,8 +1593,8 @@ Maintenance Request with "Working on it" and "Done"), its tasks can follow it. O
 click **Follow a manager field**, pick the field, and choose the task status for each of its
 values (and for no value chosen yet: To do or In progress). Then:
 
-- every submission from the last month that isn't done shows as a task for the form's
-  department, even ones sent before you chose the form. Done ones don't show;
+- every submission from the last month that isn't done shows as one task for the form's
+  departments, even ones sent before you chose the form. Done ones don't show;
 - when its status changes in Connecteam, the task follows: Done there is Done here. An In
   progress task here stays In progress while Connecteam has no status yet;
 - when someone changes the task here, its value is written to the submission in Connecteam (this
@@ -1598,7 +1603,7 @@ values (and for no value chosen yet: To do or In progress). Then:
   Connecteam's status as it is, and the task says so;
 - the manager's **Note** shows on the task, read only.
 
-These tasks are for the whole department, and stay with their form: they aren't made as Quick
+These tasks are for everyone in the form's departments, and stay with their form: they aren't made as Quick
 Tasks. A followed form is read a month at a time, so it counts as two in the cost below.
 
 **Photos.** Photos sent with a form (and image files) show on its task in the staff app: tap one

@@ -2456,6 +2456,26 @@
     return select;
   }
 
+  // Where a form's tasks go: Everyone, or any number of departments (ticking one unticks
+  // Everyone, and the other way round). Hidden or deleted ones it has stay until unticked.
+  function taskDeptPicks(chosen, name) {
+    const depts = [...shownDepartments(), ...chosen.filter((id) => !shownDepartments().some((d) => d.id === id))
+      .map((id) => ({ id, name: departmentById(id) ? `${departmentById(id).name} (hidden)` : "A deleted department" }))];
+    const all = h("input", { type: "checkbox", checked: !chosen.length });
+    const ticks = depts.map((d) => h("input", { type: "checkbox", value: String(d.id), checked: chosen.includes(d.id) }));
+    const value = () => ticks.filter((t) => t.checked).map((t) => Number(t.value));
+    all.addEventListener("change", () => {
+      if (all.checked) ticks.forEach((t) => { t.checked = false; });
+      else all.checked = !value().length;
+    });
+    ticks.forEach((t) => t.addEventListener("change", () => { all.checked = !value().length; }));
+    const box = h("div", { class: "pick-block", role: "group", "aria-label": `Departments for ${name}` },
+      h("div", { class: "pick-head" }, "Tasks go to"),
+      h("div", { class: "report-depts" }, h("label", { class: "check" }, all, " Everyone"),
+        ticks.map((t, i) => h("label", { class: "check" }, t, ` ${depts[i].name}`))));
+    return { box, value };
+  }
+
   // What checking the forms and the synced boards costs: they're checked less often as more are
   // chosen, so together they never use more than about 300 of the 2,000 Connecteam requests a
   // day reports and tasks share. Changes the sync sends are on top, at most write_cap a day.
@@ -2495,7 +2515,7 @@
   }
 
   function taskFormCard(f, isNew) {
-    const dept = taskDeptSelect(f.department_id, `Department for ${f.name}`);
+    const dept = taskDeptPicks(f.department_ids || [], f.name);
     const listId = `tk-q-${f.form_id}`;
     const question = h("input", { type: "text", maxlength: "200", value: f.title_question || "",
       placeholder: `${f.name}: name of the person who sent it`, list: listId,
@@ -2518,7 +2538,7 @@
     const save = h("button", { type: "button", class: "btn primary" }, isNew ? "Start making tasks" : "Save");
     save.addEventListener("click", () => run(async () => {
       Object.assign(taskForms, await api("PUT", `api/tasks/forms/${encodeURIComponent(f.form_id)}`, {
-        name: f.name, department_id: dept.value ? Number(dept.value) : null,
+        name: f.name, department_ids: dept.value(),
         title_question: question.value, assign_submitter: assign.checked, follow: follow.value() }));
       renderTaskForms();
     }, isNew ? `New submissions of ${f.name} now become tasks.` : "Saved."));
@@ -2532,14 +2552,14 @@
     return h("div", { class: "card tk-form-card" },
       h("div", { class: "tk-form-head" }, h("strong", null, f.name), h("span", { class: "badge" }, `Form ${f.form_id}`)),
       isNew ? h("p", { class: "hint" }, "Only submissions sent from now on become tasks.") : taskFormStatus(f),
+      dept.box,
       h("div", { class: "row" },
-        h("label", null, "Tasks go to", dept),
         h("label", null, h("span", null, "Title ", h("small", null, "The answer to this question. Blank: form name and who sent it.")),
           question, options)),
       h("div", { class: "tk-form-tools" }, load),
       h("label", { class: "check-row" }, assign,
         h("span", null, "Give the task to the person who sent it",
-          h("small", null, "When they're linked to Connecteam here. Otherwise it's for anyone in the department."))),
+          h("small", null, "When they're linked to Connecteam here. Otherwise it's for anyone in its departments."))),
       follow.box,
       h("div", { class: "card-actions" }, remove, save));
   }
@@ -2628,7 +2648,7 @@
       reset();
       $("#tk-forms").querySelector(".empty")?.remove();
       $("#tk-forms").prepend(taskFormCard({ form_id: form.id, name: form.name || `Form ${form.id}`,
-        department_id: null, title_question: "", assign_submitter: 0 }, true));
+        department_ids: [], title_question: "", assign_submitter: 0 }, true));
     });
     pick.replaceChildren(h("label", { class: "inline-select" }, "Form", select), next, cancel);
     select.focus();

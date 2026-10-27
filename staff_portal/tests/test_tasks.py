@@ -106,7 +106,7 @@ def test_what_may_be_typed():
     got = clean(title="  Fix\tthe\x00 gate  ", notes="Line 1\r\nLine 2  \n\x07", department_id="10",
                 assigned_id=1, due_date="2026-11-02", due_time="09:30", priority="urgent")
     assert got == {"title": "Fix the gate", "notes": "Line 1\nLine 2", "department_id": 10,
-                   "assigned_id": 1, "assigned_name": "Ana", "due_date": "2026-11-02",
+                   "department_ids": None, "assigned_id": 1, "assigned_name": "Ana", "due_date": "2026-11-02",
                    "due_time": "09:30", "priority": "urgent"}
     assert clean(title="x" * 500)["title"] == "x" * tasks.MAX_TITLE
     assert len(clean(title="x", notes="y" * 9000)["notes"]) == tasks.MAX_NOTES
@@ -124,6 +124,13 @@ def test_what_may_be_typed():
            "due_date": None, "due_time": None, "priority": "normal"}
     kept = tasks.clean_task({"title": "New"}, depts, people, old)
     assert (kept["title"], kept["department_id"], kept["assigned_id"], kept["assigned_name"]) == ("New", 77, 9, "Gone")
+    # A form's task in several departments keeps them while its department is left as it is
+    # (or sent unchanged); another department makes it that one's alone.
+    several = {**old, "department_id": 77, "department_ids": "[77, 10]"}
+    assert tasks.clean_task({"title": "New"}, depts, people, several)["department_ids"] == "[77, 10]"
+    assert tasks.clean_task({"department_id": 77}, depts, people, several)["department_ids"] == "[77, 10]"
+    moved = tasks.clean_task({"department_id": 10}, depts, people, several)
+    assert (moved["department_id"], moved["department_ids"]) == (10, None)
 
 
 def test_a_submission_becomes_a_task():
@@ -787,6 +794,9 @@ def test_migration_files_carry_tasks(tmp_path):
         p = Tasks(tmp_path / "old")
         async with p:
             first, _ = await some_tasks(p)
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Maintenance", "title_question": "Problem",
+                                                              "department_ids": [p.desk, p.house]})
+            desk, house = p.desk, p.house
             status, made = await p.admin_call("POST", "/api/migrate/create")
             assert status == 200, made
         f = Fresh(tmp_path / "new")
@@ -796,8 +806,234 @@ def test_migration_files_carry_tasks(tmp_path):
             assert status == 200, reply
             assert f.db.task(first["id"])["title"] == "Back up me"
             assert f.db.task_form("55")["title_question"] == "Problem"
+            assert tasks.departments_of(f.db.task_form("55")) == [desk, house]
+            [moved] = [dict(r) for r in f.db.conn.execute("SELECT * FROM tasks WHERE source = 'form'")]
+            assert tasks.departments_of(moved) == [desk, house]   # open: moved with its form
             assert f.db.task_seen("55", ["s0"]) == {"s0"}
     run(scenario())
+
+
+# ---------------------------------------------------------------- forms sent to several departments
+
+def test_a_task_in_several_departments_is_seen_in_each():
+    """The rule on its own: anyone in any of its shown departments; a manager once all are gone."""
+    task = {"department_id": 1, "department_ids": "[1, 2]", "assigned_id": None, "created_by_id": None}
+    person = lambda *depts: {"id": 9, "department_ids": list(depts)}
+    assert tasks.departments_of(task) == [1, 2]
+    assert tasks.can_see(task, person(1)) and tasks.can_see(task, person(2)) and not tasks.can_see(task, person(3))
+    assert tasks.can_see(task, person(2), live={2, 3}) and not tasks.can_see(task, person(1), live={2, 3})
+    assert not tasks.can_see(task, person(), True, live={2}) and tasks.can_see(task, person(), True, live={3})
+    # One department, or none, as before; a damaged list falls back to department_id.
+    assert tasks.departments_of({"department_id": 4, "department_ids": None}) == [4]
+    assert tasks.departments_of({"department_id": None}) == []
+    assert tasks.departments_of({"department_id": 4, "department_ids": "[1, \"x\"]"}) == [4]
+    assert tasks.stored_departments([5]) == {"department_id": 5, "department_ids": None}
+    assert tasks.stored_departments([5, 6]) == {"department_id": 5, "department_ids": "[5, 6]"}
+    assert tasks.stored_departments([]) == {"department_id": None, "department_ids": None}
+    # A form's departments: any number of known ones, in the order given; none is Everyone.
+    known = {3: "Front Desk", 1: "Housekeeping", 2: "Maintenance"}
+    form = lambda **d: tasks.clean_form(d, known)
+    assert form(department_ids=[2, 3, 2])["department_ids"] == [3, 2]
+    assert form(department_ids=[2, 3])["department_id"] == 3
+    assert form(department_ids=[]) ["department_ids"] == [] == form(department_ids=None)["department_ids"]
+    assert form(department_id=1)["department_ids"] == [1] and form()["department_ids"] == []
+    for bad in ([9], [1, "x"], "1", [True], list(range(1, 60))):
+        with pytest.raises(tasks.TaskError):
+            form(department_ids=bad)
+
+
+def test_a_form_sent_to_several_departments(tmp_path, monkeypatch):
+    async def scenario():
+        p = Tasks(tmp_path)
+        FakeCt(monkeypatch)
+        spa = p.db.create_department("Spa")
+        async with p:
+            ana, cy, dee, bob = [await p.sign_in(x) for x in (p.ana, p.cy, p.dee, p.bob)]
+            p.db.update_staff(p.dee, department_ids=[spa])
+            # The dashboard: the departments ticked, in the Staff tab's order.
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_ids": [p.house, p.desk], "title_question": "Problem"})
+            assert status == 200, body
+            assert body["forms"][0]["department_ids"] == [p.desk, p.house]
+            assert body["forms"][0]["department"] == "Front Desk, Housekeeping"
+            form = p.db.task_form("55")
+            assert (form["department_id"], json.loads(form["department_ids"])) == (p.desk, [p.desk, p.house])
+            for bad in ({"department_ids": [999]}, {"department_ids": "x"}, {"department_ids": [p.desk, "x"]}):
+                assert (await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "M", **bad}))[0] == 400
+            assert tasks.departments_of(p.db.task_form("55")) == [p.desk, p.house]   # unchanged
+            # Its submissions: one task each, in both departments.
+            p.db.add_form_tasks("55", ["s1", "s2"], [
+                tasks.task_from_submission(p.db.task_form("55"), submission("s1", time.time(), Problem="Leaky tap"),
+                                           {}, time.time()),
+                tasks.task_from_submission(p.db.task_form("55"), submission("s2", time.time(), Problem="Old lamp"),
+                                           {}, time.time())], time.time())
+            rows = {r["title"]: dict(r) for r in p.db.conn.execute("SELECT * FROM tasks")}
+            assert len(rows) == 2 and rows["Leaky tap"]["department_id"] == p.desk
+            assert json.loads(rows["Leaky tap"]["department_ids"]) == [p.desk, p.house]
+            # Seen by people in either department, not by others (Dee in Spa; Bob, a manager, in none).
+            assert "Leaky tap" in await p.listed(ana) and "Leaky tap" in await p.listed(cy)
+            assert "Leaky tap" not in await p.listed(dee) and "Leaky tap" not in await p.listed(bob)
+            leak = rows["Leaky tap"]["id"]
+            assert (await p.call("GET", f"/api/tasks/{leak}", dee))[0] == 404
+            assert (await p.call("POST", f"/api/tasks/{leak}/status", dee, {"status": "done"}))[0] == 404
+            assert (await p.call("POST", f"/api/tasks/{leak}/status", cy, {"status": "done"}))[0] == 200
+            shown = (await p.listed(ana))["Old lamp"]
+            assert shown["department"] == "Front Desk, Housekeeping"
+            assert shown["department_ids"] == [p.desk, p.house] and shown["department_id"] == p.desk
+            # A hidden one doesn't count: only the shown departments' people see it.
+            p.db.update_department(p.house, hidden=1)
+            assert "Old lamp" in await p.listed(ana) and "Old lamp" not in await p.listed(cy)
+            p.db.update_department(p.house, hidden=0)
+            # Three or more: the first two and how many more.
+            p.db.conn.execute("UPDATE tasks SET department_ids = ? WHERE title = 'Old lamp'",
+                              (json.dumps([p.desk, p.house, spa]),))
+            assert (await p.listed(dee))["Old lamp"]["department"] == "Front Desk, Housekeeping +1"
+            # Changing the form's departments moves its open tasks; finished ones stay.
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_ids": [p.house, spa], "title_question": "Problem"})
+            assert status == 200
+            lamp = p.db.task(rows["Old lamp"]["id"])
+            assert tasks.departments_of(lamp) == [p.house, spa] and lamp["department_id"] == p.house
+            assert tasks.departments_of(p.db.task(leak)) == [p.desk, p.house]   # Done: stays
+            assert p.db.task_history(lamp["id"])[-1]["note"] == "the form's departments changed"
+            assert "Old lamp" in await p.listed(dee) and "Old lamp" not in await p.listed(ana)
+            # Everyone: no list at all.
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "M", "department_ids": []})
+            form = p.db.task_form("55")
+            assert (form["department_id"], form["department_ids"]) == (None, "[]")
+            lamp = p.db.task(lamp["id"])
+            assert (lamp["department_id"], lamp["department_ids"]) == (None, None)
+            assert "Old lamp" in await p.listed(bob)
+            # Back to two; a manager's edit keeps them unless another department is picked.
+            p.db.update_staff(p.bob, department_ids=[p.desk])
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "M", "department_ids": [p.desk, p.house]})
+            status, _ = await p.call("PUT", f"/api/tasks/{lamp['id']}", bob, {"title": "New lamp"})
+            assert status == 200 and tasks.departments_of(p.db.task(lamp["id"])) == [p.desk, p.house]
+            await p.call("PUT", f"/api/tasks/{lamp['id']}", bob, {"department_id": p.house})
+            assert tasks.departments_of(p.db.task(lamp["id"])) == [p.house]
+    run(scenario())
+
+
+def test_a_department_a_form_sends_tasks_to_cant_be_deleted_or_hidden(tmp_path):
+    async def scenario():
+        p = Tasks(tmp_path)
+        pool = p.db.create_department("Pool", smart_group_id="8")
+        p.db.set_task_form("55", tasks.clean_form({"name": "Room issue", "department_ids": [p.desk, pool]},
+                                                  {p.desk: "", pool: ""}), time.time())
+        async with p:
+            for dept, call in ((p.desk, ("DELETE", f"/api/departments/{p.desk}")),
+                               (pool, ("POST", f"/api/departments/{pool}/hide"))):
+                status, body = await p.admin_call(*call)
+                assert status == 409 and "Room issue still sends its tasks to" in body["error"]
+                assert p.db.department(dept)["hidden"] == 0
+            # Housekeeping isn't one of them.
+            assert (await p.admin_call("DELETE", f"/api/departments/{p.house}"))[0] == 200
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Room issue", "department_ids": [pool]})
+            assert (await p.admin_call("DELETE", f"/api/departments/{p.desk}"))[0] == 200
+            assert (await p.admin_call("POST", f"/api/departments/{pool}/hide"))[0] == 409
+            # A hidden department the form has stays while its other settings are saved.
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Room issue", "department_ids": []})
+            assert (await p.admin_call("POST", f"/api/departments/{pool}/hide"))[0] == 200
+            p.db.set_task_form("55", {"name": "Room issue", "department_ids": [pool], "title_question": "",
+                                      "assign_submitter": 0}, time.time())
+            status, _ = await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "Renamed", "department_ids": [pool]})
+            assert status == 200 and p.db.task_form("55")["name"] == "Renamed"
+    run(scenario())
+
+
+def test_older_forms_and_tasks_have_one_department(tmp_path):
+    """An install from before forms had several: its form's department becomes its list, and its
+    tasks (department_id alone) are seen as before."""
+    from db import Database
+    p = Tasks(tmp_path)
+    p.db.set_task_form("55", {"name": "Maintenance", "department_id": p.house, "title_question": "",
+                              "assign_submitter": 0}, time.time())
+    p.db.set_task_form("56", {"name": "Lost property", "department_id": None, "title_question": "",
+                              "assign_submitter": 0}, time.time())
+    p.db.add_form_tasks("55", ["s1"], [tasks.task_from_submission(
+        p.db.task_form("55"), submission("s1", time.time()), {}, time.time())], time.time())
+    for table in ("task_forms", "tasks"):
+        p.db.conn.execute(f"ALTER TABLE {table} DROP COLUMN department_ids")
+    p.db.conn.commit()
+    p.db.conn.close()
+    db = Database(str(tmp_path))
+    assert json.loads(db.task_form("55")["department_ids"]) == [p.house]
+    assert json.loads(db.task_form("56")["department_ids"]) == []
+    [task] = [dict(r) for r in db.conn.execute("SELECT * FROM tasks")]
+    assert task["department_ids"] is None and tasks.departments_of(task) == [p.house]
+    cy = {"id": p.cy, "department_ids": [p.house]}
+    assert [t["id"] for t in db.tasks_for(cy, 0)] == [task["id"]] and tasks.can_see(task, cy)
+    assert db.tasks_for({"id": p.ana, "department_ids": [p.desk]}, 0) == []
+    # Opened again, nothing changes twice.
+    db.conn.close()
+    assert json.loads(Database(str(tmp_path)).task_form("55")["department_ids"]) == [p.house]
+
+
+def test_backups_carry_a_forms_and_its_tasks_departments(tmp_path):
+    async def scenario():
+        p = Tasks(tmp_path)
+        async with p:
+            await p.admin_call("PUT", "/api/tasks/forms/55", {"name": "M", "department_ids": [p.desk, p.house]})
+            p.db.add_form_tasks("55", ["s1"], [tasks.task_from_submission(
+                p.db.task_form("55"), submission("s1", time.time()), {}, time.time())], time.time())
+            quick = await p.add(await p.sign_in(p.ana), title="Quick one")
+            status, backup = await p.admin_call("GET", "/api/backup")
+            assert status == 200
+            p.db.conn.execute("DELETE FROM tasks")
+            p.db.conn.execute("DELETE FROM task_forms")
+            status, body = await p.admin_call("POST", "/api/restore", {"backup": backup})
+            assert status == 200, body
+            assert tasks.departments_of(p.db.task_form("55")) == [p.desk, p.house]
+            [made] = [dict(r) for r in p.db.conn.execute("SELECT * FROM tasks WHERE source = 'form'")]
+            assert tasks.departments_of(made) == [p.desk, p.house] and made["department_id"] == p.desk
+            assert p.db.task(quick["id"])["department_ids"] is None
+            # (A restore signs everyone out: who sees what, straight from the database.)
+            seen = [t["title"] for t in p.db.tasks_for({"id": p.cy, "department_ids": [p.house]}, 0)]
+            assert made["title"] in seen and "Quick one" not in seen
+            # A backup from before several departments: one each.
+            section = backup["tasks"]
+            for row in section["tasks"] + section["forms"]:
+                row.pop("department_ids", None)
+            old = tasks.clean_backup_section(section, time.time())
+            assert [f["department_ids"] for f in old["forms"]] == [[p.desk]]
+            assert {t["department_ids"] for t in old["tasks"]} == {None}
+    run(scenario())
+
+
+def test_damaged_department_lists_in_a_backup_are_left_out():
+    now = time.time()
+    task = {"id": 1, "title": "Fine", "department_id": 3, "department_ids": "[3, 4]", "created_at": now - 10}
+    form = {"form_id": "55", "picked_at": now - 10, "department_id": 3, "department_ids": "[3, 4]"}
+    bad = ("[3, \"x\"]", "[4, 3]", "{}", "nonsense", "[]", [3, True], list(range(3, 70)))
+    section = tasks.clean_backup_section({
+        "tasks": [task, *({**task, "id": i, "department_ids": b} for i, b in enumerate(bad, 2)),
+                  {**task, "id": 20, "department_id": None, "department_ids": "[]"},
+                  {**task, "id": 21, "department_ids": [3, 4, 4]}],
+        "forms": [form, *({**form, "form_id": f"5{i}", "department_ids": b} for i, b in enumerate(bad, 6)),
+                  {**form, "form_id": "70", "department_ids": [3]}]}, now)
+    assert [(t["id"], t["department_ids"]) for t in section["tasks"]] == [(1, "[3, 4]"), (20, None), (21, "[3, 4]")]
+    assert [(f["form_id"], f["department_ids"]) for f in section["forms"]] == [("55", [3, 4]), ("70", [3])]
+
+
+def test_the_staff_apps_department_filter_matches_any_of_a_tasks_departments():
+    if not shutil.which("node"):
+        pytest.skip("no node")
+    import re
+    source = open(os.path.join(HERE, "..", "app", "staff", "app.js"), encoding="utf-8").read()
+    code = re.search(r"  const tkDepts = .*?;\n", source).group(0) + \
+        re.search(r"  function tkShown\(\) \{.*?\n  }\n", source, re.S).group(0)
+    script = code + """
+const tk = { pending: new Map(), filter: { mine: false, dept: "all", status: "all" }, data: { tasks: [
+  { id: 1, department_id: 3, department_ids: [3, 4], status: "todo" },
+  { id: 2, department_id: 4, status: "todo" },
+  { id: 3, department_id: null, department_ids: [], status: "todo" },
+  { id: 4, department_id: 5, department_ids: [5], status: "todo" }] } };
+const ids = (dept) => { tk.filter.dept = dept; return tkShown().map((t) => t.id).join(","); };
+const eq = (a, b) => { if (a !== b) { console.error(a, "!==", b); process.exit(1); } };
+eq(ids("all"), "1,2,3,4"); eq(ids("3"), "1"); eq(ids("4"), "1,2"); eq(ids("everyone"), "3"); eq(ids("5"), "4");
+"""
+    done = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
 
 
 # ---------------------------------------------------------------- the page
