@@ -769,6 +769,13 @@ async def _poll(b: dict) -> None:
     for t in linked:
         r = by_id.get(t["ct_task_id"])
         if r is not None:
+            sync = _sync(t)
+            recurring_now = r.get("type") == "recurring"
+            if sync.get("seen") is not None and bool(sync["seen"].get("recurring")) != recurring_now:
+                # Kept from each read (tasks brought in before it was kept get it now).
+                sync["seen"] = {**sync["seen"], "recurring": recurring_now}
+                _save(t["id"], ct_sync=sync)
+                t = {**t, "ct_sync": json.dumps(sync)}
             _reconcile(t, ct_view(r), ct_time, to_ct, to_staff)
         elif complete and not (_sync(t).get("seen") or {}).get("archived"):
             # Gone from the whole board (an archived one may simply not be listed).

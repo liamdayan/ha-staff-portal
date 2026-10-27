@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.12
+
+- **Recurring Connecteam tasks brought in before 0.12.9 are now known as recurring** on the next
+  read of their board (within about 10 minutes of updating): only today's repeat shows, marked
+  "Repeats · Connecteam", instead of every upcoming one.
+
 ## 0.12.11
 
 - **The Attendance report opens at once:** Connecteam data is kept for a day instead of 10

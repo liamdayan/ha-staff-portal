@@ -1085,3 +1085,25 @@ def test_a_weekly_repeat_shows_the_day_after_the_last_one_was_due(tmp_path):
             # Last week's was due yesterday, so next week's shows now; the one after waits.
             assert len(dues) == 2
     run(scenario())
+
+
+def test_recurring_tasks_brought_in_before_it_was_kept_get_it_on_the_next_read(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        now = int(time.time())
+        today = {**ct_task("r1", "Wipe the counters", [7], due=now + 3600), "type": "recurring"}
+        later = {**ct_task("r2", "Wipe the counters", [7], due=now + 2 * 86400), "type": "recurring"}
+        ct.board_tasks["501"] = [today, later]
+        async with p, ct:
+            await poll(p)
+            for row in p.db.conn.execute("SELECT id, ct_sync FROM tasks").fetchall():   # as 0.12.8 kept them
+                sync = json.loads(row["ct_sync"])
+                sync["seen"].pop("recurring", None)
+                p.db.conn.execute("UPDATE tasks SET ct_sync = ? WHERE id = ?", (json.dumps(sync), row["id"]))
+            p.db.conn.commit()
+            await poll(p)
+            ana = await p.sign_in(p.ana)
+            status, body = await p.call("GET", "/api/tasks", ana)
+            shown = [t for t in body["tasks"] if t["title"] == "Wipe the counters"]
+            assert len(shown) == 1 and shown[0]["ct_recurring"] is True
+    run(scenario())
