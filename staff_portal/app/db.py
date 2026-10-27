@@ -10,6 +10,7 @@ import time
 import urllib.parse
 
 import doorlog
+import tasks
 from wristbands import door_kind, permission_choice
 
 SCHEMA = """
@@ -339,6 +340,9 @@ MIGRATIONS = {
         "ct_status": "TEXT",             # a followed form: its manager field's status option
         "photos": "TEXT",                # JSON [{url, name}]: a form submission's photos
         "manager_note": "TEXT",          # a form submission's manager notes (read only)
+        # A task from a form sent to several departments: all of them (JSON list, the first also
+        # in department_id). NULL: just department_id (tasks.departments_of).
+        "department_ids": "TEXT",
     },
     "task_history": {
         "note": "TEXT",                  # where a change came from ("in Connecteam")
@@ -347,6 +351,9 @@ MIGRATIONS = {
         # JSON: the manager field its tasks follow {field, name, options: [{id, name, color,
         # status}], unset}, or NULL.
         "follow": "TEXT",
+        # Every department its tasks go to (JSON list; [] = Everyone), the first also in
+        # department_id. Forms chosen before this had one: it becomes the list.
+        "department_ids": "TEXT NOT NULL DEFAULT '[]'",
     },
     "devices": {
         "ha_user": "TEXT",
@@ -823,6 +830,9 @@ class Database:
                 # From one department each to several: the one they had comes first.
                 self.conn.execute("UPDATE staff SET department_ids = json_array(department_id), "
                                   "department_id = NULL WHERE department_id IS NOT NULL")
+        if "task_forms.department_ids" in added:
+            self.conn.execute("UPDATE task_forms SET department_ids = json_array(department_id) "
+                              "WHERE department_id IS NOT NULL")
         if "departments.hidden" in added:
             self._hide_built_in_groups()
         self.conn.executescript(INDEXES)
@@ -1241,12 +1251,17 @@ class Database:
         row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return dict(row) if row else None
 
-    # Who sees a task (tasks.can_see): its department's people, everyone for Everyone, the
-    # person it's given to and the one who made it, and managers when its department is gone or
-    # hidden. The person's departments are a JSON list (member["department_ids"]: shown ones).
-    TASK_SEEN = """(department_id IS NULL OR department_id IN (SELECT value FROM json_each(?))
+    # Who sees a task (tasks.can_see): its departments' people, everyone for Everyone, the
+    # person it's given to and the one who made it, and managers when its departments are all
+    # gone or hidden. The person's departments are a JSON list (member["department_ids"]: shown
+    # ones); a task's are department_ids when it has several, else department_id.
+    TASK_DEPTS = """json_each(CASE WHEN json_valid(tasks.department_ids) THEN tasks.department_ids
+                    ELSE json_array(tasks.department_id) END)"""
+    TASK_SEEN = f"""(department_id IS NULL
+                    OR EXISTS (SELECT 1 FROM {TASK_DEPTS} j WHERE j.value IN (SELECT value FROM json_each(?)))
                     OR assigned_id = ? OR created_by_id = ?
-                    OR (? AND department_id NOT IN (SELECT id FROM departments WHERE hidden = 0)))"""
+                    OR (? AND NOT EXISTS (SELECT 1 FROM {TASK_DEPTS} j
+                                          WHERE j.value IN (SELECT id FROM departments WHERE hidden = 0))))"""
 
     def tasks_for(self, member: dict, since: float, manager: bool = False) -> list[dict]:
         """The tasks someone may see (tasks.can_see), not in the bin: every open one, and finished
@@ -1287,7 +1302,8 @@ class Database:
 
     # Columns a new task may also be given (a form's or Connecteam's): its own status, and the
     # Connecteam sync's.
-    TASK_EXTRAS = ("ct_task_id", "ct_board_id", "ct_sync", "ct_status", "photos", "manager_note")
+    TASK_EXTRAS = ("ct_task_id", "ct_board_id", "ct_sync", "ct_status", "photos", "manager_note",
+                   "department_ids")
 
     def add_task(self, fields: dict, by: dict | None, at: float, commit: bool = True,
                  note: str | None = None) -> int:
@@ -1313,10 +1329,10 @@ class Database:
         return cur.lastrowid
 
     def edit_task(self, task_id: int, fields: dict, by: dict, at: float) -> None:
-        keys = ("title", "notes", "department_id", "assigned_id", "assigned_name", "due_date",
-                "due_time", "priority")
+        keys = ("title", "notes", "department_id", "department_ids", "assigned_id", "assigned_name",
+                "due_date", "due_time", "priority")
         self.conn.execute(f"UPDATE tasks SET {', '.join(f'{k} = ?' for k in keys)}, updated_at = ? "
-                          "WHERE id = ?", (*(fields[k] for k in keys), at, task_id))
+                          "WHERE id = ?", (*(fields.get(k) for k in keys), at, task_id))
         self._task_event(task_id, at, by, "edited")
         self.conn.commit()
 
@@ -1363,17 +1379,36 @@ class Database:
         return dict(row) if row else None
 
     def set_task_form(self, form_id: str, fields: dict, now: float) -> None:
-        """Choose a form, or change its settings. A form chosen now only makes tasks from
-        submissions sent from now on; changing its settings doesn't move that."""
+        """Choose a form, or change its settings (fields: tasks.clean_form's). A form chosen now
+        only makes tasks from submissions sent from now on; changing its settings doesn't move
+        that."""
+        ids = tasks.departments_of(fields)
         self.conn.execute(
-            """INSERT INTO task_forms (form_id, name, department_id, title_question,
-               assign_submitter, picked_at, follow) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO task_forms (form_id, name, department_id, department_ids, title_question,
+               assign_submitter, picked_at, follow) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (form_id) DO UPDATE SET name = excluded.name,
-               department_id = excluded.department_id, title_question = excluded.title_question,
+               department_id = excluded.department_id, department_ids = excluded.department_ids,
+               title_question = excluded.title_question,
                assign_submitter = excluded.assign_submitter, follow = excluded.follow""",
-            (form_id, fields["name"], fields["department_id"], fields["title_question"],
-             fields["assign_submitter"], now, fields.get("follow")))
+            (form_id, fields["name"], ids[0] if ids else None, json.dumps(ids),
+             fields["title_question"], fields["assign_submitter"], now, fields.get("follow")))
         self.conn.commit()
+
+    def move_form_tasks(self, form_id: str, ids: list[int], at: float) -> int:
+        """A form's departments changed: its open tasks (To do or In progress, followed ones too)
+        go to the new ones; finished ones stay where they were. Returns how many moved."""
+        stored = tasks.stored_departments(ids)
+        moved = [r[0] for r in self.conn.execute(
+            "SELECT id FROM tasks WHERE form_id = ? AND source = 'form' AND status IN ('todo', 'doing') "
+            "AND (department_id IS NOT ? OR department_ids IS NOT ?)",
+            (form_id, stored["department_id"], stored["department_ids"]))]
+        for task_id in moved:
+            self.conn.execute("UPDATE tasks SET department_id = ?, department_ids = ?, updated_at = ? "
+                              "WHERE id = ?", (stored["department_id"], stored["department_ids"], at, task_id))
+            self._task_event(task_id, at, {"name": "Staff Access"}, "edited",
+                             note="the form's departments changed")
+        self.conn.commit()
+        return len(moved)
 
     def delete_task_form(self, form_id: str) -> None:
         self.conn.execute("DELETE FROM task_forms WHERE form_id = ?", (form_id,))
@@ -1690,8 +1725,8 @@ class Database:
             c.execute(f"DELETE FROM {table}")
         # Connecteam IDs are kept, but not what the two sides last agreed on, nor changes waiting
         # to be sent: when the owner turns the sync on again, Connecteam's copy is read first.
-        columns = ("id", "title", "notes", "department_id", "assigned_id", "assigned_name", "due_date",
-                   "due_time", "priority", "status", "status_at", "status_by", "created_at",
+        columns = ("id", "title", "notes", "department_id", "department_ids", "assigned_id",
+                   "assigned_name", "due_date", "due_time", "priority", "status", "status_at", "status_by", "created_at",
                    "created_by_id", "created_by_name", "source", "form_id", "form_name",
                    "submission_id", "source_url", "updated_at", "deleted_at", "deleted_by",
                    "ct_task_id", "ct_board_id", "ct_status", "photos", "manager_note")
@@ -1701,9 +1736,11 @@ class Database:
                          to_status, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                       [(h["task_id"], h["at"], h["by_id"], h["by_name"], h["action"],
                         h["from_status"], h["to_status"], h.get("note")) for h in section["history"]])
-        c.executemany("""INSERT INTO task_forms (form_id, name, department_id, title_question,
-                         assign_submitter, picked_at, last_ok, follow) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                      [(f["form_id"], f["name"], f["department_id"], f["title_question"],
+        c.executemany("""INSERT INTO task_forms (form_id, name, department_id, department_ids,
+                         title_question, assign_submitter, picked_at, last_ok, follow)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      [(f["form_id"], f["name"], f["department_id"],
+                        json.dumps(f.get("department_ids") or []), f["title_question"],
                         f["assign_submitter"], f["picked_at"], f["last_ok"], f.get("follow"))
                        for f in section["forms"]])
         c.executemany("INSERT INTO task_form_seen (form_id, submission_id, seen_at) VALUES (?, ?, ?)",

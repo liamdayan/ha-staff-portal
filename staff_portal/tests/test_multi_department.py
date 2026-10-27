@@ -313,8 +313,8 @@ def test_a_department_used_by_a_task_form_cant_be_hidden(tmp_path):
             status_deleted, deleted = await p.admin_call("DELETE", f"/api/departments/{house}")
             assert status == status_deleted == 409
             assert hidden["error"] == deleted["error"] == (
-                "Room issue still sends its tasks to Housekeeping. On the Tasks tab, pick another "
-                "department for it (or Everyone) first.")
+                "Room issue still sends its tasks to Housekeeping. On the Tasks tab, pick other "
+                "departments for it (or Everyone) first.")
             assert p.db.department(house)["hidden"] == 0
             # Showing is never in the way.
             assert (await hide(p, house, "show"))[0] == 200

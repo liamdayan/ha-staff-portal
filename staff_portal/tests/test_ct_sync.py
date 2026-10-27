@@ -939,6 +939,52 @@ def test_a_followed_forms_status_written_here_isnt_undone_by_an_older_read(tmp_p
     run(scenario())
 
 
+def test_a_followed_form_in_several_departments_keeps_one_task_per_submission(tmp_path):
+    """One task for each submission, seen in each of the form's departments: its status has one
+    manager field to follow, so there's never a copy per department. Moving the form's departments
+    moves the task, and writes nothing to Connecteam."""
+    async def scenario():
+        p, ct = synced(tmp_path, on=False)
+        p.db.update_settings({"wb_time_zone": "UTC"})
+        ct.forms = [maintenance_form()]
+        working = {"statusOptionId": "o1", "name": "Working on it", "color": "#f5a623"}
+        sub = ct_submission("s1", 55, 7, int(time.time()) - 86400, [
+            {"questionId": "q1", "questionType": "openEnded", "value": "Lamp", "wasSubmittedEmpty": False}])
+        sub["managerFields"] = status_field(working, int(time.time()) - 3600)
+        ct.submissions = {55: [sub]}
+        async with p, ct:
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_ids": [p.desk, p.house],
+                "title_question": "Problem", "follow": FOLLOW})
+            assert status == 200, body
+            assert await main.check_task_forms() == 1
+            [t] = p.db.conn.execute("SELECT * FROM tasks").fetchall()
+            assert tasks.departments_of(dict(t)) == [p.desk, p.house] and t["status"] == "doing"
+            ana, cy = await p.sign_in(p.ana), await p.sign_in(p.cy)
+            assert "Lamp" in await p.listed(ana) and "Lamp" in await p.listed(cy)
+            await p.call("POST", f"/api/tasks/{t['id']}/status", cy, {"status": "done"})
+            await ctsync.settle()
+            assert len(writes(ct)) == 1
+            for _ in range(2):   # read again: still the one task, Done in both departments
+                p.db.conn.execute("UPDATE task_forms SET last_check = NULL")
+                await main.check_task_forms()
+                assert p.db.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+                assert (await p.listed(ana))["Lamp"]["status"] == "done" == (await p.listed(cy))["Lamp"]["status"]
+            # Done ones don't move; an open one does, and Connecteam isn't written to.
+            await p.call("POST", f"/api/tasks/{t['id']}/status", cy, {"status": "doing"})
+            await ctsync.settle()
+            sent_before = len(writes(ct))
+            await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_ids": [p.house], "title_question": "Problem"})
+            await ctsync.settle()
+            assert tasks.departments_of(p.db.task(t["id"])) == [p.house] and len(writes(ct)) == sent_before
+            assert "Lamp" not in await p.listed(ana) and "Lamp" in await p.listed(cy)
+            p.db.conn.execute("UPDATE task_forms SET last_check = NULL")
+            await main.check_task_forms()
+            assert p.db.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+    run(scenario())
+
+
 def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_path):
     """quick_tasks.delete is optional: without it, Won't do on a task nobody is assigned to (a
     draft, which Connecteam can't close) leaves the draft there, says so, and isn't tried again;
