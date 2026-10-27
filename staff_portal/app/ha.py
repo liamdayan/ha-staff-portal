@@ -176,14 +176,14 @@ class HomeAssistant:
         return {e["entity_id"] for e in registry
                 if isinstance(e, dict) and (e.get("entity_category") or e.get("hidden_by"))}
 
-    async def is_admin(self, user_id: str) -> bool:
+    async def is_admin(self, user_id: str, max_age: float = 60.0) -> bool:
         """Whether a Home Assistant user is an active administrator. Admins are cached for a
-        minute. Anyone else triggers a fresh lookup (they may have just been made admin), but
+        minute (max_age: longer for the dashboard's poll). Anyone else triggers a fresh lookup (they may have just been made admin), but
         at most one lookup runs at a time, none within ADMIN_REFRESH_GAP of the last, and a "no"
         is remembered for NOT_ADMIN_SECONDS: requests from non-admins can't make the add-on
         query Home Assistant over and over."""
         now = time.monotonic()
-        if user_id in self._admins and now - self._admins_at <= 60:
+        if user_id in self._admins and now - self._admins_at <= max_age:
             return True
         if now - self._not_admins.get(user_id, float("-inf")) < NOT_ADMIN_SECONDS:
             return False

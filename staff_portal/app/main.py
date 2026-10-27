@@ -3557,15 +3557,52 @@ def gives_view(m: dict, ordered: list[dict]) -> dict:
 
 
 async def admin_state(request: web.Request):
+    """Everything the dashboard shows, with its version (v). ?v= the version the page has (its
+    poll every few seconds): unchanged, it gets just that back. A poll is answered from the
+    add-on's own records and memory only: it never asks Connecteam, TT Hotel or Home Assistant.
+    Either way it says when the newest Activity line was written, for the Activity tab."""
+    polling = "v" in request.query
+    body = state_body(await wristbands_state() if not polling else wristbands_state_now())
+    version = state_version(body)
+    newest = (db.activity(1) or [{}])[0].get("ts")
+    if polling and request.query["v"] == version:
+        return web.json_response({"v": version, "unchanged": True, "activity": newest})
+    return web.json_response({**body, "v": version, "activity": newest})
+
+
+def state_version(body: dict) -> str:
+    """A short hash of what the dashboard shows, leaving out what changes by itself all the time
+    (request counts, when things were last checked, Cloudflare's request counts), and when phones
+    and people were last seen only to the 5 minutes: a poll then only redraws for a real change."""
+    view = json.loads(json.dumps(body))
+    for key in ("checked_at", "used_today", "account_left", "retry_at", "hr"):
+        view["connecteam"].pop(key, None)
+    view["hr"].pop("connecteam", None)
+    wb = view["wristbands"]
+    for key in ("used_month", "token_expires"):
+        wb.pop(key, None)
+    for key in ("scanned_at", "scanning"):
+        wb.get("discovery", {}).pop(key, None)
+    for status in wb.get("encoders", {}).values():
+        status.pop("checked_at", None)
+    view["tunnel_sources"] = [[t["address"], t["allowed"]] for t in view["tunnel_sources"]]
+    for item in view["devices"] + view["staff"]:
+        item["last_seen"] = (item.get("last_seen") or 0) // 300
+        if isinstance(item.get("encoder_link"), dict):
+            item["encoder_link"] = {k: v for k, v in item["encoder_link"].items() if k != "last_seen"}
+    return hashlib.sha1(json.dumps(view, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def state_body(wristbands: dict) -> dict:
     owners = db.phone_order_owners()
     key_counts = db.active_key_card_counts()
     rules = db.department_clock_ins()
     ordered = db.departments()
-    return web.json_response({
+    return {
         "settings": public_settings(),
         "connecteam": connecteam_state(),
         "hr_google": google_view(),
-        "wristbands": await wristbands_state(),
+        "wristbands": wristbands,
         "tunnel_sources": tunnel_sources(),
         "roles": db.roles(),
         "departments": departments_view(ordered),
@@ -3584,7 +3621,7 @@ async def admin_state(request: web.Request):
         # dialog says so early, by the add-on's own rule.
         "not_fresh": not_fresh(),
         "hr": hr_brief(),
-    })
+    }
 
 
 def public_settings() -> dict:
@@ -6001,10 +6038,14 @@ async def wristbands_state() -> dict:
     """TT Hotel's connection and request counts, each encoder's status (all from memory), and
     Home Assistant's time zone, so the dashboard can say which zone cards use (read at most every
     few hours, and only while Wristbands is on)."""
+    return wristbands_state_now(await ha_time_zone() if tthotel_settings()[0] else ha_zone["name"])
+
+
+def wristbands_state_now(zone: str | None = None) -> dict:
+    """The same from memory only, with Home Assistant's time zone as last read (the poll)."""
     urls = sorted({encoder_address(d, rescan=False) for d in db.devices()} - {None})
-    zone = await ha_time_zone() if tthotel_settings()[0] else ha_zone["name"]
     return {**tthotel.state(), "encoders": {url: encoder_status(url) for url in urls},
-            "discovery": discovery.state(), "ha_time_zone": zone}
+            "discovery": discovery.state(), "ha_time_zone": zone or ha_zone["name"]}
 
 
 def door_view(door: dict) -> dict:
@@ -7746,6 +7787,9 @@ async def admin_delete_logo(request: web.Request):
     return web.json_response({"ok": True})
 
 
+POLL_ADMIN_SECONDS = 600
+
+
 @web.middleware
 async def admin_guard(request: web.Request, handler):
     remote = request.remote or ""
@@ -7756,7 +7800,11 @@ async def admin_guard(request: web.Request, handler):
         # they know the address, so check that this user is an administrator.
         user_id = request.headers.get("X-Remote-User-Id", "")
         try:
-            admin = bool(user_id) and await ha.is_admin(user_id)
+            # The dashboard's poll trusts who was an admin for longer, so it alone never has
+            # Home Assistant asked more than every POLL_ADMIN_SECONDS.
+            polling = request.path == "/api/state" and "v" in request.query
+            admin = bool(user_id) and await (ha.is_admin(user_id, POLL_ADMIN_SECONDS) if polling
+                                             else ha.is_admin(user_id))
         except HomeAssistantError as err:
             log.warning("Couldn't check Home Assistant user %s: %s", user_id, err)
             return web.Response(status=503, text="Couldn't check your Home Assistant account. "

@@ -417,6 +417,7 @@ dialog.ask { width: min(400px, calc(100vw - 32px)); }
 dialog.ask input { width: 100%; }
 .btn.primary.danger-fill { background: var(--danger); box-shadow: none; }
 .version { color: var(--muted); font-size: 12px; margin-left: 6px; opacity: 0.8; }
+.live-note { font-size: 12px; margin-left: 6px; }
 
 .error-panel {
   position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 200;
