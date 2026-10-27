@@ -1442,7 +1442,8 @@ once.
 Staff Access's own Connecteam connection, only when someone opens one. They read a whole
 calendar month at a time, so moving between a week, its pay period and its month asks nothing
 new. Each month is kept for a day, and read afresh every morning at 7 AM while the Attendance
-report is on; **Refresh now** at the top of a report reads it again (at most every 2 minutes).
+report is on (kept on disk, so a restart doesn't read it again); **Refresh now** at the top
+of a report reads it again (at most every 2 minutes).
 The first time a month is opened it can take a few seconds longer, because reports
 may only ask 40 things a minute (see [Staying within Connecteam's API
 limits](#staying-within-connecteams-api-limits)). For everything a report can show, the

@@ -35,7 +35,9 @@ Times are given in the property's time zone (configure's zone) as "YYYY-MM-DDTHH
 
 import asyncio
 import contextvars
+import json
 import logging
+import os
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -73,13 +75,58 @@ _refused: dict[str, float] = {}             # optional lists Connecteam refused,
 _denied: dict[str, tuple[str, float]] = {}  # permission: (Connecteam's refusal, when)
 
 
-def configure(connecteam, zone) -> None:
-    """Use this Connecteam client, and zone() for the property's time zone (a ZoneInfo)."""
-    global _ct, _zone
-    _ct, _zone = connecteam, zone
+def configure(connecteam, zone, store: str | None = None) -> None:
+    """Use this Connecteam client, and zone() for the property's time zone (a ZoneInfo). store:
+    a file the months read are kept in, so a restart (or an update) doesn't read them again."""
+    global _ct, _zone, _store
+    _ct, _zone, _store = connecteam, zone, store
     if forget not in connecteam.on_forget:
         connecteam.on_forget.append(forget)
-    forget()
+    _cache.clear()
+    _load_months()
+
+
+# ---------------------------------------------------------------- months kept on disk
+
+_store: str | None = None
+MAX_STORE = 20 * 1024 * 1024   # bytes of months kept on disk, at most
+
+
+def _month_keys() -> list[tuple]:
+    return [k for k in _cache if k and (k[0] in ("timesheets", "shifts") or str(k[0]).startswith("submissions:"))]
+
+
+def _load_months() -> None:
+    """The months kept on disk that are still under a day old (the rest are read when wanted)."""
+    if not _store:
+        return
+    try:
+        with open(_store, encoding="utf-8") as f:
+            kept = json.load(f)
+        for m in kept if isinstance(kept, list) else []:
+            if time.time() - float(m["at"]) < MONTH_TTL and isinstance(m.get("rows"), list):
+                key = (str(m["kind"]), date.fromisoformat(m["first"]), date.fromisoformat(m["last"]))
+                _cache[key] = (m["rows"], float(m["at"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass   # none yet, or damaged: read afresh
+
+
+def _write_months() -> None:
+    """Keep the months on disk (written whole, then swapped in)."""
+    if not _store:
+        return
+    kept = [{"kind": k[0], "first": k[1].isoformat(), "last": k[2].isoformat(), "at": _cache[k][1],
+             "rows": _cache[k][0]} for k in _month_keys() if k in _cache]
+    try:
+        text = json.dumps(kept, separators=(",", ":"))
+        if len(text) > MAX_STORE:
+            return
+        tmp = _store + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, _store)
+    except (OSError, TypeError, ValueError) as err:
+        log.info("Reports: couldn't keep the months read: %s", err)
 
 
 def forget_submissions(form_id) -> None:
@@ -92,9 +139,9 @@ def forget_submissions(form_id) -> None:
 
 def forget_months() -> None:
     """Drop the months kept (a report's Refresh now): the next look reads them afresh."""
-    for key in [k for k in _cache if k and k[0] in ("timesheets", "shifts")
-                or str(k[0]).startswith("submissions:")]:
+    for key in _month_keys():
         _cache.pop(key, None)
+    _write_months()
 
 
 _read_at: contextvars.ContextVar[list | None] = contextvars.ContextVar("read_at", default=None)
@@ -111,6 +158,7 @@ def track() -> list[float]:
 def forget() -> None:
     """Drop every copy kept (the Connecteam settings changed)."""
     _cache.clear()
+    _write_months()
     _refused.clear()
     _denied.clear()
 
@@ -390,13 +438,16 @@ def _months(start: date, end: date) -> list[tuple[date, date]]:
 async def _by_month(kind: str, start: date, end: date, fetch, day_of) -> list[dict]:
     """fetch(first, last)'s rows for each month start..end touches (each month kept on its
     own), those whose day_of(row) falls between start and end."""
-    rows = []
+    rows, began, read = [], time.time(), False
     for first, last in _months(start, end):
         rows.extend(await _kept((kind, first, last), MONTH_TTL,
                                 lambda first=first, last=last: fetch(first, last)))
+        read = read or _cache.get((kind, first, last), (None, 0))[1] >= began
         times, hit = _read_at.get(), _cache.get((kind, first, last))
         if times is not None and hit:
             times.append(hit[1])
+    if read:
+        _write_months()   # a month read afresh: kept on disk for the next start
     lo, hi = start.isoformat(), end.isoformat()
     return [r for r in rows if lo <= (day_of(r) or lo) <= hi]
 

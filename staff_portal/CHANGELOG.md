@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.13
+
+- **Report data is kept through a restart or update:** the months read from Connecteam are kept
+  on disk (up to a day old, as before), so the Attendance report still opens at once after the
+  add-on restarts. Refresh now, and changing the Connecteam settings, clear them as before.
+
 ## 0.12.12
 
 - **Recurring Connecteam tasks brought in before 0.12.9 are now known as recurring** on the next

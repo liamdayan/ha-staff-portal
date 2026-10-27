@@ -170,7 +170,7 @@ connecteam = Connecteam(
                          lambda u: db.update_settings({"reports_connecteam_usage": json.dumps(u)})))
 # Reports and tasks read Connecteam through ctdata, in their own lane of the same budget; the
 # task sync (ctsync) reads and writes through that lane too.
-ctdata.configure(connecteam, lambda: report_zone())
+ctdata.configure(connecteam, lambda: report_zone(), os.path.join(DATA_DIR, "report-months.json"))
 ctsync.configure(lambda: db, connecteam, lambda: report_zone())
 
 

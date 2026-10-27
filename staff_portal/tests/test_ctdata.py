@@ -4,6 +4,8 @@ caps, and that a refusal or a "too many requests" stops only reports while the c
 running. Nothing here talks to a real Connecteam."""
 
 import asyncio
+import os
+import json
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -591,3 +593,31 @@ def test_without_archived_names_rows_keep_their_number(tmp_path):
             return await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
     rows = go(scenario())
     assert [r["name"] for r in rows if r["user_id"] == "9"] == ["User 9"]
+
+
+def test_months_read_are_kept_through_a_restart(tmp_path):
+    p = setup(tmp_path)
+    store = str(tmp_path / "report-months.json")
+
+    async def scenario():
+        async with p, fake() as ct:
+            ctdata.configure(main.connecteam, lambda: ZoneInfo("America/Los_Angeles"), store)
+            path = "/time-clock/v1/time-clocks/1/time-activities"
+            first = await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            assert ct.count(path) == 1 and os.path.exists(store)
+            # A restart: the months come back from the file, so nothing is asked again.
+            ctdata.configure(main.connecteam, lambda: ZoneInfo("America/Los_Angeles"), store)
+            assert await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25)) == first
+            assert ct.count(path) == 1
+            # A day old: not loaded. Refresh now empties the file too.
+            kept = json.load(open(store))
+            for m in kept:
+                m["at"] -= ctdata.MONTH_TTL + 1
+            json.dump(kept, open(store, "w"))
+            ctdata.configure(main.connecteam, lambda: ZoneInfo("America/Los_Angeles"), store)
+            assert not ctdata._month_keys()
+            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            ctdata.forget_months()
+            assert json.load(open(store)) == []
+            ctdata.configure(main.connecteam, lambda: ZoneInfo("America/Los_Angeles"), None)
+    go(scenario())
