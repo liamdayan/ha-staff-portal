@@ -964,3 +964,6 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 #tk-sync .card-actions { margin-top: 12px; }
 .role-check { margin: 6px 0 4px; font-weight: 600; font-size: 14px; }
 .role-check small { font-weight: 400; }
+
+/* A drop-down's list is drawn by the system (white on Windows), so its options get the theme's own colours. */
+option, optgroup { background-color: var(--card); color: var(--text); }

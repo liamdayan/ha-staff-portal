@@ -56,6 +56,8 @@ html { touch-action: manipulation; }
 @media (pointer: coarse) { input, select, textarea { font-size: max(16px, 1em); } }
 
 button, select, input { font: inherit; color: inherit; }
+/* A drop-down's list is drawn by the system (white on Windows), so its options get the theme's own colours. */
+option, optgroup { background-color: var(--card); color: var(--text); }
 button { cursor: pointer; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -2441,12 +2441,19 @@ REPORT_KEEP = 120        # seconds a finished report waits to be picked up
 report_jobs: dict[tuple, dict] = {}   # (report, person, manage, params) -> {"task", "done"}
 
 
+REPORT_FRESH_GAP = 120   # seconds between Refresh nows, at most one (Connecteam's allowance)
+report_fresh = [0.0]
+
+
 async def run_report(report, ctx, params: dict, manage: bool) -> tuple[int, str]:
-    """A report's data(ctx, params), as (HTTP status, JSON body)."""
+    """A report's data(ctx, params), as (HTTP status, JSON body). The data gets read_at: when
+    the oldest Connecteam data it used was read (None: none)."""
+    read = ctdata.track()   # this runs in a task of its own, so this is the report's alone
     try:
         data = await report.data(ctx, params)
         if not isinstance(data, dict):
             raise TypeError("data() must return a dict")
+        data = {**data, "read_at": min(read) if read else None}
         # Someone who can't manage the report gets the settings data() sent (trimmed to what
         # they may see, when it trims them), not all that's stored.
         shown = data["settings"] if not manage and isinstance(data.get("settings"), dict) else ctx.settings
@@ -2469,6 +2476,10 @@ async def api_report_data(request: web.Request):
     device, member, manage = report_caller(request)
     report = REPORTS[request.match_info["key"]]
     params = reports_kit.clean_params(report, request.query)
+    if request.query.get("fresh") == "1" and time.time() - report_fresh[0] > REPORT_FRESH_GAP:
+        report_fresh[0] = time.time()
+        ctdata.forget_months()   # Refresh now: read Connecteam afresh
+        report_jobs.clear()
     now = time.monotonic()
     for k, job in list(report_jobs.items()):
         if job["done"] and now - job["done"] > REPORT_KEEP:
@@ -3314,6 +3325,52 @@ async def check_task_forms(force: bool = False) -> int:
         made += db.add_form_tasks(form["form_id"], marked, new, time.time())
         db.task_form_checked(form["form_id"], time.time(), None)
     return made
+
+
+# The attendance report's daily read: at REPORT_READ_HOUR, while it's on, this month's Connecteam
+# data is read afresh (about 10 requests), so the report opens at once all day: months are kept
+# for a day (ctdata.MONTH_TTL), and Refresh now reads them again sooner.
+REPORT_READ_HOUR = 7
+
+
+async def read_report_month() -> None:
+    access = db.reports().get("attendance")
+    if "attendance" not in REPORTS or not access or not access["enabled"] or not connecteam_settings()[0]:
+        return
+    today = datetime.now(report_zone()).date()
+    # The month so far, and last month too in a month's first week (a week can cross into it).
+    lo = today.replace(day=1) - timedelta(days=1 if today.day <= 7 else 0)
+    hi = today + timedelta(days=1)
+    forms = (access.get("settings") or {}).get("forms") or []
+    ctdata.forget_months()
+    calls = [lambda: ctdata.timesheets(lo, hi), lambda: ctdata.shifts(lo, hi)]
+    calls += [lambda f=f: ctdata.form_submissions(f["id"], lo, hi) for f in forms
+              if isinstance(f, dict) and str(f.get("id") or "").isdigit()]
+    for call in calls:
+        try:
+            await call()
+        except (ctdata.Unavailable, ValueError) as err:
+            log.info("Reports: the morning read stopped: %s", err)
+            return
+
+
+async def report_read_loop() -> None:
+    """Sleep until REPORT_READ_HOUR in the property's zone, read, and again the next day."""
+    while True:
+        if not db.settings().get("wb_time_zone"):
+            try:
+                await ha_time_zone()
+            except Exception:  # noqa: BLE001 - UTC until Home Assistant answers
+                pass
+        now = datetime.now(report_zone())
+        at = now.replace(hour=REPORT_READ_HOUR, minute=0, second=0, microsecond=0)
+        if at <= now:
+            at += timedelta(days=1)
+        await asyncio.sleep((at - now).total_seconds())
+        try:
+            await read_report_month()
+        except Exception:  # noqa: BLE001 - the loop must keep running
+            log.exception("Reports: the morning read failed")
 
 
 async def tasks_loop() -> None:
@@ -7986,6 +8043,7 @@ async def main():
     sync_task = asyncio.create_task(staff_sync_loop())   # only while it has something to do
     doors_task = asyncio.create_task(tthotel.run())
     tasks_task = asyncio.create_task(tasks_loop())   # forms only once one is chosen
+    read_task = asyncio.create_task(report_read_loop())   # 7 AM, only while the attendance report is on
     raise_file_limit()
     if hr_service.enabled():
         hr_service.start()   # locked until the recovery key is typed, if its key is missing
@@ -8014,6 +8072,7 @@ async def main():
         sync_task.cancel()
         doors_task.cancel()
         tasks_task.cancel()
+        read_task.cancel()
         for runner in runners:
             await runner.cleanup()
         await hr_service.stop()

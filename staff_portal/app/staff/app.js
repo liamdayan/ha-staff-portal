@@ -1406,7 +1406,7 @@
   }
 
   // Run the open report's data() on the server and draw it.
-  async function rpRun(params) {
+  async function rpRun(params, fresh = false) {
     const state = rp;
     const report = state.open;
     state.params = params;
@@ -1419,7 +1419,8 @@
           "Still asking Connecteam. The first look at a month can take a few minutes."));
       }
     }, 5000);
-    const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
+    const query = new URLSearchParams(Object.entries({ ...params, ...(fresh ? { fresh: 1 } : {}) })
+      .filter(([, v]) => v != null)).toString();
     // A long first look carries on on the add-on (202): ask again until it's ready.
     let res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
     for (let tries = 0; res.status === 202 && res.data.pending && tries < 60; tries++) {
@@ -1461,7 +1462,7 @@
       settings: answer.settings || {},
       params: answer.params || {},
       report,
-      refresh: (params = {}) => { if (current()) rpRun({ ...state.params, ...params }); },
+      refresh: (params = {}, opts = {}) => { if (current()) rpRun({ ...state.params, ...params }, !!opts.fresh); },
       async upload(key, file) {
         if (!current() || !(file instanceof Blob)) return { ok: false };
         const res = await rpSend("POST", `/api/reports/${report.key}/uploads/${encodeURIComponent(key)}`, file);

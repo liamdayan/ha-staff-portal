@@ -5,10 +5,9 @@ once Staff Access has used half its daily share). A refusal or a "too many reque
 reports and tasks; the clock checks carry on.
 
 Nothing is asked until a report is opened or a task source is due. Timesheets, shifts and form
-submissions are read a whole calendar month at a time and kept by month, so moving between a
-week, a pay period and the month around it is read once: a month that's still going (or ended
-within RECENT_DAYS) is asked again at most every MIN_REFRESH seconds, an older one every
-PAST_TTL. The lists that hardly change
+submissions are read a whole calendar month at a time and kept by month for MONTH_TTL, so moving
+between a week, a pay period and the month around it, or opening the report again, is read once
+a day; a report's Refresh now (forget_months) reads them afresh. The lists that hardly change
 (time clocks, schedules, jobs, forms) are reused for LISTS_TTL. Each call raises Unavailable with
 a plain reason when Connecteam can't answer (a missing scope, the budget, or no connection).
 
@@ -35,6 +34,7 @@ Times are given in the property's time zone (configure's zone) as "YYYY-MM-DDTHH
 """
 
 import asyncio
+import contextvars
 import logging
 import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -44,9 +44,8 @@ from connecteam import ConnecteamError, ReportsBusy, ReportsRefused, scope_for
 
 log = logging.getLogger("staff_portal")
 
-MIN_REFRESH = 10 * 60      # this month's timesheets, shifts and submissions: asked again at most this often
-PAST_TTL = 6 * 3600        # an earlier month's: punches are rarely fixed that late
-RECENT_DAYS = 3            # a month that ended this recently still counts as this month
+MIN_REFRESH = 10 * 60      # a task source's new submissions: asked again at most this often
+MONTH_TTL = 24 * 3600      # a month of timesheets, shifts or submissions: kept this long (Refresh now reads it again)
 LISTS_TTL = 6 * 3600       # time clocks, schedules, jobs and forms
 USERS_TTL = 3600           # the user list (shared with Staff Access's own copy)
 MAX_RANGE_DAYS = 400       # the longest range one call may ask about
@@ -89,6 +88,24 @@ def forget_submissions(form_id) -> None:
     kind = f"submissions:{str(form_id).strip()}"
     for key in [k for k in _cache if k and k[0] == kind]:
         _cache.pop(key, None)
+
+
+def forget_months() -> None:
+    """Drop the months kept (a report's Refresh now): the next look reads them afresh."""
+    for key in [k for k in _cache if k and k[0] in ("timesheets", "shifts")
+                or str(k[0]).startswith("submissions:")]:
+        _cache.pop(key, None)
+
+
+_read_at: contextvars.ContextVar[list | None] = contextvars.ContextVar("read_at", default=None)
+
+
+def track() -> list[float]:
+    """From now on in this task, note when each month used was read from Connecteam (a report
+    says how old its data is: the oldest)."""
+    times: list[float] = []
+    _read_at.set(times)
+    return times
 
 
 def forget() -> None:
@@ -370,19 +387,16 @@ def _months(start: date, end: date) -> list[tuple[date, date]]:
     return spans
 
 
-def _month_age(last: date) -> float:
-    """How long a month's answer is kept: a short while for this month, longer for earlier ones."""
-    today = datetime.now(_zone()).date()
-    return PAST_TTL if last < today - timedelta(days=RECENT_DAYS) else MIN_REFRESH
-
-
 async def _by_month(kind: str, start: date, end: date, fetch, day_of) -> list[dict]:
     """fetch(first, last)'s rows for each month start..end touches (each month kept on its
     own), those whose day_of(row) falls between start and end."""
     rows = []
     for first, last in _months(start, end):
-        rows.extend(await _kept((kind, first, last), _month_age(last),
+        rows.extend(await _kept((kind, first, last), MONTH_TTL,
                                 lambda first=first, last=last: fetch(first, last)))
+        times, hit = _read_at.get(), _cache.get((kind, first, last))
+        if times is not None and hit:
+            times.append(hit[1])
     lo, hi = start.isoformat(), end.isoformat()
     return [r for r in rows if lo <= (day_of(r) or lo) <= hi]
 

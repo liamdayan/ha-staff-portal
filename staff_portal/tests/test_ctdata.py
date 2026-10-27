@@ -4,6 +4,7 @@ caps, and that a refusal or a "too many requests" stops only reports while the c
 running. Nothing here talks to a real Connecteam."""
 
 import asyncio
+import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -220,7 +221,7 @@ def test_a_whole_month_is_read_once_for_its_weeks_and_pay_periods(tmp_path):
             assert ct.count(path) == 2
             assert all("2026-09-27" <= r["date"] <= "2026-10-03" for r in rows)
             for key, (value, when) in list(ctdata._cache.items()):
-                ctdata._cache[key] = (value, when - ctdata.PAST_TTL - 1)
+                ctdata._cache[key] = (value, when - ctdata.MONTH_TTL - 1)
             await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
             assert ct.count(path) == 3
             await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
@@ -233,14 +234,26 @@ def test_a_whole_month_is_read_once_for_its_weeks_and_pay_periods(tmp_path):
     go(scenario())
 
 
-def test_this_month_is_asked_again_after_ten_mins_an_earlier_one_after_six_hours():
-    today = datetime.now(ctdata._zone()).date()
-    assert ctdata._month_age(today) == ctdata.MIN_REFRESH
-    assert ctdata._month_age(today - timedelta(days=ctdata.RECENT_DAYS)) == ctdata.MIN_REFRESH
-    assert ctdata._month_age(today - timedelta(days=ctdata.RECENT_DAYS + 1)) == ctdata.PAST_TTL
+def test_months_are_kept_a_day_and_refresh_now_reads_them_again(tmp_path):
+    assert ctdata.MONTH_TTL == 24 * 3600
     assert ctdata._months(date(2026, 12, 30), date(2027, 2, 2)) == [
         (date(2026, 12, 1), date(2026, 12, 31)), (date(2027, 1, 1), date(2027, 1, 31)),
         (date(2027, 2, 1), date(2027, 2, 28))]
+    p = setup(tmp_path)
+
+    async def scenario():
+        async with p, fake() as ct:
+            path = "/time-clock/v1/time-clocks/1/time-activities"
+            read = ctdata.track()
+            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            assert read and max(read) <= time.time()   # when each month used was read
+            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            assert ct.count(path) == 1
+            ctdata.forget_months()   # Refresh now
+            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            assert ct.count(path) == 2
+            assert ct.count("/time-clock/v1/time-clocks") == 1   # the lists stay kept
+    go(scenario())
 
 
 def test_nothing_is_asked_until_a_report_is_opened(tmp_path):

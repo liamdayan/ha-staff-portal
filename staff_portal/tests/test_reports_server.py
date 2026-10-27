@@ -486,3 +486,21 @@ def test_migration_files_carry_uploads_too(setup, tmp_path, monkeypatch):
     files = reports_kit.uploads(str(tmp_path / "new-data"), "hours", "targets")
     assert [(x["name"], x["text"], x["by"]) for x in files] == [
         ("week1.csv", "Ana,31\n", "Bob"), ("week0.csv", "Ana,30\n", "Bob")]
+
+
+def test_refresh_now_reads_connecteam_again_but_not_too_often(setup, monkeypatch):
+    p = setup
+    forgot = []
+    monkeypatch.setattr(ctdata, "forget_months", lambda: forgot.append(1))
+
+    async def scenario():
+        async with p:
+            await share(p)
+            ana = await p.sign_in(p.ana)
+            status, body = await p.call("GET", "/api/reports/hours?week=2026-10-19&fresh=1", ana)
+            assert status == 200 and len(forgot) == 1 and "read_at" in body["data"]
+            await p.call("GET", "/api/reports/hours?week=2026-10-19&fresh=1", ana)
+            assert len(forgot) == 1   # again within two minutes: what's kept
+            assert body["params"] == {"week": "2026-10-19"}
+    monkeypatch.setattr(main, "report_fresh", [0.0])
+    go(scenario())

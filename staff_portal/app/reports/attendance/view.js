@@ -715,11 +715,11 @@
   }
 
   // Ask for the report again: the app runs data() on the server and calls render() with it.
-  function load(extra) {
+  function load(extra, fresh) {
     const d = ctx.data;
     const params = { period: ui.period, at: iso(d.start_day), ...(ui.formList ? { form_list: 1 } : {}), ...(extra || {}) };
     ui.loading = true; draw();
-    ctx.api.refresh(params);
+    ctx.api.refresh(params, { fresh: !!fresh });
   }
 
   function draw() {
@@ -810,7 +810,12 @@
         menuItem("all", "Everyone, with daily detail", "Every row opened, one section per person"),
         menuItem("open", "Only the rows I’ve opened", "Summary plus the people you expanded"),
         menuItem("summary", "Summary only", "Totals, staff table and forms")));
+    // Connecteam data is kept for a day: say how old it is, and offer to read it again.
+    const readAt = d.read_at ? new Date(d.read_at * 1000) : null;
+    const age = readAt ? ` · Connecteam data from ${readAt.toDateString() === new Date().toDateString() ? "" : readAt.toLocaleDateString([], { month: "short", day: "numeric" }) + ", "}${readAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
     const actions = h("div", { class: "att-actions att-noprint" }, deptSel,
+      h("button", { type: "button", class: "att-btn", title: `Read Connecteam again${age}`, onclick: () => load({}, true) }, "Refresh now"),
+      age ? h("span", { class: "att-muted att-age" }, age.slice(3)) : null,
       h("button", { type: "button", class: "att-btn", onclick: () => copyText(summaryText(current, ui.period, ui.dept)) }, "Copy summary"),
       h("button", { type: "button", class: "att-btn", onclick: downloadCSV }, "Download CSV"), menu);
 
@@ -827,7 +832,7 @@
       model.hasTimesheet ? "Timesheets from every Connecteam time clock" : "Timesheets didn't load",
       d.have && d.have.shifts ? (model.hasSchedule ? "Schedules from Connecteam (drafts skipped)" : "No Connecteam schedules in this period, so no late, early or no-show checks") : "Schedules didn't load",
       d.gusto ? `Gusto balances uploaded ${when(d.gusto.uploaded_at)}${d.gusto.by ? ` by ${d.gusto.by}` : ""}` : "Gusto balances not uploaded",
-      "Connecteam data is read a month at a time: this month again after 10 minutes",
+      "Connecteam data is kept for a day (Refresh now reads it again)",
     ];
     const noPunch = model.noPunches.filter(n => W.rows.some(r => r.p.name === n && r.missed.length));
     const noPunchNote = noPunch.length ? h("p", { class: "att-warn-text att-noprint" }, `On the schedule but with no punches at all: ${noPunch.join(", ")}. If they aren’t on a Connecteam time clock yet, their shifts count as no-shows.`) : null;

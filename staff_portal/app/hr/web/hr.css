@@ -621,3 +621,6 @@ body.signed-in .toast { bottom: calc(var(--tabbar-space) + 4px); }
   main, body.signed-in main { margin: 0; padding: 0; max-width: none; }
   .card { box-shadow: none; border: 1px solid #ccc; }
 }
+
+/* A drop-down's list is drawn by the system (white on Windows), so its options get the theme's own colours. */
+option, optgroup { background-color: var(--card); color: var(--text); }
