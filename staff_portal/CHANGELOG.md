@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.14
+
+- **Recurring Connecteam tasks are recognised by what they look like:** Connecteam's API lists
+  each repeat as an ordinary task (not marked recurring, as its docs say), so a series is now
+  the tasks on one board with the same title and person, due on different days. Only the
+  current repeat shows, the next from the day after it was due, tagged "Repeats · Connecteam".
+
 ## 0.12.13
 
 - **Report data is kept through a restart or update:** the months read from Connecteam are kept

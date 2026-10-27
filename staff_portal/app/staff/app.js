@@ -4747,8 +4747,8 @@
         t.mine ? "You" : t.assigned_name) : null,
       t.source === "form" ? h("span", { class: "tk-tag" }, tkIcon("form"), t.form_name || "Form") : null,
       t.photos?.length ? h("span", { class: "tk-tag" }, tkIcon("photo"), String(t.photos.length)) : null,
-      t.connecteam ? h("span", { class: "tk-tag tk-ct", title: t.ct_recurring ? "Repeats in Connecteam: edited there" : "In Connecteam" },
-        tkIcon("sync"), t.ct_recurring ? "Repeats · Connecteam" : "Connecteam") : null,
+      t.connecteam ? h("span", { class: "tk-tag tk-ct", title: t.ct_recurring || t.repeats ? "Repeats in Connecteam" : "In Connecteam" },
+        tkIcon("sync"), t.ct_recurring || t.repeats ? "Repeats · Connecteam" : "Connecteam") : null,
     ];
     const card = h("article", { class: `tk-card ${t.status}${t.priority === "urgent" ? " is-urgent" : ""}${overdue ? " is-overdue" : ""}`,
       "data-id": String(t.id) },

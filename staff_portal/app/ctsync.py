@@ -292,26 +292,29 @@ def recurring(t: dict) -> bool:
     return bool(t.get("ct_task_id")) and bool((_sync(t).get("seen") or {}).get("recurring"))
 
 
-def repeats_not_yet(today: str) -> set[int]:
-    """The repeats of Connecteam recurring tasks that don't show yet. Connecteam lists each
-    repeat as a task of its own, days ahead, and says nothing of which series it's in, so a
-    series is its board, title and person. A repeat shows from the day after the one before it
-    was due (a daily one each day; a weekly one the day after last week's), and the first of a
-    series straight away. today: "YYYY-MM-DD" in the property's zone."""
+def repeat_series(today: str) -> tuple[set[int], set[int]]:
+    """Repeats of Connecteam recurring tasks: (those that don't show yet, every repeat). Connecteam
+    lists each repeat as a task of its own, days ahead, and its API doesn't mark them recurring
+    or say which series one is in, so a series is the tasks on one board with the same title
+    and person due on different days. A repeat shows from the day after the one before it was
+    due (a daily one each day; a weekly one the day after last week's), the first straight away.
+    today: "YYYY-MM-DD" in the property's zone."""
     series: dict[tuple, list[tuple[str, int]]] = {}
     for r in _db().conn.execute(
-            "SELECT id, ct_board_id, title, assigned_id, due_date, ct_sync FROM tasks WHERE "
-            "ct_task_id IS NOT NULL AND due_date IS NOT NULL AND ct_sync LIKE '%\"recurring\":true%'"):
-        if (_sync(dict(r)).get("seen") or {}).get("recurring"):
-            key = (r["ct_board_id"], r["title"].strip().lower(), r["assigned_id"])
-            series.setdefault(key, []).append((r["due_date"], r["id"]))
-    hidden = set()
+            "SELECT id, ct_board_id, title, assigned_id, due_date FROM tasks WHERE "
+            "ct_task_id IS NOT NULL AND due_date IS NOT NULL AND deleted_at IS NULL"):
+        key = (r["ct_board_id"], r["title"].strip().lower(), r["assigned_id"])
+        series.setdefault(key, []).append((r["due_date"], r["id"]))
+    hidden, members = set(), set()
     for repeats in series.values():
+        if len({due for due, _ in repeats}) < 2:
+            continue   # one task, or several due the same day: not a series
         repeats.sort()
+        members |= {task_id for _, task_id in repeats}
         for (before, _), (due, task_id) in zip(repeats, repeats[1:]):
             if due > today and before >= today:   # the one before isn't past its day yet
                 hidden.add(task_id)
-    return hidden
+    return hidden, members
 
 
 def _log_recurring(board_id: str, r: dict) -> None:

@@ -3128,8 +3128,8 @@ async def api_tasks(request: web.Request):
     departments = task_departments()
     since = time.time() - tasks.LIST_FINISHED_DAYS * 86400
     today = datetime.now(report_zone()).date().isoformat()
-    waiting = ctsync.repeats_not_yet(today)
-    body = {"tasks": [task_view(t, member, manager, departments)
+    waiting, repeats = ctsync.repeat_series(today)
+    body = {"tasks": [{**task_view(t, member, manager, departments), "repeats": t["id"] in repeats}
                       for t in db.tasks_for(member, since, manager)
                       if tasks.can_see(t, member, manager, departments) and t["id"] not in waiting],
             "departments": [{"id": k, "name": v} for k, v in departments.items()],

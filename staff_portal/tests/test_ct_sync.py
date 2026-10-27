@@ -1107,3 +1107,21 @@ def test_recurring_tasks_brought_in_before_it_was_kept_get_it_on_the_next_read(t
             shown = [t for t in body["tasks"] if t["title"] == "Wipe the counters"]
             assert len(shown) == 1 and shown[0]["ct_recurring"] is True
     run(scenario())
+
+
+def test_repeats_connecteam_doesnt_mark_recurring_are_known_by_title_and_person(tmp_path):
+    """As the owner's board shows: Connecteam's API lists each repeat as an ordinary task, so a
+    series is the same title and person on one board, due on different days."""
+    async def scenario():
+        p, ct = synced(tmp_path)
+        now, day = int(time.time()), 86400
+        ct.board_tasks["501"] = [ct_task(f"d{i}", "Reocu test 2", [7], due=now + 3600 + i * day) for i in range(4)]
+        ct.board_tasks["501"].append(ct_task("x1", "Fix the sink", [7], due=now + 2 * day))   # a one-off
+        async with p, ct:
+            await poll(p)
+            ana = await p.sign_in(p.ana)
+            status, body = await p.call("GET", "/api/tasks", ana)
+            shown = {t["title"]: t for t in body["tasks"]}
+            assert [t["title"] for t in body["tasks"]].count("Reocu test 2") == 1
+            assert shown["Reocu test 2"]["repeats"] is True and shown["Fix the sink"]["repeats"] is False
+    run(scenario())
