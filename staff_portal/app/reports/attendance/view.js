@@ -76,9 +76,27 @@
     if (n === n.toUpperCase() || n === n.toLowerCase()) n = n.toLowerCase().replace(/(^|[\s\-'])([a-z])/g, (_, p, c) => p + c.toUpperCase());
     return n;
   }
-  // Nickname check for unmatched names: same last name, and first names like Nate/Nathan, Toni/Tonia, Liam/William.
+  // Common short names, kept the same as report.py's NICKNAMES: each line is one name and the names it goes by.
+  const NICKNAMES = [
+    "abigail abby", "albert al bert", "alexander alex xander", "alexandra alex alexa sandra sasha", "alfred al alfie fred", "andrew andy drew",
+    "anthony tony", "antonia toni tonia", "barbara barb barbie", "benjamin ben benji", "catherine cathy kate katie cat",
+    "charles charlie chuck chaz", "christina chris tina", "christine chris tina", "christopher chris kit", "daniel dan danny", "david dave davey",
+    "deborah deb debbie", "donald don donnie", "dorothy dot dottie", "douglas doug", "edward ed eddie ted ned",
+    "elizabeth liz lizzie beth betty eliza libby", "eugene gene", "frances fran frannie", "francis frank frankie", "frederick fred freddie",
+    "gerald gerry jerry", "gregory greg", "harold harry hal", "henry hank harry", "isabel izzy bella", "isabella izzy bella", "jacob jake",
+    "james jim jimmy jamie", "jennifer jen jenny", "jeffrey jeff", "jessica jess jessie", "john jack johnny", "jonathan jon jonny",
+    "joseph joe joey", "joshua josh", "katherine kate katie kathy kat", "kathryn kate katie kathy kat", "kenneth ken kenny", "lawrence larry",
+    "leonard leo len lenny", "louis lou", "margaret maggie meg peggy", "matthew matt", "michael mike mikey", "nathan nate", "nathaniel nate nathan",
+    "nicholas nick nicky", "patricia pat patty trish", "patrick pat paddy", "peter pete", "philip phil", "raymond ray", "rebecca becky becca",
+    "richard rick ricky dick rich", "robert rob robbie bob bobby bert", "ronald ron ronnie", "samantha sam sammy", "samuel sam sammy",
+    "stephen steve", "steven steve", "susan sue susie", "theodore ted teddy theo", "thomas tom tommy", "timothy tim timmy", "victoria vicky tori",
+    "vincent vince", "walter walt", "william will bill billy liam", "zachary zach zack", "alejandro alex", "eduardo lalo eddie",
+    "francisco paco pancho frank", "guillermo memo will", "ignacio nacho", "jesus chuy", "jose pepe", "manuel manny", "roberto beto rob"];
+  const NICK = new Map();
+  for (const line of NICKNAMES) { const names = line.split(" "); for (const n of names) { if (!NICK.has(n)) NICK.set(n, new Set()); names.forEach(x => NICK.get(n).add(x)); } }
+  // Nickname check for unmatched names: same last name, and first names like Nate/Nathan, Toni/Tonia, Liam/William, Tom/Thomas.
   function firstNamesAlike(a, b) {
-    if (a === b) return true;
+    if (a === b || (NICK.has(a) && NICK.get(a).has(b))) return true;
     if (a.length < 3 || b.length < 3) return false;
     return a.startsWith(b) || b.startsWith(a) || a.endsWith(b) || b.endsWith(a) || a.slice(0, 3) === b.slice(0, 3);
   }
@@ -196,6 +214,23 @@
       return null;
     };
 
+    // Gusto names to people, as report.py's match_names does (it filters the file the same way): by name or
+    // alias, else by a short name only when it's the one person it could be, that person has no row of their own,
+    // and no other Gusto name points at them too (so Devi Patel's balance never lands on Dev Patel's row).
+    const matchGusto = raws => {
+      const found = new Map(), exact = new Set(), guesses = [];
+      for (const raw of new Set(raws.filter(x => x && !NOT_A_PERSON.test(x)))) {
+        const k = keyOf(raw), hit = byName.get(k);
+        if (hit) { found.set(raw, hit); exact.add(hit); continue; }
+        const [f, l] = k.split(" "); if (hit === false || !l) continue;
+        const c = [...people.values()].filter(p => { const [pf, pl] = p.nk.split(" "); return pl === l && firstNamesAlike(f, pf); });
+        if (c.length === 1) guesses.push([raw, c[0]]);
+      }
+      const count = new Map(); guesses.forEach(([, p]) => count.set(p, (count.get(p) || 0) + 1));
+      for (const [raw, p] of guesses) if (!exact.has(p) && count.get(p) === 1) { found.set(raw, p); fuzzy.push([niceName(raw), p.name]); }
+      return found;
+    };
+
     // timesheets: work punches, breaks, and time off
     const punchJobs = new Set();
     for (const t of d.timesheets || []) {
@@ -257,11 +292,12 @@
     const bt = d.gusto ? gustoTable(d.gusto.text) : null;
     if (bt) {
       const long = !has(bt.map, "pto") && !has(bt.map, "sick") && has(bt.map, "policy") && has(bt.map, "balance");
+      const matched = matchGusto(bt.data.map(r => rowName(r, bt.map)));
       const seenRaw = new Set();
       for (const r of bt.data) {
         const raw = rowName(r, bt.map); if (!raw || NOT_A_PERSON.test(raw)) continue;
         if (!seenRaw.has(raw)) { seenRaw.add(raw); balPeople++; }
-        const p = lookup(raw);
+        const p = matched.get(raw);
         if (!p) { balUnmatched.add(niceName(raw)); continue; }
         p.bal = p.bal || { pto: null, sick: null, sickUsed: null, ptoUsed: null, sickAccrued: null, ptoAccrued: null };
         const title = cell(r, bt.map, "title"); if (title) p.title = title;
@@ -1011,7 +1047,7 @@
           : h("span", { class: "att-hint" }, "Departments and jobs appear here once there are shifts in the period shown."),
         h("span", { class: "att-hint" }, "Everyone is checked by default, since leaving early needs approval. Untick a department, Gusto title or Connecteam job to stop flagging early clock-outs there. Late arrivals and missed lunches are still checked.")),
       field("att-r-aliases", "Name matches between Gusto and Connecteam", h("textarea", { id: "att-r-aliases", class: "att-input att-mono", disabled: ro, maxlength: "12000", placeholder: "Robert Smith = Bobby Smith\nNguyen, Thanh = Ty Nguyen", onchange: e => { R.aliases = e.target.value; changed(); } }, R.aliases || ""),
-        "One per line: the name in Gusto, then =, then the Connecteam name. People are matched by their Connecteam ID first; middle names, initials and common short names (Nate and Nathan) already match on their own."));
+        "One per line: the name in Gusto, then =, then the Connecteam name. People are matched by their Connecteam ID first; middle names, initials and common short names (Tom and Thomas, Nate and Nathan) already match on their own when only one person fits."));
     form.querySelector("textarea").value = R.aliases || "";
     const top = h("div", { class: "att-panel-head" }, h("h2", null, "Rules"),
       manage ? h("div", { class: "att-actions" },
@@ -1077,7 +1113,7 @@
   }
 
   // ---------------------------------------------------------------- hook up
-  const core = { parseCSV, parseHours, normKey, niceName, firstNamesAlike, gustoTable, buildModel, computePeriod, periodOf, periodLabel, blocksFor, daySlots, hoursSetting, freqText,
+  const core = { parseCSV, parseHours, normKey, niceName, firstNamesAlike, NICKNAMES, gustoTable, buildModel, computePeriod, periodOf, periodLabel, blocksFor, daySlots, hoursSetting, freqText,
     summaryText, csvText, fileName, fmtDur, fmtClock, ymd, DEFAULT_RULES };
   if (typeof module === "object" && module.exports) module.exports = core;
   if (typeof StaffReports !== "undefined") StaffReports.register("attendance", { render });

@@ -447,6 +447,42 @@ def test_gusto_rows_are_kept_by_name_alias_and_short_name():
     assert rep.name_key("Ortiz, Maya J.") == "maya ortiz" and rep.name_key("José  Núñez") == "jose nunez"
 
 
+def test_gusto_rows_are_kept_only_by_their_name_column():
+    """A Manager or Approved by column naming an allowed person doesn't keep someone else's row,
+    and a relative who isn't in Connecteam isn't kept by a short name when the allowed person has
+    a row of their own. Tom matches Thomas (a common short name), still only when unique."""
+    everyone = {"dev patel", "maria lopez", "tom baker"}
+    text = ("Time Off Balances\nEmployee,Title,Manager,Sick,PTO\nDev Patel,Front Desk,,10,5\n"
+            "Devi Patel,Housekeeping,,3,1\nMaria Lopez,Housekeeping,Dev Patel,4,4\nLopez Dev,Kitchen,,1,1\n"
+            '"Baker, Thomas",Housekeeping,,2,2\n')
+    kept = rep.gusto_for(text, {"dev patel"}, everyone, "").splitlines()
+    assert kept == ["Time Off Balances", "Employee,Title,Manager,Sick,PTO", "Dev Patel,Front Desk,,10,5"]
+    kept = rep.gusto_for(text, {"tom baker"}, everyone, "").splitlines()
+    assert kept[2:] == ['"Baker, Thomas",Housekeeping,,2,2']
+    # First and last name columns; two Gusto names for one person are both left out.
+    two = "First name,Last name,Sick\nThomas,Baker,1\nTommy,Baker,2\n"
+    assert rep.gusto_for(two, {"tom baker"}, everyone, "").splitlines()[1:] == []
+    assert rep.match_names({"devi patel"}, everyone, {}) == {"devi patel": "dev patel"}  # no row of his own
+    assert rep.match_names({"devi patel", "dev patel"}, everyone, {}) == {"dev patel": "dev patel"}
+
+
+@need_node
+def test_view_matches_nicknames_like_the_server(tmp_path):
+    """view.js and report.py share the short-name list, and match Gusto names the same way."""
+    names = subprocess.run(["node", "-e", f"process.stdout.write(JSON.stringify(require({json.dumps(VIEW)}).NICKNAMES))"],
+                           capture_output=True, text=True, check=True).stdout
+    assert json.loads(names) == rep.NICKNAMES
+    gusto = ("Employee,Title,Manager,Sick,PTO\n\"Baker, Thomas\",Housekeeping,,2,2\nDev Patel,Front Desk,,10,5\n"
+             "Devi Patel,Housekeeping,,3,1\nMaria Lopez,Housekeeping,Dev Patel,4,4\n")
+    ct = FakeCt([dict(user_id=u, name=n, date="2026-10-12", clock_in="2026-10-12T09:00",
+                      clock_out="2026-10-12T13:00", break_minutes=0, job="Spa", type="shift")
+                 for u, n in (("1", "Tom Baker"), ("2", "Dev Patel"), ("3", "Maria Lopez"))])
+    out = view(tmp_path, run(FakeCtx(ct, uploads={"gusto": [dict(name="g.csv", text=gusto, uploaded_at=1)]})))
+    rows = by_name(out)
+    assert rows["Tom Baker"]["sick"] == 2 and rows["Dev Patel"]["sick"] == 10 and rows["Maria Lopez"]["sick"] == 4
+    assert out["fuzzy"] == [["Thomas Baker", "Tom Baker"]] and out["balUnmatched"] == ["Devi Patel"]
+
+
 def test_settings_are_cleaned_and_kept_small():
     saved = rep.check_settings(dict(who_sees="everyone", rules=dict(aliases="x" * 50000),
                                     forms=[dict(id=str(i), applies_to="y" * 5000) for i in range(30)],

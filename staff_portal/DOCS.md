@@ -1383,9 +1383,12 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   It's kept on the add-on, so everyone who can see the report sees the newest one. Columns are
   found by their names, whichever layout Gusto uses (one row per person, or one per policy).
 - **Matching people.** Connecteam people are matched by their Connecteam ID. Gusto has no
-  Connecteam ID, so Gusto names are matched by name: "Patel, Dev" matches "Dev Patel", and short
-  names (Nate and Nathan) match on their own. The Leave balances tab lists anyone who didn't match;
-  add the pair under **Rules → Name matches** (one per line, Gusto name = Connecteam name).
+  Connecteam ID, so Gusto names are matched by name: "Patel, Dev" matches "Dev Patel", and common
+  short names (Tom and Thomas, Nate and Nathan) match on their own, but only when one person fits:
+  not when that person has a Gusto row of their own, or two Gusto names point at them. Only the
+  name column is read (never a Manager or Approved by column). The Leave balances tab lists anyone
+  who didn't match; add the pair under **Rules → Name matches** (one per line, Gusto name =
+  Connecteam name).
 - **Departments.** Each person shows under their Staff Access department: the first department
   whose Connecteam smart group they're in (Connecteam's user list says which groups). People
   without one show under their Gusto title.

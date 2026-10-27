@@ -363,49 +363,135 @@ def name_key(name) -> str:
     return f"{words[0]} {words[-1]}" if len(words) > 1 else (words[0] if words else "")
 
 
+# Common short names, kept the same as view.js's NICKNAMES: each line is one name and the
+# names it goes by. Tom matches Thomas through this, which the spelling rules below can't see.
+NICKNAMES = [
+    "abigail abby", "albert al bert", "alexander alex xander", "alexandra alex alexa sandra sasha",
+    "alfred al alfie fred", "andrew andy drew", "anthony tony", "antonia toni tonia",
+    "barbara barb barbie", "benjamin ben benji", "catherine cathy kate katie cat",
+    "charles charlie chuck chaz", "christina chris tina", "christine chris tina",
+    "christopher chris kit", "daniel dan danny", "david dave davey", "deborah deb debbie",
+    "donald don donnie", "dorothy dot dottie", "douglas doug", "edward ed eddie ted ned",
+    "elizabeth liz lizzie beth betty eliza libby", "eugene gene", "frances fran frannie",
+    "francis frank frankie", "frederick fred freddie", "gerald gerry jerry", "gregory greg",
+    "harold harry hal", "henry hank harry", "isabel izzy bella", "isabella izzy bella",
+    "jacob jake", "james jim jimmy jamie", "jennifer jen jenny", "jeffrey jeff",
+    "jessica jess jessie", "john jack johnny", "jonathan jon jonny", "joseph joe joey",
+    "joshua josh", "katherine kate katie kathy kat", "kathryn kate katie kathy kat",
+    "kenneth ken kenny", "lawrence larry", "leonard leo len lenny", "louis lou",
+    "margaret maggie meg peggy", "matthew matt", "michael mike mikey", "nathan nate",
+    "nathaniel nate nathan", "nicholas nick nicky", "patricia pat patty trish",
+    "patrick pat paddy", "peter pete", "philip phil", "raymond ray", "rebecca becky becca",
+    "richard rick ricky dick rich", "robert rob robbie bob bobby bert", "ronald ron ronnie",
+    "samantha sam sammy", "samuel sam sammy", "stephen steve", "steven steve",
+    "susan sue susie", "theodore ted teddy theo", "thomas tom tommy", "timothy tim timmy",
+    "victoria vicky tori", "vincent vince", "walter walt", "william will bill billy liam",
+    "zachary zach zack", "alejandro alex", "eduardo lalo eddie", "francisco paco pancho frank",
+    "guillermo memo will", "ignacio nacho", "jesus chuy", "jose pepe", "manuel manny",
+    "roberto beto rob"]
+_NICK = {}
+for _line in NICKNAMES:
+    _names = _line.split()
+    for _n in _names:
+        _NICK.setdefault(_n, set()).update(_names)
+
+
 def _alike(a, b) -> bool:
-    """view.js's firstNamesAlike: Nate and Nathan, Toni and Tonia, Liam and William."""
-    if a == b:
+    """view.js's firstNamesAlike: Nate and Nathan, Toni and Tonia, Liam and William, and the
+    common short names (Tom and Thomas)."""
+    if a == b or b in _NICK.get(a, ()):
         return True
     if len(a) < 3 or len(b) < 3:
         return False
     return a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a) or a[:3] == b[:3]
 
 
+def aliases_of(text) -> dict:
+    """The rules' name matches: {Gusto name key: Connecteam name key}."""
+    found = {}
+    for line in str(text or "").split("\n"):
+        parts = [p.strip() for p in re.split(r"=|→|->", line)]
+        if len(parts) > 1 and parts[0] and parts[1]:
+            found[name_key(parts[0])] = name_key(parts[1])
+    return found
+
+
+def match_names(keys, everyone: set, alias: dict) -> dict:
+    """Gusto names (keys) to Connecteam people (keys), as view.js matches them: by name or a name
+    match from the rules, else by a short name (same last name, first names alike) only when
+    it's the one person it could be, that person has no row of their own, and no other Gusto
+    name points at them too."""
+    found, guesses = {}, {}
+    for key in keys:
+        key2 = alias.get(key, key)
+        if key2 in everyone:
+            found[key] = key2
+            continue
+        first, _, last = key2.partition(" ")
+        alike = [k for k in everyone if last and k.split(" ")[-1] == last and _alike(first, k.split(" ")[0])]
+        if len(alike) == 1:
+            guesses[key] = alike[0]
+    taken = set(found.values())
+    counts = {}
+    for k in guesses.values():
+        counts[k] = counts.get(k, 0) + 1
+    found.update({key: k for key, k in guesses.items() if k not in taken and counts[k] == 1})
+    return found
+
+
 GUSTO_NAME_HEAD = re.compile(
     r"^(employee|employee name|employee full name|name|full name|user|users|user name|team member|"
     r"staff( member)?|worker|first|first name|given name|legal first name|preferred first name)$", re.I)
+# view.js's name columns (NAME_FIELDS): a strong heading scores 3, a weak one 1.
+NAME_COLUMNS = dict(
+    employee=(re.compile(r"^(employee|employee name|employee full name|name|full name|user|users|user name|"
+                         r"team member|staff( member)?|worker|submitted by|submitter|assigned to|assignee)$", re.I),
+              re.compile(r"employee|user|staff|submitted by|assigned|name", re.I),
+              re.compile(r"first|last|job|form|company|manager|approved|location|position|title|policy|"
+                         r"\bid\b|number|#|email|phone|type|note|comment", re.I)),
+    first=(re.compile(r"^(first|first name|given name|legal first name|preferred first name)$", re.I),
+           re.compile(r"first ?name", re.I), None),
+    last=(re.compile(r"^(last|last name|surname|family name|legal last name)$", re.I),
+          re.compile(r"last ?name|surname", re.I), None))
+
+
+def _name_column(headers, kind):
+    strong, weak, bad = NAME_COLUMNS[kind]
+    best, score = None, 0
+    for i, cell in enumerate(headers):
+        cell = cell.strip()
+        if not cell or (bad and bad.search(cell)):
+            continue
+        s = 3 if strong.match(cell) else 1 if weak.search(cell) else 0
+        if s > score:
+            best, score = i, s
+    return best
 
 
 def gusto_for(text, allowed: set, everyone: set, aliases: str) -> str:
     """Gusto's file with only the rows of people this viewer may see: the lines above the column
-    headers (the report's title and the company), the headers, and each row naming an allowed
-    person (by name, a name match from the rules, or a short name only they have). allowed and
-    everyone are name keys. Nothing if the headers can't be found."""
+    headers (the report's title and the company), the headers, and each row whose name (in the
+    name column, or first and last name columns) is an allowed person's, matched as view.js
+    matches it (match_names). allowed and everyone are name keys. Nothing if the headers can't
+    be found."""
     rows = parse_csv(text)
     head = next((i for i, r in enumerate(rows[:25]) if any(GUSTO_NAME_HEAD.match(v.strip()) for v in r)),
                 None)
     if head is None:
         return ""
-    alias = {}
-    for line in str(aliases or "").split("\n"):
-        parts = [p.strip() for p in re.split(r"=|→|->", line)]
-        if len(parts) > 1 and parts[0] and parts[1]:
-            alias[name_key(parts[0])] = name_key(parts[1])
+    who = _name_column(rows[head], "employee")
+    first, last = _name_column(rows[head], "first"), _name_column(rows[head], "last")
+    if who is None and first is None:
+        return ""
 
-    def allowed_key(key):
-        key = alias.get(key, key)
-        if key in everyone:
-            return key in allowed
-        first, _, last = key.partition(" ")
-        alike = [k for k in everyone if k.split(" ")[-1] == last and _alike(first, k.split(" ")[0])]
-        return bool(last) and len(alike) == 1 and alike[0] in allowed
+    def cell(r, i):
+        return r[i].strip() if i is not None and i < len(r) else ""
 
-    def names(r):
-        cells = [v.strip() for v in r if v.strip()]
-        yield from (name_key(v) for v in cells)
-        yield from (name_key(f"{a} {b}") for a, b in zip(cells, cells[1:]))   # first, last
-    kept = rows[:head + 1] + [r for r in rows[head + 1:] if any(k and allowed_key(k) for k in names(r))]
+    def name(r):
+        return cell(r, who) or " ".join(filter(None, (cell(r, first), cell(r, last))))
+    body = [(r, name_key(name(r))) for r in rows[head + 1:]]
+    matched = match_names({k for _, k in body if k}, everyone, aliases_of(aliases))
+    kept = rows[:head + 1] + [r for r, k in body if k and matched.get(k) in allowed]
     return _csv_text(kept)
 
 
