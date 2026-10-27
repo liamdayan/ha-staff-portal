@@ -29,7 +29,12 @@ MAX_QUESTION = 200
 BIN_DAYS = 30            # deleted tasks can be put back for this long
 KEEP_FINISHED_DAYS = 365 # finished tasks are kept this long, then dropped
 LIST_FINISHED_DAYS = 30  # the staff app lists finished tasks from this far back
-FORM_CHECK_SECONDS = 600 # each form chosen on the dashboard is checked this often
+FORM_CHECK_SECONDS = 600 # each form chosen on the dashboard is checked this often, at most...
+FORM_DAILY_REQUESTS = 300  # ...and all of them together ask about this many times a day (under a
+                         # third of the reports lane's 1,000), so the checks are spread out more
+                         # as forms are added: up to 2 forms every 10 minutes, 5 every 24
+FORM_OVERLAP = 3600      # a check looks back this far before the last good one (a submission
+                         # sent from a phone that was offline arrives late)
 FORM_LOOKBACK_DAYS = 31  # the most a check reaches back (after the add-on was off a while)
 MAX_FORMS = 50
 MAX_TASKS = 50_000       # in a backup (the newest)
@@ -249,16 +254,29 @@ def clean_url(value) -> str | None:
 
 def form_range(form: dict, now: float, zone) -> tuple[datetime, date]:
     """What a form's check asks Connecteam about (ctdata.form_submissions' start and end):
-    submissions from the moment the form was chosen, or a day before the last good check (one
-    that arrived late still counts), at most FORM_LOOKBACK_DAYS back, to today in the property's
-    zone. Repeats are never made into tasks twice (db.task_form_seen)."""
-    since = max(form["picked_at"], (form.get("last_ok") or 0) - 86400,
+    submissions from the moment the form was chosen, or FORM_OVERLAP before the last good check
+    (one that arrived late still counts), at most FORM_LOOKBACK_DAYS back, to today in the
+    property's zone. So a check is usually one page. Repeats are never made into tasks twice
+    (db.task_form_seen)."""
+    since = max(form["picked_at"], (form.get("last_ok") or 0) - FORM_OVERLAP,
                 now - FORM_LOOKBACK_DAYS * 86400)
     return datetime.fromtimestamp(since, zone), datetime.fromtimestamp(now, zone).date()
 
 
-def form_due(form: dict, now: float) -> bool:
-    return now - (form.get("last_check") or 0) >= FORM_CHECK_SECONDS
+def form_interval(count: int) -> int:
+    """Seconds between a form's checks when `count` forms make tasks: every 10 minutes, or
+    longer so that all of them stay within FORM_DAILY_REQUESTS a day (whole minutes)."""
+    spread = -(-max(count, 1) * 86400 // FORM_DAILY_REQUESTS)
+    return max(FORM_CHECK_SECONDS, -(-spread // 60) * 60)
+
+
+def form_requests_a_day(count: int) -> int:
+    """About how many Connecteam requests the checks make a day (one page each)."""
+    return round(count * 86400 / form_interval(count)) if count else 0
+
+
+def form_due(form: dict, now: float, count: int = 1) -> bool:
+    return now - (form.get("last_check") or 0) >= form_interval(count)
 
 
 # ---------------------------------------------------------------- tasks in backups

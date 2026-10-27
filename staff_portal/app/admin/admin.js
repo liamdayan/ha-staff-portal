@@ -2106,9 +2106,22 @@
     return select;
   }
 
+  // What checking the forms costs: they're checked less often as more are chosen, so they
+  // never use more than about 300 of the 1,000 Connecteam requests a day reports and tasks share.
+  function taskFormsCost() {
+    const n = taskForms.forms.length;
+    if (!n) return "Each form is checked every 10 minutes. Up to 2 forms are checked that often; " +
+      "with more, each is checked less often, so they use at most about 300 Connecteam requests a day.";
+    return `${n === 1 ? "This form is" : `These ${n} forms are each`} checked every ${taskForms.check_minutes} minutes: ` +
+      `about ${taskForms.requests_a_day} Connecteam requests a day, of the ${taskForms.lane_a_day.toLocaleString()} ` +
+      "reports and tasks share (the time clock checks have their own)." +
+      (n > 2 ? " Each form you add makes the checks a little less frequent." : "");
+  }
+
   function renderTaskForms() {
     const list = $("#tk-forms");
     $("#tk-ct-off").hidden = !!taskForms.connecteam;
+    $("#tk-cost").textContent = taskFormsCost();
     if (!taskForms.forms.length) {
       list.replaceChildren(h("div", { class: "empty small" }, "No forms yet. Choose one, like a maintenance " +
         "request or a room inspection, and each new submission becomes a task."));
@@ -2146,18 +2159,16 @@
     const assign = h("input", { type: "checkbox", checked: !!f.assign_submitter });
     const save = h("button", { type: "button", class: "btn primary" }, isNew ? "Start making tasks" : "Save");
     save.addEventListener("click", () => run(async () => {
-      const { forms } = await api("PUT", `api/tasks/forms/${encodeURIComponent(f.form_id)}`, {
+      Object.assign(taskForms, await api("PUT", `api/tasks/forms/${encodeURIComponent(f.form_id)}`, {
         name: f.name, department_id: dept.value ? Number(dept.value) : null,
-        title_question: question.value, assign_submitter: assign.checked });
-      taskForms.forms = forms;
+        title_question: question.value, assign_submitter: assign.checked }));
       renderTaskForms();
     }, isNew ? `New submissions of ${f.name} now become tasks.` : "Saved."));
     const remove = h("button", { type: "button", class: "btn danger" }, isNew ? "Cancel" : "Stop");
     remove.addEventListener("click", () => run(async () => {
       if (isNew) return renderTaskForms();
       if (!await askConfirm(`Stop making tasks from ${f.name}? Tasks already made stay.`, "Stop")) return false;
-      const { forms } = await api("DELETE", `api/tasks/forms/${encodeURIComponent(f.form_id)}`);
-      taskForms.forms = forms;
+      Object.assign(taskForms, await api("DELETE", `api/tasks/forms/${encodeURIComponent(f.form_id)}`));
       renderTaskForms();
     }, isNew ? null : "Stopped."));
     return h("div", { class: "card tk-form-card" },

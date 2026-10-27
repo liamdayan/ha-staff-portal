@@ -3160,16 +3160,17 @@ async def api_restore_task(request: web.Request):
     return web.json_response({"ok": True})
 
 
-# Tasks from Connecteam forms: every form chosen on the dashboard is checked every 10 minutes
-# (tasks.FORM_CHECK_SECONDS), through ctdata in the reports lane of the Connecteam budget.
-# Nothing is asked while no form is chosen.
+# Tasks from Connecteam forms: every form chosen on the dashboard is checked every 10 minutes, or
+# less often as more are chosen (tasks.form_interval), through ctdata in the reports lane of the
+# Connecteam budget. Nothing is asked while no form is chosen.
 tasks_purged = [0.0]
 
 
 async def check_task_forms(force: bool = False) -> int:
     """Turn new submissions of the chosen forms into tasks. Returns how many were made."""
     now = time.time()
-    forms = [f for f in db.task_forms() if force or tasks.form_due(f, now)]
+    chosen = db.task_forms()
+    forms = [f for f in chosen if force or tasks.form_due(f, now, len(chosen))]
     if not forms:
         return 0
     if not connecteam_settings()[0]:
@@ -7027,10 +7028,17 @@ def task_forms_view() -> list[dict]:
             for f in db.task_forms()]
 
 
+def task_forms_body() -> dict:
+    """The chosen forms, and what checking them costs: how often, and about how many of the
+    reports lane's Connecteam requests a day."""
+    count = len(db.task_forms())
+    return {"forms": task_forms_view(), "check_minutes": tasks.form_interval(count) // 60,
+            "requests_a_day": tasks.form_requests_a_day(count),
+            "lane_a_day": connecteam_module.REPORTS_DAILY_CAP}
+
+
 async def admin_task_forms(request: web.Request):
-    return web.json_response({"forms": task_forms_view(),
-                              "connecteam": connecteam_settings()[0],
-                              "check_minutes": tasks.FORM_CHECK_SECONDS // 60})
+    return web.json_response({**task_forms_body(), "connecteam": connecteam_settings()[0]})
 
 
 async def admin_connecteam_forms(request: web.Request):
@@ -7076,7 +7084,7 @@ async def admin_save_task_form(request: web.Request):
     db.set_task_form(form_id, fields, time.time())
     db.log(admin_name(request), "Changed a form that makes tasks" if old
            else "Chose a form to make tasks", detail=fields["name"])
-    return web.json_response({"forms": task_forms_view()})
+    return web.json_response(task_forms_body())
 
 
 async def admin_delete_task_form(request: web.Request):
@@ -7084,7 +7092,7 @@ async def admin_delete_task_form(request: web.Request):
     if form:
         db.delete_task_form(form["form_id"])
         db.log(admin_name(request), "Stopped a form making tasks", detail=form["name"])
-    return web.json_response({"forms": task_forms_view()})
+    return web.json_response(task_forms_body())
 
 
 def admin_app() -> web.Application:

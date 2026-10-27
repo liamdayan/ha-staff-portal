@@ -584,6 +584,43 @@ def test_forms_through_the_real_ctdata_and_the_reports_lane(tmp_path):
     run(scenario())
 
 
+def test_form_checks_stay_within_their_share_of_the_reports_lane():
+    """Checks look back an hour before the last good one, not a day, so one page usually does;
+    and they're spread out as forms are added, so all of them stay under FORM_DAILY_REQUESTS a
+    day (under a third of the lane) however many are chosen."""
+    import connecteam
+    zone = ZoneInfo("America/Los_Angeles")
+    now = 1_800_000_000
+    form = {"picked_at": now - 5 * 86400, "last_ok": now - 600}
+    assert tasks.form_range(form, now, zone)[0].timestamp() == now - 600 - 3600
+    assert tasks.form_range({**form, "last_ok": None}, now, zone)[0].timestamp() == now - 5 * 86400
+    assert tasks.FORM_DAILY_REQUESTS <= 0.3 * connecteam.REPORTS_DAILY_CAP
+    for count in range(1, tasks.MAX_FORMS + 1):
+        every = tasks.form_interval(count)
+        assert every >= tasks.FORM_CHECK_SECONDS and every % 60 == 0
+        assert count * 86400 / every <= tasks.FORM_DAILY_REQUESTS
+    assert [tasks.form_interval(n) // 60 for n in (1, 2, 3, 7, 50)] == [10, 10, 15, 34, 240]
+    assert tasks.form_requests_a_day(0) == 0 and tasks.form_requests_a_day(1) == 144
+    # Due by the stretched interval: with 7 forms, 10 minutes isn't enough.
+    assert not tasks.form_due({"last_check": now - 601}, now, 7)
+    assert tasks.form_due({"last_check": now - 34 * 60}, now, 7) and tasks.form_due({}, now, 7)
+
+
+def test_the_dashboard_says_what_form_checks_cost(tmp_path, monkeypatch):
+    async def scenario():
+        p = Tasks(tmp_path)
+        FakeCt(monkeypatch)
+        async with p:
+            status, body = await p.admin_call("GET", "/api/tasks/forms")
+            assert (body["check_minutes"], body["requests_a_day"], body["lane_a_day"]) == (10, 0, 1000)
+            for form_id in ("55", "56", "57"):
+                status, body = await p.admin_call("PUT", f"/api/tasks/forms/{form_id}", {"name": form_id})
+            assert (body["check_minutes"], body["requests_a_day"]) == (15, 288)
+            status, body = await p.admin_call("DELETE", "/api/tasks/forms/57")
+            assert (body["check_minutes"], body["requests_a_day"]) == (10, 288)
+    run(scenario())
+
+
 def test_the_dashboard_chooses_forms(tmp_path, monkeypatch):
     async def scenario():
         p = Tasks(tmp_path)

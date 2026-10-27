@@ -1307,7 +1307,8 @@ a small, steady share:
 - Reports and tasks have a share of their own in the same way: at most 15 requests a minute and
   1,000 a day, and none once Staff Access has used half of its day. Nothing is asked until
   someone opens a report (or a form's tasks are due), and the same week is asked again at most
-  every 10 minutes. If Connecteam refuses a report's request or says "too many requests", only
+  every 10 minutes. Forms that make tasks use at most about 300 of the 1,000 (see
+  [Tasks](#tasks)), so reports keep the rest. If Connecteam refuses a report's request or says "too many requests", only
   reports and tasks wait; the time clock checks carry on. See [Reports](#reports).
 - How the shares add up (Expert: 100 a minute and 10,000 a day for your whole account): Staff
   Access takes at most 30 a minute and 5,000 a day; inside that, the HR portal at most 6 and 500,
@@ -1457,10 +1458,16 @@ Connecteam forms. For each one you pick:
 - whether the person who sent it gets the task (when they're linked to Connecteam here).
 
 Each new submission becomes one task, with every answer in its notes. Only submissions sent after
-you chose the form count, and none becomes a task twice, even after its task is deleted. Each
-form is checked every 10 minutes, and nothing is asked of Connecteam while no form is chosen.
-The checks use the reports share of Staff Access's Connecteam allowance, so they never hold up the
-time clock checks; if Connecteam can't be reached or the allowance is used up, the form's card
+you chose the form count, and none becomes a task twice, even after its task is deleted.
+
+**What the checks cost.** Each check is usually one Connecteam request (it reads what was sent
+since an hour before the last good check). With one or two forms, each is checked every 10
+minutes (144 requests a day per form). With more, each is checked less often, so all of them
+together use at most about 300 requests a day of the 1,000 reports and tasks share: 3 forms every
+15 minutes, 5 every 24, 10 every 48, 50 every 4 hours. The Tasks tab shows how often and about how
+many requests a day. Nothing is asked of Connecteam while no form is chosen, and reading the
+form list costs a few more a day. The checks use the reports share of Staff Access's Connecteam
+allowance, so they never hold up the time clock checks; if Connecteam can't be reached or the allowance is used up, the form's card
 says so and it tries again later. Staff Access's Connecteam app needs the **forms.read**
 permission (see [Connecteam permissions](#connecteam-permissions)).
 
