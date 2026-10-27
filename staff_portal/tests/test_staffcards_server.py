@@ -166,22 +166,29 @@ def test_connecteam_sync_adds_updates_and_turns_off(tmp_path):
         connecteam_on(p)
         managers = department(p, "Managers", smart_group_id="22", role_id=p.manager)
         house = department(p, "Housekeeping", smart_group_id="11", role_id=p.front_desk)
-        # Ana was added by hand and linked to Connecteam: the sync never touches her.
+        # Ana was added by hand and linked to Connecteam: the sync only puts her in her smart
+        # group's department.
         p.db.update_staff(p.ana, connecteam_user_id="500")
         users = [ct_user(500, "Ana", code="5000", groups=[22]),
                  ct_user(501, "Eve", "Adams", "5555", [11]),
-                 ct_user(502, "Bob", code="6666"),                  # Bob is taken: "Bob (2)"
+                 ct_user(502, "Bo", code="6666"),
                  ct_user(503, "Finn"),                              # no kiosk code
                  ct_user(504, "Gus", code="1111"),                  # Ana's PIN: not usable
-                 ct_user(505, "Hal", code="7777", groups=[11, 22])]  # Managers comes first
+                 ct_user(505, "Hal", code="7777", groups=[11, 22]),  # Managers comes first
+                 ct_user(506, "Bob", code="6060")]                  # Bob is here: waits to be linked
         async with FakeConnecteam(users) as ct, p:
             counts = await sync(p)
-            assert counts == {"added": 5, "updated": 0, "turned_off": 0, "turned_on": 0,
-                              "no_code": 2}
+            assert counts == {"added": 5, "updated": 1, "turned_off": 0, "turned_on": 0,
+                              "no_code": 2, "waiting": 1, "departments_added": 0,
+                              "departments_renamed": 0}
             assert ("Admin", "Synced staff from Connecteam", True) in p.activity()
-            assert p.db.activity(1)[0]["detail"] == "5 added, 2 without a kiosk code"
+            assert p.db.activity(1)[0]["detail"] == (
+                "5 added, 1 updated, 2 without a kiosk code, 1 waiting to be linked (same name as "
+                "someone here)")
+            assert ("Admin", "Moved Ana to Managers", True) in p.activity()
+            assert not any(m["name"] == "Bob (2)" for m in p.db.staff_list())
             eve, bob2, finn, gus, hal = (by_name(p, n) for n in
-                                         ("Eve Adams", "Bob (2)", "Finn", "Gus", "Hal"))
+                                         ("Eve Adams", "Bo", "Finn", "Gus", "Hal"))
             assert (eve["status"], eve["connecteam_auto"], eve["require_clock_in"]) == ("active", 1, 1)
             assert eve["department_id"] == house and eve["role_id"] == p.front_desk
             assert hal["department_id"] == managers and hal["role_id"] == p.manager
@@ -190,8 +197,8 @@ def test_connecteam_sync_adds_updates_and_turns_off(tmp_path):
             for m in (finn, gus):
                 assert m["status"] == "disabled" and m["connecteam_note"] == main.NO_KIOSK_CODE
             ana = p.db.staff(p.ana)
-            assert ana["connecteam_auto"] == 0 and ana["department_id"] is None
-            assert check_pin("1111", ana["pin_hash"])
+            assert ana["connecteam_auto"] == 0 and ana["department_id"] == managers
+            assert ana["role_id"] == p.front_desk and check_pin("1111", ana["pin_hash"])
             assert ct.count("/users/v1/users") == 1
 
             # Admin changes by hand: Eve's role and clock-in rule, Bob (2)'s PIN.
@@ -209,13 +216,14 @@ def test_connecteam_sync_adds_updates_and_turns_off(tmp_path):
             main.pin_sessions["bob2-session"] = (p.device, time.time(), bob2["id"])
 
             users[1] = ct_user(501, "Eve", "Adams", "5556", [22])   # moved, new kiosk code
-            users[2] = ct_user(502, "Bob", code="6667")
+            users[2] = ct_user(502, "Bo", code="6667")
             users[3] = ct_user(503, "Finn", code="9999")
             users[5] = ct_user(505, "Hal", code="7778", groups=[11, 22])
             ct.users = users
             counts = await sync(p)
             assert counts == {"added": 0, "updated": 2, "turned_off": 0, "turned_on": 1,
-                              "no_code": 0}
+                              "no_code": 0, "waiting": 1, "departments_added": 0,
+                              "departments_renamed": 0}
             eve = p.db.staff(eve["id"])
             assert eve["department_id"] == managers                # follows the smart group
             assert eve["role_id"] == p.no_cards                    # but not the role set by hand
@@ -286,7 +294,8 @@ def test_sync_staff_now_and_its_budget(tmp_path):
             connecteam_on(p)
             assert main.staff_sync_due()
             status, reply = await p.admin_call("POST", "/api/connecteam/sync-staff")
-            assert status == 200 and reply["added"] == 1 and reply["detail"] == "1 added"
+            assert status == 200 and reply["added"] == 1
+            assert reply["detail"] == "1 added, 1 department made"     # from the smart group
             assert by_name(p, "Ivy")["connecteam_auto"] == 1
             # At most once a minute by hand, and the regular sync waits an hour.
             assert (await p.admin_call("POST", "/api/connecteam/sync-staff"))[0] == 429
@@ -806,7 +815,7 @@ def test_sync_checks_few_pins_and_never_reuses_a_pin_given_meanwhile(tmp_path, m
     run(scenario())
 
 
-def test_sync_takes_people_out_of_a_department_they_left(tmp_path):
+def test_sync_leaves_people_with_no_matching_group_where_they_are(tmp_path):
     async def scenario():
         p = Portal(tmp_path)
         connecteam_on(p)
@@ -818,22 +827,29 @@ def test_sync_takes_people_out_of_a_department_they_left(tmp_path):
             await sync(p)
             eve, ivy = by_name(p, "Eve"), by_name(p, "Ivy")
             assert (eve["department_id"], eve["role_id"]) == (managers, p.manager)
-            p.db.update_staff(ivy["id"], department_id=spa)       # chosen by hand
-            ct.users = [ct_user(801, "Eve", code="8101", groups=[33]),
-                        ct_user(802, "Ivy", code="8102")]
-            assert (await sync(p))["updated"] == 1
-            eve = p.db.staff(eve["id"])
-            assert (eve["department_id"], eve["role_id"]) == (None, None)   # no Manager role
-            assert p.db.staff(ivy["id"])["department_id"] == spa
-            # A role an admin chose stays, out of the department too.
+            # Ivy's department chosen by hand on the Staff tab: the sync leaves it so.
+            assert (await p.admin_call("PATCH", f"/api/staff/{ivy['id']}",
+                                       {"department_id": spa}))[0] == 200
+            assert p.db.staff(ivy["id"])["department_set"] == 1
+            ct.users = [ct_user(801, "Eve", code="8101", groups=[33]), users[1]]
+            assert (await sync(p))["updated"] == 1                # Ivy's role, from Spa
+            eve, ivy = p.db.staff(eve["id"]), p.db.staff(ivy["id"])
+            # No matching group: left as she was.
+            assert (eve["department_id"], eve["role_id"]) == (managers, p.manager)
+            assert (ivy["department_id"], ivy["role_id"]) == (spa, p.front_desk)
+            # A role an admin chose stays.
+            await p.admin_call("PATCH", f"/api/staff/{eve['id']}", {"role_id": p.front_desk})
             ct.users = users
             await sync(p)
-            assert p.db.staff(eve["id"])["role_id"] == p.manager
-            await p.admin_call("PATCH", f"/api/staff/{eve['id']}", {"role_id": p.front_desk})
-            ct.users = [ct_user(801, "Eve", code="8101")]
-            await sync(p)
-            eve = p.db.staff(eve["id"])
-            assert (eve["department_id"], eve["role_id"]) == (None, p.front_desk)
+            assert p.db.staff(eve["id"])["role_id"] == p.front_desk
+            # Follow Connecteam: back to her smart group's department at once (cached list).
+            calls = len(ct.calls)
+            assert (await p.admin_call("PATCH", f"/api/staff/{ivy['id']}",
+                                       {"department_set": False}))[0] == 200
+            ivy = p.db.staff(ivy["id"])
+            assert (ivy["department_id"], ivy["department_set"]) == (managers, 0)
+            assert len(ct.calls) == calls
+            assert ("Admin", "Ivy's department follows Connecteam again", True) in p.activity()
     run(scenario())
 
 

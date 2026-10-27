@@ -360,7 +360,8 @@ def test_the_connecteam_sync_never_brings_them_back(tmp_path):
             ct.users = [ct_user(601, "Ivy", code="7071", groups=[22]), users[1]]
             counts = await sync(p)
             assert counts == {"added": 0, "updated": 0, "turned_off": 0, "turned_on": 0,
-                              "no_code": 0}
+                              "no_code": 0, "waiting": 0, "departments_added": 0,
+                              "departments_renamed": 0}
             now = p.db.staff(ivy["id"])
             assert (now["status"], now["department_id"], now["role_id"]) == (
                 "archived", house, p.front_desk)

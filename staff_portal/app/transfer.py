@@ -806,10 +806,11 @@ def make_backup(db, branding, version: str) -> dict:
         staff=rows("""SELECT id, name, pin_hash, status, created_at, last_seen, connecteam_user_id,
                       require_clock_in, role_id, layout_pages, wristbands, department_id,
                       connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                      connecteam_note, pin_length, archived_at, archived_by, archived_from
-                      FROM staff"""),
+                      connecteam_note, pin_length, archived_at, archived_by, archived_from,
+                      department_set FROM staff"""),
         departments=rows("""SELECT id, name, sort_order, smart_group_id, role_id, card_access,
-                            card_days, card_lockout, created_at, clock_in FROM departments"""),
+                            card_days, card_lockout, created_at, clock_in, group_named,
+                            group_gone FROM departments"""),
         staff_devices=rows("SELECT staff_id, device_id FROM staff_devices"),
         staff_entities=rows("SELECT staff_id, entity_id, level FROM staff_entities"),
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
@@ -969,7 +970,9 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                 "card_lockout": 0 if row.get("card_lockout") in (0, False) else 1,
                 "created_at": _time(row.get("created_at"), time.time()),
                 # Backups from before the department clock-in rule: each person's own setting.
-                "clock_in": _file_clock_in(row.get("clock_in"))})
+                "clock_in": _file_clock_in(row.get("clock_in")),
+                "group_named": 1 if group and row.get("group_named") in (1, True) else 0,
+                "group_gone": 1 if group and row.get("group_gone") in (1, True) else 0})
     department_ids = {d["id"] for d in departments or []}
     flag = lambda value: 1 if value in (1, True) else 0
 
@@ -1005,6 +1008,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                                           if isinstance(row.get("connecteam_note"), str) else None),
                       # Backups from before 0.8.3 don't know it: the PIN pad waits for a pause.
                       "pin_length": pin_length(row.get("pin_length")),
+                      "department_set": flag(row.get("department_set")),
                       **archived_fields(row)})
     staff_ids = {m["id"] for m in staff}
     staff_entities = {(r["staff_id"], r["entity_id"]): ("view" if r["level"] == "control" and not controllable(r["entity_id"])

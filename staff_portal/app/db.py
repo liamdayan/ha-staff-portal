@@ -395,6 +395,9 @@ MIGRATIONS = {
         "archived_at": "REAL",
         "archived_by": "TEXT",
         "archived_from": "TEXT",
+        # 1 once an admin chose a linked person's department by hand (or kept it when linking):
+        # the Connecteam sync no longer moves them to their smart group's department.
+        "department_set": "INTEGER NOT NULL DEFAULT 0",
     },
     "wb_doors": {
         # 'public' (a shared door, such as the pool gate), 'room' (a guest room) or 'staff' (a
@@ -443,6 +446,10 @@ MIGRATIONS = {
         # one, NULL = each person's own setting. A person's own, set by hand, still wins
         # (Database.clock_in_rule).
         "clock_in": "INTEGER",
+        # 1 = made from a Connecteam smart group and not renamed here since, so its name follows
+        # the group's. group_gone: 1 once its smart group is no longer listed (never deleted).
+        "group_named": "INTEGER NOT NULL DEFAULT 0",
+        "group_gone": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -504,6 +511,8 @@ DEFAULT_SETTINGS = {
     # adds must be clocked in (each person's own setting wins once an admin changes it).
     "connecteam_auto_staff": "0",
     "connecteam_auto_clock_in": "1",
+    # Make a department for each smart group (the sync). On for new setups only: see __init__.
+    "connecteam_auto_departments": "1",
     # Remote lock-out of lost cards through door gateways (experimental, off until tested):
     # which TT Hotel call enrolls the card number, and when the owner confirmed it works.
     "wb_remote_lockout": "0",
@@ -588,14 +597,15 @@ STAFF_FIELDS = {"name", "pin_hash", "status", "failed_pins", "last_seen", "locke
                 "ha_user", "ha_refresh_token", "ha_link_error", "connecteam_user_id",
                 "require_clock_in", "role_id", "layout_pages", "wristbands", "department_id",
                 "connecteam_auto", "clock_in_set", "role_set", "pin_from_connecteam",
-                "connecteam_note", "pin_length", "archived_at", "archived_by", "archived_from"}
+                "connecteam_note", "pin_length", "archived_at", "archived_by", "archived_from",
+                "department_set"}
 # A person's status: 'active', 'disabled' (turned off, by an admin or by the Connecteam sync) or
 # 'archived' (gone for good, but kept with everything they did). Turned off and archived people
 # have no access anywhere: every way in asks staff_off(), or uses STAFF_ON in SQL.
 STAFF_OFF = ("disabled", "archived")
 STAFF_ON = "status NOT IN ('disabled', 'archived')"
 DEPARTMENT_FIELDS = {"name", "smart_group_id", "role_id", "card_access", "card_days",
-                     "card_lockout", "clock_in"}
+                     "card_lockout", "clock_in", "group_named", "group_gone"}
 
 # One row of each log table as backups carry it: a section's "columns" are these fields, in this
 # order. Tuples rather than dicts because a full log is tens of thousands of rows, and a backup
@@ -723,6 +733,10 @@ class Database:
                 if column not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         self.conn.executescript(INDEXES)
+        if self.conn.execute("SELECT 1 FROM settings WHERE key = 'connecteam_enabled'").fetchone():
+            # Set up before smart group departments existed: they stay off until turned on.
+            self.conn.execute("INSERT OR IGNORE INTO settings (key, value) "
+                              "VALUES ('connecteam_auto_departments', '0')")
         for key, value in DEFAULT_SETTINGS.items():
             self.conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
@@ -1381,6 +1395,21 @@ class Database:
         self.conn.execute(f"UPDATE staff SET {cols} WHERE id = ?", (*sets.values(), staff_id))
         self.conn.commit()
 
+    def update_staff_many(self, changes: list[tuple[int, dict]]) -> None:
+        """update_staff for several people in one transaction (all or none), so links can be
+        swapped between two people without either being linked twice."""
+        try:
+            for staff_id, fields in changes:
+                sets = {k: v for k, v in fields.items() if k in STAFF_FIELDS}
+                if sets:
+                    cols = ", ".join(f"{k} = ?" for k in sets)
+                    self.conn.execute(f"UPDATE staff SET {cols} WHERE id = ?",
+                                      (*sets.values(), staff_id))
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
+
     def archive_staff(self, staff_id: int, by: str) -> None:
         """Archive a person: no access anywhere from now on (staff_off). Nothing of theirs is
         deleted, and the status they had ('active' or 'disabled') is kept for Restore."""
@@ -1552,11 +1581,12 @@ class Database:
                 c.execute("DELETE FROM departments")
                 c.executemany(
                     """INSERT INTO departments (id, name, sort_order, smart_group_id, role_id,
-                       card_access, card_days, card_lockout, created_at, clock_in)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       card_access, card_days, card_lockout, created_at, clock_in, group_named,
+                       group_gone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [(d["id"], d["name"], d["sort_order"], d["smart_group_id"], d["role_id"],
                       d["card_access"], d["card_days"], d["card_lockout"], d["created_at"],
-                      d.get("clock_in")) for d in snap["departments"]])
+                      d.get("clock_in"), d.get("group_named", 0), d.get("group_gone", 0))
+                     for d in snap["departments"]])
             else:
                 by_name = {r["name"].casefold(): r["id"] for r in snap["roles"]}
                 c.executemany("UPDATE departments SET role_id = ? WHERE id = ?", [
@@ -1568,14 +1598,16 @@ class Database:
                 """INSERT INTO staff (id, name, pin_hash, status, created_at, last_seen,
                    connecteam_user_id, require_clock_in, role_id, layout_pages, wristbands,
                    department_id, connecteam_auto, clock_in_set, role_set, pin_from_connecteam,
-                   connecteam_note, pin_length, archived_at, archived_by, archived_from)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   connecteam_note, pin_length, archived_at, archived_by, archived_from,
+                   department_set)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(m["id"], m["name"], m["pin_hash"], m["status"], m["created_at"], m["last_seen"],
                   m["connecteam_user_id"], m["require_clock_in"], m["role_id"], m["layout_pages"],
                   m["wristbands"], m.get("department_id"), m.get("connecteam_auto", 0),
                   m.get("clock_in_set", 0), m.get("role_set", 0), m.get("pin_from_connecteam", 0),
                   m.get("connecteam_note"), m.get("pin_length"), m.get("archived_at"),
-                  m.get("archived_by"), m.get("archived_from")) for m in snap["staff"]])
+                  m.get("archived_by"), m.get("archived_from"), m.get("department_set", 0))
+                 for m in snap["staff"]])
             c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
                       "(SELECT id FROM departments)")
             self._restore_tasks(snap.get("tasks"))

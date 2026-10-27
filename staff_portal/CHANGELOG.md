@@ -63,6 +63,36 @@
   every 10 minutes, less often once more than 2 are chosen, so together they use at most about
   300 Connecteam requests a day; the Tasks tab shows how often and what it costs.
 
+**Linking staff you already have**
+
+- **Link existing staff** (Staff tab, and Settings → Connections → Connecteam, also offered after
+  the first Test connection or Save) lists everyone not linked to Connecteam, each with a suggested
+  user when their name is a clear match (same name, first and last swapped, or a short first name
+  like Bob for Robert). Pick from a searchable list or Don't link, then **Link selected** and
+  confirm. It reuses the cached user list.
+- **Relink everyone** shows everyone's link beside the best match, marks broken links (users
+  archived or removed in Connecteam) and differences, and applies only the ticked changes, swaps
+  included, in one go.
+- Linking keeps PINs and roles, and never makes someone clock in unless you tick it. Their kiosk
+  code as PIN is an opt-in tick.
+- **The Edit dialog has a Connecteam user picker** to link, change or unlink anyone. One
+  Connecteam user can be linked to one person; the add-on enforces it. Every link, change and
+  unlink is in Activity.
+- **Add everyone from Connecteam no longer makes "Bob (2)"** when someone here called Bob isn't
+  linked: that user waits as a suggestion in Link existing staff instead.
+
+**Departments from smart groups**
+
+- **Make a department for each smart group** (new setting, on for new setups): the hourly sync,
+  or **Add departments now**, makes a department for each smart group without one, with no role,
+  no key card and each person's own clock-in rule. Its name follows the group's unless renamed
+  here. A removed group's department is kept and marked, never deleted.
+- **Everyone linked to Connecteam joins their smart group's department**, people added by hand
+  and linked too, straight away and as their groups change (the first in the department order
+  wins). A department picked by hand on the Staff tab is kept (**Set by hand**, with **Follow
+  Connecteam** to undo it). Someone in no matching group stays where they are. Each department
+  made or renamed and each move is in Activity, with any change to their clock-in rule.
+
 **Connecteam permissions**
 
 - **Reports and tasks need two more permissions** besides users.read and time_clock.read:

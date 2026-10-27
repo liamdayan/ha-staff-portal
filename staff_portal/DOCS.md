@@ -984,9 +984,10 @@ carries them, encrypted).
 On the **Staff** tab, under **Departments**, click **Add department** (Housekeeping, Front Desk,
 Maintenance…). Each one has:
 
-- **Connecteam smart group** (optional): with **Add everyone from Connecteam** on (see the
-  Connecteam section), people in that smart group join this department. Someone in several of
-  these smart groups gets the first department in the list: drag departments to change the order.
+- **Connecteam smart group** (optional): people linked to Connecteam who are in that smart group
+  join this department (see [Departments from smart groups](#departments-from-smart-groups)).
+  Someone in several of these smart groups gets the first department in the list: drag
+  departments to change the order.
 - **Role**: given to people who join it (or **Leave their role as it is**).
 - **Clock-in**: for people linked to Connecteam, **Must be clocked in** (everyone in it must be
   clocked in to sign in), **Doesn't need to clock in**, or **Each person's own setting**. Someone
@@ -1188,10 +1189,67 @@ How clocked-in sign-in works:
   was due. After that, clocked-in-only people can't sign in or use controls until Connecteam
   answers again. **Settings → Connections** and the add-on log show what went wrong.
 - The Staff tab shows each linked person's clock status. **Edit** lets you turn clocked-in-only
-  on or off, change their PIN to their current kiosk code (if it changed in Connecteam), or
-  **Unlink** them.
+  on or off, change their PIN to their current kiosk code (if it changed in Connecteam), or pick
+  another **Connecteam user** (search by name) or **Not linked**. One Connecteam user can be
+  linked to one person only. Each link, change and unlink is in **Activity**.
 - Turning off **Link staff to Connecteam** lets everyone sign in with their PIN again, without
   removing the links.
+
+### Linking staff you already have
+
+People you added by hand before connecting Connecteam aren't linked to anyone there. To link
+them, click **Link existing staff** (Staff tab, or **Settings → Connections → Connecteam**; it's
+also offered after the first **Test connection** or **Save** that reads your users).
+
+- Everyone here who isn't linked (not archived people) is listed with a **suggested Connecteam
+  user** when their name is a clear match: the same name (accents, capitals and punctuation
+  ignored), first and last swapped, a short first name ("Bob Smith" for "Robert Smith", "Chris"
+  for "Christopher"), or a first name alone ("Bob"). A suggestion is only made when it's the one
+  match for that person, nobody else here matches that user as well, and that user isn't linked to
+  someone else.
+- Check each row: pick someone else from the searchable list, or **Don't link**. Tick the rows to
+  link and click **Link selected**; nothing changes until you confirm.
+- Linking keeps their PIN and role. **Put them in their smart group's department** is ticked;
+  untick it to keep their department (it then counts as set by hand). **Also use their kiosk code
+  as their PIN** and **Also require them to be clocked in to sign in** are up to you: without
+  that last tick, linking never makes someone clock in, even in a department that requires it
+  (their own setting says so, and you can change it on their row).
+- **Relink everyone** lists everyone, linked or not, with their link now beside the best match.
+  Rows where they differ stand out, and a link to someone Connecteam no longer lists (archived or
+  removed there) shows as **Link broken**. Tick the changes to make; two people's links can be
+  swapped in one go. Links that already match are left alone.
+- Linked people then follow the usual rules: the clock-in rule, and their smart group's
+  department (below). People you added by hand are never turned off or given a new PIN by the
+  sync, even if they're archived in Connecteam: Relink everyone shows that as a broken link.
+- With **Add everyone from Connecteam** on, a Connecteam user with the same name as someone here
+  who isn't linked (first and last swapped counts) is never added as a second person: they wait
+  as a suggestion in Link existing staff. If they really are two people, rename one here, or add
+  the other with **Add from Connecteam** under another name.
+
+### Departments from smart groups
+
+**Make a department for each smart group** (Settings → Connections → Connecteam; ticked for new
+setups) makes a department for each Connecteam smart group that has none, about once an hour, or
+at once with **Add departments now**. New departments have no role, no key card and **Each
+person's own setting** for clock-in, until you set them. A department you made by hand with the
+same name as a smart group (and no smart group) follows that group instead of getting a twin.
+
+- Its name follows the smart group's when the group is renamed in Connecteam, unless you rename
+  it here.
+- A smart group removed in Connecteam leaves its department, marked **Smart group removed in
+  Connecteam**. It's never deleted automatically.
+- Everyone linked to Connecteam (added by the sync or by hand) joins the department of their
+  smart group, straight away when linked, and the hourly sync keeps them there as their groups
+  change. Someone in several smart groups joins the first of those departments in the department
+  order. Someone in no matching group stays where they are.
+- Pick a linked person's department on their row on the Staff tab and it's **Set by hand**: the
+  sync leaves it alone. **Follow Connecteam** goes back to their smart group's department.
+- Moving someone doesn't change their own clock-in setting. If their new department sets a rule,
+  that counts (unless their own was set by hand), and the move's line in **Activity** says so.
+
+This reads the smart group list Staff Access already keeps (asked again at most every 6 hours)
+and the user list the sync reads anyway. Each department made or renamed, and each person moved,
+is in **Activity**.
 
 ### Connecteam permissions
 
@@ -1217,26 +1275,31 @@ Instead of adding people one by one, tick **Add everyone from Connecteam** under
 Connections → Connecteam** and click **Save Connecteam settings**. Every active Connecteam user
 then becomes a staff member here:
 
-- Named as in Connecteam ("First Last"; if someone here already has that name, "(2)" is added).
+- Named as in Connecteam ("First Last"). Someone here with that name who isn't linked is never
+  doubled: they wait to be linked (see [Linking staff you already have](#linking-staff-you-already-have)).
+  If only an archived person has the name, "(2)" is added.
 - Their PIN is their Connecteam kiosk code when it's 4 to 8 digits and nobody else here uses it.
   Otherwise they're added **turned off**, and their card says **No usable kiosk code in
   Connecteam**: give them a PIN with **Edit** and tick **Can sign in**. If their kiosk code changes
   in Connecteam, their PIN follows it (and they're signed out), unless you've given them a
   different PIN.
-- Their department comes from their Connecteam smart groups (Staff tab, **Departments**), and
-  their role from the department, if it sets one. Someone who leaves the smart group leaves its
-  department (and the role it gave them); a department without a smart group, chosen by hand,
-  stays. Once you change someone's role by hand, the sync leaves their role alone.
+- Their department comes from their Connecteam smart groups (see [Departments from smart
+  groups](#departments-from-smart-groups)), and their role from the department, if it sets one.
+  Someone in no matching smart group keeps their department; one you pick by hand stays. Once you
+  change someone's role by hand, the sync leaves their role alone.
 - People archived or removed in Connecteam are turned off (and signed out), never deleted. If they
   come back, they're turned on again. Someone you turn off yourself stays off.
 - Someone you [archive](#archiving-people) here stays archived and is left exactly as they are,
   whatever Connecteam says, and is never added again. Once restored, the sync keeps them up to
   date again.
-- People you added by hand are never changed. If you delete someone the sync added, the next sync
+- People you added by hand are never changed, apart from their department once they're linked.
+  If you delete someone the sync added, the next sync
   adds them again while they're active in Connecteam: archive them instead. For the same reason
   they can't be unlinked from Connecteam while this is ticked.
 
-The sync runs about once an hour while this is ticked, soon after you save the settings, and when
+The sync runs about once an hour while this is ticked (or while departments are made from smart
+groups, or anyone linked follows their smart group's department), soon after you save the
+settings, and when
 you click **Sync staff now** (on the Staff tab or in Settings; at most once a minute). It uses the
 same request limits as the time clock checks (below) and never runs while Connecteam is paused or
 stopped. The Staff tab says when it last ran and what changed, and each sync that changes

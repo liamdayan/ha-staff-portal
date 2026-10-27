@@ -367,6 +367,7 @@
     state.notFresh = data.not_fresh || null;
     state.hr = data.hr || {};
     $("#add-from-connecteam").hidden = !data.connecteam.enabled;
+    $("#link-staff").hidden = !data.connecteam.enabled;
     $("#top-title").textContent = `${state.settings.property_name} · Staff Access`;
     renderPhones();
     renderStaff();
@@ -1361,7 +1362,7 @@
         `Their department sets it for everyone in it. The switch sets it for ${m.name} alone.`],
       person: ["Set by hand", byHand(m)],
       default: m.connecteam_auto ? ["Default", "Follows \u201cPeople added this way must be clocked in\u201d " +
-        "in Settings \u2192 Connecteam"] : null,
+        "in Settings \u2192 Connecteam"] : ["Their own", "Their own setting: their department doesn't set one"],
     }[m.clock_in_from];
     const back = m.clock_in_from === "person" && dept && dept.clock_in != null
       ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
@@ -1383,7 +1384,9 @@
     ? "Set by hand, so their department and the Connecteam sync leave it as it is"
     : "Set by hand, so their department doesn't change it";
 
-  // Their department, saved as soon as it's picked (shown once there are departments).
+  // Their department, saved as soon as it's picked (shown once there are departments). A linked
+  // person follows their Connecteam smart group's department until it's picked here by hand;
+  // Follow Connecteam undoes that.
   function departmentSelect(m) {
     if (!state.departments.length && !m.department_id) return null;
     const select = h("select", { "aria-label": `Department for ${m.name}` });
@@ -1391,9 +1394,19 @@
     select.addEventListener("change", () => run(async () => {
       await api("PATCH", `api/staff/${m.id}`, { department_id: select.value ? Number(select.value) : null });
       await load();
-    }, m.connecteam_auto ? `${m.name}'s department changed. The Connecteam sync moves them back if their ` +
-      "smart group says otherwise." : `${m.name}'s department changed.`));
-    return h("label", { class: "inline-select" }, "Department", select);
+    }, m.connecteam_user_id ? `${m.name}'s department changed. Set by hand, so the Connecteam sync ` +
+      "leaves it as it is." : `${m.name}'s department changed.`));
+    const label = h("label", { class: "inline-select" }, "Department", select);
+    if (!m.connecteam_user_id) return label;
+    const from = m.department_set
+      ? h("span", { class: "hint-inline", title: "Chosen by hand, so the Connecteam sync leaves it as it is" }, "Set by hand")
+      : h("span", { class: "hint-inline", title: "Follows their smart group in Connecteam (the first in the " +
+        "department order, if they're in several)" }, "From Connecteam");
+    const back = m.department_set ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
+      await api("PATCH", `api/staff/${m.id}`, { department_set: false });
+      await load();
+    }, `${m.name} follows their Connecteam smart group's department again.`) }, "Follow Connecteam") : null;
+    return h("span", { class: "dept-rule" }, label, from, back);
   }
 
   function fillDepartmentOptions(select, selected) {
@@ -1430,11 +1443,14 @@
       : "4 to 8 digits. They enter it after tapping their name.";
     form.elements["active"].checked = !m || m.status !== "disabled";
     form.elements["active"].closest("label").hidden = !m;
-    // Connecteam: shown for people who are (or are being) linked.
+    // Connecteam: who they're linked to, picked from the user list (one person per user; the
+    // add-on checks that too). Shown while Connecteam is on, or for anyone linked.
     let ctId = m ? m.connecteam_user_id : ctUser?.id;
+    let ctUsers = ctUser ? [ctUser] : [];
     const ctBox = $("[data-ct]", dialog);
-    ctBox.hidden = !ctId;
-    $("[data-ct-label]", dialog).textContent = ctUser ? `Connecteam: ${ctUser.name}` : "Linked to Connecteam";
+    ctBox.hidden = !ctId && !state.connecteam?.enabled;
+    const pickBox = $("[data-ct-pick]", dialog);
+    const ctRows = () => [kiosk.closest("label"), form.elements["require_clock_in"].closest("label")];
     // The clock-in rule as it stands. Until it's touched, it follows the department picked here
     // (the server only sets it by hand when it differs from that).
     const clockBox = form.elements["require_clock_in"];
@@ -1464,8 +1480,7 @@
     ctNote.hidden = !ctNote.textContent;
     // Their Connecteam kiosk code as the PIN: fetched by the add-on, never shown here.
     const kiosk = form.elements["use_kiosk_code"];
-    kiosk.closest("label").hidden = ctUser ? !ctUser.has_kiosk_code : !m?.connecteam_user_id;
-    $("[data-kiosk-label]", dialog).textContent = m
+    $("[data-kiosk-label]", dialog).textContent = m?.connecteam_user_id
       ? "Change their PIN to their current Connecteam kiosk code" : "Use their Connecteam kiosk code as their PIN";
     kiosk.checked = !!ctUser?.has_kiosk_code;
     const pinRow = $("[data-pin-row]", dialog);
@@ -1473,17 +1488,39 @@
       pinRow.hidden = kiosk.checked;
       form.elements["pin"].required = !m && !kiosk.checked;
     };
-    kiosk.onchange();
-    const unlink = $("[data-ct-unlink]", dialog);
-    // Someone the sync added stays linked while it runs (it would only add them again).
-    unlink.hidden = !m || !!(m.connecteam_auto && state.staffSync?.enabled);
-    unlink.onclick = () => {
-      ctId = null;
-      kiosk.checked = false;
+    const showLink = () => {
+      const user = ctUsers.find((u) => u.id === ctId);
+      for (const row of ctRows()) row.hidden = !ctId;
+      kiosk.closest("label").hidden = !ctId || (user ? !user.has_kiosk_code : !m?.connecteam_user_id);
+      if (kiosk.closest("label").hidden) kiosk.checked = false;
       kiosk.onchange();
-      ctBox.hidden = true;
-      toast("Click Save to unlink them from Connecteam.");
     };
+    // Someone the sync added stays linked while it runs (it would only add them again).
+    const locked = !!(m?.connecteam_auto && state.staffSync?.enabled);
+    const drawPicker = () => pickBox.replaceChildren(locked
+      ? h("p", { class: "hint" }, `${ctUsers.find((u) => u.id === ctId)?.name || "Linked"}: added by the ` +
+        "Connecteam sync, so they stay linked while Add everyone from Connecteam is on.")
+      : ctPicker(ctUsers.filter((u) => !u.linked_id || u.linked_id === m?.id || u.id === ctId)
+        .map((u) => ({ ...u, note: u.has_kiosk_code ? null : "no kiosk code" })), ctId, (id) => {
+        const fresh = id && !m?.connecteam_user_id && id !== ctId;
+        ctId = id;
+        // Linking someone never makes them clock in unless you tick it here.
+        if (fresh && !clockTouched) clockBox.checked = false;
+        showLink();
+      }, { noneLabel: "Not linked", label: `Connecteam user for ${m?.name || "this person"}` }));
+    drawPicker();
+    showLink();
+    if (!ctUser && !locked && state.connecteam?.enabled) {
+      // The add-on's cached user list (as Add from Connecteam uses).
+      pickBox.prepend(h("p", { class: "hint", "data-loading": "" }, "Loading your Connecteam users\u2026"));
+      api("GET", "api/connecteam/users").then((data) => {
+        ctUsers = data.users;
+        drawPicker();
+        showLink();
+      }, (err) => {
+        pickBox.replaceChildren(h("p", { class: "hint" }, `Can't list Connecteam users: ${err.message}`));
+      });
+    }
     orderResetRow(dialog, m, "staff");
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
@@ -1547,6 +1584,215 @@
       search.focus();
     }, (err) => { msg.textContent = err.message; });
   });
+
+  // ---------------------------------------------------------------- Connecteam user picker
+
+  // A searchable list of Connecteam users ({id, name, note}), folded to a button that shows the
+  // choice. onChange(id) gets null for noneLabel. One is open at a time; a click outside closes it.
+  let openPicker = null;
+  document.addEventListener("pointerdown", (e) => {
+    if (openPicker && !openPicker.wrap.contains(e.target)) openPicker.close();
+  });
+
+  function ctPicker(users, selected, onChange, { noneLabel = "Not linked", label = "Connecteam user" } = {}) {
+    let value = selected || null;
+    const button = h("button", { type: "button", class: "ct-pick-btn", "aria-haspopup": "listbox",
+      "aria-expanded": "false", "aria-label": label });
+    const search = h("input", { type: "search", placeholder: "Search names", autocomplete: "off",
+      "aria-label": `Search: ${label}` });
+    const list = h("div", { class: "ct-pick-list", role: "listbox", "aria-label": label });
+    const panel = h("div", { class: "ct-pick-panel", hidden: true }, search, list);
+    const wrap = h("div", { class: "ct-pick" }, button, panel);
+    const show = () => {
+      button.textContent = value ? users.find((u) => u.id === value)?.name || "Unknown user" : noneLabel;
+      button.classList.toggle("none", !value);
+    };
+    const close = () => {
+      panel.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+      if (openPicker?.wrap === wrap) openPicker = null;
+    };
+    const choose = (id) => {
+      close();
+      button.focus();
+      if (id === value) return;
+      value = id;
+      show();
+      onChange(id);
+    };
+    const option = (id, text, note) => h("button", { type: "button", role: "option", class: "ct-pick-item",
+      "aria-selected": String(id === value), onclick: () => choose(id) }, h("span", null, text), note ? h("small", null, note) : null);
+    const draw = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = users.filter((u) => !q || u.name.toLowerCase().includes(q));
+      list.replaceChildren(q ? "" : option(null, noneLabel),
+        ...shown.slice(0, 300).map((u) => option(u.id, u.name, u.note)),
+        shown.length ? "" : h("p", { class: "hint" }, users.length ? "No one matches." : "No Connecteam users to choose from."));
+    };
+    button.addEventListener("click", () => {
+      if (!panel.hidden) return close();
+      openPicker?.close();
+      openPicker = { wrap, close };
+      panel.hidden = false;
+      button.setAttribute("aria-expanded", "true");
+      search.value = "";
+      draw();
+      search.focus();
+    });
+    search.addEventListener("input", draw);
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+        button.focus();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        $(".ct-pick-item", list)?.click();
+      }
+    });
+    show();
+    return wrap;
+  }
+
+  // ---------------------------------------------------------------- Link existing staff
+
+  // People added by hand, each with the Connecteam user that's the one clear match for their
+  // name (the add-on works it out, from its cached user list). Nothing changes until Link
+  // selected and its confirmation. Relink everyone lists everyone, with their link now next to
+  // the suggestion; rows where they differ stand out.
+  const LINK_OFFER_KEY = "staff-portal.ct-link-offered";
+
+  async function openLinkStaff() {
+    const dialog = $("#link-dialog");
+    const form = $("#link-form");
+    const msg = $("[data-link-msg]", dialog);
+    const rows = $("[data-link-rows]", dialog);
+    const tools = $("[data-link-tools]", dialog);
+    const options = $("[data-link-options]", dialog);
+    const relinkBox = $("[data-relink]", dialog);
+    const apply = $("[data-link-apply]", dialog);
+    form.reset();
+    rows.replaceChildren();
+    tools.hidden = options.hidden = true;
+    apply.disabled = true;
+    msg.textContent = "Loading your Connecteam users…";
+    if (!dialog.open) dialog.showModal();
+    let plan;
+    try {
+      plan = await api("GET", "api/connecteam/links");
+    } catch (err) {
+      msg.textContent = err.message;
+      return;
+    }
+    const users = new Map(plan.users.map((u) => [u.id, u]));
+    const staffName = new Map(plan.staff.map((m) => [m.id, m.name]));
+    let picks = new Map();   // staff id -> { uid, ticked }
+
+    // Each mode starts from its suggestions: linking ticks every suggestion; relinking ticks none.
+    const start = () => {
+      const relink = relinkBox.checked;
+      picks = new Map(plan.staff.map((m) => {
+        const hint = relink ? m.relink : m.suggested;
+        const uid = relink ? (hint?.id ?? m.connecteam_user_id) : (m.connecteam_user_id ? m.connecteam_user_id : hint?.id ?? null);
+        return [m.id, { uid, ticked: !relink && !!hint }];
+      }));
+      draw();
+    };
+    const lockedRow = (m) => m.auto && plan.auto_locked;
+    const applies = (m) => (relinkBox.checked || !m.connecteam_user_id) && picks.get(m.id).ticked && !lockedRow(m);
+    const changes = () => plan.staff.filter((m) => applies(m)
+      && (picks.get(m.id).uid || null) !== (m.connecteam_user_id || null));
+    const draw = () => {
+      const relink = relinkBox.checked;
+      const shown = relink ? plan.staff : plan.staff.filter((m) => !m.connecteam_user_id);
+      // Who each Connecteam user would be linked to once the ticked changes are made: one
+      // user, one person.
+      const chosen = new Map();
+      for (const m of plan.staff) {
+        const uid = applies(m) ? picks.get(m.id).uid : m.connecteam_user_id;
+        if (uid) chosen.set(uid, [...(chosen.get(uid) || []), m.id]);
+      }
+      const choices = plan.users.filter((u) => !u.linked_archived && (relink || !u.linked_to))
+        .map((u) => ({ id: u.id, name: u.name, note: u.linked_to ? `linked to ${staffName.get(u.linked_to)}` : null }));
+      rows.replaceChildren(...shown.map((m) => {
+        const p = picks.get(m.id);
+        const hint = relink ? m.relink : m.suggested;
+        const twice = applies(m) && p.uid && (chosen.get(p.uid) || []).length > 1;
+        const differs = relink && (p.uid || null) !== (m.connecteam_user_id || null);
+        const tick = h("input", { type: "checkbox", checked: p.ticked, disabled: lockedRow(m),
+          "aria-label": `Apply the change for ${m.name}` });
+        tick.addEventListener("change", () => { p.ticked = tick.checked; draw(); });
+        const now = !relink ? null : m.broken ? h("span", { class: "badge locked" }, "Link broken: no longer in Connecteam")
+          : m.connecteam_user_id ? `Now: ${m.link_name}` : "Now: not linked";
+        const why = hint ? `Suggested: ${hint.name} (${hint.why.toLowerCase()})` : "No clear match by name";
+        return h("div", { class: `link-row${differs ? " differs" : ""}${twice ? " clash" : ""}` },
+          h("label", { class: "link-who" }, tick, h("span", null, h("b", null, m.name),
+            h("small", null, now, now ? " · " : "", why))),
+          lockedRow(m) ? h("small", { class: "hint" }, "Added from Connecteam: stays linked while Add everyone from Connecteam is on.")
+            : ctPicker(choices, p.uid, (uid) => {
+              p.uid = uid;
+              p.ticked = relink ? (uid || null) !== (m.connecteam_user_id || null) : !!uid;
+              draw();
+            }, { noneLabel: relink ? "Not linked" : "Don't link", label: `Connecteam user for ${m.name}` }),
+          twice ? h("small", { class: "link-warn" }, `${users.get(p.uid)?.name} would also be linked to ` +
+            `${(chosen.get(p.uid) || []).filter((id) => id !== m.id).map((id) => staffName.get(id)).join(", ")}. ` +
+            (relink ? "Change their link too (tick their row) to swap them." : "Choose one person.")) : null);
+      }));
+      const n = changes().length;
+      const clash = [...chosen.values()].some((ids) => ids.length > 1);
+      msg.textContent = !shown.length ? (relink ? "No staff yet." : "Everyone here is linked to Connecteam. Tick Relink everyone to check their links.")
+        : relink ? "Everyone here, with their link now and the best match by name. Tick the changes to make."
+        : "Staff not linked to Connecteam, each with a suggested user when their name is a clear match. Check each one: nobody is linked until you confirm.";
+      $("[data-link-count]", dialog).textContent = `${n} selected`;
+      tools.hidden = false;
+      options.hidden = relink && !changes().some((m) => !m.connecteam_user_id);
+      apply.disabled = !n || clash;
+      apply.textContent = relink ? "Apply selected" : "Link selected";
+    };
+    relinkBox.onchange = start;
+    apply.onclick = () => run(async () => {
+      const list = changes();
+      const words = list.map((m) => {
+        const uid = picks.get(m.id).uid;
+        return uid ? `${m.name} → ${users.get(uid)?.name}` : `${m.name}: unlink`;
+      });
+      const opts = Object.fromEntries(["follow_department", "use_kiosk_code", "require_clock_in"]
+        .map((k) => [k, form.elements[k].checked]));
+      const extra = [opts.follow_department ? "join their smart group's department" : "keep their department",
+        opts.use_kiosk_code ? "get their kiosk code as PIN" : "keep their PIN", "keep their role",
+        opts.require_clock_in ? "must be clocked in to sign in" : "don't need to clock in unless you set it"];
+      const fresh = list.some((m) => !m.connecteam_user_id && picks.get(m.id).uid);
+      if (!await askConfirm(`${relinkBox.checked ? "Change" : "Link"} ${people(list.length)}? ${words.join("; ")}.` +
+        (fresh ? ` Newly linked people ${extra.slice(0, -1).join(", ")}, and ${extra.at(-1)}.` : ""),
+      relinkBox.checked ? "Apply" : "Link")) return false;
+      const r = await api("POST", "api/connecteam/links", { ...opts,
+        links: list.map((m) => ({ staff_id: m.id, connecteam_user_id: picks.get(m.id).uid || null })) });
+      dialog.close();
+      await load();
+      toast(`${plural(r.changed, "link")} saved.` + (r.pins_kept.length
+        ? ` Kept the PIN of ${r.pins_kept.join(", ")}: their kiosk code is missing or someone else's.` : ""));
+    });
+    start();
+  }
+
+  $("#link-staff").addEventListener("click", () => openLinkStaff());
+  $("#ct-link").addEventListener("click", () => run(async () => {
+    if (connDirty.ct) throw new Error("Click Save Connecteam settings first.");
+    await openLinkStaff();
+  }));
+
+  // Right after the first Test connection or Save that reads users, once per browser.
+  function offerLinkStaff() {
+    const unlinked = state.staff.filter((m) => !m.connecteam_user_id).length;
+    if (!unlinked || !state.connecteam?.enabled) return;
+    try {
+      if (localStorage.getItem(LINK_OFFER_KEY)) return;
+      localStorage.setItem(LINK_OFFER_KEY, "1");
+    } catch { /* no storage: offer anyway */ }
+    askConfirm(`${people(unlinked)} you added by hand ${unlinked === 1 ? "isn't" : "aren't"} linked to Connecteam yet. ` +
+      "Link them now? You'll see a suggested Connecteam user for each, and nothing changes until you confirm.",
+    "Link existing staff").then((ok) => { if (ok) openLinkStaff(); });
+  }
 
   // ---------------------------------------------------------------- roles
 
@@ -2377,7 +2623,7 @@
   const connDirty = { tt: false, ct: false };   // changed but not saved yet
   // FormData leaves unticked boxes out, so each form's checkboxes are listed here.
   const CONN_CHECKBOXES = { tt: ["tthotel_clear_secret"], ct: ["connecteam_enabled",
-    "connecteam_clear_secret", "connecteam_auto_staff", "connecteam_auto_clock_in"] };
+    "connecteam_clear_secret", "connecteam_auto_staff", "connecteam_auto_clock_in", "connecteam_auto_departments"] };
 
   // Fills each connection's form with what's saved, unless it has unsaved changes. The secrets
   // are write-only: the dashboard only learns whether they're saved.
@@ -2501,6 +2747,20 @@
         (hrLane.paused ? `. Waiting: ${hrLane.paused}` : state.hr?.status === "on" ? "." : "; it's off."));
     }
     $("#ct-status").replaceChildren(...lines.flatMap((t, i) => (i ? [h("br"), t] : [t])));
+    // Link existing staff, and smart group departments.
+    const unlinked = (state.staff || []).filter((m) => !m.connecteam_user_id).length;
+    const waiting = state.staffSync?.result?.waiting || 0;
+    $("#ct-link-status").textContent = !ct.enabled ? "Turn on Connecteam to link the staff you added by hand."
+      : (unlinked ? `${people(unlinked)} here ${unlinked === 1 ? "isn't" : "aren't"} linked to Connecteam.`
+        : "Everyone here is linked to Connecteam.") +
+        (waiting ? ` ${plural(waiting, "Connecteam user")} with the same name as someone here ${waiting === 1 ? "waits" : "wait"} ` +
+          "to be linked rather than added twice." : "");
+    $("#ct-link").disabled = !ct.enabled;
+    const following = (state.departments || []).filter((d) => d.smart_group_id).length;
+    $("#ct-dept-status").textContent = !ct.enabled ? "Turn on Connecteam to make departments from smart groups."
+      : !state.staffSync?.departments ? "Making departments from smart groups is turned off."
+      : `${plural(following, "department")} ${following === 1 ? "follows" : "follow"} a smart group.`;
+    $("#ct-departments").disabled = !state.staffSync?.departments;
     renderStaffSync();
   }
 
@@ -2516,6 +2776,7 @@
         connDirty[key] = false;
         await load();
         fillConnections();
+        if (key === "ct" && ctState()[1] === "active") offerLinkStaff();
       }, key === "tt" ? "TT Hotel settings saved." : "Connecteam settings saved.");
     });
   }
@@ -2535,6 +2796,7 @@
   // with Connecteam's own words. It lifts a stop.
   $("#ct-test").addEventListener("click", () => run(async () => {
     if (connDirty.ct) throw new Error("Click Save Connecteam settings first: the test uses what's saved.");
+    let usersRead = false;
     const button = $("#ct-test");
     button.disabled = true;
     button.textContent = "Testing…";
@@ -2542,11 +2804,13 @@
       const r = await api("POST", "api/connecteam/test");
       showChecks($("#ct-checks"), r.checks);
       toast(r.ok ? "Connecteam works." : "Connecteam has a problem: see the list.", !r.ok);
+      usersRead = r.checks.some((c) => c.check === "Reading users" && c.ok);
     } finally {
       button.disabled = false;
       button.textContent = "Test connection";
       await load();
     }
+    if (usersRead) offerLinkStaff();
   }));
 
   // ------------------------------------------------ Google Drive (HR files), in Connections
@@ -4103,6 +4367,8 @@
       h("div", { class: "entity-text" },
         h("div", { class: "entity-name" }, d.name),
         h("div", { class: "entity-id dept-sub" }, departmentSummary(d)),
+        d.group_gone ? h("div", { class: "via access-note" }, "Smart group removed in Connecteam. The department " +
+          "and its people stay: delete it or choose another group when you're ready.") : null,
         d.card_access && !d.card_access.length
           ? h("div", { class: "via access-note" }, "Its key card is damaged: choose its doors again.") : null),
       h("div", { class: "area-actions" },
@@ -4341,7 +4607,10 @@
     if (!r) return "";
     const parts = [r.added && `${r.added} added`, r.updated && `${r.updated} updated`,
       r.turned_off && `${r.turned_off} turned off`, r.turned_on && `${r.turned_on} turned on`,
-      r.no_code && `${r.no_code} without a kiosk code`].filter(Boolean);
+      r.no_code && `${r.no_code} without a kiosk code`,
+      r.waiting && `${r.waiting} waiting to be linked`,
+      r.departments_added && plural(r.departments_added, "department") + " made",
+      r.departments_renamed && `${r.departments_renamed} renamed`].filter(Boolean);
     return parts.length ? parts.join(", ") : "no changes";
   }
 
@@ -4363,8 +4632,10 @@
     $("#sync-staff").hidden = !s.enabled;
     const settingsLine = $("#ct-sync-status");
     settingsLine.textContent = !state.connecteam?.enabled ? "Turn on Connecteam to add everyone from it."
-      : !s.enabled ? "Adding everyone from Connecteam is turned off." : staffSyncText();
-    $("#ct-sync").disabled = !s.enabled;
+      : !s.enabled ? "Adding everyone from Connecteam is turned off." +
+        (s.running ? " Linked people still follow their smart group's department, checked about once an hour." : "")
+      : staffSyncText();
+    $("#ct-sync").disabled = !s.running;
   }
 
   function syncStaffNow(button) {
@@ -4381,6 +4652,20 @@
   }
 
   $("#sync-staff").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
+  $("#ct-departments").addEventListener("click", (e) => run(async () => {
+    if (connDirty.ct) throw new Error("Click Save Connecteam settings first.");
+    const button = e.currentTarget;
+    button.disabled = true;
+    try {
+      const r = await api("POST", "api/connecteam/departments", {});
+      toast(r.departments_added || r.departments_renamed
+        ? `${plural(r.departments_added, "department")} made, ${r.departments_renamed} renamed. People join theirs within a minute.`
+        : "Every smart group already has a department.");
+    } finally {
+      button.disabled = false;
+      await load();
+    }
+  }));
   $("#ct-sync").addEventListener("click", (e) => syncStaffNow(e.currentTarget));
 
   // ---------------------------------------------------------------- key cards: this computer's encoder
