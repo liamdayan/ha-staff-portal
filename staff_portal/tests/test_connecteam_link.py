@@ -7,11 +7,11 @@ test_staffcards_server, and Home Assistant's admin check is replaced as in test_
 
 from test_encoder_dashboard import PAT, VIC, as_user, call, dashboard_portal, ingress_client
 from test_staffcards_server import FakeConnecteam, by_name, connecteam_on, ct_user, department, sync
-from test_wristbands_server import Portal, run
+from test_wristbands_server import dept_of, Portal, run
 
 import ctlink  # noqa: E402
 import main  # noqa: E402
-from db import Database, check_pin  # noqa: E402
+from db import Database, check_pin, department_list  # noqa: E402
 
 GROUPS = [{"id": 11, "name": "Housekeeping"}, {"id": 22, "name": "Managers"}]
 
@@ -69,7 +69,7 @@ def test_link_existing_staff(tmp_path):
         p = Portal(tmp_path)
         linked_on(p)
         house = department(p, "Housekeeping", smart_group_id="11", clock_in=1)
-        p.db.update_staff(p.cy, department_id=None)
+        p.db.update_staff(p.cy, department_ids=[])
         archived = p.person("Eve", "5151", p.front_desk)
         p.db.archive_staff(archived, "Admin")
         users = [ct_user(701, "Ana", "Lopez", "7001", [11]), ct_user(702, "Robert", "Jones", "7002"),
@@ -86,7 +86,7 @@ def test_link_existing_staff(tmp_path):
             assert row(plan, p.cy)["suggested"]["id"] == "703"
             assert row(plan, p.dee)["suggested"] is None              # linked already
             assert next(u for u in plan["users"] if u["id"] == "705")["linked_to"] == p.dee
-            assert next(u for u in plan["users"] if u["id"] == "701")["department_id"] == house
+            assert dept_of(next(u for u in plan["users"] if u["id"] == "701")) == house
             # The step reuses the cached user list.
             await links(p)
             assert ct.count("/users/v1/users") == 1
@@ -108,13 +108,13 @@ def test_link_existing_staff(tmp_path):
             # Role kept; department from the smart group; their clock-in rule doesn't switch on
             # although Housekeeping requires it: set for them, so it beats the department's.
             for m, was in ((ana, before[p.ana]), (cy, before[p.cy])):
-                assert m["role_id"] == was["role_id"] and m["department_id"] == house
+                assert m["role_id"] == was["role_id"] and dept_of(m) == house
                 assert m["connecteam_auto"] == 0 and m["department_set"] == 0
                 assert p.db.clock_in_rule(m) == (False, "person")
                 assert not main.needs_clock_in(m)
             assert ("Admin", "Linked Ana to Connecteam", True) in p.activity()
             detail = next(a["detail"] for a in p.db.activity(20) if a["action"] == "Linked Ana to Connecteam")
-            assert detail == ("Connecteam user Ana Lopez; PIN set to their kiosk code; department: "
+            assert detail == ("Connecteam user Ana Lopez; PIN set to their kiosk code; departments: "
                               "Housekeeping; may sign in without clocking in")
 
             # Bob with the clock-in tick, keeping his department.
@@ -122,7 +122,7 @@ def test_link_existing_staff(tmp_path):
                 "links": [{"staff_id": p.bob, "connecteam_user_id": "702"}],
                 "follow_department": False, "require_clock_in": True})
             bob = p.db.staff(p.bob)
-            assert status == 200 and bob["department_set"] == 1 and bob["department_id"] is None
+            assert status == 200 and bob["department_set"] == 1 and dept_of(bob) is None
             assert p.db.clock_in_rule(bob)[0] and main.needs_clock_in(bob)
             # Nothing left to link; Relink everyone has suggestions for everyone.
             plan = await links(p)
@@ -262,7 +262,7 @@ def test_add_everyone_never_duplicates_someone_here(tmp_path):
             await p.admin_call("POST", "/api/connecteam/links", {"links": [
                 {"staff_id": p.bob, "connecteam_user_id": "741"}]})
             bob = p.db.staff(p.bob)
-            assert bob["department_id"] == house and not p.db.clock_in_rule(bob)[0]
+            assert dept_of(bob) == house and not p.db.clock_in_rule(bob)[0]
             counts = await sync(p)
             assert (counts["added"], counts["waiting"]) == (0, 1)              # Cy still waits
             # A new kiosk code, another group, the clock-in setting: only the department follows.
@@ -272,11 +272,11 @@ def test_add_everyone_never_duplicates_someone_here(tmp_path):
             ct.users = [ct_user(741, "Bob", code="9999", groups=[22])] + users[1:]
             await sync(p)
             after = p.db.staff(p.bob)
-            assert after["department_id"] == managers and after["pin_hash"] == bob["pin_hash"]
+            assert dept_of(after) == managers and after["pin_hash"] == bob["pin_hash"]
             assert (after["require_clock_in"], after["role_id"], after["connecteam_auto"]) == (
                 bob["require_clock_in"], bob["role_id"], 0)
-            assert ("Staff Portal", "Moved Bob to Managers", True) in p.activity() or (
-                "Admin", "Moved Bob to Managers", True) in p.activity()
+            assert ("Staff Portal", "Bob's departments: Managers", True) in p.activity() or (
+                "Admin", "Bob's departments: Managers", True) in p.activity()
             # Archived or removed in Connecteam: people added by hand are never turned off.
             ct.users = users[1:]
             assert (await sync(p))["turned_off"] == 0
@@ -285,7 +285,7 @@ def test_add_everyone_never_duplicates_someone_here(tmp_path):
             p.db.archive_staff(p.bob, "Admin")
             ct.users = [ct_user(741, "Bob", code="9999", groups=[11])] + users[1:]
             counts = await sync(p)
-            assert p.db.staff(p.bob)["department_id"] == managers
+            assert dept_of(p.db.staff(p.bob)) == managers
             assert p.db.staff(p.bob)["status"] == "archived" and counts["added"] == 0
     run(scenario())
 
@@ -296,26 +296,27 @@ def test_departments_follow_the_smart_group_unless_set_by_hand(tmp_path):
         linked_on(p)
         house = department(p, "Housekeeping", smart_group_id="11", clock_in=1)
         managers = department(p, "Managers", smart_group_id="22")
-        users = [ct_user(751, "Ana", groups=[22, 11])]          # Housekeeping comes first
+        users = [ct_user(751, "Ana", groups=[22, 11])]          # in both; Housekeeping first
         async with FakeConnecteam(users) as ct, p:
             p.db.update_staff(p.ana, connecteam_user_id="751", require_clock_in=0)
             assert main.connecteam_sync_wanted() and main.staff_sync_due()
             await sync(p)
             ana = p.db.staff(p.ana)
-            assert ana["department_id"] == house
-            log = next(a for a in p.db.activity(20) if a["action"] == "Moved Ana to Housekeeping")
-            assert log["detail"] == ("their Connecteam smart group; now must be clocked in to sign "
+            assert department_list(ana["department_ids"]) == [house, managers]
+            log = next(a for a in p.db.activity(20)
+                       if a["action"] == "Ana's departments: Housekeeping, Managers")
+            assert log["detail"] == ("their Connecteam smart groups; now must be clocked in to sign "
                                      "in (Housekeeping's rule)")
             # By hand on the Staff tab: kept; Follow Connecteam undoes it.
             assert (await p.admin_call("PATCH", f"/api/staff/{p.ana}", {"department_id": managers}))[0] == 200
             await sync(p)
-            assert p.db.staff(p.ana)["department_id"] == managers
+            assert dept_of(p.db.staff(p.ana)) == managers
             assert (await p.admin_call("PATCH", f"/api/staff/{p.ana}", {"department_set": False}))[0] == 200
-            assert p.db.staff(p.ana)["department_id"] == house
+            assert department_list(p.db.staff(p.ana)["department_ids"]) == [house, managers]
             # No matching group: left as is. Unlinked: nothing follows Connecteam.
             ct.users = [ct_user(751, "Ana")]
             await sync(p)
-            assert p.db.staff(p.ana)["department_id"] == house
+            assert department_list(p.db.staff(p.ana)["department_ids"]) == [house, managers]
             await p.admin_call("PATCH", f"/api/staff/{p.ana}", {"connecteam_user_id": None})
             assert not main.connecteam_sync_wanted()
     run(scenario())
@@ -339,7 +340,7 @@ def test_departments_from_smart_groups(tmp_path):
             assert (house["smart_group_id"], house["role_id"], house["card_access"], house["clock_in"],
                     house["group_named"]) == ("11", None, None, None, 1)
             assert depts["Spa"]["id"] == spa and depts["Spa"]["smart_group_id"] == "33"
-            assert p.db.staff(p.ana)["department_id"] == house["id"]
+            assert dept_of(p.db.staff(p.ana)) == house["id"]
             assert ("Admin", "Made department Housekeeping from a Connecteam smart group", True) in p.activity()
             # The smart group list is cached: the next sync asks for users only.
             await sync(p)

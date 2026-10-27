@@ -292,25 +292,36 @@ def user_names(users) -> dict:
     return {u: n for u, n in ((_user_id(r), _name(r)) for r in users or [] if isinstance(r, dict)) if u and n}
 
 
-def department_map(departments, users, staff=()) -> dict:
-    """{Connecteam user ID: Staff Access department {id, name}}. First the department someone
-    linked to Connecteam has here (staff: [{connecteam_user_id, department_id}], set by hand or
-    by sync); else by smart group: a department follows one, and users() lists each person's
-    groups, someone in several getting the first department, as Staff Access does."""
+def department_lists(departments, users, staff=()) -> dict:
+    """{Connecteam user ID: every Staff Access department they're in, [{id, name}], in the
+    department order}. First the departments someone linked to Connecteam has here (staff:
+    [{connecteam_user_id, department_ids}] (or one department_id), set by hand or by sync);
+    else by smart group: a department follows one, and users() lists each person's groups."""
     named = {d.get("id"): d for d in departments or [] if isinstance(d, dict) and d.get("name")}
+    order = list(named)
     mapped = [d for d in named.values() if d.get("smart_group_id")]
+    pick = lambda ds: [dict(id=d.get("id"), name=_text(d["name"], NAME_LEN)) for d in ds]
     found = {}
     for s in staff or []:
-        d = named.get(s.get("department_id")) if isinstance(s, dict) else None
-        if d and s.get("connecteam_user_id") not in (None, ""):
-            found[str(s["connecteam_user_id"])[:40]] = dict(id=d.get("id"), name=_text(d["name"], NAME_LEN))
+        if not isinstance(s, dict) or s.get("connecteam_user_id") in (None, ""):
+            continue
+        ids = s.get("department_ids") if isinstance(s.get("department_ids"), list) else [s.get("department_id")]
+        mine = sorted({i for i in ids if i in named}, key=order.index)
+        if mine:
+            found[str(s["connecteam_user_id"])[:40]] = pick(named[i] for i in mine)
     for r in users or []:
         uid = _user_id(r) if isinstance(r, dict) else None
         groups = {str(g) for g in r.get("groups") or []} if uid else set()
-        d = next((d for d in mapped if str(d["smart_group_id"]) in groups), None)
-        if d and uid not in found:
-            found[uid] = dict(id=d.get("id"), name=_text(d["name"], NAME_LEN))
+        mine = [d for d in mapped if str(d["smart_group_id"]) in groups]
+        if mine and uid not in found:
+            found[uid] = pick(mine)
     return found
+
+
+def department_map(departments, users, staff=()) -> dict:
+    """{Connecteam user ID: the department they're shown under, {id, name}}: the first of
+    theirs (department_lists)."""
+    return {uid: ds[0] for uid, ds in department_lists(departments, users, staff).items()}
 
 
 # ---------------------------------------------------------------- who can see whom
@@ -502,9 +513,10 @@ def gusto_for(text, allowed: set, everyone: set, aliases: str) -> str:
 
 
 def only_own(ctx, d: dict, users, dept_of: dict) -> dict:
-    """The report's data with only the people in the viewer's own departments."""
+    """The report's data with only the people in the viewer's own departments (anyone in one of
+    them; dept_of: department_lists)."""
     own = {x.get("id") for x in (ctx.person or {}).get("departments") or [] if isinstance(x, dict)}
-    allowed = {uid for uid, dept in dept_of.items() if dept["id"] in own}
+    allowed = {uid for uid, depts in dept_of.items() if any(x["id"] in own for x in depts)}
     keys = {uid: name_key(n) for uid, n in user_names(users).items()}
     d["timesheets"] = [t for t in d["timesheets"] if t["uid"] in allowed]
     d["shifts"] = [s for s in d["shifts"] if s["uid"] in allowed or (s["uid"] is None and s["open"])]
@@ -515,6 +527,7 @@ def only_own(ctx, d: dict, users, dept_of: dict) -> dict:
                 s["name"] = "Anonymous"
     d["users"] = {uid: n for uid, n in d["users"].items() if uid in allowed}
     d["departments"] = {uid: n for uid, n in d["departments"].items() if uid in allowed}
+    d["department_lists"] = {uid: n for uid, n in d["department_lists"].items() if uid in allowed}
     mine = {keys[u] for u in allowed if u in keys}
     aliases = d["settings"]["rules"]["aliases"]
     if d["gusto"]:
@@ -584,7 +597,7 @@ async def data(ctx, params) -> dict:
         u = max(uploads, key=lambda u: u.get("uploaded_at") or 0)
         gusto = dict(name=_text(u.get("name"), 200), text=str(u.get("text") or ""),
                      uploaded_at=u.get("uploaded_at"), by=_text(u.get("by"), NAME_LEN))
-    dept_of = department_map(ctx.departments, users, getattr(ctx, "staff", ()))
+    dept_of = department_lists(ctx.departments, users, getattr(ctx, "staff", ()))
     now = getattr(ctx, "now", None) or dt.datetime.now(tz)
     found = dict(
         period=kind, start=start.isoformat(), end=end.isoformat(),
@@ -593,7 +606,9 @@ async def data(ctx, params) -> dict:
         today=day_number(today), now=abs_minutes(now, None, tz),
         timesheets=timesheet_rows(ts, tz, rules["defaultShift"]), shifts=shift_rows(shifts, tz), forms=forms,
         have=dict(timesheets=have_ts, shifts=have_shifts),
-        users=user_names(users), departments={uid: d["name"] for uid, d in dept_of.items()},
+        users=user_names(users), departments={uid: ds[0]["name"] for uid, ds in dept_of.items()},
+        # Everyone in several departments is under each of them in the department filter.
+        department_lists={uid: [x["name"] for x in ds] for uid, ds in dept_of.items() if len(ds) > 1},
         gusto=gusto, settings=settings, form_choices=choices, errors=errors, own_only=False)
     return only_own(ctx, found, users if have_users else [], dept_of) if own_only else found
 

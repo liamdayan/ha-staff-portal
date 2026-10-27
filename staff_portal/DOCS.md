@@ -342,11 +342,11 @@ each person sign in with their own PIN so every action is recorded under their n
 
 1. In **Staff**, click **Add staff member** for each person, with a name and a 4- to 8-digit PIN.
 
-   The Staff tab lists one thin row per person: name, role, department, anything that needs a look
+   The Staff tab lists one thin row per person: name, role, departments, anything that needs a look
    (inactive, locked, not clocked in) and when they last signed in. Click a row for everything
    else and its buttons. Search by name, role or department, and sort by **Department** (each
-   department folds away with a click), **Name** or **Role**; this browser remembers the sort
-   and the folded departments. People you've archived are folded away under the list (see
+   department folds away with a click; someone in several shows under each), **Name** or **Role**;
+   this browser remembers the sort and the folded departments. People you've archived are folded away under the list (see
    [Archiving people](#archiving-people)).
 2. In **Phones**, click **Edit** on the shared phone and set **Who uses it** to
    **Shared: each person signs in with their own PIN**. Leave **Everyone on the Staff tab**
@@ -985,10 +985,8 @@ On the **Staff** tab, under **Departments**, click **Add department** (Housekeep
 Maintenance…). Each one has:
 
 - **Connecteam smart group** (optional): people linked to Connecteam who are in that smart group
-  join this department (see [Departments from smart groups](#departments-from-smart-groups)).
-  Someone in several of these smart groups gets the first department in the list: drag
-  departments to change the order.
-- **Role**: given to people who join it (or **Leave their role as it is**).
+  are in this department (see [Departments from smart groups](#departments-from-smart-groups)).
+- **Role**: given to people in it (or **Leave their role as it is**).
 - **Clock-in**: for people linked to Connecteam, **Must be clocked in** (everyone in it must be
   clocked in to sign in), **Doesn't need to clock in**, or **Each person's own setting**. Someone
   whose own setting you've changed by hand keeps theirs (see **Clocking in, by department or
@@ -997,14 +995,39 @@ Maintenance…). Each one has:
   whole floors or single doors, like a staff card), how many days it lasts, and whether it opens
   doors that are deadbolted from inside.
 
-Pick each person's department on their card on the Staff tab (or in **Edit**). Deleting a
-department leaves its people with no department. Departments are in backups, and can be exported
-and imported on the Backup tab (roles are matched by name).
+**Someone in several departments** is in all of them: they show under each one on the Staff tab,
+and every one counts for reports and tasks. Their role, key card and clock-in rule each come from
+the first department in the list that sets it; one that leaves it alone is skipped. So an "All
+users group" department with **Leave their role as it is** never gets in the way of Front Desk's
+role. Drag departments to change the order. Their own role and clock-in setting, changed by hand,
+still win.
+
+Each department's row says how many people are in it, where they come from (**Connecteam:**
+and the smart group, or **Added by hand**) and what it sets, for example **Role: Front Desk ·
+Key card: Staff doors, 30 days · Clock-in required**, or **Sets nothing**. Two smart groups with
+the same name (Front Desk and Front Desk (2)) also show each one's Connecteam group ID and how
+many people Connecteam has in it, so you can tell which is which. Each person's row lists their
+departments, with **(role)** after the one their role comes from.
+
+Pick each person's departments in **Edit** (tick any number). For someone linked to Connecteam,
+that sets them by hand (see below). Deleting a department leaves its people in their other
+departments. Departments are in backups, and can be exported and imported on the Backup tab (roles
+are matched by name).
+
+**Hiding a department.** A department that follows a smart group has **Hide** instead of
+**Delete**: deleting it would only have the sync make it again. A hidden department gives nothing
+(no role, key card, clock-in rule, reports or tasks), isn't offered anywhere (the staff app, the
+dashboard and the HR portal), and is never made again by the sync. Its people stay in it. Hidden
+departments are folded away under the list, in **Hidden smart groups**, each with **Show** to bring
+it back as it was. A department used by a task form can't be hidden (or deleted) until you pick
+another department for the form on the Tasks tab. Departments you made by hand (no smart group)
+keep **Delete**, and so does one whose smart group was removed in Connecteam. Hiding and showing
+are in **Activity**, and hidden departments stay hidden in backups and migration files.
 
 ### Make key card
 
-Every person's card on the Staff tab says what **Make key card** would make for them, from their
-department. Click it, have a blank card (or a card to reuse) ready at the encoder, and the
+Every person's card on the Staff tab says what **Make key card** would make for them, from the
+first of their departments that has a key card. Click it, have a blank card (or a card to reuse) ready at the encoder, and the
 dashboard walks you through it like the staff app: place the card, wait, take it off, with **Try
 again** and **Stop** if it doesn't work. The card is recorded as made by you (your Home Assistant
 name), from the dashboard, for that person.
@@ -1233,23 +1256,27 @@ setups) makes a department for each Connecteam smart group that has none, about 
 at once with **Add departments now**. New departments have no role, no key card and **Each
 person's own setting** for clock-in, until you set them. A department you made by hand with the
 same name as a smart group (and no smart group) follows that group instead of getting a twin.
+Connecteam's own **All users group** and **All admins group**, which everyone is in, get departments
+that are made hidden. An install from before hiding hides its departments for those two once, if
+they still follow their smart group and you haven't given them a role, key card or clock-in rule.
 
 - Its name follows the smart group's when the group is renamed in Connecteam, unless you rename
   it here.
 - A smart group removed in Connecteam leaves its department, marked **Smart group removed in
   Connecteam**. It's never deleted automatically.
-- Everyone linked to Connecteam (added by the sync or by hand) joins the department of their
-  smart group, straight away when linked, and the hourly sync keeps them there as their groups
-  change. Someone in several smart groups joins the first of those departments in the department
-  order. Someone in no matching group stays where they are.
-- Pick a linked person's department on their row on the Staff tab and it's **Set by hand**: the
-  sync leaves it alone. **Follow Connecteam** goes back to their smart group's department.
-- Moving someone doesn't change their own clock-in setting. If their new department sets a rule,
-  that counts (unless their own was set by hand), and the move's line in **Activity** says so.
+- Everyone linked to Connecteam (added by the sync or by hand) is in the department of each smart
+  group they're in, straight away when linked, and the hourly sync keeps that up to date as their
+  groups change. Departments the sync can't know about (made by hand, or whose smart group was
+  removed) stay. Someone in no matching group stays where they are.
+- Change a linked person's departments in **Edit** and they're **Set by hand**: the sync leaves
+  them alone. **Follow Connecteam** on their row goes back to their smart groups' departments.
+- A change of departments doesn't change their own clock-in setting. If the rule they get from
+  their departments changes, that counts (unless their own was set by hand), and the change's line
+  in **Activity** says so.
 
 This reads the smart group list Staff Access already keeps (asked again at most every 6 hours)
-and the user list the sync reads anyway. Each department made or renamed, and each person moved,
-is in **Activity**.
+and the user list the sync reads anyway. Each department made or renamed, and each person whose
+departments change, is in **Activity**.
 
 ### Connecteam permissions
 
@@ -1283,22 +1310,22 @@ then becomes a staff member here:
   Connecteam**: give them a PIN with **Edit** and tick **Can sign in**. If their kiosk code changes
   in Connecteam, their PIN follows it (and they're signed out), unless you've given them a
   different PIN.
-- Their department comes from their Connecteam smart groups (see [Departments from smart
-  groups](#departments-from-smart-groups)), and their role from the department, if it sets one.
-  Someone in no matching smart group keeps their department; one you pick by hand stays. Once you
+- Their departments come from their Connecteam smart groups (see [Departments from smart
+  groups](#departments-from-smart-groups)), and their role from the first of them that sets one.
+  Someone in no matching smart group keeps their departments; ones you pick by hand stay. Once you
   change someone's role by hand, the sync leaves their role alone.
 - People archived or removed in Connecteam are turned off (and signed out), never deleted. If they
   come back, they're turned on again. Someone you turn off yourself stays off.
 - Someone you [archive](#archiving-people) here stays archived and is left exactly as they are,
   whatever Connecteam says, and is never added again. Once restored, the sync keeps them up to
   date again.
-- People you added by hand are never changed, apart from their department once they're linked.
+- People you added by hand are never changed, apart from their departments once they're linked.
   If you delete someone the sync added, the next sync
   adds them again while they're active in Connecteam: archive them instead. For the same reason
   they can't be unlinked from Connecteam while this is ticked.
 
 The sync runs about once an hour while this is ticked (or while departments are made from smart
-groups, or anyone linked follows their smart group's department), soon after you save the
+groups, or anyone linked follows their smart groups' departments), soon after you save the
 settings, and when
 you click **Sync staff now** (on the Staff tab or in Settings; at most once a minute). It uses the
 same request limits as the time clock checks (below) and never runs while Connecteam is paused or
@@ -1314,9 +1341,9 @@ on their row on the Staff tab (or in **Edit**).
 
 What counts for each person:
 
-1. Their own setting, if you've changed it by hand. Their department and the sync never change
+1. Their own setting, if you've changed it by hand. Their departments and the sync never change
    it back.
-2. Otherwise their department's, if it sets one.
+2. Otherwise the first of their departments, in the department order, that sets one.
 3. Otherwise their own setting (for people the sync added, the one it gave them).
 
 Their row shows **Must be clocked in** or **Clock-in not required**, and where that comes from:
@@ -1324,8 +1351,8 @@ Their row shows **Must be clocked in** or **Clock-in not required**, and where t
 **Default** (the setting above). When it's set by hand and their department sets one, **Use the
 department's setting** goes back to the department's. Changing a department's setting counts
 from the next sign-in (and, for anyone already signed in, from the next control they use).
-Moving someone to another department in **Edit** leaves the switch following the new
-department, unless you change the switch too.
+Changing someone's departments in **Edit** leaves the switch following their new departments,
+unless you change the switch too.
 
 ### Staying within Connecteam's API limits
 
@@ -1401,8 +1428,9 @@ them. Who gets which report depends on their **department**.
    (such as a Gusto time-off export) and change its settings; they see it too.
 3. Click **Save**. Staff see the change within a few seconds.
 
-Someone without a department sees no reports. Access is checked on every request, so moving
-someone to another department, turning a report off or turning the person off takes effect at
+Someone in several departments gets every report any of them may view (and manages it if any of
+them may). Hidden departments aren't offered and give no access. Someone without a department sees
+no reports. Access is checked on every request, so moving someone to another department, turning a report off or turning the person off takes effect at
 once.
 
 **Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
@@ -1453,15 +1481,16 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   name column is read (never a Manager or Approved by column). The Leave balances tab lists anyone
   who didn't match; add the pair under **Rules → Name matches** (one per line, Gusto name =
   Connecteam name).
-- **Departments.** Each person shows under their Staff Access department: the one they have on
+- **Departments.** Each person shows under their Staff Access departments: the ones they have on
   the Staff tab when they're linked to Connecteam (chosen by hand or by sync, with or without a
-  smart group), otherwise the first department whose Connecteam smart group they're in. People
-  without one show under their Gusto title.
+  smart group), otherwise every department whose Connecteam smart group they're in. Their row
+  shows the first of them, and the department filter finds them under each. People without one
+  show under their Gusto title.
 - **Who can see whom.** On the **Rules** tab, people who manage the report choose:
   - **Everyone sees all departments** (the default): everyone who may view the report sees
     everybody.
   - **Viewers see only their own department**: people who view the report see only the people in
-    their own department (their timesheets, schedules, forms and Gusto rows), and the name matches
+    their own departments (their timesheets, schedules, forms and Gusto rows), and the name matches
     for them. People who manage the report still see everyone. The add-on leaves the others out
     before anything is sent, so they can't be seen by any means. Someone whose department isn't
     known (not linked here and in no smart group) is only shown to managers.
@@ -1487,8 +1516,9 @@ Everyone who signs in with their own PIN (on a shared or role-based phone or com
 **Tasks** list in the staff app, next to the pages. It's each department's to-do list. A kiosk
 phone nobody signs in to has no tasks.
 
-**Who sees what.** People see the tasks for their department (the one set on the Staff tab, or
-by its Connecteam smart group), the tasks for **Everyone**, the tasks given to them, and the
+**Who sees what.** People see the tasks for each of their departments (the ones set on the
+Staff tab, or by their Connecteam smart groups; hidden departments don't count), the tasks for
+**Everyone**, the tasks given to them, and the
 tasks they made. Anyone who sees a task can change its status. Only the person who made a task,
 or someone whose role has **Manage tasks** (Roles tab → the role → Tasks), can edit or delete it.
 On a shared kiosk computer, someone without a role of their own gets the computer's role here.
@@ -1501,7 +1531,7 @@ quick task or a Connecteam form) and a history of every change.
 
 **On the phone.** Tasks are listed by status, with coloured status chips, and urgent and overdue
 tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes to your own
-department unless you pick another (or Everyone), a person, or a due date. Tap a task's status
+department (the first of yours) unless you pick another (or Everyone), a person, or a due date. Tap a task's status
 chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
 computer) for **Won't do** and **Reopen**. Tap a task to see its notes and history, and to edit
 or delete it. The filters show only **Mine**, one department, or one status. Done tasks fold

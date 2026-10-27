@@ -108,11 +108,12 @@
       <div class="head-actions"><button class="btn" id="add-department">Add department</button></div>
     </div>
     <p class="hint">A department gives its people a role, the key card made for them with
-      <b>Make key card</b>, and whether they must be clocked in to sign in. With Connecteam's
-      <b>Add everyone from Connecteam</b> on, people join the department whose smart group they're in.
-      Someone in several of these smart groups gets the first one in this list: drag to change the
-      order.</p>
+      <b>Make key card</b>, and whether they must be clocked in to sign in. People linked to
+      Connecteam are in every department whose smart group they're in. Someone in several
+      departments gets each of these from the first one in this list that sets it, so drag to
+      change the order.</p>
     <div id="department-list" class="area-list dept-list"></div>
+    <div id="department-hidden"></div>
   </section>
 
   <section id="tab-roles" class="tab" hidden>
@@ -725,23 +726,24 @@
               </div>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
                 <span>Add everyone from Connecteam
-                <small>Every active Connecteam user becomes a staff member here, in the department whose
+                <small>Every active Connecteam user becomes a staff member here, in every department whose
                 smart group they're in (Staff tab, Departments), with their kiosk code as their PIN. Checked
                 about once an hour, inside the same request limits. People archived in Connecteam are turned
                 off, never deleted. Someone here with the same name waits to be linked instead of being
-                added twice. People you add by hand are never changed, apart from their department
+                added twice. People you add by hand are never changed, apart from their departments
                 once linked.</small></span></label>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
                 <span>People added this way must be clocked in to sign in
-                <small>Unless their department sets its own (Staff tab, Departments). You can change it for
+                <small>Unless one of their departments sets its own (Staff tab, Departments). You can change it for
                 anyone on their row on the Staff tab; the sync never changes it back.</small></span></label>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_departments">
                 <span>Make a department for each smart group
                 <small>Each Connecteam smart group gets a department here, with no role, no key card and
                 each person's own clock-in rule until you set them. Its name follows the smart group's
                 unless you rename it. A smart group removed in Connecteam leaves its department, marked
-                as removed: it's never deleted. Linked people join the department of their smart group
-                (the first in the department order, if they're in several).</small></span></label>
+                as removed: it's never deleted. Connecteam's own "All users group" and "All admins
+                group" are made hidden. Linked people are in the department of each smart group they're
+                in.</small></span></label>
               <div class="ct-status">
                 <span id="ct-dept-status" class="hint"></span>
                 <button class="btn" type="button" id="ct-departments">Add departments now</button>
@@ -1010,8 +1012,11 @@
     <h2 data-title>Add staff member</h2>
     <label>Name<input name="name" maxlength="40" placeholder="Bob" required></label>
     <label>Role <small>What they get on role-based devices.</small><select name="role_id"></select></label>
-    <label data-dept-row>Department <small>Their key card comes from it (Make key card).</small>
-      <select name="department_id"></select></label>
+    <div class="pick-block" data-dept-row>
+      <div class="pick-head">Departments <small>Each of their role, key card and clock-in rule comes
+        from the first of these, in the Departments order, that sets it.</small></div>
+      <div class="report-depts" data-dept-picks></div>
+    </div>
     <label data-pin-row>PIN <small data-pin-hint></small>
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <label class="check"><input type="checkbox" name="active"> Can sign in</label>
@@ -1061,7 +1066,7 @@
     <div class="link-options" data-link-options hidden>
       <p class="hint">For the people being linked:</p>
       <label class="check"><input type="checkbox" name="follow_department" checked>
-        <span>Put them in their smart group's department <small>Otherwise their department stays, as
+        <span>Put them in their smart groups' departments <small>Otherwise their departments stay, as
           set by hand.</small></span></label>
       <label class="check"><input type="checkbox" name="use_kiosk_code">
         <span>Also use their kiosk code as their PIN <small>Their PIN stays if the code is missing or

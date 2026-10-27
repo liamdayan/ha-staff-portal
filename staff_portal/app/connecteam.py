@@ -716,6 +716,10 @@ class Connecteam:
         """{smart group ID: name} from the last list read, of any age (never asks Connecteam)."""
         return {g["id"]: g["name"] for g in self._groups[0]} if self._groups else {}
 
+    def known_groups(self) -> dict[str, dict]:
+        """{smart group ID: {id, name, users}} from the last list read, of any age (never asks)."""
+        return {g["id"]: g for g in self._groups[0]} if self._groups else {}
+
     async def kiosk_code(self, user_id: str) -> str | None:
         """One user's kiosk code, if it's usable as a PIN (from the cached list when recent)."""
         for u in await self.users():

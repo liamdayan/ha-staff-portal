@@ -972,7 +972,12 @@
   }
 
   const roleName = (m) => state.roles.find((r) => r.id === m.role_id)?.name || "";
-  const departmentOf = (m) => state.departments.find((d) => d.id === m.department_id) || null;
+  // Departments that aren't hidden: the only ones offered, and the only ones that give anything.
+  const shownDepartments = () => state.departments.filter((d) => !d.hidden);
+  // A person's departments (the shown ones), in the department order.
+  const departmentsOf = (m) => shownDepartments().filter((d) => (m.department_ids || []).includes(d.id));
+  const departmentById = (id) => state.departments.find((d) => d.id === id) || null;
+  const departmentNames = (m) => departmentsOf(m).map((d) => d.name).join(", ");
   const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
   function renderStaff() {
@@ -990,14 +995,14 @@
       return;
     }
     // By department only once there are departments (it's by name until then).
-    const departments = state.departments.length > 0;
+    const departments = shownDepartments().length > 0;
     const sort = staffView.sort === "department" && !departments ? "name" : staffView.sort;
     document.querySelectorAll("#staff-sort button").forEach((b) => {
       b.hidden = b.dataset.sort === "department" && !departments;
       b.setAttribute("aria-checked", String(b.dataset.sort === sort));
     });
     const q = staffView.q.trim().toLowerCase();
-    const shown = state.staff.filter((m) => !q || [m.name, roleName(m), departmentOf(m)?.name,
+    const shown = state.staff.filter((m) => !q || [m.name, roleName(m), departmentNames(m),
       m.ha_user].some((text) => text && text.toLowerCase().includes(q)));
     $("#staff-count").textContent = q ? `${shown.length} of ${state.staff.length}`
       : `${state.staff.length} ${state.staff.length === 1 ? "person" : "people"}`;
@@ -1006,9 +1011,10 @@
       return;
     }
     if (sort === "department") {
-      const groups = state.departments.map((d) => [String(d.id), d.name,
-        shown.filter((m) => m.department_id === d.id)]);
-      groups.push(["none", "No department", shown.filter((m) => !departmentOf(m))]);
+      // Someone in several departments is under each of them.
+      const groups = shownDepartments().map((d) => [String(d.id), d.name,
+        shown.filter((m) => (m.department_ids || []).includes(d.id))]);
+      groups.push(["none", "No department", shown.filter((m) => !departmentsOf(m).length)]);
       list.replaceChildren(...groups.filter(([, , people]) => people.length)
         .map(([key, title, people]) => staffGroup(key, title, people.sort(byName), !!q)));
       return;
@@ -1045,7 +1051,7 @@
     const draw = () => {
       const open = staffView.open.has(m.id);
       item.classList.toggle("open", open);
-      const sub = [roleName(m) || "No role", sort !== "department" ? departmentOf(m)?.name : null];
+      const sub = [roleName(m) || "No role", sort !== "department" ? departmentNames(m) : null];
       const flags = [
         m.status === "disabled" ? ["Inactive", "revoked"] : null,
         m.locked ? ["Locked (wrong PINs)", "locked"] : null,
@@ -1083,7 +1089,6 @@
       await load();
     }, `${m.name}'s role changed. It applies on role-based devices within a few seconds.`));
     const own = ownChangesText(m);
-    const dept = departmentOf(m);
     const actions = [h("button", { class: "btn", onclick: () => editStaff(m) }, "Edit"),
       h("button", { class: "btn", onclick: () => openPersonAccess(m.id) }, "Access")];
     if (wristbandsOn()) {
@@ -1117,7 +1122,7 @@
               title: m.ha_link_error || "Actions show in Home Assistant as this user",
             }, m.ha_link_error ? `HA user ${m.ha_user}: link broken` : `HA user: ${m.ha_user}`) : null,
             m.connecteam_auto ? h("span", { class: "badge linked",
-              title: "Added by Add everyone from Connecteam, which keeps their department up to date" },
+              title: "Added by Add everyone from Connecteam, which keeps their departments up to date" },
             "From Connecteam") : null,
             clockBadge(m),
             h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
@@ -1128,11 +1133,11 @@
             ? `Can sign in on: ${phones.join(", ")}`
             : "Not on any shared phone yet"),
           own ? h("div", { class: "meta" }, `Own changes to their role: ${own}`) : null,
-          wristbandsOn() ? keyCardLine(m, dept) : null,
+          departmentLine(m),
+          wristbandsOn() ? keyCardLine(m, departmentById(m.card_department)) : null,
           clockRule(m)),
         h("div", { class: "staff-selects" },
-          h("label", { class: "inline-select" }, "Role", roleSelect),
-          departmentSelect(m))),
+          h("label", { class: "inline-select" }, "Role", roleSelect))),
       h("div", { class: "card-actions" }, actions),
     ];
   }
@@ -1156,7 +1161,7 @@
   function renderArchived() {
     const box = $("#staff-archived");
     const q = staffView.q.trim().toLowerCase();
-    const people = state.archived.filter((m) => !q || [m.name, roleName(m), departmentOf(m)?.name, m.ha_user]
+    const people = state.archived.filter((m) => !q || [m.name, roleName(m), departmentNames(m), m.ha_user]
       .some((text) => text && text.toLowerCase().includes(q))).sort(byName);
     if (!people.length) {
       box.replaceChildren();
@@ -1177,7 +1182,7 @@
 
   function archivedRow(m) {
     const cards = m.key_cards || 0;
-    const sub = [roleName(m), departmentOf(m)?.name, m.archived_at
+    const sub = [roleName(m), departmentNames(m), m.archived_at
       ? `Archived ${when(m.archived_at)}${m.archived_by ? ` by ${m.archived_by}` : ""}` : "Archived"];
     return h("article", { class: "staff-row archived" },
       h("div", { class: "staff-archived-row" },
@@ -1338,12 +1343,13 @@
 
   // Whether this person must be clocked in on Connecteam to sign in, as a switch on their card,
   // and where that comes from (the server works it out: clock_in, clock_in_from): set by hand,
-  // their department, or their own default. Changing it here (or in Edit) is the admin's choice:
-  // their department and the Connecteam sync leave it alone, until "Use the department's setting".
+  // the first of their departments that sets one, or their own default. Changing it here (or in
+  // Edit) is the admin's choice: their departments and the Connecteam sync leave it alone, until
+  // "Use the department's setting".
   function clockRule(m) {
     if (!m.connecteam_user_id) return null;
     const required = !!m.clock_in;
-    const dept = departmentOf(m);
+    const dept = departmentById(m.clock_in_department) || departmentsOf(m).find((d) => d.clock_in != null);
     const box = h("input", { type: "checkbox", role: "switch", checked: required,
       "aria-label": `${m.name} must be clocked in to sign in` });
     box.addEventListener("change", () => run(async () => {
@@ -1359,10 +1365,11 @@
     const off = !state.connecteam?.enabled;
     const from = {
       department: [`From ${dept?.name || "their department"}`,
-        `Their department sets it for everyone in it. The switch sets it for ${m.name} alone.`],
+        `${dept?.name || "Their department"} sets it for everyone in it (the first of their departments that does). ` +
+        `The switch sets it for ${m.name} alone.`],
       person: ["Set by hand", byHand(m)],
       default: m.connecteam_auto ? ["Default", "Follows \u201cPeople added this way must be clocked in\u201d " +
-        "in Settings \u2192 Connecteam"] : ["Their own", "Their own setting: their department doesn't set one"],
+        "in Settings \u2192 Connecteam"] : ["Their own", "Their own setting: none of their departments sets one"],
     }[m.clock_in_from];
     const back = m.clock_in_from === "person" && dept && dept.clock_in != null
       ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
@@ -1381,47 +1388,46 @@
   }
 
   const byHand = (m) => m.connecteam_auto
-    ? "Set by hand, so their department and the Connecteam sync leave it as it is"
-    : "Set by hand, so their department doesn't change it";
+    ? "Set by hand, so their departments and the Connecteam sync leave it as it is"
+    : "Set by hand, so their departments don't change it";
 
-  // Their department, saved as soon as it's picked (shown once there are departments). A linked
-  // person follows their Connecteam smart group's department until it's picked here by hand;
-  // Follow Connecteam undoes that.
-  function departmentSelect(m) {
-    if (!state.departments.length && !m.department_id) return null;
-    const select = h("select", { "aria-label": `Department for ${m.name}` });
-    fillDepartmentOptions(select, m.department_id);
-    select.addEventListener("change", () => run(async () => {
-      await api("PATCH", `api/staff/${m.id}`, { department_id: select.value ? Number(select.value) : null });
-      await load();
-    }, m.connecteam_user_id ? `${m.name}'s department changed. Set by hand, so the Connecteam sync ` +
-      "leaves it as it is." : `${m.name}'s department changed.`));
-    const label = h("label", { class: "inline-select" }, "Department", select);
-    if (!m.connecteam_user_id) return label;
-    const from = m.department_set
-      ? h("span", { class: "hint-inline", title: "Chosen by hand, so the Connecteam sync leaves it as it is" }, "Set by hand")
-      : h("span", { class: "hint-inline", title: "Follows their smart group in Connecteam (the first in the " +
-        "department order, if they're in several)" }, "From Connecteam");
-    const back = m.department_set ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
+  // Their departments (changed in Edit; shown once there are departments), the one their role
+  // comes from marked. A linked person follows their Connecteam smart groups until their
+  // departments are changed by hand; Follow Connecteam undoes that.
+  function departmentLine(m) {
+    const mine = departmentsOf(m);
+    if (!shownDepartments().length && !mine.length) return null;
+    const names = mine.length ? mine.flatMap((d, i) => [i ? ", " : "", d.id === m.role_department
+      ? h("span", { title: `${roleName(m) || "Their role"} comes from ${d.name}` }, `${d.name} (role)`) : d.name])
+      : ["None"];
+    const from = !m.connecteam_user_id ? null : m.department_set
+      ? h("span", { class: "hint-inline", title: "Chosen by hand, so the Connecteam sync leaves them as they are" }, "Set by hand")
+      : h("span", { class: "hint-inline", title: "Every department whose smart group they're in, in Connecteam" }, "From Connecteam");
+    const back = m.connecteam_user_id && m.department_set ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
       await api("PATCH", `api/staff/${m.id}`, { department_set: false });
       await load();
-    }, `${m.name} follows their Connecteam smart group's department again.`) }, "Follow Connecteam") : null;
-    return h("span", { class: "dept-rule" }, label, from, back);
+    }, `${m.name}'s departments follow their Connecteam smart groups again.`) }, "Follow Connecteam") : null;
+    return h("div", { class: "meta dept-rule" }, h("span", null, mine.length > 1 ? "Departments: " : "Department: ", names), from, back);
   }
 
-  function fillDepartmentOptions(select, selected) {
-    select.replaceChildren(h("option", { value: "" }, "No department"),
-      ...state.departments.map((d) => h("option", { value: d.id, selected: d.id === selected }, d.name)));
+  // Department checkboxes for the Edit dialog (the shown ones, in order).
+  function departmentPicks(box, chosen, onChange) {
+    box.replaceChildren(...shownDepartments().map((d) => {
+      const tick = h("input", { type: "checkbox", value: String(d.id), checked: chosen.includes(d.id) });
+      tick.addEventListener("change", onChange);
+      return h("label", { class: "check" }, tick, ` ${d.name}`);
+    }));
   }
+  const pickedDepartments = (box) => [...box.querySelectorAll("input:checked")].map((i) => Number(i.value));
 
   // Their key cards and the one Make key card would make, in a line.
   function keyCardLine(m, dept) {
     const n = m.key_cards || 0;
     const cards = n ? h("button", { type: "button", class: "linkish", onclick: () => showKeyCardsFor(m) },
       `${plural(n, "active key card")}`) : "No active key card";
-    const template = !dept ? "no department, so no key card to make"
-      : dept.card_access == null ? `${dept.name} has no key card set`
-      : `Make key card: ${accessSummary(dept.card_access)}, ${plural(dept.card_days, "day")}`;
+    const template = dept ? `Make key card: ${accessSummary(dept.card_access)}, ${plural(dept.card_days, "day")} (${dept.name})`
+      : departmentsOf(m).length ? "none of their departments has a key card set"
+      : "no department, so no key card to make";
     return h("div", { class: "meta" }, cards, ` \u00b7 ${template}`);
   }
 
@@ -1434,8 +1440,10 @@
       : ctUser ? "Add from Connecteam" : "Add staff member";
     form.elements["name"].value = m ? m.name : ctUser ? ctUser.name.slice(0, 40) : "";
     fillRoleOptions(form.elements["role_id"], m ? m.role_id : null, "No role");
-    fillDepartmentOptions(form.elements["department_id"], m ? m.department_id : null);
-    $("[data-dept-row]", dialog).hidden = !state.departments.length && !m?.department_id;
+    // Their departments: any number of the shown ones (hidden ones they're in stay).
+    const deptBox = $("[data-dept-picks]", dialog);
+    const deptsBefore = m ? departmentsOf(m).map((d) => d.id) : [];
+    $("[data-dept-row]", dialog).hidden = !shownDepartments().length;
     form.elements["pin"].required = !m;
     $("[data-pin-hint]", dialog).textContent = m
       ? "Leave blank to keep their current PIN."
@@ -1451,31 +1459,30 @@
     ctBox.hidden = !ctId && !state.connecteam?.enabled;
     const pickBox = $("[data-ct-pick]", dialog);
     const ctRows = () => [kiosk.closest("label"), form.elements["require_clock_in"].closest("label")];
-    // The clock-in rule as it stands. Until it's touched, it follows the department picked here
-    // (the server only sets it by hand when it differs from that).
+    // The clock-in rule as it stands. Until it's touched, it follows the departments picked here:
+    // the first of them that sets one (the server only sets it by hand when it differs from that).
     const clockBox = form.elements["require_clock_in"];
-    const deptSelect = form.elements["department_id"];
-    const clockFor = (deptId) => {
-      const rule = state.departments.find((d) => d.id === deptId)?.clock_in;
+    const clockFor = (deptIds) => {
+      const rule = shownDepartments().find((d) => deptIds.includes(d.id) && d.clock_in != null)?.clock_in;
       if (m?.clock_in_set || rule == null) {
         return m ? !!m.require_clock_in : state.settings.connecteam_auto_clock_in !== "0";
       }
       return !!rule;
     };
     let clockTouched = false;
-    clockBox.checked = m ? !!m.clock_in : clockFor(null);
+    clockBox.checked = m ? !!m.clock_in : clockFor([]);
     clockBox.onchange = () => { clockTouched = true; };
-    deptSelect.onchange = () => {
-      if (!clockTouched) clockBox.checked = clockFor(deptSelect.value ? Number(deptSelect.value) : null);
-    };
+    departmentPicks(deptBox, deptsBefore, () => {
+      if (!clockTouched) clockBox.checked = clockFor(pickedDepartments(deptBox));
+    });
     const ctNote = $("[data-ct-note]", dialog);
     const clockNote = !m ? ""
-      : m.clock_in_from === "department" ? `The clock-in rule comes from ${departmentOf(m)?.name || "their department"}. ` +
+      : m.clock_in_from === "department" ? `The clock-in rule comes from ${departmentById(m.clock_in_department)?.name || "their department"}. ` +
         `Changing it here sets it for ${m.name} alone.`
       : m.clock_in_from === "person" ? `The clock-in rule was set by hand, so ${m.connecteam_auto
-        ? "their department and the sync leave it as it is" : "their department doesn't change it"}.`
+        ? "their departments and the sync leave it as it is" : "their departments don't change it"}.`
       : m.connecteam_auto ? "Changing the clock-in rule here makes it yours: the sync never changes it back." : "";
-    ctNote.textContent = [m?.connecteam_auto ? "Added by the Connecteam sync, which keeps their department up to date." : "",
+    ctNote.textContent = [m?.connecteam_auto ? "Added by the Connecteam sync, which keeps their departments up to date." : "",
       clockNote].filter(Boolean).join(" ");
     ctNote.hidden = !ctNote.textContent;
     // Their Connecteam kiosk code as the PIN: fetched by the add-on, never shown here.
@@ -1525,8 +1532,10 @@
     dialog.onclose = () => {
       if (dialog.returnValue !== "save") return;
       const body = { name: form.elements["name"].value, role_id: form.elements["role_id"].value || null };
-      const dept = form.elements["department_id"].value;
-      if (!$("[data-dept-row]", dialog).hidden) body.department_id = dept ? Number(dept) : null;
+      // Sent only when changed: for someone linked, that sets their departments by hand.
+      const picked = pickedDepartments(deptBox);
+      if (!$("[data-dept-row]", dialog).hidden && (picked.length !== deptsBefore.length
+        || picked.some((id) => !deptsBefore.includes(id)))) body.department_ids = picked;
       const pin = form.elements["pin"].value.trim();
       if (pin) body.pin = pin;
       if (m) body.active = form.elements["active"].checked;
@@ -1758,7 +1767,7 @@
       });
       const opts = Object.fromEntries(["follow_department", "use_kiosk_code", "require_clock_in"]
         .map((k) => [k, form.elements[k].checked]));
-      const extra = [opts.follow_department ? "join their smart group's department" : "keep their department",
+      const extra = [opts.follow_department ? "join their smart groups' departments" : "keep their departments",
         opts.use_kiosk_code ? "get their kiosk code as PIN" : "keep their PIN", "keep their role",
         opts.require_clock_in ? "must be clocked in to sign in" : "don't need to clock in unless you set it"];
       const fresh = list.some((m) => !m.connecteam_user_id && picks.get(m.id).uid);
@@ -2344,8 +2353,8 @@
   function taskDeptSelect(value, label) {
     const select = h("select", { "aria-label": label },
       h("option", { value: "" }, "Everyone"),
-      state.departments.map((d) => h("option", { value: String(d.id) }, d.name)));
-    if (value != null && !state.departments.some((d) => d.id === value)) {
+      shownDepartments().map((d) => h("option", { value: String(d.id) }, d.name)));
+    if (value != null && !shownDepartments().some((d) => d.id === value)) {
       select.append(h("option", { value: String(value) }, "A deleted department"));
     }
     select.value = value == null ? "" : String(value);
@@ -4309,9 +4318,10 @@
 
   // ---------------------------------------------------------------- staff tab: departments
 
-  // A department gives its people a role and the key card Make key card makes for them; with
-  // Add everyone from Connecteam on, people join the one whose smart group they're in (the first
-  // in this order, if they're in several).
+  // A department gives its people a role, the key card Make key card makes for them and a
+  // clock-in rule; people are in every one whose smart group they're in, and each of the three
+  // comes from the first of theirs, in this order, that sets it. One that follows a smart group
+  // is hidden rather than deleted (the sync would only make it again): hidden, it gives nothing.
 
   let smartGroups = null;   // Connecteam's smart groups ({id, name, users}), once the dialog loaded them
 
@@ -4342,27 +4352,36 @@
       n("door") && plural(n("door"), "door")].filter(Boolean).join(", ");
   }
 
+  // How many people, where they come from, and what it actually sets ("Sets nothing" when it
+  // leaves all three alone). Two smart groups of the same name get their group ID and size, so
+  // the owner can tell which is which.
   function departmentSummary(d) {
     const role = state.roles.find((r) => r.id === d.role_id);
+    const name = d.smart_group_id ? groupName(d.smart_group_id) : "";
+    const known = (x) => (smartGroups?.find((g) => g.id === x.smart_group_id)?.name || x.smart_group_name || "").toLowerCase();
+    const twin = d.smart_group_id && known(d) && state.departments.some((x) => x.id !== d.id
+      && x.smart_group_id && known(x) === known(d));
+    const users = smartGroups?.find((g) => g.id === d.smart_group_id)?.users ?? d.smart_group_users;
+    const sets = [role ? `Role: ${role.name}` : null,
+      d.card_access == null ? null : `Key card: ${accessSummary(d.card_access)}, ${plural(d.card_days, "day")}` +
+        (d.card_lockout ? ", opens deadbolted doors" : ""),
+      d.clock_in == null ? null : d.clock_in ? "Clock-in required" : "No clock-in needed"].filter(Boolean);
     return [people(d.staff_count || 0),
-      d.smart_group_id ? `Connecteam: ${groupName(d.smart_group_id)}` : "Added by hand",
-      role ? `Role: ${role.name}` : "Role left alone",
-      d.card_access == null ? "No key card"
-        : `Key card: ${accessSummary(d.card_access)}, ${plural(d.card_days, "day")}` +
-          (d.card_lockout ? ", opens deadbolted doors" : ""),
-      d.clock_in == null ? (state.connecteam?.enabled ? "Clock-in: each person's own" : null)
-        : d.clock_in ? "Clock-in: must be clocked in" : "Clock-in: not needed"].filter(Boolean).join(" · ");
+      d.smart_group_id ? `Connecteam: ${name}` + (twin ? ` (group ${d.smart_group_id}` +
+        (users == null ? ")" : `, ${people(users)} there)`) : "") : "Added by hand",
+      ...(sets.length ? sets : ["Sets nothing"])].join(" · ");
   }
+
+  // Hidden smart groups stay folded under the list unless opened (kept open while this page is).
+  let hiddenFoldOpen = false;
 
   function renderDepartments() {
     const list = $("#department-list");
     if (!list) return;
-    if (!state.departments.length) {
-      list.replaceChildren(h("div", { class: "empty small" }, "No departments yet. Add one like " +
-        "“Housekeeping” with the doors its key cards open."));
-      return;
-    }
-    list.replaceChildren(...state.departments.map((d) => h("div", { class: "area-row sort-row" },
+    const shown = shownDepartments();
+    const hidden = state.departments.filter((d) => d.hidden);
+    list.hidden = !shown.length && hidden.length > 0;
+    list.replaceChildren(...(shown.length ? shown.map((d) => h("div", { class: "area-row sort-row" },
       dragHandle(`Reorder department ${d.name}`),
       h("div", { class: "entity-text" },
         h("div", { class: "entity-name" }, d.name),
@@ -4373,18 +4392,52 @@
           ? h("div", { class: "via access-note" }, "Its key card is damaged: choose its doors again.") : null),
       h("div", { class: "area-actions" },
         h("button", { type: "button", class: "btn", onclick: () => run(() => editDepartment(d)) }, "Edit"),
-        h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
-          const who = d.staff_count ? ` Its ${people(d.staff_count)} stay, with no department.` : "";
+        d.smart_group_id ? hideButton(d, true) : null,
+        !d.smart_group_id || d.group_gone ? h("button", { type: "button", class: "btn danger", onclick: () => run(async () => {
+          const who = d.staff_count ? ` Its ${people(d.staff_count)} stay, in their other departments.` : "";
           if (!await askConfirm(`Delete the ${d.name} department?${who}`, "Delete department")) return false;
           await api("DELETE", `api/departments/${d.id}`);
           await load();
-        }, "Department deleted.") }, "Delete")))));
+        }, "Department deleted.") }, "Delete") : null)))
+      : [h("div", { class: "empty small" }, "No departments yet. Add one like " +
+        "“Housekeeping” with the doors its key cards open.")]));
+    const box = $("#department-hidden");
+    if (!hidden.length) {
+      box.replaceChildren();
+      return;
+    }
+    const fold = h("details", { class: "fold-section device-fold dept-fold", open: hiddenFoldOpen },
+      h("summary", null, h("span", { class: "chev", "aria-hidden": "true" }),
+        h("h3", { class: "editor-sub" }, "Hidden smart groups"),
+        h("span", { class: "fold-count" }, `(${hidden.length})`)),
+      h("p", { class: "hint" }, "These give nothing and aren't offered anywhere. The sync never makes them again, " +
+        "and their people stay in them."),
+      h("div", { class: "area-list dept-list" }, hidden.map((d) => h("div", { class: "area-row" },
+        h("div", { class: "entity-text" },
+          h("div", { class: "entity-name" }, d.name),
+          h("div", { class: "entity-id dept-sub" }, departmentSummary(d))),
+        h("div", { class: "area-actions" }, hideButton(d, false))))));
+    fold.addEventListener("toggle", () => { hiddenFoldOpen = fold.open; });
+    box.replaceChildren(fold);
   }
 
-  // Saved straight away, one move at a time, like the areas list.
+  // Hide (a department that follows a smart group: deleting it would only bring it back) or Show.
+  function hideButton(d, hide) {
+    return h("button", { type: "button", class: "btn", onclick: () => run(async () => {
+      await api("POST", `api/departments/${d.id}/${hide ? "hide" : "show"}`);
+      await load();
+    }, hide ? `${d.name} is hidden. It's under Hidden smart groups.` : `${d.name} is shown again.`) },
+    hide ? "Hide" : "Show");
+  }
+
+  // Saved straight away, one move at a time, like the areas list. Hidden departments keep their
+  // places in the order.
   let departmentSaves = Promise.resolve();
   sortable($("#department-list"), "departments", (from, to) => {
-    moveItem(state.departments, from, to);
+    const shown = shownDepartments();
+    moveItem(shown, from, to);
+    let next = 0;
+    state.departments = state.departments.map((d) => (d.hidden ? d : shown[next++]));
     renderDepartments();
     const order = state.departments.map((d) => d.id);
     departmentSaves = departmentSaves.then(() => run(async () => {
@@ -4633,7 +4686,7 @@
     const settingsLine = $("#ct-sync-status");
     settingsLine.textContent = !state.connecteam?.enabled ? "Turn on Connecteam to add everyone from it."
       : !s.enabled ? "Adding everyone from Connecteam is turned off." +
-        (s.running ? " Linked people still follow their smart group's department, checked about once an hour." : "")
+        (s.running ? " Linked people still follow their smart groups' departments, checked about once an hour." : "")
       : staffSyncText();
     $("#ct-sync").disabled = !s.running;
   }
@@ -5574,12 +5627,13 @@
     loadKeyCards(true);
   }
 
-  // Make key card (Staff tab): their department's key card, on an encoder the admin picks.
+  // Make key card (Staff tab): the key card of the first of their departments that has one, on
+  // an encoder the admin picks.
   async function makeKeyCard(m) {
-    const dept = state.departments.find((d) => d.id === m.department_id);
-    if (!dept) throw new Error(`Choose ${m.name}'s department first: their key card comes from it.`);
-    if (dept.card_access == null) {
-      throw new Error(`${dept.name} has no key card set. Edit the department under Departments to choose its doors.`);
+    const dept = departmentById(m.card_department);
+    if (!departmentsOf(m).length) throw new Error(`Choose ${m.name}'s department first: their key card comes from it.`);
+    if (!dept) {
+      throw new Error(`None of ${m.name}'s departments has a key card set. Edit one under Departments to choose its doors.`);
     }
     const ask = async (current) => {
       const numbers = (current || []).map((c) => c.card_number).filter(Boolean);
@@ -5925,7 +5979,7 @@
           "them. Use a notice card (or remote lock-out) instead."
           : `Make ${card.holder} a new key card that also cancels the lost one. The first ` +
           "time it's tapped on a door, that door refuses the lost card. Tick each door off once it's been tapped. " +
-          "It uses their department's key card (or what the lost card opened)."),
+          "It uses their department's key card (the first of theirs with one), or what the lost card opened."),
         h("div", { class: "lo-actions" }, h("button", { type: "button", class: "btn",
           disabled: !!card.holder_archived, onclick: () =>
           run(() => cardDialogJob(`api/keycards/${card.id}/replace`, `Replacement card for ${card.holder}`)) },
@@ -7458,7 +7512,7 @@
   }
 
   function reportCard(r) {
-    const depts = state.departments || [];
+    const depts = shownDepartments();   // hidden ones give nothing, so they aren't offered
     const picks = (kind, chosen) => depts.length ? h("div", { class: "report-depts" }, depts.map((d) =>
       h("label", { class: "check-row" }, h("input", { type: "checkbox", "data-kind": kind, value: d.id,
         checked: chosen.includes(d.id) }), h("span", null, d.name))))

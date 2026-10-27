@@ -728,6 +728,11 @@ dialog input.code-input {
 .kc-head, .dept-head { margin-top: 32px; }
 .dept-list { background: var(--card); border-radius: var(--radius); padding: 4px 18px; box-shadow: var(--shadow); }
 .dept-list .entity-id.dept-sub { white-space: normal; }
+.dept-list[hidden] { display: none; }
+.dept-fold .dept-list { margin-top: 6px; }
+/* Staff dialog: the Departments picks, headed like the dialog's other fields. */
+#staff-dialog .pick-head { display: grid; gap: 5px; font-weight: 600; }
+#staff-dialog .pick-head small { font-weight: 400; color: var(--muted); }
 .dept-card { display: grid; gap: 10px; margin-top: 8px; }
 .dept-card[hidden] { display: none; }
 .dept-access .wb-tree-box { background: var(--card-2); margin-top: 6px; }

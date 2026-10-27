@@ -180,12 +180,14 @@
   // The department a person is shown under: their Staff Access department (Connecteam smart
   // group) when known, otherwise their Gusto title, as the original did.
   const deptOf = p => p.dept || p.title || "No department";
+  // Every department a person is in: the department filter shows them under each one.
+  const deptsOf = p => p.depts && p.depts.length ? p.depts : [deptOf(p)];
 
   function buildModel(d, R) {
     const A = aliasMap(R.aliases);
     const people = new Map(), byName = new Map();
     const keyOf = raw => { const k = normKey(raw); return A.get(k) || k; };
-    const users = d.users || {}, deptByUser = d.departments || {};
+    const users = d.users || {}, deptByUser = d.departments || {}, deptsByUser = d.department_lists || {};
     // People are keyed by their Connecteam user ID, or by name (the original's way) without one.
     const ref = (raw, uid) => {
       raw = (uid != null && users[uid]) || raw;
@@ -195,7 +197,7 @@
       let p = people.get(k);
       if (!p && uid == null && byName.get(nk)) p = byName.get(nk);
       if (!p) {
-        p = { key: k, uid: uid ?? null, nk, name: niceName(raw), dept: uid != null ? deptByUser[uid] || null : null, punches: [], shifts: [], off: new Map(), bal: null, title: null, jobs: new Set(), blips: new Set() };
+        p = { key: k, uid: uid ?? null, nk, name: niceName(raw), dept: uid != null ? deptByUser[uid] || null : null, depts: uid != null ? deptsByUser[uid] || null : null, punches: [], shifts: [], off: new Map(), bal: null, title: null, jobs: new Set(), blips: new Set() };
         people.set(k, p);
         // two people with the same name can't be told apart by name: neither is matched by it
         if (nk) byName.set(nk, byName.has(nk) && byName.get(nk) !== p ? false : p);
@@ -349,7 +351,7 @@
     const list = [...people.values()];
     const seenFuzzy = new Set();
     const depts = new Set();
-    list.forEach(p => { if (p.dept) depts.add(p.dept); if (p.title) depts.add(p.title); });
+    list.forEach(p => { deptsOf(p).forEach(x => { if (x !== "No department") depts.add(x); }); if (p.title) depts.add(p.title); });
     schedJobs.forEach(j => { const shown = (d.shifts || []).find(s => s.job && s.job.toLowerCase() === j); if (shown) depts.add(shown.job); });
     punchJobs.forEach(j => { if (![...depts].some(x => x.toLowerCase() === j.toLowerCase())) depts.add(j); });
     const fetched = day => day >= d.fetch_start && day <= d.fetch_end;
@@ -512,13 +514,13 @@
     const skip = new Set((R.earlySkip || []).map(s => s.toLowerCase()));
     const rows = [];
     for (const p of model.people) {
-      if (opts.dept && deptOf(p) !== opts.dept) continue;
+      if (opts.dept && !deptsOf(p).includes(opts.dept)) continue;
       const blocks = blocksFor(p, lo, hi);
       const offDays = days.filter(d => p.off.has(d));
       if (!blocks.length && !offDays.length) continue;
       const rec = { p, days: days.map(d => ({ d, blocks: [], off: p.off.get(d) || null })), late: [], early: [], lunch: [], missed: [], noOut: 0, worked: new Set(), offHrs: 0, workedMin: 0, formsExpected: 0, formsMissed: 0, formMisses: [], unchecked: 0 };
       for (const d of offDays) rec.offHrs += p.off.get(d).hrs || 0;
-      const titleSkipped = [p.title, p.dept].some(t => t && skip.has(t.toLowerCase()));
+      const titleSkipped = [p.title, p.dept, ...(p.depts || [])].some(t => t && skip.has(t.toLowerCase()));
       for (const b of blocks) {
         const d = Math.floor(b.anchor / 1440); const day = rec.days[d - P.start];
         const s = b.shift; b.flags = [];
@@ -742,7 +744,7 @@
   function reportView() {
     const d = ctx.data, R = rules();
     const P = { start: d.start_day, end: d.end_day };
-    const depts = [...new Set(model.people.map(deptOf))].sort();
+    const depts = [...new Set(model.people.flatMap(deptsOf))].sort();
     if (ui.dept && !depts.includes(ui.dept)) ui.dept = "";
     const W = computePeriod(model, P, { R, dept: ui.dept, now: d.now, today: d.today }); current = W;
     const T = W.totals;

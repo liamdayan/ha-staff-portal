@@ -53,14 +53,15 @@ class TaskError(ValueError):
 # ---------------------------------------------------------------- who sees and edits
 
 def can_see(task: dict, person: dict, manager: bool = False, live=None) -> bool:
-    """People see tasks for their department, tasks for Everyone, tasks assigned to them, and
-    tasks they made. A task whose department no longer exists (not in live, the department IDs
-    there are) is seen by those two and by anyone who may Manage tasks, to move it on."""
+    """People see tasks for any of their departments (person["department_ids"]: the ones not
+    hidden), tasks for Everyone, tasks assigned to them, and tasks they made. A task whose
+    department no longer exists or is hidden (not in live, the department IDs shown) is seen by
+    those two and by anyone who may Manage tasks, to move it on."""
     if task.get("deleted_at"):
         return False
     dept = task["department_id"]
     return (dept is None
-            or (person.get("department_id") is not None and dept == person["department_id"])
+            or (dept in (person.get("department_ids") or ()) and (live is None or dept in live))
             or task["assigned_id"] == person["id"] or task["created_by_id"] == person["id"]
             or (manager and live is not None and dept not in live))
 

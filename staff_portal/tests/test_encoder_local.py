@@ -485,7 +485,7 @@ def test_dashboard_key_cards_and_test_encoder_through_the_link(tmp_path):
             tthotel_account(p)
             house = p.db.create_department(name="Housekeeping",
                                            card_access=[{"level": "door", "door": 900}])
-            p.db.update_staff(p.cy, department_id=house)
+            p.db.update_staff(p.cy, department_ids=[house])
             async with p:
                 # Test encoder: only through the link.
                 test = f"/api/devices/{p.device}/encoder-test"
@@ -796,7 +796,7 @@ def test_automatic_never_uses_an_encoder_nobody_confirmed(tmp_path, monkeypatch)
             p.db.update_device(p.device, encoder_auto=1)
             house = p.db.create_department(name="Housekeeping",
                                            card_access=[{"level": "door", "door": 900}])
-            p.db.update_staff(p.cy, department_id=house)
+            p.db.update_staff(p.cy, department_ids=[house])
             main.discovery.port = sim._runner.addresses[0][1]
             async with p:
                 await search_done()

@@ -286,8 +286,9 @@ def test_view_matches_names_and_departments(tmp_path):
     assert "Front Office" in out["departments"] and "Maintenance" in out["departments"]
     front = view(tmp_path, run(ctx), dept="Front Office")
     assert [r["name"] for r in front["rows"]] == ["Dev Patel", "Maya Ortiz"]
+    # Dev is in both smart groups: shown under Front Office (the first), and in either filter.
     maint = view(tmp_path, run(ctx), dept="Maintenance")
-    assert [r["name"] for r in maint["rows"]] == ["Jonah Reyes", "Sam Whitaker"]
+    assert sorted(r["name"] for r in maint["rows"]) == ["Dev Patel", "Jonah Reyes", "Sam Whitaker"]
 
 
 @need_node
@@ -578,8 +579,8 @@ def test_the_report_through_the_server_with_the_real_ctdata(tmp_path, monkeypatc
                           "connecteam_client_secret": "secret", "wb_time_zone": "America/Los_Angeles"})
     front = p.db.create_department("Front Office", smart_group_id="501")
     maint = p.db.create_department("Maintenance", smart_group_id="502")
-    p.db.update_staff(p.ana, department_id=front)
-    p.db.update_staff(p.bob, department_id=maint)
+    p.db.update_staff(p.ana, department_ids=[front])
+    p.db.update_staff(p.bob, department_ids=[maint])
     p.db.set_report("attendance", "test", enabled=True, view=[front], manage=[maint],
                     settings={"who_sees": "own", "rules": {"aliases": "Jon Reyes = Jonah Reyes"},
                               "forms": [{"id": "5", "name": "Log", "applies_to": "Jonah Reyes, Front Office"}]})

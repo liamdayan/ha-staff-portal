@@ -57,7 +57,7 @@ def setup(tmp_path, monkeypatch):
     p.front = p.db.create_department("Front")
     p.kitchen = p.db.create_department("Kitchen")
     for person, dept in ((p.ana, p.front), (p.dee, p.front), (p.bob, p.kitchen)):
-        p.db.update_staff(person, department_id=dept)
+        p.db.update_staff(person, department_ids=[dept])
     p.report, p.asked, p.data_dir = report, asked, str(data)
     return p
 
@@ -191,9 +191,9 @@ def test_moving_department_or_being_turned_off_takes_effect_at_once(setup):
             await share(p)
             ana = await p.sign_in(p.ana)
             assert (await p.call("GET", "/api/reports/hours", ana))[0] == 200
-            p.db.update_staff(p.ana, department_id=None)
+            p.db.update_staff(p.ana, department_ids=[])
             assert (await p.call("GET", "/api/reports/hours", ana))[0] == 403
-            p.db.update_staff(p.ana, department_id=p.front, status="disabled")
+            p.db.update_staff(p.ana, department_ids=[p.front], status="disabled")
             assert (await p.call("GET", "/api/reports/hours", ana))[0] == 403
     go(scenario())
 

@@ -14,7 +14,7 @@ import time
 from test_door_activity import POOL, deliver, fresh_state, record, settle, stored
 from test_signin_and_lookup_server import phone
 from test_staffcards_server import FakeConnecteam, by_name, connecteam_on, ct_user, department, sync
-from test_wristbands_server import Portal, run, staff_card
+from test_wristbands_server import dept_of, Portal, run, staff_card
 
 import db as db_module  # noqa: E402
 import doorlog  # noqa: E402
@@ -141,7 +141,7 @@ def test_archived_people_have_no_access_anywhere(tmp_path, monkeypatch):
             blocked = [a for a in p.db.activity(50) if a["action"] == "Blocked: wristbands"]
             assert len(blocked) == 1 and "archived" in blocked[0]["detail"]   # only the real try
             house = department(p, "Housekeeping", card_access=FLOOR_ONE)
-            p.db.update_staff(p.ana, department_id=house)
+            p.db.update_staff(p.ana, department_ids=[house])
             status, reply = await p.admin_call("POST", f"/api/staff/{p.ana}/keycard", {})
             assert status == 400 and "archived" in reply["error"]
             # A lost card of theirs: a notice card, never a replacement.
@@ -326,7 +326,7 @@ def test_archived_while_a_request_was_on_its_way(tmp_path, monkeypatch):
 
             # Make key card on the Staff tab, archived while the card was being planned.
             house = department(p, "Housekeeping", card_access=FLOOR_ONE)
-            p.db.update_staff(p.bob, department_id=house)
+            p.db.update_staff(p.bob, department_ids=[house])
             real_plan = main.dashboard_plan
 
             async def plan_then_archive(*args, **kwargs):
@@ -363,7 +363,7 @@ def test_the_connecteam_sync_never_brings_them_back(tmp_path):
                               "no_code": 0, "waiting": 0, "departments_added": 0,
                               "departments_renamed": 0}
             now = p.db.staff(ivy["id"])
-            assert (now["status"], now["department_id"], now["role_id"]) == (
+            assert (now["status"], dept_of(now), now["role_id"]) == (
                 "archived", house, p.front_desk)
             assert check_pin("6061", now["pin_hash"])
             # Archived or removed in Connecteam: still archived (not just turned off), and never
