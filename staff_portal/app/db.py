@@ -1071,23 +1071,30 @@ class Database:
         row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return dict(row) if row else None
 
-    def tasks_for(self, member: dict, since: float) -> list[dict]:
+    # Who sees a task (tasks.can_see): its department's people, everyone for Everyone, the
+    # person it's given to and the one who made it, and managers when its department is gone.
+    TASK_SEEN = """(department_id IS NULL OR department_id = ? OR assigned_id = ? OR created_by_id = ?
+                    OR (? AND department_id NOT IN (SELECT id FROM departments)))"""
+
+    def tasks_for(self, member: dict, since: float, manager: bool = False) -> list[dict]:
         """The tasks someone may see (tasks.can_see), not in the bin: every open one, and finished
         ones from `since` on. Urgent first, then by due date (none last), then newest."""
         rows = self.conn.execute(
-            """SELECT * FROM tasks WHERE deleted_at IS NULL
-               AND (department_id IS NULL OR department_id = ? OR assigned_id = ? OR created_by_id = ?)
+            f"""SELECT * FROM tasks WHERE deleted_at IS NULL AND {self.TASK_SEEN}
                AND (status IN ('todo', 'doing') OR status_at >= ?)
                ORDER BY priority = 'urgent' DESC, due_date IS NULL, due_date, due_time IS NULL,
                         due_time, created_at DESC, id DESC""",
-            (member.get("department_id"), member["id"], member["id"], since))
+            (member.get("department_id"), member["id"], member["id"], 1 if manager else 0, since))
         return [dict(r) for r in rows]
 
     def tasks_in_bin(self, member: dict, manager: bool) -> list[dict]:
-        """Deleted tasks this person may put back: their own, or every one for a manager."""
+        """Deleted tasks this person may put back (tasks.can_restore): their own, and for a
+        manager the ones they could see if they weren't deleted."""
+        seen = self.TASK_SEEN if manager else "created_by_id = ?"
+        args = (member.get("department_id"), member["id"], member["id"], 1) if manager else (member["id"],)
         rows = self.conn.execute(
-            "SELECT * FROM tasks WHERE deleted_at IS NOT NULL AND (? OR created_by_id = ?) "
-            "ORDER BY deleted_at DESC LIMIT 200", (1 if manager else 0, member["id"]))
+            f"SELECT * FROM tasks WHERE deleted_at IS NOT NULL AND {seen} "
+            "ORDER BY deleted_at DESC LIMIT 200", args)
         return [dict(r) for r in rows]
 
     def task_history(self, task_id: int) -> list[dict]:

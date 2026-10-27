@@ -79,10 +79,14 @@ def test_who_sees_and_edits_a_task():
     assert not tasks.can_edit(task, ana, False)
     assert tasks.can_edit(task, ana, True) and not tasks.can_edit(task, cy, True)
     assert tasks.can_edit({**task, "created_by_id": 1}, ana, False)
-    # The bin: the maker or a manager may put it back.
+    # The bin: the maker, or a manager who could see it if it weren't deleted, may put it back.
     gone = {**task, "deleted_at": 5.0}
-    assert tasks.can_restore(gone, {"id": 2}, False) and tasks.can_restore(gone, cy, True)
+    assert tasks.can_restore(gone, {"id": 2}, False) and tasks.can_restore(gone, ana, True)
+    assert not tasks.can_restore(gone, cy, True) and not tasks.can_restore(gone, nobody, True)
     assert not tasks.can_restore(gone, ana, False) and not tasks.can_restore(task, ana, True)
+    # A department that's gone: only its maker, its person, and managers (to move it on).
+    assert tasks.can_see(task, cy, True, {20}) and not tasks.can_see(task, cy, True, {10, 20})
+    assert not tasks.can_see(task, cy, False, {20}) and tasks.can_edit(task, nobody, True, set())
 
 
 def test_status_cycle_and_names():
@@ -323,6 +327,52 @@ def test_deleted_tasks_go_to_a_30_day_bin(tmp_path):
             assert p.db.task(task["id"]) is None and p.db.task_history(task["id"]) == []
             assert p.db.purge_tasks(now + 366 * 86400, tasks.BIN_DAYS, tasks.KEEP_FINISHED_DAYS) == 1
             assert p.db.task(done["id"]) is None
+    run(scenario())
+
+
+def test_a_managers_bin_holds_only_tasks_they_could_see(tmp_path):
+    """Manage tasks doesn't open other departments' deleted tasks (form answers, say)."""
+    async def scenario():
+        p = Tasks(tmp_path)
+        async with p:
+            cy, bob = await p.sign_in(p.cy), await p.sign_in(p.bob)
+            task = await p.add(cy, title="Incident in 12", notes="What happened: ...")
+            assert task["department_id"] == p.house
+            await p.call("DELETE", f"/api/tasks/{task['id']}", cy)
+            status, body = await p.call("GET", "/api/tasks/bin", bob)
+            assert body["tasks"] == [] and (await p.call("GET", "/api/tasks", bob))[1]["bin"] == 0
+            for method, path in (("GET", f"/api/tasks/{task['id']}"),
+                                 ("POST", f"/api/tasks/{task['id']}/restore")):
+                assert (await p.call(method, path, bob))[0] == 404
+            # In Housekeeping, the manager sees it there and may put it back.
+            p.db.update_staff(p.bob, department_id=p.house)
+            status, body = await p.call("GET", "/api/tasks/bin", bob)
+            assert [t["title"] for t in body["tasks"]] == ["Incident in 12"]
+            assert (await p.call("POST", f"/api/tasks/{task['id']}/restore", bob))[0] == 200
+    run(scenario())
+
+
+def test_a_deleted_departments_tasks_reach_managers_and_forms_keep_theirs(tmp_path, monkeypatch):
+    async def scenario():
+        p = Tasks(tmp_path)
+        async with p:
+            cy, ana, bob = await p.sign_in(p.cy), await p.sign_in(p.ana), await p.sign_in(p.bob)
+            task = await p.add(cy, title="Room 4 drain")
+            p.db.set_task_form("55", {"name": "Room issue", "department_id": p.house, "title_question": "",
+                                      "assign_submitter": 0}, time.time())
+            # A form still sends its tasks there: the department can't be deleted yet.
+            status, body = await p.admin_call("DELETE", f"/api/departments/{p.house}")
+            assert status == 409 and "Room issue" in body["error"] and p.db.department(p.house)
+            p.db.set_task_form("55", {"name": "Room issue", "department_id": None, "title_question": "",
+                                      "assign_submitter": 0}, time.time())
+            status, _ = await p.admin_call("DELETE", f"/api/departments/{p.house}")
+            assert status == 200 and not p.db.department(p.house)
+            # Its tasks: the maker still sees them, a manager sees and moves them, others don't.
+            assert "Room 4 drain" in await p.listed(cy) and "Room 4 drain" not in await p.listed(ana)
+            listed = await p.listed(bob)
+            assert listed["Room 4 drain"]["department"] == "Old department" and listed["Room 4 drain"]["can_edit"]
+            status, body = await p.call("PUT", f"/api/tasks/{task['id']}", bob, {"department_id": p.desk})
+            assert status == 200 and "Room 4 drain" in await p.listed(ana)
     run(scenario())
 
 

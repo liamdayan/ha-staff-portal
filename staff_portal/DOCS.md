@@ -1440,7 +1440,13 @@ away after a day (**Show older**). On a tablet or computer the list becomes a bo
 for each status. The list updates by itself every few seconds.
 
 **The bin.** A deleted task goes to the **Bin** (at the bottom of the list) for 30 days, where
-the person who made it, or a manager, can put it back. Finished tasks are kept for a year.
+the person who made it, or a manager who could see it (its department, Everyone, or given to
+them), can put it back. Finished tasks are kept for a year.
+
+**Deleting a department.** A department can't be deleted while a form still sends its tasks
+there: pick another department for the form first. Tasks already in a deleted department show
+as **Old department**: the people who made them or were given them still see them, and so does
+anyone whose role has **Manage tasks**, so they can move them to another department.
 
 **Tasks from Connecteam forms.** On the dashboard's **Tasks** tab, **Choose a form** lists your
 Connecteam forms. For each one you pick:

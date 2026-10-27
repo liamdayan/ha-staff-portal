@@ -3030,13 +3030,13 @@ def task_view(t: dict, member: dict, manager: bool, departments: dict[int, str])
             "made_by_me": t["created_by_id"] == member["id"],
             "source": t["source"], "form_name": t["form_name"], "source_url": t["source_url"],
             "deleted_at": t["deleted_at"], "deleted_by": t["deleted_by"],
-            "can_edit": tasks.can_edit(t, member, manager)}
+            "can_edit": tasks.can_edit(t, member, manager, departments)}
 
 
-def visible_task(task_id: str, member: dict) -> dict:
+def visible_task(task_id: str, member: dict, manager: bool) -> dict:
     """The task, if this person may see it (else Not found, the same as a task that isn't)."""
     task = db.task(int(task_id))
-    if not task or not tasks.can_see(task, member):
+    if not task or not tasks.can_see(task, member, manager, task_departments()):
         raise json_error(web.HTTPNotFound, "That task isn't there any more.")
     return task
 
@@ -3048,7 +3048,8 @@ async def api_tasks(request: web.Request):
     departments = task_departments()
     since = time.time() - tasks.LIST_FINISHED_DAYS * 86400
     body = {"tasks": [task_view(t, member, manager, departments)
-                      for t in db.tasks_for(member, since) if tasks.can_see(t, member)],
+                      for t in db.tasks_for(member, since, manager)
+                      if tasks.can_see(t, member, manager, departments)],
             "departments": [{"id": k, "name": v} for k, v in departments.items()],
             "me": {"id": member["id"], "name": member["name"],
                    "department_id": member["department_id"]
@@ -3072,7 +3073,9 @@ async def api_task_people(request: web.Request):
 async def api_task(request: web.Request):
     device, member, manager = task_caller(request)
     task = db.task(int(request.match_info["id"]))
-    if not task or not (tasks.can_see(task, member) or tasks.can_restore(task, member, manager)):
+    live = task_departments()
+    if not task or not (tasks.can_see(task, member, manager, live)
+                        or tasks.can_restore(task, member, manager, live)):
         raise json_error(web.HTTPNotFound, "That task isn't there any more.")
     return web.json_response({"task": task_view(task, member, manager, task_departments()),
                               "history": db.task_history(task["id"])})
@@ -3097,8 +3100,8 @@ async def api_add_task(request: web.Request):
 
 async def api_edit_task(request: web.Request):
     device, member, manager = task_caller(request, change=True)
-    task = visible_task(request.match_info["id"], member)
-    if not tasks.can_edit(task, member, manager):
+    task = visible_task(request.match_info["id"], member, manager)
+    if not tasks.can_edit(task, member, manager, task_departments()):
         return bad_request("Only the person who made this task, or a manager, can change it.", 403)
     data = await read_json(request)
     try:
@@ -3116,7 +3119,7 @@ async def api_edit_task(request: web.Request):
 async def api_task_status(request: web.Request):
     """Anyone who sees a task may change its status; it's saved at once, in its history."""
     device, member, manager = task_caller(request, change=True)
-    task = visible_task(request.match_info["id"], member)
+    task = visible_task(request.match_info["id"], member, manager)
     data = await read_json(request)
     try:
         status = tasks.clean_status(data, task)
@@ -3129,8 +3132,8 @@ async def api_task_status(request: web.Request):
 
 async def api_delete_task(request: web.Request):
     device, member, manager = task_caller(request, change=True)
-    task = visible_task(request.match_info["id"], member)
-    if not tasks.can_edit(task, member, manager):
+    task = visible_task(request.match_info["id"], member, manager)
+    if not tasks.can_edit(task, member, manager, task_departments()):
         return bad_request("Only the person who made this task, or a manager, can delete it.", 403)
     db.bin_task(task["id"], member, time.time())
     db.log(actor_name(device, member), "Deleted a task", role=role_label(device, member),
@@ -3149,7 +3152,7 @@ async def api_task_bin(request: web.Request):
 async def api_restore_task(request: web.Request):
     device, member, manager = task_caller(request, change=True)
     task = db.task(int(request.match_info["id"]))
-    if not task or not tasks.can_restore(task, member, manager):
+    if not task or not tasks.can_restore(task, member, manager, task_departments()):
         raise json_error(web.HTTPNotFound, "That task isn't in the bin any more.")
     db.bin_task(task["id"], member, time.time(), restore=True)
     db.log(actor_name(device, member), "Put back a task", role=role_label(device, member),
@@ -3919,6 +3922,11 @@ async def admin_delete_department(request: web.Request):
     dept = db.department(int(request.match_info["id"]))
     if not dept:
         raise web.HTTPNotFound()
+    # Its tasks would go nowhere: pick another department for the form first.
+    forms = [f["name"] for f in db.task_forms() if f["department_id"] == dept["id"]]
+    if forms:
+        return bad_request(f"{', '.join(forms)} still sends its tasks to {dept['name']}. On the "
+                           "Tasks tab, pick another department for it (or Everyone) first.", 409)
     db.delete_department(dept["id"])
     db.log(admin_name(request), f"Deleted department {dept['name']}")
     return web.json_response({"ok": True})

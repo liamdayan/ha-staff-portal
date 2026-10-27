@@ -47,27 +47,30 @@ class TaskError(ValueError):
 
 # ---------------------------------------------------------------- who sees and edits
 
-def can_see(task: dict, person: dict) -> bool:
+def can_see(task: dict, person: dict, manager: bool = False, live=None) -> bool:
     """People see tasks for their department, tasks for Everyone, tasks assigned to them, and
-    tasks they made. A task whose department no longer exists is only seen by the last two."""
+    tasks they made. A task whose department no longer exists (not in live, the department IDs
+    there are) is seen by those two and by anyone who may Manage tasks, to move it on."""
     if task.get("deleted_at"):
         return False
-    return (task["department_id"] is None
-            or (person.get("department_id") is not None
-                and task["department_id"] == person["department_id"])
-            or task["assigned_id"] == person["id"] or task["created_by_id"] == person["id"])
+    dept = task["department_id"]
+    return (dept is None
+            or (person.get("department_id") is not None and dept == person["department_id"])
+            or task["assigned_id"] == person["id"] or task["created_by_id"] == person["id"]
+            or (manager and live is not None and dept not in live))
 
 
-def can_edit(task: dict, person: dict, manager: bool) -> bool:
+def can_edit(task: dict, person: dict, manager: bool, live=None) -> bool:
     """Only the person who made a task, or someone whose role may Manage tasks, edits or deletes
     it (and only one they can see). Anyone who sees it may change its status."""
     return (manager or task["created_by_id"] == person["id"]) and (
-        can_see(task, person) or bool(task.get("deleted_at")))
+        can_see({**task, "deleted_at": None}, person, manager, live))
 
 
-def can_restore(task: dict, person: dict, manager: bool) -> bool:
-    """A task in the bin: whoever could have edited it may put it back (and see it there)."""
-    return bool(task.get("deleted_at")) and (manager or task["created_by_id"] == person["id"])
+def can_restore(task: dict, person: dict, manager: bool, live=None) -> bool:
+    """A task in the bin: the person who made it, or a manager who could see it if it weren't
+    deleted, may put it back (and see it there)."""
+    return bool(task.get("deleted_at")) and can_edit(task, person, manager, live)
 
 
 # ---------------------------------------------------------------- what's typed
