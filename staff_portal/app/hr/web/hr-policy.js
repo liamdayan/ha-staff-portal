@@ -42,6 +42,19 @@
   const num = (n) => String(Math.round(Number(n) * 100) / 100);
   const pts = (n) => `${num(n)} point${Math.abs(Number(n)) === 1 ? "" : "s"}`;
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const card = (...xs) => h("section", { class: "card" }, xs);
+  const note = (text) => h("p", { class: "muted small" }, text);
+  // A page's head: an optional back link, the title, a line under it, then badges or buttons.
+  function head({ back = null, backText = "", title, sub = null, after = [] }) {
+    return h("header", { class: "page-head" }, back ? h("a", { class: "back-link", href: back }, backText) : null,
+      h("h1", { class: "page-title" }, title), sub ? h("p", { class: "page-sub" }, sub) : null, after);
+  }
+  const STATE_BADGE = { draft: ["Draft", "quiet"], scheduled: ["Scheduled", "warn"], in_use: ["In use", "ok"], retired: ["Retired", "quiet"],
+    withdrawn: ["Withdrawn", "quiet"] };
+  const stateBadge = (state, fallback) => {
+    const [word, cls] = STATE_BADGE[state] || [fallback, ""];
+    return h("span", { class: `badge ${cls}`.trim() }, word);
+  };
 
   function day(iso) {
     if (!iso) return "";
@@ -146,17 +159,15 @@
   // ---------------------------------------------------------------- the point system, to read
 
   async function showRead(main, data) {
-    const top = h("section", { class: "card" }, h("h1", null, "Point system"));
-    if (H.me && H.me.hr) add(top, h("p", null, h("a", { href: "#/policy" }, "Discipline setup")));
+    const setup = H.me && H.me.hr ? h("div", { class: "page-actions" }, h("a", { class: "button small-btn", href: "#/policy" }, "Discipline setup")) : null;
     if (!data.set_up) {
-      add(top, h("p", { class: "warn" }, data.message || NOT_SET_UP));
-      return show(top);
+      return show(head({ title: "Point system", after: setup }), h("p", { class: "warn" }, data.message || NOT_SET_UP));
     }
     const p = data.policy;
-    add(top, h("p", { class: "muted" }, `${p.name}, in force since ${day(p.effective)}.`),
-      h("p", null, p.expiry), p.credits ? h("p", null, p.credits) : null,
-      h("p", { class: "muted small" }, p.steps_in_order ? "Steps go in order, though serious offences can go straight to a higher step."
-        : "Points can lead straight to any step."));
+    const top = [head({ title: "Point system", sub: `${p.name}, in force since ${day(p.effective)}.`, after: setup }),
+      card(h("h2", null, "How points work"), h("p", null, p.expiry), p.credits ? h("p", null, p.credits) : null,
+        note(p.steps_in_order ? "Steps go in order, though serious offences can go straight to a higher step."
+          : "Points can lead straight to any step."))];
     const steps = h("section", { class: "card" }, h("h2", null, "Steps"));
     for (const t of p.tracks) {
       if (p.tracks.length > 1) add(steps, h("h3", null, t.name));
@@ -169,18 +180,19 @@
     const byCategory = {};
     for (const o of p.offences) (byCategory[o.category || "Other"] ||= []).push(o);
     const offences = h("section", { class: "card" }, h("h2", null, "Offences and their points"),
-      Object.entries(byCategory).map(([cat, list]) => [h("h3", null, cat), h("ul", { class: "offence-list" }, list.map((o) => h("li", null,
-        h("span", { class: "pts" }, pts(o.points)), h("div", { class: "title" }, o.name),
-        o.range[0] !== o.range[1] ? h("div", { class: "why" }, `A manager may choose ${num(o.range[0])} to ${num(o.range[1])}.`) : null,
-        o.repeat ? h("div", { class: "why" }, `Repeats: ${o.repeat}.`) : null,
-        o.min_step ? h("div", { class: "why" }, `Goes to ${o.min_step} at least.`) : null,
-        o.wording ? h("div", { class: "why" }, o.wording) : null)))]));
+      Object.entries(byCategory).map(([cat, list]) => [h("h3", null, cat), h("ul", { class: "list" }, list.map((o) => h("li", null,
+        h("div", { class: "item split pol-offence" }, h("div", { class: "item-text" }, h("div", { class: "title" }, o.name),
+          o.range[0] !== o.range[1] ? h("div", { class: "sub" }, `A manager may choose ${num(o.range[0])} to ${num(o.range[1])}.`) : null,
+          o.repeat ? h("div", { class: "sub" }, `Repeats: ${o.repeat}.`) : null,
+          o.min_step ? h("div", { class: "sub" }, `Goes to ${o.min_step} at least.`) : null,
+          o.wording ? h("div", { class: "sub plain-text" }, o.wording) : null),
+        h("span", { class: "badge" }, pts(o.points))))))]));
     const probation = p.probation.length ? h("section", { class: "card" }, h("h2", null, "Probation"),
-      p.probation.map((x) => [h("h3", null, x.name), h("p", { class: "muted small" }, `${x.kind}. ${plural(x.days, "day")}` +
+      p.probation.map((x) => [h("h3", null, x.name), note(`${x.kind}. ${plural(x.days, "day")}` +
         (x.multiplier !== 1 ? `; points × ${num(x.multiplier)}` : "") + (x.serious ? `; a serious offence goes to ${x.serious}` : "") + "."),
       x.ladders.map((l) => h("ul", { class: "legend-list" }, l.ladder.map((r) => h("li", null, `${pts(r.points)} or more: ${r.step}`))))])) : null;
     const leave = h("section", { class: "card" }, h("h2", null, "Protected leave"),
-      h("p", { class: "muted small" }, "An absence that was protected leave scores 0 points and never leads to a step:"),
+      note("An absence that was protected leave scores 0 points and never leads to a step:"),
       h("ul", { class: "legend-list" }, p.protected_leave.map((n) => h("li", null, n))));
     show(top, steps, offences, probation, leave);
   }
@@ -191,20 +203,24 @@
     const again = () => showSetup(main);
     const data = await api("GET", "/api/policy");
     const now = data.current;
-    const status = h("section", { class: "card" }, h("h1", null, "Discipline setup"),
-      now ? h("p", null, `In use: ${now.name}, since ${day(now.effective)}.`) : h("p", { class: "warn" },
-        `${NOT_SET_UP} Load your written point system (import the spreadsheet, or edit a draft), test it in the simulator, then publish it with a date. Until then managers can't record incidents.`),
+    const status = [head({ title: "Discipline setup", sub: now ? `In use: ${now.name}, since ${day(now.effective)}.` : null,
+      after: h("div", { class: "page-actions" },
+        now ? h("a", { class: "button small-btn", href: "#/policy/rescore" }, "Re-score people") : null,
+        h("a", { class: "button small-btn", href: "#/policy/read" }, "Read it as staff do")) }),
+    now ? null : h("p", { class: "warn" },
+      `${NOT_SET_UP} Load your written point system (import the spreadsheet, or edit a draft), test it in the simulator, then publish it with a date. Until then managers can't record incidents.`),
+    card(h("h2", null, "New version"), note("Start from your spreadsheet, from the sample, or from nothing. It's a draft until you publish it."),
       h("div", { class: "actions" },
-        h("a", { class: "button", href: "#/policy/import" }, "Import a spreadsheet"),
+        h("a", { class: "button primary", href: "#/policy/import" }, "Import a spreadsheet"),
         h("button", { type: "button", onclick: () => newDraft("sample") }, "New draft from the sample"),
-        h("button", { type: "button", onclick: () => newDraft("blank") }, "New blank draft"),
-        now ? h("a", { class: "button", href: "#/policy/rescore" }, "Re-score people") : null,
-        h("a", { class: "button", href: "#/policy/read" }, "Read it as staff do")));
+        h("button", { type: "button", onclick: () => newDraft("blank") }, "New blank draft")))];
     const list = h("section", { class: "card versions" }, h("h2", null, "Versions"),
-      h("p", { class: "muted small" }, "Drafts aren't used until published. A published version is never changed: make a new draft from it. Every incident keeps the version it was scored under."),
-      h("ul", { class: "list" }, data.versions.map((v) => h("li", null, h("a", { class: "item", href: `#/policy/${v.id}` },
+      note("Drafts aren't used until published. A published version is never changed: make a new draft from it. Every incident keeps the version it was scored under."),
+      data.versions.length ? h("ul", { class: "list" }, data.versions.map((v) => h("li", null, h("a", { class: "item", href: `#/policy/${v.id}` },
         h("div", { class: "title" }, v.name),
-        h("div", { class: "sub" }, [v.label, v.state === "draft" ? `changed ${H.when(v.updated_at)}` : null].filter(Boolean).join(" · ")))))));
+        h("div", { class: "sub" }, [v.label, v.state === "draft" ? `changed ${H.when(v.updated_at)}` : null].filter(Boolean).join(" · ")),
+        h("div", { class: "chips" }, stateBadge(v.state, v.label))))))
+        : H.emptyState("No versions yet.", "Import a spreadsheet or start a draft."));
     show(status, list);
 
     async function newDraft(from) {
@@ -224,7 +240,7 @@
     const ed = { editable, dirty: editable && !!kept, fresh: new Set(), problems: data.problems };
     const stepOptions = () => [...b.steps].sort((x, y) => x.rank - y.rank).map((s) => [s.key, s.name || s.key]);
     const stepName = (k) => (b.steps.find((s) => s.key === k) || {}).name || k;
-    const dirtyNote = h("span", { class: "pol-dirty", hidden: !ed.dirty }, "Unsaved changes");
+    const dirtyNote = h("span", { class: "badge warn", hidden: !ed.dirty }, "Unsaved changes");
     const touch = () => {
       if (!ed.editable) return;
       ed.dirty = true;
@@ -294,7 +310,7 @@
     // A section that draws itself again when its rows change.
     function section(title, note, draw) {
       const box = h("section", { class: "card" });
-      const redraw = () => fill(box, h("h2", null, title), note ? h("p", { class: "pol-note" }, note) : null, draw(redraw));
+      const redraw = () => fill(box, h("h2", null, title), note ? h("p", { class: "muted small" }, note) : null, draw(redraw));
       redraw();
       box.redraw = redraw;
       return box;
@@ -343,8 +359,8 @@
     // ------------ header: name, state, problems and actions
     const problemsBox = h("div");
     const drawProblems = () => fill(problemsBox, ed.problems.length
-      ? [h("p", { class: "warn" }, `${plural(ed.problems.length, "problem")} to fix before it can be published:`),
-        h("ul", { class: "pol-problems" }, ed.problems.slice(0, 30).map((p) => h("li", null, p)))]
+      ? h("div", { class: "warn" }, h("strong", null, `${plural(ed.problems.length, "problem")} to fix before it can be published:`),
+        h("ul", { class: "pol-problems" }, ed.problems.slice(0, 30).map((p) => h("li", null, p))))
       : h("p", { class: "pol-ok" }, editable ? "No problems: test it in the simulator, then publish it." : "No problems."));
     drawProblems();
 
@@ -365,19 +381,20 @@
       const input = h("input", { type: "date", value: data.today, required: true, min: data.first ? null : data.today });
       const choice = await openDialog("Publish the point system", [
         h("p", null, "From the day you choose, new incidents are scored with this version, and managers can record incidents. Earlier incidents keep the points they were given unless you re-score them."),
-        data.first ? h("p", { class: "muted small" }, "This is the first version, so it can start earlier, to load past incidents.") : null,
+        data.first ? note("This is the first version, so it can start earlier, to load past incidents.") : null,
         h("label", null, "It starts on", input),
-        h("p", { class: "muted small" }, "Publishing asks for your code (or PIN) again.")],
+        note("Publishing asks for your code (or PIN) again.")],
       [{ label: "Cancel", value: "cancel" }, { label: "Publish", value: "ok", class: "primary" }]);
       if (choice !== "ok") return;
       const r = await run(() => api("POST", `/api/policy/${id}/publish`, { effective: input.value }), "Published.");
       if (r) await showEditor(main, id);
     }
 
-    const name = editable ? field("Name", textIn(b, "name", "Name of this version")) : h("p", { class: "pol-name" }, b.name);
-    const header = h("section", { class: "card" },
-      h("div", { class: "pol-head" }, h("h1", null, editable ? "Edit the point system" : "Point system"),
-        h("span", { class: "badge" }, data.version.label)),
+    const name = editable ? field("Name", textIn(b, "name", "Name of this version")) : null;
+    const header = [head({ back: "#/policy", backText: "All versions", title: editable ? "Edit the point system" : "Point system",
+      sub: editable ? null : b.name, after: h("div", { class: "chips" }, stateBadge(data.version.state, data.version.label),
+        data.version.state === "draft" ? null : h("span", { class: "badge quiet" }, data.version.label), dirtyNote) }),
+    h("section", { class: "card" }, h("h2", null, editable ? "This draft" : "This version"),
       name, problemsBox,
       h("div", { class: "actions" },
         editable ? h("button", { type: "button", class: "primary", onclick: () => save() }, "Save draft") : null,
@@ -402,9 +419,7 @@
             delete drafts[id];
             location.hash = "#/policy";
           }
-        } }, "Delete draft") : null,
-        dirtyNote),
-      h("p", null, h("a", { href: "#/policy" }, "All versions")));
+        } }, "Delete draft") : null))];
 
     // ------------ basics: point size, order of steps, point totals
     const basics = section("Basics", null, (redraw) => [
@@ -417,7 +432,7 @@
           return h("label", { class: "check" }, el, label);
         })),
       h("h3", null, "Point totals"),
-      h("p", { class: "pol-note" }, "Most places keep one total, Discipline. Some keep Attendance and Conduct apart: each total has its own ladder."),
+      note("Most places keep one total, Discipline. Some keep Attendance and Conduct apart: each total has its own ladder."),
       b.tracks.map((t) => h("div", { class: "pol-row" }, field("Name", nameIn(t, b.tracks, "track", "Point total name"), null, "wide"),
         h("span", { class: "pol-key" }, t.key),
         b.tracks.length > 1 ? removeBtn("Remove", () => { b.tracks.splice(b.tracks.indexOf(t), 1); delete b.ladders[t.key]; redraw(); redrawLadders(); }) : null)),
@@ -479,7 +494,7 @@
       const draw = () => {
         swatches.clear();
         fill(box, h("h3", null, label), barHolder,
-          !rungs.length && emptyNote ? h("p", { class: "pol-note" }, emptyNote) : null,
+          !rungs.length && emptyNote ? note(emptyNote) : null,
           rungs.length ? h("div", { class: "rung head", "aria-hidden": "true" }, h("span"), h("span", null, "Points"), h("span", null, "lead to")) : null,
           rungs.map((r) => {
             const sw = h("span", { class: "sw", "aria-hidden": "true" });
@@ -502,7 +517,7 @@
     }
     const laddersBox = h("div");
     const ladders = h("section", { class: "card" }, h("h2", null, "Ladders"),
-      h("p", { class: "pol-note" }, "The point total that leads to each step. Probation policies can have lower ones, below."), laddersBox);
+      note("The point total that leads to each step. Probation policies can have lower ones, below."), laddersBox);
     function redrawLadders() {
       fill(laddersBox, ...b.tracks.map((t) => ladderEditor(b.ladders, t.key, b.tracks.length > 1 ? t.name || t.key : "Thresholds")));
     }
@@ -514,7 +529,7 @@
         field("While on", selectIn(e, "while", "While on", [["any", "Any step"], ...stepOptions()], { none: "Choose" }), null, "wide"),
         field("a new incident goes to", selectIn(e, "to", "Goes to", [["next", "The next step"], ...stepOptions()], { none: "Choose" }), null, "wide"),
         removeBtn("Remove", () => { b.escalation.splice(b.escalation.indexOf(e), 1); redraw(); }))),
-      b.escalation.length ? null : h("p", { class: "muted" }, "None: a new incident is scored by its points alone."),
+      b.escalation.length ? null : h("p", { class: "muted small" }, "None: a new incident is scored by its points alone."),
       addBtn("Add a rule", () => { b.escalation.push({ while: null, to: null }); redraw(); })]);
 
     // ------------ offences: an editable table
@@ -559,11 +574,11 @@
         h("label", { class: "o-hi" }, tiny("Manager max"), numIn(o, "max", "Managers may choose up to")),
         h("div", { class: "o-more" }, more));
       function drawDetail() {
-        const repeatBox = h("div", { class: "pol-sub" });
+        const repeatBox = h("div", { class: "sub-card pol-sub" });
         const drawRepeat = () => {
           const r = o.repeat;
-          fill(repeatBox, h("h4", null, "Repeats"),
-            !r ? h("p", { class: "pol-note" }, "No repeat rule: every one scores the same.") : [
+          fill(repeatBox, h("h3", null, "Repeats"),
+            !r ? note("No repeat rule: every one scores the same.") : [
               field("Counts as a repeat within", spanIn(r, "within", "Repeat period", { never: false })),
               (r.tiers || []).map((t) => h("div", { class: "pol-row" },
                 field("The", numIn(t, "nth", "Which repeat (2 for the second)", { step: "1", min: "2" }), "occurrence (2 is the second)", "narrow"),
@@ -624,7 +639,7 @@
           redraw();
         } }),
         reset ? field("Clean stretch", spanIn(b.expiry, "clean_reset", "Clean stretch", { never: false })) : null,
-        h("p", { class: "pol-note" }, "HR can change when any one entry stops counting."),
+        note("HR can change when any one entry stops counting."),
         h("h3", null, "Earning points back"),
         checkIn(b.credits, "on", "Points can be earned back", { onChange: redraw }),
         b.credits.on ? [h("div", { class: "pol-row" },
@@ -658,7 +673,7 @@
       })]);
 
     function probationCard(p, redrawAll) {
-      const box = h("div", { class: "pol-sub" });
+      const box = h("div", { class: "sub-card pol-sub" });
       const deptName = (g) => (departments.find((d) => d.group === g) || {}).name || `Group ${g}`;
       const draw = () => {
         const overrides = Object.entries(p.overrides || {});
@@ -666,7 +681,7 @@
           h("div", { class: "pol-row" }, field("Name", nameIn(p, b.probation, "probation", "Probation name"), "Such as Introductory period", "wide"),
             field("Kind", selectIn(p, "kind", "Kind", [["introductory", "Introductory (new hires)"], ["disciplinary", "Disciplinary (placed by HR)"]])),
             field("Days", numIn(p, "days", "Days", { step: "1", min: "1" }), "Calendar days", "narrow")),
-          h("h4", null, "Departments"),
+          h("h3", null, "Departments"),
           departments.length ? h("div", { class: "pol-checks" }, departments.map((d) => {
             const el = h("input", { type: "checkbox", checked: (p.departments || []).includes(d.group), disabled: dis });
             el.addEventListener("change", () => {
@@ -677,7 +692,7 @@
             });
             return h("label", { class: "check" }, el, d.name);
           })) : null,
-          h("p", { class: "pol-note" }, "None ticked: every department."),
+          note("None ticked: every department."),
           Object.entries(p.department_days || {}).map(([g, days]) => {
             const holder = { days };
             return h("div", { class: "pol-row" }, h("span", null, deptName(g)),
@@ -699,7 +714,7 @@
           h("div", { class: "pol-row" },
             field("Points ×", numIn(p, "multiplier", "Points multiplier", { step: "0.05", min: "0.25", max: "5" }), "1 for none", "narrow"),
             field("A serious offence goes to", selectIn(p, "serious_floor", "Serious offences go to", stepOptions(), { none: "Nothing extra" }))),
-          h("h4", null, "Points of its own for some offences"),
+          h("h3", null, "Points of its own for some offences"),
           overrides.map(([k, v]) => h("div", { class: "pol-row" },
             h("span", { class: "wide" }, (b.offences.find((o) => o.key === k) || {}).name || k),
             field("Points", numIn(v, "points", "Points"), null, "narrow"),
@@ -719,8 +734,8 @@
             });
             return pick;
           })() : null,
-          h("p", { class: "pol-note" }, "Offences listed here use these points instead of the multiplier. Without a min and max, managers can't change them."),
-          h("h4", null, "Extensions and the end"),
+          note("Offences listed here use these points instead of the multiplier. Without a min and max, managers can't change them."),
+          h("h3", null, "Extensions and the end"),
           h("div", { class: "pol-row" },
             field("Extensions", numIn(p.extensions, "count", "How many extensions", { step: "1" }), null, "narrow"),
             field("of days", numIn(p.extensions, "days", "Days per extension", { step: "1", min: "1" }), null, "narrow"),
@@ -823,7 +838,7 @@
     }
     function drawList() {
       fill(list, state.events.length ? state.events.map(eventRow)
-        : h("p", { class: "muted" }, "No made-up incidents yet."));
+        : H.emptyState("No made-up incidents yet.", "Add an incident or HR points, then run it."));
     }
     drawList();
     const lastDate = () => {
@@ -847,7 +862,7 @@
     function drawResults(r) {
       if (r.problems && r.problems.length) {
         return fill(results, h("section", { class: "card" }, h("h2", null, "It can't run yet"),
-          h("ul", { class: "pol-problems" }, r.problems.map((p) => h("li", null, p)))));
+          h("div", { class: "warn" }, h("ul", { class: "pol-problems" }, r.problems.map((p) => h("li", null, p))))));
       }
       const chartBox = h("div", { class: "sim-chart" });
       const tracks = b.tracks.map((t) => t.key);
@@ -857,7 +872,7 @@
       fill(results, h("section", { class: "card" },
         h("h2", null, tracks.length > 1 ? "Points over time" : `${(b.tracks[0] || {}).name || "Points"} points over time`),
         legend, chartBox,
-        h("p", { class: "muted small" }, `On ${day(r.until)}: ${totals}. Each step is treated as issued the day its incident counts, and covers the points counting then.`)),
+        note(`On ${day(r.until)}: ${totals}. Each step is treated as issued the day its incident counts, and covers the points counting then.`)),
       h("section", { class: "card" }, h("h2", null, "Timeline"), timeline(r)));
       const draw = () => fill(chartBox, simChart(r, chartBox.clientWidth || 340));
       draw();
@@ -890,7 +905,7 @@
         if (row.on_probation) why.push(h("div", null, `During ${(b.probation.find((p) => p.key === row.on_probation) || {}).name || "probation"}.`));
         if (row.kind === "incident" && row.step) {
           const s = b.steps.find((x) => x.key === row.step) || {};
-          why.push(h("div", null, h("span", { class: `chip${s.hr_only || s.termination ? " hr" : ""}` }, `Step due: ${row.step_name}`), row.reason));
+          why.push(h("div", null, h("span", { class: `badge ${s.hr_only || s.termination ? "bad" : "warn"}` }, `Step due: ${row.step_name}`), row.reason));
         } else if (row.kind === "incident" && row.reason && !row.errors.length && !row.protected) {
           why.push(h("div", null, row.reason));
         }
@@ -1014,15 +1029,15 @@
       return root;
     }
 
-    show(h("section", { class: "card" }, h("h1", null, "Simulator"),
-      h("p", { class: "muted" }, `${data.body.name}${drafts[id] ? " (with your unsaved changes)" : ""}. Made-up incidents for a test person: nothing here is saved or reaches anyone's file.`),
-      h("div", { class: "row" }, h("label", null, "Their start date", start), h("label", null, "Department", dept)),
-      h("h2", null, "Made-up incidents"), list,
+    show(head({ back: `#/policy/${id}`, backText: "Back to the point system", title: "Simulator",
+      sub: `${data.body.name}${drafts[id] ? " (with your unsaved changes)" : ""}. Made-up incidents for a test person: nothing here is saved or reaches anyone's file.` }),
+    card(h("h2", null, "The test person"),
+      h("div", { class: "row" }, h("label", null, "Their start date", start), h("label", null, "Department", dept))),
+    h("section", { class: "card" }, h("h2", null, "Made-up incidents"), list,
       h("div", { class: "actions" },
         h("button", { type: "button", onclick: () => { state.events.push({ kind: "incident", date: lastDate(), offence: "" }); drawList(); } }, "Add an incident"),
         h("button", { type: "button", onclick: () => { state.events.push({ kind: "adjust", date: lastDate(), points: 1 }); drawList(); } }, "Add HR points"),
-        h("button", { type: "button", class: "primary", onclick: simulate }, "Run")),
-      h("p", null, h("a", { href: `#/policy/${id}` }, "Back to the point system"))), results);
+        h("button", { type: "button", class: "primary", onclick: simulate }, "Run"))), results);
   }
 
   // ---------------------------------------------------------------- import
@@ -1042,8 +1057,10 @@
     });
     const name = h("input", { type: "text", maxlength: "80", placeholder: "Such as Hot Lake point system 2026" });
     const out = h("div");
-    show(h("section", { class: "card" }, h("h1", null, "Import a point system"),
-      h("p", null, "The spreadsheet has sections (Settings, Point totals, Steps, Ladder, Escalation, Offences, Repeats, Probation and Protected leave), each a title row, then a header row, then one row per item. It's loaded as a draft; nothing changes until you publish it."),
+    show(head({ back: "#/policy", backText: "All versions", title: "Import a point system",
+      sub: "It's loaded as a draft; nothing changes until you publish it." }),
+    h("section", { class: "card" }, h("h2", null, "The spreadsheet"),
+      note("The spreadsheet has sections (Settings, Point totals, Steps, Ladder, Escalation, Offences, Repeats, Probation and Protected leave), each a title row, then a header row, then one row per item."),
       sample ? h("p", null, h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
         const r = await api("GET", `/api/policy/${sample.id}/export`);
         download(r.filename, r.csv);
@@ -1054,18 +1071,17 @@
         if (!text.value.trim()) throw new Error("Choose the file, or paste the spreadsheet.");
         const r = await api("POST", "/api/policy/import", { csv: text.value, name: name.value });
         fill(out, h("section", { class: "card" }, h("h2", null, "Loaded as a draft"),
-          r.questions.length ? [h("p", null, "Please check these: we had to guess."), h("ul", { class: "qs" }, r.questions.map((q) => h("li", null, q)))]
+          r.questions.length ? h("div", { class: "warn" }, h("strong", null, "Please check these: we had to guess."), h("ul", { class: "pol-problems" }, r.questions.map((q) => h("li", null, q))))
             : h("p", { class: "pol-ok" }, "Nothing was unclear."),
           h("div", { class: "actions" }, h("a", { class: "button primary", href: `#/policy/${r.id}` }, "Open the draft"))));
-      }, "Imported.") }, "Import as a draft")),
-      h("p", null, h("a", { href: "#/policy" }, "All versions"))), out);
+      }, "Imported.") }, "Import as a draft"))), out);
   }
 
   // ---------------------------------------------------------------- re-scoring
 
   async function showRescore() {
     const data = await api("GET", "/api/policy/rescore");
-    if (!data.version) return show(h("section", { class: "card" }, h("h1", null, "Re-score people"), h("p", { class: "warn" }, data.message)));
+    if (!data.version) return show(head({ back: "#/policy", backText: "All versions", title: "Re-score people" }), h("p", { class: "warn" }, data.message));
     const chosen = new Set();
     const out = h("div");
     const boxes = data.people.map((p) => {
@@ -1073,7 +1089,7 @@
       el.addEventListener("change", () => { if (el.checked) chosen.add(p.id); else chosen.delete(p.id); });
       return h("label", { class: "check" }, el, h("span", null, p.name, h("small", null, `${plural(p.incidents, "incident")} under an earlier version`)));
     });
-    const all = h("button", { type: "button", class: "linkish", onclick: () => {
+    const all = h("button", { type: "button", class: "small-btn", onclick: () => {
       for (const b of boxes) { const el = b.querySelector("input"); el.checked = true; }
       data.people.forEach((p) => chosen.add(p.id));
     } }, "Choose everyone");
@@ -1085,7 +1101,7 @@
       fill(out, h("section", { class: "card" }, h("h2", null, "Preview"),
         h("p", null, r.changed ? `${plural(r.changed, "incident")} would change.` : "Nothing would change."),
         r.people.map((p) => [h("h3", null, p.name),
-          h("p", { class: "muted small" }, Object.keys(p.before).map((t) => `${t}: ${num(p.before[t])} → ${num(p.after[t] ?? 0)} points`).join(", ")),
+          note(Object.keys(p.before).map((t) => `${t}: ${num(p.before[t])} → ${num(p.after[t] ?? 0)} points`).join(", ")),
           h("ul", { class: "list" }, p.changes.map((c) => h("li", null, h("div", { class: "item" },
             h("div", { class: "title" }, `${c.name} on ${day(c.happened)}: ${num(c.old)} → ${num(c.new)}`),
             c.old_ends !== c.new_ends ? h("div", { class: "sub" }, `Stops counting ${c.old_ends ? day(c.old_ends) : "when a write-up ends"} → ${c.new_ends ? day(c.new_ends) : "when a write-up ends"}`) : null,
@@ -1097,11 +1113,11 @@
             if (done) await showRescore();
           } }, "Re-score them"))] : null));
     }
-    show(h("section", { class: "card" }, h("h1", null, "Re-score people"),
-      h("p", null, `Score these people's counting incidents again under ${data.version.name}, the version in use. Each change is added as an adjustment, so the original stays visible. You see a preview first.`),
-      data.people.length ? [all, h("div", null, boxes), h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: preview }, "Preview"))]
-        : h("p", { class: "muted" }, "Everyone's counting incidents are already scored under this version (your own file is for another HR admin)."),
-      h("p", null, h("a", { href: "#/policy" }, "All versions"))), out);
+    show(head({ back: "#/policy", backText: "All versions", title: "Re-score people",
+      sub: `Score these people's counting incidents again under ${data.version.name}, the version in use. Each change is added as an adjustment, so the original stays visible. You see a preview first.` }),
+    h("section", { class: "card" }, data.people.length ? [h("div", { class: "card-head" }, h("h2", null, "Who"), all), h("div", null, boxes),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: preview }, "Preview"))]
+      : [h("h2", null, "Who"), H.emptyState("No one to re-score.", "Everyone's counting incidents are already scored under this version (your own file is for another HR admin).")]), out);
   }
 
   // ---------------------------------------------------------------- registering
@@ -1123,8 +1139,8 @@
     add(box, h("h2", null, "Discipline"),
       data.set_up ? h("p", null, `Point system in use: ${data.current.name}, since ${day(data.current.effective)}.`)
         : h("p", { class: "warn" }, data.message || NOT_SET_UP),
-      data.scheduled.map((v) => h("p", { class: "muted small" }, `${v.name}: ${v.label}.`)),
-      data.drafts ? h("p", { class: "muted small" }, `${plural(data.drafts, "draft")} not in use.`) : null,
+      data.scheduled.map((v) => note(`${v.name}: ${v.label}.`)),
+      data.drafts ? note(`${plural(data.drafts, "draft")} not in use.`) : null,
       h("div", { class: "actions" }, h("a", { class: "button", href: "#/policy" }, "Discipline setup")));
   });
 })();

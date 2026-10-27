@@ -1,37 +1,72 @@
-/* HR portal: discipline and probation (hr-discipline.js), on hr.css's colours: phone first,
-   light and dark, and a clean printout of a write-up for signing on paper. */
-.plain { white-space: pre-wrap; }
-.text-block { margin: 6px 0 10px; }
-.text-block h3 { margin: 12px 0 4px; }
-.quote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
-.preview { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 4px 0 14px;
-  background: var(--accent-soft); }
-.preview strong { display: block; }
-.preview ul { margin: 6px 0 0; padding-left: 20px; }
-.badge.warn { background: var(--warn-bg); color: var(--warn); }
-.badge.ok { background: rgba(46, 125, 50, 0.12); color: var(--ok); }
-.badge.dim { background: var(--line); color: var(--muted); }
-fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 0 0 14px; min-width: 0; }
+/* HR portal: discipline and probation (hr-discipline.js). Everything else comes from hr.css's
+   shared classes; this is only what's this part's own: quoted text, the incident form's live
+   preview and write-up box, folded history, the statement to sign, and the paper printout. */
+
+/* Page-wide defaults this file always gave fieldsets and folds, which other parts (reviews, the
+   Google box in HR settings) still lean on. They belong in hr.css; kept here until they move. */
+fieldset { min-width: 0; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 legend { font-weight: 600; padding: 0 6px; }
-textarea { resize: vertical; }
-details summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
-.probation + .probation { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+details > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+
+/* A labelled block of text on a write-up or incident. */
+.text-block { margin: 4px 0 14px; }
+.text-block h3 { margin: 14px 0 4px; }
+.text-block > p { margin: 0; }
+.quote { margin: 0; padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--card-2); color: var(--muted); }
+
+/* The incident form: the live preview and the write-up that goes with it. */
+.preview { margin: 4px 0 16px; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--on-bg); }
+.preview strong { display: block; }
+.preview p, .preview ul { margin: 6px 0 0; }
+.preview ul { padding-left: 20px; }
+.preview > :first-child { margin-top: 0; }
+fieldset.dc-writeup { min-width: 0; margin: 0 0 16px; padding: 14px; border: 0; border-radius: var(--radius-sm); background: var(--card-2); }
+fieldset.dc-writeup legend { float: left; width: 100%; padding: 0; margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+fieldset.dc-writeup legend + * { clear: both; }
+fieldset.dc-writeup input, fieldset.dc-writeup select, fieldset.dc-writeup textarea { background: var(--card); }
+fieldset.dc-writeup .quote { background: var(--card); }
+
+/* Folded parts of a section (History, Points history): a row with a chevron. */
+.dc-fold { margin-top: 12px; border-top: 1px solid var(--line); }
+.dc-fold > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; font-weight: 650; cursor: pointer; list-style: none; }
+.dc-fold > summary::-webkit-details-marker { display: none; }
+.dc-fold > summary::after { content: ""; width: 7px; height: 7px; margin: -3px 4px 0 auto; border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s var(--ease); }
+.dc-fold[open] > summary::after { transform: rotate(-135deg); margin-top: 3px; }
+
+/* Buttons under one row of a list (a points line, an HR task). */
+.list > li > .dc-line-actions { margin: -4px 0 12px; gap: 8px; }
+.dc-actions .actions { margin-top: 0; align-items: center; }
+.dc-actions .actions > p { flex: 1 1 100%; margin: 0; }
+
+.probation + .probation { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
 .probation h3 { margin-top: 0; }
-.statement { border-left: 4px solid var(--accent); padding: 10px 12px; background: var(--accent-soft);
-  border-radius: 8px; }
-.reading { font-size: 1.05rem; }
-.filter { margin-bottom: 8px; }
-.list .item .actions { margin-top: 8px; }
-.file-button { position: relative; overflow: hidden; margin: 0; }
+.probation > .chips { margin-bottom: 8px; }
+
+/* What the employee signs. */
+.statement { padding: 12px 14px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--on-bg); font-weight: 500; }
+.reading { font-size: 17px; }
+.dc-sign-head { margin-top: 20px; }
+.file-button { position: relative; overflow: hidden; }
 .file-button input { position: absolute; inset: 0; opacity: 0; min-height: 0; margin: 0; cursor: pointer; }
+
+/* On paper: lines to sign on, and room for a comment. */
 .print-only { display: none; }
 .signature-line { margin-top: 44px; border-top: 1px solid currentColor; padding-top: 4px; }
 .comment-space { height: 120px; border: 1px solid currentColor; border-radius: 6px; }
 
+@media (min-width: 1024px) {
+  .reading { font-size: 15px; }
+  .preview, fieldset.dc-writeup { border-radius: 10px; }
+}
+
 @media print {
-  .bar, .nav, .toast, dialog, .no-print, .actions { display: none !important; }
-  body, .card { background: #fff !important; color: #000 !important; border: none !important; }
-  main { max-width: none; padding: 0; }
+  .no-print, .actions { display: none !important; }
+  body, .card { background: #fff !important; color: #000 !important; }
+  .card { border: none !important; padding: 0; }
+  .page-head { border: 0; padding: 0; }
   .print-only { display: block; }
-  .statement, .preview { background: none; }
+  .statement, .preview, .quote { background: none; }
 }

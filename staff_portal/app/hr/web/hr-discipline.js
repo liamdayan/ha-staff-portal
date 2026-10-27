@@ -44,7 +44,12 @@
   // Append only real nodes: the DOM's own append would write "null" for a missing one.
   const put = (el, ...nodes) => el.append(...nodes.flat().filter((n) => n != null && n !== false));
   const badge = (text, cls = "") => h("span", { class: `badge ${cls}`.trim() }, text);
-  const STATE_CLASS = { draft: "dim", with_hr: "warn", approved: "ok", delivered: "warn", active: "ok", expired: "dim", voided: "bad", returned: "warn" };
+  const STATE_CLASS = { draft: "quiet", with_hr: "warn", approved: "ok", delivered: "warn", active: "ok", expired: "quiet", voided: "bad", returned: "warn" };
+  // A row of badges (nothing when there are none).
+  const chips = (...xs) => {
+    const found = xs.flat().filter(Boolean);
+    return found.length ? h("div", { class: "chips" }, found) : null;
+  };
 
   function rows(list) {
     const items = list.filter(([, v]) => v !== null && v !== undefined && v !== "");
@@ -53,25 +58,44 @@
 
   function block(label, text, note) {
     return text ? h("div", { class: "text-block" }, h("h3", null, label, note ? h("small", { class: "muted" }, ` (${note})`) : null),
-      h("p", { class: "plain" }, text)) : null;
+      h("p", { class: "plain-text" }, text)) : null;
   }
 
+  // A list row; badges among the extras go in one .chips row under the text.
   function item(href, title, sub, ...extra) {
-    const inner = [h("div", { class: "title" }, title), sub ? h("div", { class: "sub" }, sub) : null, ...extra];
+    const found = extra.filter(Boolean);
+    const badges = found.filter((x) => x.classList && x.classList.contains("badge"));
+    const inner = [h("div", { class: "title" }, title), sub ? h("div", { class: "sub" }, sub) : null,
+      chips(badges), ...found.filter((x) => !badges.includes(x))];
     return h("li", null, href ? h("a", { class: "item", href }, inner) : h("div", { class: "item" }, inner));
   }
 
-  const list = (items, empty) => (items.length ? h("ul", { class: "list" }, items) : empty ? h("p", { class: "muted" }, empty) : null);
+  const list = (items, empty) => (items.length ? h("ul", { class: "list" }, items) : empty ? h("p", { class: "muted small" }, empty) : null);
   const card = (...children) => h("section", { class: "card" }, ...children);
   const button = (label, onclick, cls = "") => h("button", { type: "button", class: cls, onclick }, label);
   const link = (label, href, cls = "button") => h("a", { class: cls, href }, label);
+  // A card's header, with a badge or a small button on its right when there is one.
+  const cardHead = (title, ...right) => (right.filter(Boolean).length
+    ? h("div", { class: "card-head" }, h("h2", null, title), ...right.filter(Boolean)) : h("h2", null, title));
+  // A page's head: an optional back link, the title, a line under it, and badges.
+  function head({ back = null, backText = "", title, sub = null, badges = [] }) {
+    return h("header", { class: "page-head" }, back ? h("a", { class: "back-link", href: back }, backText) : null,
+      h("h1", { class: "page-title" }, title), sub ? h("p", { class: "page-sub" }, sub) : null, chips(badges));
+  }
 
+  function historyLines(lines) {
+    return h("ul", { class: "list lines" }, lines.map((l) =>
+      h("li", null, h("div", { class: "what" }, l.what), h("div", { class: "muted small" }, [H.when(l.when), l.actor].filter(Boolean).join(" · ")),
+        l.note ? h("div", { class: "small plain-text" }, l.note) : null)));
+  }
+
+  // Inside a section: folded away. On a page of its own: a card.
   function history(lines) {
     if (!lines || !lines.length) return null;
-    return h("details", null, h("summary", null, "History"), h("ul", { class: "list lines" }, lines.map((l) =>
-      h("li", null, h("div", { class: "what" }, l.what), h("div", { class: "muted small" }, [H.when(l.when), l.actor].filter(Boolean).join(" · ")),
-        l.note ? h("div", { class: "small plain" }, l.note) : null))));
+    return h("details", { class: "dc-fold" }, h("summary", null, "History"), historyLines(lines));
   }
+  const historyCard = (lines) => card(h("h2", null, "History"),
+    lines && lines.length ? historyLines(lines) : h("p", { class: "muted small" }, "No history yet."));
 
   // ---------------------------------------------------------------- form fields and dialogs
 
@@ -98,7 +122,7 @@
 
   // A dialog of fields: their values, or null when cancelled.
   async function formDialog(title, fields, okLabel = "Save", { danger = false, intro = null } = {}) {
-    const nodes = [intro ? h("p", { class: "muted small plain" }, intro) : null, ...fields.map((f) => (f.node || f))].filter(Boolean);
+    const nodes = [intro ? h("p", { class: "muted small plain-text" }, intro) : null, ...fields.map((f) => (f.node || f))].filter(Boolean);
     const pick = await openDialog(title, nodes, [{ label: "Cancel", value: "cancel" },
       { label: okLabel, value: "ok", class: danger ? "primary danger" : "primary" }]);
     if (pick !== "ok") return null;
@@ -111,9 +135,10 @@
 
   H.registerSection("discipline", (box, s, p, again) => {
     const self = p.relation === "self";
-    put(box, h("h2", null, "Discipline"));
-    if (s.message && !self) put(box, h("p", { class: "warn" }, s.message));
     const tracks = Object.entries(s.points || {});
+    const now = s.points ? total(s.points) : null;
+    put(box, cardHead("Discipline", now != null ? badge(plural(now, "point"), now > 0 ? "warn" : "ok") : null));
+    if (s.message && !self) put(box, h("p", { class: "warn" }, s.message));
     put(box, rows([
       ["Points now", s.points ? (tracks.length > 1 ? tracks.map(([t, v]) => `${t}: ${pts(v)}`).join(", ") : pts(total(s.points))) : null],
       ["Current step", self ? null : s.step || "None"],
@@ -149,13 +174,13 @@
 
   // The points statement. For HR (today's view), each line it can undo has its own actions.
   function pointLines(lines, p = null, again = null) {
-    return h("details", null, h("summary", null, "Points history"), h("ul", { class: "list" }, lines.map((l) => {
+    return h("details", { class: "dc-fold" }, h("summary", null, "Points history"), h("ul", { class: "list" }, lines.map((l) => {
       const li = item(l.incident_id ? `#/incident/${l.incident_id}` : null, `${l.points > 0 ? "+" : ""}${pts(l.points)} · ${l.label}`,
         [day(l.date), l.ends && l.state === "counts" ? `counts until ${day(l.ends)}` : null, l.reason].filter(Boolean).join(" · "),
-        l.state === "expired" ? badge(`Expired${l.ends ? ` ${day(l.ends)}` : ""}: no longer counts`, "dim")
+        l.state === "expired" ? badge(`Expired${l.ends ? ` ${day(l.ends)}` : ""}: no longer counts`, "quiet")
           : l.state === "voided" ? badge("Voided", "bad") : null);
       const actions = p && l.can ? lineActions(l, p, again) : [];
-      if (actions.length) put(li, h("div", { class: "actions" }, actions));
+      if (actions.length) put(li, h("div", { class: "actions dc-line-actions" }, actions));
       return li;
     })));
   }
@@ -168,14 +193,14 @@
         const values = await formDialog("When it stops counting", [textField("ends", "First day it no longer counts", { type: "date", value: l.ends || "" }), reasonField()],
           "Save", { intro: "This always wins over the point system's expiry rules." });
         if (values && await act(() => api("POST", `${url}/ends`, values))) await again();
-      }));
+      }, "small-btn"));
     }
     if (l.can.void) {
       found.push(button("Void", async () => {
         const values = await formDialog("Void this line", [reasonField()], "Void",
           { danger: true, intro: "It stops counting from today and stays on the statement as voided. Later write-ups are checked again." });
         if (values && await act(() => api("POST", `${url}/void`, values))) await again();
-      }, "danger"));
+      }, "small-btn danger"));
     }
     return found;
   }
@@ -195,7 +220,7 @@
 
   H.registerSection("probation", (box, s, p, again) => {
     put(box, h("h2", null, s.title));
-    if (!s.probations.length) put(box, h("p", { class: "muted" }, "Not on probation."));
+    if (!s.probations.length) put(box, h("p", { class: "muted small" }, "Not on probation."));
     for (const pr of s.probations) put(box, probationBlock(pr, s, p, again));
     if (s.can.place) {
       put(box, h("div", { class: "actions" }, button("Place on disciplinary probation", async () => {
@@ -214,14 +239,14 @@
     const open = pr.status === "open";
     const limits = pr.extension_limits;
     // The kind as a heading only when the section's title doesn't already say it.
-    const state = badge(pr.status_word, open ? "warn" : "dim");
-    const el = h("div", { class: "probation" }, pr.title === s.title ? h("p", null, state) : h("h3", null, pr.title, " ", state),
+    const state = badge(pr.status_word, open ? "warn" : "quiet");
+    const el = h("div", { class: "probation" }, pr.title === s.title ? chips(state) : h("h3", null, pr.title, " ", state),
       rows([["Started", day(pr.starts)], ["Ends", pr.ends ? day(pr.ends) : null],
         ["Review due", !self && open ? day(pr.review_due) : null],
         ["Extensions", limits ? `${pr.extensions} of ${limits.count} used (each up to ${limits.days} days; ${limits.maximum} days in all)` : null],
         ["Recommended", pr.recommendation ? `${pr.recommendation.word}${pr.recommendation.to ? ` to ${day(pr.recommendation.to)}` : ""}` : null],
         ["Decided", pr.decided_on ? day(pr.decided_on) : null], ["Why HR placed it", pr.reason], ["HR's reason", pr.outcome_note]]));
-    if (pr.recommendation && pr.recommendation.note) put(el, h("p", { class: "small plain" }, `Recommendation note: ${pr.recommendation.note}`));
+    if (pr.recommendation && pr.recommendation.note) put(el, h("p", { class: "small plain-text" }, `Recommendation note: ${pr.recommendation.note}`));
     if (self && pr.needs_ack) {
       put(el, h("p", { class: "warn" }, "This changed. Read it, then acknowledge it. Acknowledging means you've seen it."),
         h("div", { class: "actions" }, button("Acknowledge", async () => {
@@ -281,7 +306,10 @@
     const editId = params.get("edit");
     const form = await api("GET", `/api/people/${encodeURIComponent(pid)}/incident-form`);
     const back = `#/people/${encodeURIComponent(pid)}`;
-    if (!form.set_up) return show(card(h("h1", null, "Record an incident"), h("p", { class: "warn" }, form.message), link("Back", back)));
+    if (!form.set_up) {
+      return show(head({ back, backText: "Back", title: "Record an incident" }),
+        card(h("p", { class: "warn" }, form.message), h("div", { class: "actions" }, link("Back", back))));
+    }
     const editing = editId ? await api("GET", `/api/incidents/${encodeURIComponent(editId)}`) : null;
     const who = form.person;
     const byKey = Object.fromEntries(form.offences.map((o) => [o.key, o]));
@@ -298,7 +326,7 @@
     const pointsHint = h("small");
     const reason = h("textarea", { name: "reason", rows: "2", maxlength: "1000" });
     const reasonBox = field("Why these points?", reason, "Needed when you choose points other than the default.");
-    const preview = h("div", { class: "preview", role: "status", "aria-live": "polite" }, h("p", { class: "muted" }, "Choose the offence to see what it means."));
+    const preview = h("div", { class: "preview", role: "status", "aria-live": "polite" }, h("p", { class: "muted small" }, "Choose the offence to see what it means."));
     const errorBox = h("p", { class: "error", role: "alert", hidden: true });
     const wu = writeupFields(form);
     const submit = h("button", { type: "submit", class: "primary" }, editing ? "Send to HR again" : "Send to HR");
@@ -338,7 +366,7 @@
       timer = setTimeout(async () => {
         const mine = ++seq;
         if (!chosen()) {
-          preview.replaceChildren(h("p", { class: "muted" }, "Choose the offence to see what it means."));
+          preview.replaceChildren(h("p", { class: "muted small" }, "Choose the offence to see what it means."));
           wu.box.hidden = true;
           return;
         }
@@ -386,17 +414,18 @@
     field("What happened", what, "Plain facts: what, where, who saw it. Their managers and HR see this."),
     leaveBox, h("label", null, "Points", pointsHint, points), reasonBox, preview, wu.box, errorBox,
     h("div", { class: "actions" }, submit, link("Cancel", editing ? `#/incident/${encodeURIComponent(editId)}` : back)));
-    show(card(h("h1", null, editing ? "Change the incident" : `Record an incident for ${firstName(who.name)}`),
-      editing && editing.return_note ? h("p", { class: "warn plain" }, `HR's note: ${editing.return_note}`) : null,
-      h("p", { class: "muted small" }, "HR approves it before it counts or they see anything. When it reaches a step, the write-up goes with it."),
-      formEl));
+    show(head({ back: editing ? `#/incident/${encodeURIComponent(editId)}` : back, backText: editing ? "The incident" : who.name,
+      title: editing ? "Change the incident" : `Record an incident for ${firstName(who.name)}`,
+      sub: "HR approves it before it counts or they see anything. When it reaches a step, the write-up goes with it." }),
+    editing && editing.return_note ? h("p", { class: "warn plain-text" }, `HR's note: ${editing.return_note}`) : null,
+    card(formEl));
     layout();
     if (editing) refresh();
   }
 
   // The write-up part of the form, shown when the preview says a write-up is needed.
   function writeupFields(form) {
-    const policy = h("p", { class: "plain quote" });
+    const policy = h("p", { class: "plain-text quote" });
     const f = {
       improvement: textField("improvement", "Expected improvement", { area: true }),
       consequences: textField("consequences", "If it happens again", { area: true, hint: "Leave blank to say the next step." }),
@@ -410,7 +439,7 @@
     downgrade.node.hidden = true;
     let recommended = null;
     step.addEventListener("change", () => { downgrade.node.hidden = !step.value || step.value === recommended; });
-    const box = h("fieldset", { hidden: true }, h("legend", null, "The write-up"),
+    const box = h("fieldset", { class: "dc-writeup", hidden: true }, h("legend", null, "The write-up"),
       h("div", { class: "text-block" }, h("h3", null, "Policy", h("small", { class: "muted" }, " (quoted on the write-up)")), policy),
       Object.values(f).map((x) => x.node), stepBox, downgrade.node);
     return {
@@ -479,9 +508,10 @@
         if (values && await act(() => api("POST", `/api/incidents/${id}/void`, values))) await H.route();
       }, "danger"));
     }
-    show(card(h("h1", null, i.offence), h("p", null, link(i.person.name, `#/people/${encodeURIComponent(i.person.id)}`, "")),
-      badge(i.status_word, STATE_CLASS[i.status] || ""), i.on_probation ? badge("During probation", "warn") : null,
-      i.return_note ? h("p", { class: "warn plain" }, `HR's note: ${i.return_note}`) : null,
+    show(head({ back: `#/people/${encodeURIComponent(i.person.id)}`, backText: i.person.name, title: i.offence, sub: `Incident · ${day(i.happened)}`,
+      badges: [badge(i.status_word, STATE_CLASS[i.status] || ""), i.on_probation ? badge("During probation", "warn") : null] }),
+    i.return_note ? h("p", { class: "warn plain-text" }, `HR's note: ${i.return_note}`) : null,
+    card(h("h2", null, "Incident"),
       rows([["Happened", day(i.happened)], ["Protected leave", i.protected], ["Points", pointsText],
         ["If approved now", i.points_if_approved != null && i.points_if_approved !== i.final_points ? pts(i.points_if_approved) : null], ["Default points", pts(i.default_points)],
         ["Manager's points", i.manager_points != null ? pts(i.manager_points) : null], ["Why", i.manager_reason], ["HR's points", i.hr_points != null ? pts(i.hr_points) : null],
@@ -489,7 +519,7 @@
         ["Step", i.step ? `${i.step}${i.step_reason ? ` (${i.step_reason})` : ""}` : null], ["Void reason", i.void_reason]]),
       block("What happened", i.what), i.writeup_id ? h("p", null, link("Open the write-up", `#/writeup/${i.writeup_id}`, "")) : null,
       buttons.length ? h("div", { class: "actions" }, buttons) : null),
-    card(history(i.history) || h("p", { class: "muted" }, "No history yet.")));
+    historyCard(i.history));
   }
 
   // ---------------------------------------------------------------- a write-up
@@ -511,16 +541,18 @@
     if (parts[1] === "in-person") return renderInPerson(id);
     const w = await api("GET", `/api/writeups/${id}`);
     if (w.voided && !w.texts) {
-      return show(card(h("h1", null, "Write-up"), h("p", null, w.status_word), h("p", { class: "muted small" }, "It was withdrawn and no longer counts.")));
+      return show(head({ title: "Write-up", badges: [badge(w.status_word, "bad")] }),
+        card(h("p", { class: "muted" }, "It was withdrawn and no longer counts.")));
     }
     const staff = "manager_note" in w;
     const self = !staff;
-    const head = card(h("h1", null, w.step), h("p", null, link(w.person.name, `#/people/${encodeURIComponent(w.person.id)}`, "")),
-      badge(w.status_word, STATE_CLASS[w.state] || ""), w.under_appeal ? badge("Under appeal", "warn") : null,
-      w.return_note && w.status === "draft" ? h("p", { class: "warn plain" }, `HR's note: ${w.return_note}`) : null,
-      w.recommended && w.recommended !== w.step ? h("p", { class: "small" }, `The point system called for ${w.recommended}.${w.downgrade_reason ? ` Why lower: ${w.downgrade_reason}` : ""}`) : null,
-      w.incident ? h("p", { class: "small" }, link(`Incident: ${w.incident.offence}, ${day(w.incident.happened)}`, `#/incident/${w.incident.id}`, "")) : null);
-    const content = w.can.edit ? draftForm(w) : card(...writeupBody(w),
+    const top = [head({ back: self ? null : `#/people/${encodeURIComponent(w.person.id)}`, backText: w.person.name, title: w.step,
+      sub: [self ? null : w.person.name, "Write-up", w.issued_on && w.state !== "voided" ? `delivered ${day(w.issued_on)}` : null].filter(Boolean).join(" · "),
+      badges: [badge(w.status_word, STATE_CLASS[w.state] || ""), w.under_appeal ? badge("Under appeal", "warn") : null] }),
+    w.return_note && w.status === "draft" ? h("p", { class: "warn plain-text" }, `HR's note: ${w.return_note}`) : null,
+    w.recommended && w.recommended !== w.step ? h("p", { class: "note" }, `The point system called for ${w.recommended}.${w.downgrade_reason ? ` Why lower: ${w.downgrade_reason}` : ""}`) : null];
+    const incident = w.incident ? h("p", { class: "small" }, link(`Incident: ${w.incident.offence}, ${day(w.incident.happened)}`, `#/incident/${w.incident.id}`, "")) : null;
+    const content = w.can.edit ? draftForm(w, incident) : card(h("h2", null, "Write-up"), incident, ...writeupBody(w),
       staff ? block("Note for managers and HR", w.manager_note, "the employee never sees this") : null,
       "hr_note" in w ? block("HR note", w.hr_note, "HR only") : null);
     const delivery = w.method || w.appeal ? card(h("h2", null, "Delivery"), rows([["How", w.method_word], ["Delivered by", w.delivered_by_name],
@@ -528,17 +560,17 @@
     block(self ? "Your comment" : "Their comment", w.comment), w.appeal ? appealBlock(w) : null) : null;
     const actions = writeupActions(w, id);
     const sign = w.can.sign ? signForm(w, id) : null;
-    show(head, content, delivery, sign, actions.length ? card(h("div", { class: "actions" }, actions)) : null,
-      card(history(w.history) || h("p", { class: "muted" }, "No history yet.")));
+    show(top, content, delivery, sign, actions.length ? h("section", { class: "card dc-actions" }, h("div", { class: "actions" }, actions)) : null,
+      historyCard(w.history));
   }
 
   function appealBlock(w) {
     const a = w.appeal;
-    return h("div", { class: "text-block" }, h("h3", null, "Appeal ", badge(a.word, a.status === "open" ? "warn" : "dim")),
-      h("p", { class: "plain" }, a.text), a.note ? h("p", { class: "plain" }, `HR's decision: ${a.note}`) : null);
+    return h("div", { class: "text-block" }, h("h3", null, "Appeal ", badge(a.word, a.status === "open" ? "warn" : "quiet")),
+      h("p", { class: "plain-text" }, a.text), a.note ? h("p", { class: "plain-text" }, `HR's decision: ${a.note}`) : null);
   }
 
-  function draftForm(w) {
+  function draftForm(w, incident = null) {
     const f = [textField("what", "What happened", { area: true, value: w.texts.what }),
       textField("improvement", "Expected improvement", { area: true, value: w.texts.improvement }),
       textField("consequences", "If it happens again", { area: true, value: w.texts.consequences }),
@@ -563,8 +595,8 @@
       });
       if (ok) await H.route();
     };
-    return card(h("h2", null, "Draft"), h("div", { class: "text-block" }, h("h3", null, "Policy", h("small", { class: "muted" }, " (quoted automatically)")),
-      h("p", { class: "plain quote" }, w.texts.policy || "No handbook wording.")),
+    return card(h("h2", null, "Draft"), incident, h("div", { class: "text-block" }, h("h3", null, "Policy", h("small", { class: "muted" }, " (quoted automatically)")),
+      h("p", { class: "plain-text quote" }, w.texts.policy || "No handbook wording.")),
     f.map((x) => x.node), h("div", { class: "actions" }, button("Save", () => save(false)), w.can.submit ? button("Send to HR", () => save(true), "primary") : null));
   }
 
@@ -699,13 +731,14 @@
     h("div", { class: "actions" }, button("Record a refusal", () => refusal(id, back))));
     paper.classList.add("no-print");
     refused.classList.add("no-print");
-    show(card(h("p", { class: "no-print muted" }, `Hand this to ${first} to read. Only what ${first} may see is shown.`),
-      h("h1", null, w.step), h("p", null, `${w.person.name}${w.issued_on ? ` · ${day(w.issued_on)}` : ""}`),
-      h("div", { class: "reading" }, writeupBody(w)), h("p", { class: "statement" }, w.statement),
-      h("div", { class: "print-only" }, h("p", { class: "signature-line" }, "Employee signature and date"),
-        h("p", { class: "signature-line" }, "Manager signature and date"),
-        h("p", { class: "small" }, "Comment:"), h("div", { class: "comment-space" })),
-      signHere), paper, refused, h("p", { class: "no-print" }, link("Back to the write-up", back, "")));
+    const top = h("header", { class: "page-head" }, h("a", { class: "back-link no-print", href: back }, "Back to the write-up"),
+      h("h1", { class: "page-title" }, w.step), h("p", { class: "page-sub" }, `${w.person.name}${w.issued_on ? ` · ${day(w.issued_on)}` : ""}`));
+    show(top, h("p", { class: "note no-print" }, `Hand this to ${first} to read. Only what ${first} may see is shown.`),
+      card(h("div", { class: "reading" }, writeupBody(w)), h("p", { class: "statement" }, w.statement),
+        h("div", { class: "print-only" }, h("p", { class: "signature-line" }, "Employee signature and date"),
+          h("p", { class: "signature-line" }, "Manager signature and date"),
+          h("p", { class: "small" }, "Comment:"), h("div", { class: "comment-space" })),
+        w.can_sign_here ? h("h2", { class: "no-print dc-sign-head" }, "Sign here") : null, signHere), paper, refused);
   }
 
   async function refusal(id, back) {
@@ -740,11 +773,13 @@
     const d = await api("GET", `/api/people/${encodeURIComponent(pid)}/discipline${on ? `?as_of=${encodeURIComponent(on)}` : ""}`);
     const picker = h("input", { type: "date", value: d.as_of, max: d.today });
     picker.addEventListener("change", () => { if (picker.value) location.hash = `#/discipline-history/${encodeURIComponent(pid)}?on=${picker.value}`; });
-    show(card(h("h1", null, `As of ${day(d.as_of)}`), field("Show another day", picker),
-      rows([["Points", pts(total(d.points))], ["Step", d.step || "None"], ["Next drop", d.next_drop ? `${plural(d.next_drop.points, "point")} on ${day(d.next_drop.date)}` : null]]),
-      h("p", null, link("Back to their page", `#/people/${encodeURIComponent(pid)}`, ""))),
-    card(h("h2", null, "Write-ups"), list(d.writeups.map(writeupItem), "None by then.")),
-    card(h("h2", null, "Incidents"), list(d.incidents.map((i) => item(`#/incident/${i.id}`, i.offence, `${day(i.happened)} · ${plural(i.points, "point")} · ${i.status_word}`)), "None by then.")),
+    const none = (items) => (items.length ? null : H.emptyState("None by then."));
+    show(head({ back: `#/people/${encodeURIComponent(pid)}`, backText: "Back to their page", title: `As of ${day(d.as_of)}`,
+      sub: "Their points and records as they were that day." }),
+    card(h("h2", null, "Points"), field("Show another day", picker),
+      rows([["Points", pts(total(d.points))], ["Step", d.step || "None"], ["Next drop", d.next_drop ? `${plural(d.next_drop.points, "point")} on ${day(d.next_drop.date)}` : null]])),
+    card(h("h2", null, "Write-ups"), list(d.writeups.map(writeupItem)), none(d.writeups)),
+    card(h("h2", null, "Incidents"), list(d.incidents.map((i) => item(`#/incident/${i.id}`, i.offence, `${day(i.happened)} · ${plural(i.points, "point")} · ${i.status_word}`))), none(d.incidents)),
     d.lines.length ? card(pointLines(d.lines)) : null);
   } });
 
@@ -752,12 +787,15 @@
 
   H.registerPage("team", { nav: "My team", who: (me) => me.staff, render: async () => {
     const t = await api("GET", "/api/discipline/team");
-    const filter = h("input", { type: "search", placeholder: "Find someone", "aria-label": "Find someone", class: "filter" });
+    const filter = h("input", { type: "search", placeholder: "Find someone", "aria-label": "Find someone" });
     const people = t.people.map((p) => {
       const counts = [[p.tasks, "step due"], [p.drafts, "draft"], [p.returned, "sent back"], [p.waiting, "with HR"], [p.to_deliver, "to deliver"], [p.unsigned, "not signed"]]
         .filter(([n]) => n).map(([n, word]) => badge(`${n} ${word}`, word === "step due" || word === "sent back" ? "warn" : ""));
-      const el = item(`#/people/${encodeURIComponent(p.id)}`, p.name,
-        [`${plural(p.points, "point")}`, p.step || "No step", p.probation ? `${p.probation} until ${day(p.probation_ends)}` : null].filter(Boolean).join(" · "), ...counts);
+      const el = h("li", null, h("a", { class: "item with-avatar", href: `#/people/${encodeURIComponent(p.id)}` },
+        h("span", { class: "avatar", "aria-hidden": "true" }, H.initial(p.name)),
+        h("div", { class: "item-text" }, h("div", { class: "title" }, p.name),
+          h("div", { class: "sub" }, [`${plural(p.points, "point")}`, p.step || "No step", p.probation ? `${p.probation} until ${day(p.probation_ends)}` : null].filter(Boolean).join(" · ")),
+          chips(counts))));
       el.dataset.name = p.name.toLowerCase();
       return el;
     });
@@ -765,26 +803,29 @@
       const q = filter.value.trim().toLowerCase();
       for (const el of people) el.hidden = q && !el.dataset.name.includes(q);
     });
-    show(card(h("h1", null, "My team"), t.message ? h("p", { class: "warn" }, t.message) : null,
-      h("p", { class: "muted small" }, "Points, steps and probation for everyone whose file you see.")),
-    t.tasks.length ? card(h("h2", null, "To do"), list(t.tasks.map((x) => item(x.writeup_id ? `#/writeup/${x.writeup_id}` : `#/people/${encodeURIComponent(x.person_id)}`,
+    show(head({ title: "My team", sub: "Points, steps and probation for everyone whose file you see." }),
+    t.message ? h("p", { class: "warn" }, t.message) : null,
+    t.tasks.length ? card(cardHead("To do", badge(String(t.tasks.length), "warn")), list(t.tasks.map((x) => item(x.writeup_id ? `#/writeup/${x.writeup_id}` : `#/people/${encodeURIComponent(x.person_id)}`,
       `${x.name}: ${x.word}${x.step ? ` (${x.step})` : ""}`, x.reason)))) : null,
-    t.returned.length ? card(h("h2", null, "Sent back to you by HR"), list(t.returned.map((x) => item(`#/incident/${x.id}`, `${x.name}: ${x.offence}`, "Read HR's note, change it and send it again.")))) : null,
-    card(h("h2", null, "People"), t.people.length > 8 ? filter : null, list(people, "No one to show.")));
+    t.returned.length ? card(cardHead("Sent back to you by HR", badge(String(t.returned.length), "warn")), list(t.returned.map((x) => item(`#/incident/${x.id}`, `${x.name}: ${x.offence}`, "Read HR's note, change it and send it again.")))) : null,
+    card(cardHead("People", badge(String(t.people.length), "quiet")), t.people.length > 8 ? h("div", { class: "search" }, filter) : null,
+      people.length ? list(people) : H.emptyState("No one to show.")));
   } });
 
   // ---------------------------------------------------------------- HR's discipline queue
 
   H.registerPage("discipline", { nav: "Discipline", who: (me) => me.hr, render: async () => {
     const q = await api("GET", "/api/discipline/queue");
-    const own = (x) => (x.own_work ? badge("Another HR admin approves this", "dim") : null);
+    const own = (x) => (x.own_work ? badge("Another HR admin approves this", "quiet") : null);
     const sections = [];
-    const add = (title, items, note) => { if (items.length) sections.push(card(h("h2", null, title), note ? h("p", { class: "muted small" }, note) : null, list(items))); };
+    const add = (title, items, note) => {
+      if (items.length) sections.push(card(cardHead(title, badge(String(items.length), "warn")), note ? h("p", { class: "muted small" }, note) : null, list(items)));
+    };
     add("Incidents to approve", q.incidents.map((i) => item(`#/incident/${i.id}`, `${i.name}: ${i.offence}`,
       `${day(i.happened)} · ${plural(i.points, "point")} · recorded by ${i.by}`, own(i))));
     add("Write-ups to approve", q.writeups.map((w) => item(`#/writeup/${w.id}`, `${w.name}: ${w.step}`, w.by ? `By ${w.by}` : "Drafted for HR", own(w))));
     add("Appeals to decide", q.appeals.map((a) => item(`#/writeup/${a.writeup_id}`, `${a.name}: ${a.step}`, `Appealed ${H.when(a.filed_at)}`,
-      a.own_work ? badge("Another HR admin decides this", "dim") : null)));
+      a.own_work ? badge("Another HR admin decides this", "quiet") : null)));
     add("Tasks", q.tasks.map((t) => taskItem(t)));
     const p = q.probation;
     add("Probation decisions", [
@@ -794,9 +835,10 @@
       ...p.separations.map((x) => item(`#/people/${encodeURIComponent(x.person_id)}`, `${x.name}: employment ending`, "Archive them in Connecteam by hand, then mark it done on their page."))]);
     add("Not signed yet", q.unsigned.map((w) => item(`#/writeup/${w.id}`, w.name, `Delivered ${day(w.issued_on)}. It counts either way.`)));
     add("Signed write-ups that couldn't be filed", q.pdfs.map((w) => item(`#/writeup/${w.id}`, w.name, w.error)));
-    show(card(h("h1", null, "Discipline"), q.message ? h("p", { class: "warn" }, q.message) : null,
-      q.waiting_pdfs ? h("p", { class: "muted small" }, `${q.waiting_pdfs} signed write-up${q.waiting_pdfs === 1 ? " waits" : "s wait"} to be filed in Google Drive.`) : null,
-      sections.length ? null : h("p", { class: "muted" }, "Nothing is waiting for you.")), sections);
+    show(head({ title: "Discipline", sub: "Incidents, write-ups, appeals and probation decisions waiting for HR." }),
+      q.message ? h("p", { class: "warn" }, q.message) : null,
+      q.waiting_pdfs ? h("p", { class: "note" }, `${q.waiting_pdfs} signed write-up${q.waiting_pdfs === 1 ? " waits" : "s wait"} to be filed in Google Drive.`) : null,
+      sections.length ? sections : card(H.emptyState("Nothing is waiting for you.", "New incidents, write-ups and appeals show here.")));
   } });
 
   function taskItem(t) {
@@ -804,16 +846,16 @@
     const el = item(href, `${t.name}: ${t.word}${t.step ? ` (${t.step})` : ""}`, t.reason);
     const done = async (path, values) => { if (await act(() => api("POST", `/api/discipline-tasks/${t.id}/${path}`, values))) await H.route(); };
     if (t.kind === "termination") {
-      put(el, h("div", { class: "actions" }, button("Decide", async () => {
+      put(el, h("div", { class: "actions dc-line-actions" }, button("Decide", async () => {
         const v = await formDialog("Termination review", [choiceField("outcome", "Outcome", [["no_action", "No action"], ["last_chance", "Last-chance agreement"], ["terminate", "Terminate"]], "no_action"), reasonField()],
           "Decide", { intro: "Never automatic: you decide. Terminate is recorded here; archive them in Connecteam by hand." });
         if (v) await done("decide", v);
-      }, "primary")));
+      }, "small-btn primary")));
     } else if (t.kind === "check" || t.kind === "separation") {
-      put(el, h("div", { class: "actions" }, button("Done", async () => {
+      put(el, h("div", { class: "actions dc-line-actions" }, button("Done", async () => {
         const v = await formDialog(t.word, [textField("note", "Note (optional)", { area: true })], "Done");
         if (v) await done("done", v);
-      })));
+      }, "small-btn")));
     }
     return el;
   }
