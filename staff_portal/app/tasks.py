@@ -16,6 +16,7 @@ import re
 from datetime import date, datetime, timezone
 
 STATUSES = ("todo", "doing", "done", "wont")
+OFFERED = ("todo", "doing", "done")   # what people can choose: Won't do is gone (older tasks keep it)
 STATUS_NAMES = {"todo": "To do", "doing": "In progress", "done": "Done", "wont": "Won't do"}
 FINISHED = ("done", "wont")
 PRIORITIES = ("normal", "urgent")
@@ -200,8 +201,8 @@ def clean_status(data: dict, task: dict) -> str:
     """The status a person asked for. `from` is the status they saw: if someone else changed
     it meanwhile, nothing changes (so two taps from two phones don't skip a step)."""
     status = data.get("status")
-    if status not in STATUSES:
-        raise TaskError("Pick To do, In progress, Done or Won't do.")
+    if status not in OFFERED:
+        raise TaskError("Pick To do, In progress or Done.")
     if "from" in data and data["from"] != task["status"]:
         raise TaskError(f"Someone just changed this task to {STATUS_NAMES[task['status']]}.")
     return status
@@ -246,7 +247,7 @@ def clean_follow(raw) -> str | None:
         oid = str(o.get("id") or "") if isinstance(o, dict) else ""
         if not CT_ID_RE.match(oid) or oid in ids or len(options) >= MAX_OPTIONS:
             continue
-        if o.get("status") not in STATUSES:
+        if o.get("status") not in OFFERED:
             raise TaskError("Pick a task status for each of the field's values.")
         ids.add(oid)
         options.append({"id": oid, "name": clean_text(o.get("name"), 80),

@@ -94,8 +94,8 @@ def test_status_cycle_and_names():
     assert tasks.STATUS_NAMES == {"todo": "To do", "doing": "In progress", "done": "Done", "wont": "Won't do"}
     task = {"status": "todo"}
     assert tasks.clean_status({"status": "doing", "from": "todo"}, task) == "doing"
-    assert tasks.clean_status({"status": "wont"}, task) == "wont"
-    for bad in ({"status": "finished"}, {"status": None}, {"status": "done", "from": "doing"}):
+    # Won't do isn't offered any more (older tasks keep it).
+    for bad in ({"status": "wont"}, {"status": "finished"}, {"status": None}, {"status": "done", "from": "doing"}):
         with pytest.raises(tasks.TaskError):
             tasks.clean_status(bad, task)
 
@@ -246,22 +246,24 @@ def test_anyone_who_sees_a_task_changes_its_status_and_it_is_recorded(tmp_path):
             ana, dee = await p.sign_in(p.ana), await p.sign_in(p.dee)
             task = await p.add(ana, title="Check pool")
             path = f"/api/tasks/{task['id']}/status"
-            for who, status in ((dee, "doing"), (ana, "done"), (dee, "todo"), (ana, "wont")):
+            for who, status in ((dee, "doing"), (ana, "done"), (dee, "todo"), (ana, "done")):
                 code, body = await p.call("POST", path, who, {"status": status})
                 assert code == 200 and body["task"]["status"] == status
             # Two phones tapping at once: the second saw an old status, so nothing changes.
             code, body = await p.call("POST", path, dee, {"status": "doing", "from": "todo"})
-            assert code == 409 and body["task"]["status"] == "wont" and "Won't do" in body["error"]
+            assert code == 409 and body["task"]["status"] == "done" and "Done" in body["error"]
+            code, body = await p.call("POST", path, dee, {"status": "wont"})
+            assert code in (400, 409) and p.db.task(task["id"])["status"] == "done"   # Won't do is gone
             code, body = await p.call("POST", path, dee, {"status": "everything"})
             assert code == 409 or code == 400
             code, body = await p.call("GET", f"/api/tasks/{task['id']}", dee)
             trail = [(e["by_name"], e["action"], e["from_status"], e["to_status"]) for e in body["history"]]
             assert trail == [("Ana", "created", None, "todo"), ("Dee", "status", "todo", "doing"),
                              ("Ana", "status", "doing", "done"), ("Dee", "status", "done", "todo"),
-                             ("Ana", "status", "todo", "wont")]
+                             ("Ana", "status", "todo", "done")]
             assert p.db.task(task["id"])["status_by"] == "Ana"
             # The same status again changes nothing and adds nothing.
-            await p.call("POST", path, ana, {"status": "wont"})
+            await p.call("POST", path, ana, {"status": "done"})
             assert len(p.db.task_history(task["id"])) == 5
     run(scenario())
 

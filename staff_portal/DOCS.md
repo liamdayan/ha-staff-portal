@@ -1563,14 +1563,14 @@ All of this is checked by the add-on on every request, not by the phone.
 **A task** has a title, optional notes, a department (or Everyone; a form's task can be in several),
 optionally a person it's
 given to, an optional due date and time, Normal or Urgent, and a status: **To do**, **In
-progress**, **Done** or **Won't do**. Each task keeps who made it, when, where it came from (a
+progress** or **Done** (tasks marked Won't do before 0.12.19 keep it). Each task keeps who made it, when, where it came from (a
 quick task or a Connecteam form) and a history of every change.
 
 **On the phone.** Tasks are listed by status, with coloured status chips, and urgent and overdue
 tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes to your own
 department (the first of yours) unless you pick another (or Everyone), a person, or a due date. Tap a task's status
 chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
-computer) for **Won't do** and **Reopen**. Tap a task to see its notes and history, and to edit
+computer) to pick any status, or **Reopen** a done one. Tap a task to see its notes and history, and to edit
 or delete it. The filters show only **Mine**, one department, or one status. Done tasks fold
 away after a day (**Show older**). On a tablet or computer the list becomes a board with a column
 for each status. The list updates by itself every few seconds.
@@ -1625,7 +1625,7 @@ values (and for no value chosen yet: To do or In progress). Then:
   progress task here stays In progress while Connecteam has no status yet;
 - when someone changes the task here, its value is written to the submission in Connecteam (this
   needs the **forms.write** permission). Connecteam can't clear a status through its API, so
-  moving a task back to To do (no status) or to Won't do (when no value means it) leaves
+  moving a task back to To do (no status) leaves
   Connecteam's status as it is, and the task says so;
 - the manager's **Note** shows on the task, read only.
 
@@ -1644,7 +1644,7 @@ expires. One that can't be had says **Photo unavailable**.
 
 1. Check that Staff Access's Connecteam app has **quick_tasks.read** and **quick_tasks.write**
    (and **forms.write** for forms that follow a status). **quick_tasks.delete** isn't needed: it
-   only lets Won't do and the bin remove a task nobody is assigned to (Connecteam can't close
+   only lets the bin remove a task nobody is assigned to (Connecteam can't close
    those); without it they stay on the board. **Test** shows
    which it has, and reads the list of boards. A Connecteam app's permissions can't be changed:
    if one is missing, make a new OAuth app with all of them and enter its keys in Settings →
@@ -1660,7 +1660,7 @@ From then on:
   requires). A department with no board keeps its tasks here, and they say so;
 - changes to the title, notes, due date, person and status go both ways. To do and In progress
   are open in Connecteam (In progress is kept here); Done is completed;
-- Won't do and the bin archive the task in Connecteam, and putting it back unarchives it. An
+- the bin archives the task in Connecteam, and putting it back unarchives it. An
   unassigned draft can't be archived in Connecteam, so it's deleted there instead and made again
   if it's reopened or put back;
 - tasks made on those boards in Connecteam show up here for the board's department, given to

@@ -133,10 +133,14 @@ def test_status_mapping_both_ways(tmp_path):
             await status("done")
             await sent(p)
             assert remote["status"] == "completed"
-            await status("wont")
+            await status("todo")
+            await sent(p)
+            assert (remote["status"], remote["isArchived"]) == ("published", False)
+            # The bin archives it there; putting it back unarchives it.
+            await p.call("DELETE", f"/api/tasks/{t['id']}", ana)
             await sent(p)
             assert (remote["status"], remote["isArchived"]) == ("published", True)
-            await status("todo")
+            await p.call("POST", f"/api/tasks/{t['id']}/restore", ana)
             await sent(p)
             assert (remote["status"], remote["isArchived"]) == ("published", False)
             # From Connecteam: completed is Done; reopened, Done goes back to To do.
@@ -157,10 +161,10 @@ def test_status_mapping_both_ways(tmp_path):
             await ctsync.settle()
             first = p.db.task(u["id"])["ct_task_id"]
             assert next(x for x in ct.board_tasks["501"] if x["id"] == first)["status"] == "draft"
-            await p.call("POST", f"/api/tasks/{u['id']}/status", ana, {"status": "wont"})
+            await p.call("DELETE", f"/api/tasks/{u['id']}", ana)
             await sent(p)
             assert writes(ct)[-1][0] == "DELETE" and p.db.task(u["id"])["ct_task_id"] is None
-            await p.call("POST", f"/api/tasks/{u['id']}/status", ana, {"status": "todo"})
+            await p.call("POST", f"/api/tasks/{u['id']}/restore", ana)
             await sent(p)
             again = p.db.task(u["id"])["ct_task_id"]
             assert again and again != first and writes(ct)[-1][0] == "POST"
@@ -1260,17 +1264,17 @@ def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_pat
             u = await p.add(ana, title="Sweep")
             await ctsync.settle()
             first = p.db.task(u["id"])["ct_task_id"]
-            await p.call("POST", f"/api/tasks/{u['id']}/status", ana, {"status": "wont"})
+            await p.call("DELETE", f"/api/tasks/{u['id']}", ana)
             await sent(p)
             assert not writes(ct, "DELETE") and p.db.task(u["id"])["ct_task_id"] == first
             assert "quick_tasks.delete" in p.db.task(u["id"])["ct_note"]
             await sent(p)
             await poll(p)
-            assert not writes(ct, "DELETE") and p.db.task(u["id"])["status"] == "wont"
+            assert not writes(ct, "DELETE") and p.db.task(u["id"])["deleted_at"]
             # An assigned task is archived as before: that needs no delete.
             t = await p.add(ana, title="Count towels", assigned_id=p.ana)
             await ctsync.settle()
-            await p.call("POST", f"/api/tasks/{t['id']}/status", ana, {"status": "wont"})
+            await p.call("DELETE", f"/api/tasks/{t['id']}", ana)
             await sent(p)
             remote = next(x for x in ct.board_tasks["501"] if x["id"] == p.db.task(t["id"])["ct_task_id"])
             assert remote["isArchived"] is True

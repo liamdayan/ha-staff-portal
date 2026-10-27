@@ -328,7 +328,10 @@
     me = H.me = null;
     drawNav();
     const error = h("p", { class: "error", role: "alert", hidden: true });
-    const code = h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "11" });
+    // Password managers read the standard names: the mobile number is the username, the PIN the
+    // password and the authenticator code a one-time code.
+    const code = h("input", { name: "otp", id: "otp", inputmode: "numeric", autocomplete: "one-time-code",
+      maxlength: "11", autocapitalize: "off", spellcheck: "false" });
     const useRecovery = h("button", { type: "button", class: "linkish", onclick: () => {
       code.setAttribute("inputmode", "text");
       code.setAttribute("autocapitalize", "characters");
@@ -343,8 +346,8 @@
       button.disabled = true;
       try {
         const f = form.elements;
-        await api("POST", "/api/signin", { mobile: f.mobile.value, pin: f.pin.value, code: f.code.value });
-        form.reset();
+        await api("POST", "/api/signin", { mobile: f.username.value, pin: f.password.value, code: f.otp.value });
+        // (not cleared here: a password manager offers to save what was typed as the page moves on)
         await refreshMe();
         if (!location.hash || location.hash === "#/signout") location.hash = "#/";
         await route();
@@ -352,25 +355,26 @@
         if (!(err instanceof SignedOut)) {
           error.textContent = err.message;
           error.hidden = false;
-          form.elements.pin.value = "";
-          form.elements.code.value = "";
+          form.elements.password.value = "";
+          form.elements.otp.value = "";
         }
       } finally {
         button.disabled = false;
       }
     } },
     h("label", null, "Mobile number", h("small", null, "As it is in Connecteam"),
-      h("input", { name: "mobile", inputmode: "tel", autocomplete: "username", required: true, maxlength: "60" })),
+      h("input", { name: "username", id: "username", type: "tel", autocomplete: "username", required: true,
+        maxlength: "60", autocapitalize: "off", spellcheck: "false" })),
     h("label", null, "PIN", h("small", null, "Your Connecteam kiosk code"),
-      h("input", { name: "pin", type: "password", inputmode: "numeric", autocomplete: "current-password",
-        required: true, maxlength: "8" })),
+      h("input", { name: "password", id: "password", type: "password", inputmode: "numeric",
+        autocomplete: "current-password", required: true, maxlength: "8" })),
     h("label", null, "Authenticator code", h("small", null, "The 6-digit code from your authenticator app, if you use one"), code),
     useRecovery, error, h("div", { class: "actions full" }, button));
     show(authPage("Sign in to HR", "With your Connecteam mobile number and kiosk code.",
       note ? h("p", { class: "warn" }, note) : null, h("section", { class: "card" }, form),
       h("p", { class: "muted small" }, "Managers, directors and HR need an authenticator code. If yours isn't set up yet, ask HR for a setup code."),
       h("p", { class: "muted small" }, "After 5 wrong tries, sign-in pauses for 15 minutes.")));
-    form.elements.mobile.focus();
+    form.elements.username.focus();
   }
 
   async function signOut() {

@@ -2620,7 +2620,7 @@
   // A form's tasks may follow one of its status manager fields: each of the field's values maps
   // to a task status, both ways. Submissions that aren't done show as tasks (from the last month,
   // even ones sent before the form was chosen); a Done one there is Done here.
-  const TK_STATUSES = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"], ["wont", "Won't do"]];
+  const TK_STATUSES = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"]];
 
   function taskFollow(f) {
     let current = null;

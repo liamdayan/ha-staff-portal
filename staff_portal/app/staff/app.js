@@ -4491,6 +4491,8 @@
     wont: { name: "Won't do", short: "Won't do" },
   };
   const TK_NEXT = { todo: "doing", doing: "done", done: "todo", wont: "todo" };
+  // What people can choose (Won't do is gone; an older task that has it still shows it).
+  const TK_OFFERED = ["todo", "doing", "done"];
   const TK_COLUMNS = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"]];
   const TK_FOLD_MS = 24 * 3600 * 1000;   // finished tasks fold away after a day
   const TK_HOLD_MS = 450;                // a press this long on a chip opens its menu
@@ -4706,7 +4708,8 @@
     deptSelect.addEventListener("change", () => { f.dept = deptSelect.value; tkSaveFilter(); tkDraw(); });
     const statusSelect = h("select", { class: "tk-filter-select", "aria-label": "Status" },
       h("option", { value: "all" }, "Status"),
-      Object.entries(TK_STATUS).map(([k, s]) => h("option", { value: k }, s.name)));
+      TK_OFFERED.map((k) => h("option", { value: k }, TK_STATUS[k].name)));
+    if (!TK_OFFERED.includes(f.status)) f.status = "all";   // a filter saved before Won't do went
     statusSelect.value = f.status;
     statusSelect.addEventListener("change", () => { f.status = statusSelect.value; tkSaveFilter(); tkDraw(); });
     return h("div", { class: "tk-filters", role: "group", "aria-label": "Filters" },
@@ -4719,7 +4722,7 @@
   }
 
   // One status's group of tasks: a section of the list on a phone, a column on the board.
-  // Done holds Won't do too; finished tasks older than a day fold away.
+  // Done holds older Won't do tasks too; finished tasks older than a day fold away.
   function tkColumn(status, name, shown) {
     const items = shown.filter((t) => (status === "done" ? tkFinished(t) : t.status === status));
     if (status === "done") items.sort((a, b) => b.status_at - a.status_at);
@@ -4825,7 +4828,6 @@
     chip.addEventListener("click", (ev) => {
       ev.stopPropagation();
       if (held) { held = false; return; }
-      if (t.status === "wont") return tkStatusMenu(t);
       tkSetStatus(t, TK_NEXT[t.status]);
     });
     return chip;
@@ -4912,7 +4914,7 @@
     tkSheet("menu", t.id, t.title, [
       h("div", { class: "tk-menu" },
         finished ? choice("todo", "Reopen") : choice("todo", "To do"),
-        choice("doing", "In progress"), choice("done", "Done"), choice("wont", "Won't do")),
+        choice("doing", "In progress"), choice("done", "Done")),
     ], { label: `Status of ${t.title}` });
   }
 
@@ -4940,7 +4942,7 @@
     const row = (icon, label, value, cls) => h("div", { class: `tk-fact ${cls || ""}` }, tkIcon(icon),
       h("span", { class: "tk-fact-label" }, label), h("span", { class: "tk-fact-value" }, value));
     const statusRow = h("div", { class: "tk-status-row", role: "group", "aria-label": "Status" },
-      Object.entries(TK_STATUS).map(([k, s]) => h("button", {
+      TK_OFFERED.map((k) => [k, TK_STATUS[k]]).map(([k, s]) => h("button", {
         class: `tk-status-btn ${k}${k === status ? " on" : ""}`, type: "button", "aria-pressed": k === status ? "true" : "false",
         onclick: () => tkSetStatus({ ...t, status }, k) }, tkIcon(k, "tk-chip-icon"), s.name)));
     const facts = h("div", { class: "tk-facts" },
