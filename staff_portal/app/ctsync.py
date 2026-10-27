@@ -386,8 +386,11 @@ def boards() -> list[dict]:
 
 
 def board_for(department_id) -> dict | None:
-    """The board new tasks of a department go to (the first chosen for it)."""
-    return next((b for b in boards() if b["department_id"] == department_id), None)
+    """The board new tasks of a department go to: the first chosen for it, else a board for
+    Everyone (a general board takes every department that has none of its own)."""
+    chosen = boards()
+    return (next((b for b in chosen if b["department_id"] == department_id), None)
+            or next((b for b in chosen if b["department_id"] is None), None))
 
 
 def follows(t: dict) -> dict | None:

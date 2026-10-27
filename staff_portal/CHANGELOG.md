@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.15
+
+- **Tasks from Connecteam forms can go to several departments:** tick any number (or Everyone)
+  under **Tasks go to** on a form's card. Each submission is still one task, seen by everyone in
+  any of those departments, found by the staff app's department filter in each, and tagged with
+  their names ("Maintenance, Front Desk"). Changing a form's departments moves its open tasks
+  too, followed ones included; finished ones stay where they were.
+- **A Connecteam board set to Everyone is the general board:** tasks made here for a department
+  with no board of its own go to it.
+
 ## 0.12.14
 
 - **Recurring Connecteam tasks are recognised by what they look like:** Connecteam's API lists

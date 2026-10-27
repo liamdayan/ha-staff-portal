@@ -1171,3 +1171,17 @@ def test_repeats_connecteam_doesnt_mark_recurring_are_known_by_title_and_person(
             assert [t["title"] for t in body["tasks"]].count("Reocu test 2") == 1
             assert shown["Reocu test 2"]["repeats"] is True and shown["Fix the sink"]["repeats"] is False
     run(scenario())
+
+
+def test_a_board_for_everyone_takes_departments_with_no_board_of_their_own(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            status, _ = await p.admin_call("PUT", "/api/tasks/sync", {"enabled": True, "boards": [
+                {"board_id": "501", "name": "General", "department_id": None},
+                {"board_id": "502", "name": "House", "department_id": p.house}]})
+            assert status == 200
+            assert ctsync.board_for(p.desk)["board_id"] == "501"     # no board of its own
+            assert ctsync.board_for(p.house)["board_id"] == "502"    # its own
+            assert ctsync.board_for(None)["board_id"] == "501"
+    run(scenario())
