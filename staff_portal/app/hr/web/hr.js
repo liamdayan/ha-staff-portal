@@ -1,7 +1,8 @@
 // HR portal. Plain script, no inline handlers (the page's Content-Security-Policy allows only
 // scripts from this address). Everything shown is plain text: h() makes text nodes, never HTML.
 // Other parts of the portal add scripts (hr-*.js) that load after this one and use
-// window.HRPortal: registerSection, registerPage, registerSettings, h, api, toast, ask.
+// window.HRPortal: registerSection, registerPage, registerSettings, h, api, toast, ask, and for the
+// look (hr.css's design system): pageHead(title, sub, ...extra), emptyState(text, more), initial(name).
 (() => {
   "use strict";
 
@@ -45,6 +46,26 @@
   const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString([], {
     month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) : "Never");
   const firstName = (name) => String(name || "").split(" ")[0];
+
+  // A page's title (one per page), its line underneath, and anything after it (badges, buttons).
+  function pageHead(title, sub, ...extra) {
+    return h("header", { class: "page-head" }, h("h1", { class: "page-title" }, title),
+      sub ? h("p", { class: "page-sub" }, sub) : null, extra);
+  }
+
+  // A card's empty state: "Nothing here yet." (and a line under it).
+  const emptyState = (text, more) => (more
+    ? h("div", { class: "empty" }, h("strong", null, text), h("span", null, more))
+    : h("p", { class: "empty" }, text));
+
+  // Signed out (sign-in, setup): the portal's logo and name above a card.
+  function authPage(title, sub, ...nodes) {
+    return h("div", { class: "auth" },
+      h("div", { class: "auth-hero" }, h("img", { class: "auth-logo", src: "/icon.png", alt: "" }),
+        h("div", { class: "brand-line" }, h("span", null, portalName), h("span", { class: "hr-mark" }, "HR")),
+        h("h1", null, title), sub ? h("p", null, sub) : null),
+      nodes);
+  }
 
   class SignedOut extends Error {}
   // A page's data that arrived after the person had already moved to another page: dropped, so
@@ -107,7 +128,12 @@
   // A dialog built from nodes; resolves with the value of the button pressed ("" if closed).
   function openDialog(title, nodes, buttons) {
     return new Promise((resolve) => {
-      const form = h("form", { method: "dialog" }, h("h2", null, title), nodes,
+      // A bottom sheet on phones, a panel on bigger screens (hr.css). The close button is the same
+      // as Escape: the dialog closes with "".
+      const form = h("form", { method: "dialog" },
+        h("div", { class: "sheet-head" }, h("h2", null, title),
+          h("button", { type: "button", class: "sheet-close", "aria-label": "Close", onclick: () => dialog.close() })),
+        nodes,
         h("div", { class: "actions" }, buttons.map((b) =>
           h("button", { value: b.value, class: b.class || "", type: "submit" }, b.label))));
       dialog.replaceChildren(form);
@@ -182,38 +208,74 @@
 
   // ---------------------------------------------------------------- navigation
 
+  // Phones: the top bar, a floating tab bar (Home, People or My file, More) and the whole menu in a
+  // sheet that More opens above the tab bar. Desk width (1024 px): the menu is a sidebar instead.
   const nav = $("#nav");
   const menuBtn = $("#menu-btn");
-  menuBtn.addEventListener("click", () => {
-    const open = nav.hidden;
+  const tabbar = $("#tabbar");
+  const scrim = $("#nav-scrim");
+  const deskQuery = window.matchMedia("(min-width: 1024px)");
+  const portalName = document.title.replace(/\s*HR$/, "") || document.title;
+  const initial = (name) => String(name || "?").trim().charAt(0).toUpperCase() || "?";
+  $("#brand-name").textContent = portalName;
+
+  function setMenu(open) {
     nav.hidden = !open;
-    menuBtn.setAttribute("aria-expanded", String(open));
+    scrim.hidden = !open || deskQuery.matches;
+    menuBtn.setAttribute("aria-expanded", String(open && !deskQuery.matches));
+  }
+  menuBtn.addEventListener("click", () => setMenu(nav.hidden));
+  scrim.addEventListener("click", () => setMenu(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !deskQuery.matches && !nav.hidden) setMenu(false);
   });
+  deskQuery.addEventListener("change", () => { if (me) setMenu(deskQuery.matches); });
 
   function drawNav() {
+    document.body.classList.toggle("signed-in", !!me);
+    const avatar = $("#bar-avatar");
     if (!me) {
-      nav.hidden = true;
+      setMenu(false);
+      nav.replaceChildren();
+      tabbar.hidden = true;
       menuBtn.hidden = true;
+      avatar.hidden = true;
+      $("#brand-sub").textContent = "HR portal";
       return;
     }
-    const links = [["#/", "Home", me.unread], me.staff ? ["#/people", "People"] : ["#/people/" + me.id, "My file"],
+    const mine = me.staff ? ["#/people", "People"] : ["#/people/" + me.id, "My file"];
+    const links = [["#/", "Home", me.unread], mine,
       ...Object.entries(H.pages).filter(([, p]) => p.nav && (!p.who || p.who(me))).map(([route, p]) => ["#/" + route, p.nav]),
-      ["#/account", "My account"], me.hr ? ["#/settings", "HR settings"] : null,
-      me.hr ? ["#/audit", "Audit log"] : null].filter(Boolean);
+      ["#/account", "My account"]];
+    const admin = me.hr ? [["#/settings", "HR settings"], ["#/audit", "Audit log"]] : [];
     const current = location.hash || "#/";
-    nav.replaceChildren(...links.map(([href, label, count]) => h("a", {
-      href, "aria-current": (href === "#/" ? current === "#/" || current === "#" : current.startsWith(href)) ? "page" : null,
-    }, label, count ? h("span", { class: "count" }, String(count)) : null)),
-    h("a", { href: "#/signout" }, "Sign out"));
+    const isCurrent = (href) => (href === "#/" ? current === "#/" || current === "#" : current.startsWith(href));
+    const link = ([href, label, count], cls = "nav-link") => h("a", { href, class: cls, "aria-current": isCurrent(href) ? "page" : null },
+      h("span", { class: "nav-text" }, label), count ? h("span", { class: "count", "aria-label": `${count} unread` }, String(count)) : null);
+    nav.replaceChildren(
+      h("div", { class: "nav-brand" }, h("img", { src: "/icon.png", alt: "", width: "36", height: "36" }),
+        h("div", { class: "nav-brand-text" }, h("div", { class: "nav-name" }, portalName), h("div", { class: "nav-sub" }, "HR portal")),
+        h("span", { class: "hr-mark" }, "HR")),
+      h("div", { class: "nav-links" }, links.map((l) => link(l))),
+      admin.length ? h("div", { class: "nav-label" }, "HR admin") : null,
+      admin.length ? h("div", { class: "nav-links" }, admin.map((l) => link(l))) : null,
+      h("div", { class: "nav-foot" }, h("span", { class: "avatar sm", "aria-hidden": "true" }, initial(me.name)),
+        h("div", { class: "nav-who" }, h("div", { class: "nav-who-name" }, me.name), h("div", { class: "nav-who-sub" }, me.role_word || "")),
+        h("a", { href: "#/signout", class: "nav-signout" }, "Sign out")));
+    // The tab bar: Home and People (or My file), then More for everything else.
+    const onTab = isCurrent("#/") || isCurrent(mine[0]);
+    tabbar.replaceChildren(link(links[0], "tab"), link(mine, "tab"), menuBtn);
+    menuBtn.classList.toggle("active", !onTab);
+    tabbar.hidden = false;
     menuBtn.hidden = false;
-    if (window.matchMedia("(min-width: 760px)").matches) nav.hidden = false;
+    avatar.hidden = false;
+    avatar.textContent = initial(me.name);
+    $("#brand-sub").textContent = [me.name, me.role_word].filter(Boolean).join(" · ");
+    if (deskQuery.matches) setMenu(true);
   }
 
   window.addEventListener("hashchange", () => {
-    if (window.matchMedia("(max-width: 759px)").matches) {
-      nav.hidden = true;
-      menuBtn.setAttribute("aria-expanded", "false");
-    }
+    if (!deskQuery.matches) setMenu(false);
     route();
   });
 
@@ -234,10 +296,12 @@
       if (parts[0] === "audit" && me.hr) return await showAudit();
       const page = H.pages[parts[0]];
       if (page && (!page.who || page.who(me))) return await page.render(main, parts.slice(1), params);
-      show(h("section", { class: "card" }, h("p", null, "That page isn't here."), h("a", { href: "#/" }, "Go home")));
+      show(h("section", { class: "card" }, emptyState("That page isn't here."),
+        h("div", { class: "actions" }, h("a", { class: "button", href: "#/" }, "Go home"))));
     } catch (err) {
       if (quiet(err)) return;
-      show(h("section", { class: "card" }, h("p", { class: "error" }, err.message), h("a", { href: "#/" }, "Go home")));
+      show(h("section", { class: "card" }, h("p", { class: "note bad" }, err.message),
+        h("div", { class: "actions" }, h("a", { class: "button", href: "#/" }, "Go home"))));
     }
   }
 
@@ -302,8 +366,8 @@
         required: true, maxlength: "8" })),
     h("label", null, "Authenticator code", h("small", null, "The 6-digit code from your authenticator app, if you use one"), code),
     useRecovery, error, h("div", { class: "actions full" }, button));
-    show(h("section", { class: "card narrow" }, h("h1", null, "Sign in to HR"),
-      note ? h("p", { class: "warn" }, note) : null, form,
+    show(authPage("Sign in to HR", "With your Connecteam mobile number and kiosk code.",
+      note ? h("p", { class: "warn" }, note) : null, h("section", { class: "card" }, form),
       h("p", { class: "muted small" }, "Managers, directors and HR need an authenticator code. If yours isn't set up yet, ask HR for a setup code."),
       h("p", { class: "muted small" }, "After 5 wrong tries, sign-in pauses for 15 minutes.")));
     form.elements.mobile.focus();
@@ -325,17 +389,18 @@
     try {
       info = await api("GET", `/api/setup/${token}`);
     } catch (err) {
-      return show(h("section", { class: "card narrow" }, h("h1", null, "Set up"), h("p", { class: "error" }, err.message)));
+      return show(authPage("Set up", null, h("section", { class: "card" }, h("p", { class: "error" }, err.message))));
     }
     if (!info.has_code) {
-      return show(h("section", { class: "card narrow" }, h("h1", null, "Set up"),
-        h("p", null, "Connecteam has no kiosk code for you yet, so this can't be set up. Ask HR.")));
+      return show(authPage("Set up", null, h("section", { class: "card" },
+        h("p", null, "Connecteam has no kiosk code for you yet, so this can't be set up. Ask HR."))));
     }
-    show(h("section", { class: "card narrow" }, h("h1", null, "Set up your HR sign-in"),
-      h("p", null, "This takes about two minutes. You'll need your phone with an authenticator app, such as Google Authenticator or Microsoft Authenticator."),
-      h("h2", null, "Is this you?"), h("p", { class: "code" }, info.name),
-      h("div", { class: "actions full" },
-        h("button", { class: "primary", type: "button", onclick: setupPin }, "Yes, that's me")),
+    show(authPage("Set up your HR sign-in",
+      "This takes about two minutes. You'll need your phone with an authenticator app, such as Google Authenticator or Microsoft Authenticator.",
+      h("section", { class: "card" }, setupSteps(1),
+        h("h2", null, "Is this you?"), h("p", { class: "code who-name" }, info.name),
+        h("div", { class: "actions full" },
+          h("button", { class: "primary", type: "button", onclick: setupPin }, "Yes, that's me"))),
       h("p", { class: "muted small" }, "Not you? Close this page and tell HR.")));
   }
 
@@ -354,7 +419,7 @@
     } }, h("label", null, "Your PIN", h("small", null, "Your Connecteam kiosk code"),
       h("input", { name: "pin", type: "password", inputmode: "numeric", autocomplete: "current-password", required: true, maxlength: "8" })),
     error, h("div", { class: "actions full" }, h("button", { class: "primary", type: "submit" }, "Next")));
-    show(h("section", { class: "card narrow" }, h("h1", null, "Type your PIN"), form));
+    show(authPage("Type your PIN", null, h("section", { class: "card" }, setupSteps(2), form)));
     form.elements.pin.focus();
   }
 
@@ -382,8 +447,12 @@
     return form;
   }
 
+  // Where someone is in setting up: three steps (name, PIN, authenticator).
+  const setupSteps = (at) => h("ol", { class: "steps", "aria-label": `Step ${at} of 3` },
+    [1, 2, 3].map((n) => h("li", { class: n <= at ? "on" : null })));
+
   function setupScan(r) {
-    show(h("section", { class: "card narrow" }, h("h1", null, "Scan with your phone"),
+    show(authPage("Scan with your phone", null, h("section", { class: "card" }, setupSteps(3),
       scanStep(r, async (code) => {
         const done = await api("POST", `/api/setup/${setupToken}/finish`, { code });
         setupToken = null;
@@ -391,7 +460,7 @@
         await refreshMe();
         location.hash = "#/";
         await route();
-      })));
+      }))));
   }
 
   // ---------------------------------------------------------------- home
@@ -403,23 +472,25 @@
       ? `Last sign-in: ${when(me.last_signin.at)}${me.last_signin.ip ? `, from ${me.last_signin.ip}` : ""}. Not you? Tell HR.`
       : "This is your first sign-in.";
     const inbox = home.inbox || [];
+    const unread = inbox.filter((i) => !i.read_at).length;
     show(
-      h("section", { class: "card" }, h("h1", null, `Hello, ${firstName(me.name)}`),
-        h("p", { class: "muted small" }, last)),
-      home.todos.length ? h("section", { class: "card" }, h("h2", null, "To do"),
-        h("ul", { class: "list" }, home.todos.map((t) => h("li", null, t.link
-          ? h("a", { class: "item", href: t.link }, h("span", { class: "title" }, t.text))
-          : h("div", { class: "item" }, h("span", { class: "title" }, t.text)))))) : null,
-      h("section", { class: "card" }, h("h2", null, "Inbox"),
-        inbox.length ? h("ul", { class: "list" }, inbox.map(inboxItem))
-          : h("p", { class: "muted" }, "Nothing here yet."),
-        inbox.some((i) => !i.read_at) ? h("div", { class: "actions" },
-          h("button", { type: "button", onclick: () => run(async () => {
-            const r = await api("POST", "/api/inbox/read", {});
-            me.unread = r.unread;
-            await again();
-            drawNav();
-          }) }, "Mark all read")) : null));
+      pageHead(`Hello, ${firstName(me.name)}`, last),
+      h("div", { class: home.todos.length ? "cols" : "stack" },
+        home.todos.length ? h("section", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", null, "To do"), h("span", { class: "badge warn" }, String(home.todos.length))),
+          h("ul", { class: "list" }, home.todos.map((t) => h("li", null, t.link
+            ? h("a", { class: "item", href: t.link }, h("span", { class: "title" }, t.text))
+            : h("div", { class: "item" }, h("span", { class: "title" }, t.text)))))) : null,
+        h("section", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", null, "Inbox"),
+            unread ? h("button", { type: "button", class: "small-btn", onclick: () => run(async () => {
+              const r = await api("POST", "/api/inbox/read", {});
+              me.unread = r.unread;
+              await again();
+              drawNav();
+            }) }, "Mark all read") : null),
+          inbox.length ? h("ul", { class: "list" }, inbox.map(inboxItem))
+            : emptyState("Nothing here yet.", "Messages from HR and the portal show here."))));
   }
 
   function inboxItem(i) {
@@ -449,21 +520,27 @@
     if (todoFilter === "code") people = people.filter((p) => (p.flags || []).includes("No kiosk code in Connecteam"));
     if (todoFilter === "access") people = people.filter((p) => (p.flags || []).includes("Access ended"));
     const search = h("input", { type: "search", name: "q", value: q, placeholder: "Search by name", "aria-label": "Search by name" });
-    const form = h("form", { class: "row", onsubmit: (e) => {
+    const form = h("form", { class: "search", role: "search", onsubmit: (e) => {
       e.preventDefault();
       location.hash = `#/people?${new URLSearchParams({ q: search.value, ...(former ? { former: "1" } : {}) })}`;
     } }, search, h("button", { type: "submit" }, "Search"));
-    show(h("section", { class: "card" },
-      h("h1", null, former ? "Former employees" : "People"), form,
-      me.hr ? h("p", null, h("a", { href: former ? "#/people" : "#/people?former=1" },
-        former ? "Show current employees" : "Show former employees")) : null,
-      todoFilter ? h("p", null, h("a", { href: "#/people" }, "Show everyone")) : null,
+    show(pageHead(former ? "Former employees" : "People",
+      people.length ? `${people.length} ${people.length === 1 ? "person" : "people"}${q ? ` matching “${q}”` : ""}` : null),
+    form,
+    me.hr || todoFilter ? h("div", { class: "toolbar" },
+      me.hr ? h("nav", { class: "seg", "aria-label": "Current or former employees" },
+        h("a", { href: "#/people", "aria-current": former ? null : "page" }, "Current"),
+        h("a", { href: "#/people?former=1", "aria-current": former ? "page" : null }, "Former")) : null,
+      todoFilter ? h("a", { class: "button small-btn", href: "#/people" }, "Show everyone") : null) : null,
+    h("section", { class: "card flush" },
       people.length ? h("ul", { class: "list" }, people.map((p) => h("li", null,
-        h("a", { class: "item", href: `#/people/${encodeURIComponent(p.id)}` },
-          h("div", { class: "title" }, p.name),
-          h("div", { class: "sub" }, [p.departments.join(", ") || "No department", p.role !== "Employee" ? p.role : null].filter(Boolean).join(" · ")),
-          (p.flags || []).map((f) => h("span", { class: "badge bad" }, f))))))
-        : h("p", { class: "muted" }, q ? "No one by that name." : "No one to show.")));
+        h("a", { class: "item with-avatar", href: `#/people/${encodeURIComponent(p.id)}` },
+          h("span", { class: "avatar", "aria-hidden": "true" }, initial(p.name)),
+          h("div", { class: "item-text" },
+            h("div", { class: "title" }, p.name),
+            h("div", { class: "sub" }, [p.departments.join(", ") || "No department", p.role !== "Employee" ? p.role : null].filter(Boolean).join(" · ")),
+            (p.flags || []).length ? h("div", { class: "chips" }, p.flags.map((f) => h("span", { class: "badge bad" }, f))) : null)))))
+        : emptyState(q ? "No one by that name." : "No one to show.")));
   }
 
   async function showPerson(id) {
@@ -477,10 +554,14 @@
       else drawSection(box, s, p, again);
       return box;
     });
-    show(h("section", { class: "card" }, h("h1", null, p.name),
-      h("p", { class: "muted" }, [p.departments.join(", ") || "No department", p.role].join(" · ")),
-      p.archived ? h("span", { class: "badge bad" }, "Former employee") : null,
-      (p.flags || []).map((f) => h("span", { class: "badge bad" }, f))), sections);
+    const flags = [p.archived ? "Former employee" : null, ...(p.flags || [])].filter(Boolean);
+    show(h("header", { class: "page-head with-avatar" },
+      me.staff ? h("a", { class: "back-link", href: p.archived ? "#/people?former=1" : "#/people" }, "People") : null,
+      h("span", { class: "avatar lg", "aria-hidden": "true" }, initial(p.name)),
+      h("h1", { class: "page-title" }, p.name),
+      h("p", { class: "page-sub" }, [p.departments.join(", ") || "No department", p.role].join(" · ")),
+      flags.length ? h("div", { class: "chips" }, flags.map((f) => h("span", { class: "badge bad" }, f))) : null),
+    sections);
   }
 
   // A section as the server describes it: rows, notes and action buttons.
@@ -523,7 +604,8 @@
   async function showAccount() {
     const again = redrawer(showAccount);
     const acc = await api("GET", "/api/account");
-    const totp = h("section", { class: "card" }, h("h2", null, "Authenticator code"));
+    const totp = h("section", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Authenticator code"),
+      acc.totp_on ? h("span", { class: "badge ok" }, "On") : h("span", { class: acc.totp_required ? "badge bad" : "badge quiet" }, "Off")));
     if (acc.totp_on) {
       totp.append(h("p", null, "On. You type a code from your authenticator app when you sign in."),
         h("p", { class: "muted small" }, `${acc.recovery_left} recovery code${acc.recovery_left === 1 ? "" : "s"} left.`),
@@ -545,10 +627,12 @@
         h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: () => newPhone(true) }, "Turn on")));
     }
     const devices = h("section", { class: "card" }, h("h2", null, "Signed-in devices"),
-      h("ul", { class: "list" }, acc.sessions.map((s) => h("li", null, h("div", { class: "item" },
-        h("div", { class: "title" }, s.current ? "This device" : deviceName(s.agent)),
-        h("div", { class: "sub" }, `Signed in ${when(s.created_at)} · last used ${when(s.last_used)}${s.ip ? ` · ${s.ip}` : ""}`),
-        s.current ? null : h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
+      h("ul", { class: "list" }, acc.sessions.map((s) => h("li", null, h("div", { class: "item split" },
+        h("div", { class: "item-text" },
+          h("div", { class: "title" }, s.current ? "This device" : deviceName(s.agent),
+            s.current ? h("span", { class: "badge quiet" }, "Now") : null),
+          h("div", { class: "sub" }, `Signed in ${when(s.created_at)} · last used ${when(s.last_used)}${s.ip ? ` · ${s.ip}` : ""}`)),
+        s.current ? null : h("button", { type: "button", class: "small-btn", onclick: () => run(async () => {
           await api("DELETE", `/api/account/sessions/${s.id}`);
           await again();
         }, "Signed out on that device.") }, "Sign out"))))),
@@ -556,9 +640,11 @@
         if (!(await confirmDialog("Sign out on every device, including this one?", "Sign out everywhere", true))) return;
         if (await run(() => api("POST", "/api/signout-everywhere", {}))) showSignIn("You're signed out everywhere.");
       } }, "Sign out everywhere")));
-    show(h("section", { class: "card" }, h("h1", null, "My account"),
-      h("p", { class: "muted" }, `${me.name} · ${me.role_word}`),
-      h("p", { class: "muted small" }, `You're signed out after ${me.idle_minutes} minutes without use, and after 8 hours.`)),
+    show(h("header", { class: "page-head with-avatar" },
+      h("span", { class: "avatar lg", "aria-hidden": "true" }, initial(me.name)),
+      h("h1", { class: "page-title" }, "My account"),
+      h("p", { class: "page-sub" }, `${me.name} · ${me.role_word}`),
+      h("p", { class: "page-sub small" }, `You're signed out after ${me.idle_minutes} minutes without use, and after 8 hours.`)),
     totp, devices);
   }
 
@@ -580,8 +666,9 @@
     }
     const r = await run(() => api("POST", "/api/account/authenticator", body));
     if (!r) return;
-    show(h("section", { class: "card narrow" }, h("h1", null, firstTime ? "Turn on an authenticator" : "Set up a new phone"),
-      firstTime ? null : h("p", { class: "muted" }, "Once this is done, your old phone's codes stop working."),
+    show(pageHead(firstTime ? "Turn on an authenticator" : "Set up a new phone",
+      firstTime ? null : "Once this is done, your old phone's codes stop working."),
+    h("section", { class: "card narrow" },
       scanStep(r, async (code) => {
         const done = await api("POST", "/api/account/authenticator/finish", { token: r.token, code });
         await showRecoveryCodes(done.recovery_codes);
@@ -616,10 +703,12 @@
         p.id === s.me ? null : h("button", { type: "button", class: "linkish", onclick: async () => {
           if (await confirmDialog(`Take ${p.name}'s ${role} role away?`, "Take away", true)) await setRole(p.id, "none");
         } }, "Take away")))))
-      : h("p", { class: "muted" }, "None yet.")];
+      : h("p", { class: "muted small" }, "None yet.")];
     const roles = h("section", { class: "card" }, h("h2", null, "Roles"),
       h("p", { class: "muted small" }, "Directors see everyone except HR admins and other directors. Managers see the people in the departments you give them. Only the owner makes HR admins, in Home Assistant."),
-      h("h3", null, "HR admins"), h("p", null, s.sections.roles.hr_admins.map((p) => p.name).join(", ") || "None"),
+      h("h3", null, "HR admins"), s.sections.roles.hr_admins.length
+        ? h("div", { class: "chips" }, s.sections.roles.hr_admins.map((p) => h("span", { class: "badge" }, p.name)))
+        : h("p", null, "None"),
       roleList("Directors", s.sections.roles.directors, "director"),
       roleList("Managers", s.sections.roles.managers, "manager"), h("h3", null, "Give someone a role"), roleForm);
 
@@ -697,8 +786,8 @@
       H.settings[name](box, data, again);
       return box;
     });
-    show(h("section", { class: "card" }, h("h1", null, "HR settings")), roles, departments, signinBox, notifications,
-      fields, records, ...extra, keyBox);
+    show(pageHead("HR settings", "Roles, sign-in, Connecteam fields, records and each part of the portal."),
+      roles, departments, signinBox, notifications, fields, records, ...extra, keyBox);
 
     function managerForm(m) {
       const form = h("form", { onsubmit: (e) => {
@@ -743,15 +832,15 @@
       more.hidden = next.lines.length < 100;
     }) }, "Show older");
     const result = h("p", { class: "muted small" }, checkText(data.last_check));
-    show(h("section", { class: "card" }, h("h1", null, "Audit log"),
-      h("p", { class: "muted small" }, "Every sign-in, look at a file and change. Lines can't be changed: Check audit log shows whether any were."),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: () => run(async () => {
-        const r = await api("POST", "/api/audit/check", {});
-        result.textContent = checkText(r);
-        toast(r.ok ? "No changes found." : "Something was changed. See the note.", !r.ok);
-      }) }, "Check audit log")), result),
-    h("section", { class: "card" }, data.lines.length ? lines : h("p", { class: "muted" }, "Nothing yet."),
-      h("div", { class: "actions" }, more)));
+    show(pageHead("Audit log", "Every sign-in, look at a file and change. Lines can't be changed: Check audit log shows whether any were."),
+      h("section", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Check"),
+        h("button", { type: "button", class: "primary", onclick: () => run(async () => {
+          const r = await api("POST", "/api/audit/check", {});
+          result.textContent = checkText(r);
+          toast(r.ok ? "No changes found." : "Something was changed. See the note.", !r.ok);
+        }) }, "Check audit log")), result),
+      h("section", { class: "card" }, data.lines.length ? lines : emptyState("Nothing yet."),
+        h("div", { class: "actions" }, more)));
   }
 
   function checkText(r) {
@@ -765,9 +854,12 @@
   // ---------------------------------------------------------------- for other parts
 
   Object.assign(H, {
-    h, api, toast, ask, confirmDialog, openDialog, showQr, show, when, route,
+    h, api, toast, ask, confirmDialog, openDialog, showQr, show, when, route, pageHead, emptyState, initial,
     registerSection(name, render) { H.sections[name] = render; },
-    registerPage(route_, page) { H.pages[route_] = page; },
+    registerPage(route_, page) {
+      H.pages[route_] = page;
+      if (me) drawNav();   // a part that loaded after the first page was drawn: show it in the menu
+    },
     registerSettings(name, render) { H.settings[name] = render; },
   });
 

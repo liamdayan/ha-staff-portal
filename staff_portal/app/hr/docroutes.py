@@ -143,7 +143,9 @@ def documents_section(svc, v: access.Viewer, p: dict, rel: str) -> dict | None:
              "rows": [{"label": "Files", "value": str(len(current)) if current else "None yet"}],
              "documents": docs, "kinds": addable(kinds, rel, p),
              "limit_mb": documents.upload_limit(rel) // 2**20,
-             "waiting_note": None if rel == "hr" else "Files you add wait for HR to check them."}
+             "waiting_note": None if rel == "hr" else "Files you add wait for HR to check them.",
+             # HR's day (its time zone), the add form's default date: never the device's clock.
+             "today": notify.local_day(db)}
     if rel == "hr":
         settings = svc.main_settings()
         restricted_kinds = section_kinds(db, rel, restricted=True)
@@ -173,7 +175,8 @@ async def api_restricted(request: web.Request):
     apart = folders.place_drive(svc.main_settings(), folders.RESTRICTED)[1]
     return web.json_response({"documents": docs, "kinds": addable(kinds, "hr", p),
                               "warning": None if apart else RESTRICTED_WARNING,
-                              "limit_mb": documents.upload_limit("hr") // 2**20})
+                              "limit_mb": documents.upload_limit("hr") // 2**20,
+                              "today": notify.local_day(svc.db)})
 
 
 # ---------------------------------------------------------------- opening a file

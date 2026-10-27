@@ -1,12 +1,21 @@
-/* HR portal: documents (hr-documents.js). Phone first, light and dark, using hr.css's colours. */
+/* HR portal: documents (hr-documents.js). Only this part's layout: everything else is hr.css's
+   design system (cards, lists, badges, sub-cards, forms), so it follows dark mode by itself. */
 .doc-image { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain;
-  margin: 4px 0 10px; border-radius: 10px; background: var(--bg); }
+  margin: 0 0 10px; border-radius: var(--radius-sm); background: var(--card-2); }
 .doc-note { margin: 6px 0; }
-.doc-add, .doc-hr { margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--line); }
-.doc-add input[type="file"] { padding: 9px 10px; }
-.doc-restricted { margin-bottom: 6px; }
-.item .title .badge { font-weight: 500; vertical-align: middle; }
-.list .item .actions { margin-top: 8px; }
-.list .item .actions .button, .list .item .actions button { min-height: 40px; padding: 8px 14px; }
-.doc-kind > div { min-width: 0; }
-.doc-kind > button { flex: none; white-space: nowrap; }
+/* A part of the section (adding a file, the recycle bin, open restricted files): a hairline above. */
+.doc-part { margin-top: 16px; padding-top: 4px; border-top: 1px solid var(--line); }
+.doc-hr { margin-top: 16px; }
+.doc-hr > .sub-card { margin: 0 0 10px; }
+.doc-hr .card-head { margin-bottom: 6px; }
+.doc-hr .card-head h3, .doc-part > .card-head h3 { margin: 0; }
+.doc-part > .card-head { margin: 14px 0 6px; }
+/* Quiet buttons on an inset panel would vanish into it. */
+.doc-hr .sub-card button:not(.primary), .doc-hr .sub-card .button:not(.primary) { background: var(--card); }
+.doc-groups > h3.eyebrow { margin: 14px 0 0; }
+.doc-groups > h3.eyebrow:first-child { margin-top: 2px; }
+.doc-buttons { margin-top: 10px; gap: 8px; }
+.doc-add .row { margin-bottom: 16px; }
+@media (min-width: 1024px) { .doc-add .row { margin-bottom: 14px; } }
+/* Kind and date side by side only when both fit on one line (stacked on phones). */
+.doc-add .row > label { flex-basis: 210px; }

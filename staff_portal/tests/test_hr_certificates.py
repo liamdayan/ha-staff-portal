@@ -612,6 +612,22 @@ def test_boards_banners_filters_and_the_spreadsheet(tmp_path):
 
 # ---------------------------------------------------------------- reminders
 
+def test_a_or_an_by_how_the_name_sounds():
+    """Reminders say "an OLCC Service Permit", not "a OLCC Service Permit"."""
+    a = certificates.a_or_an
+    assert a("OLCC Service Permit") == "an OLCC Service Permit"          # "oh-el-see-see"
+    assert a("Oregon Food Handler Card") == "an Oregon Food Handler Card"
+    assert a("Food handler certificate") == "a Food handler certificate"
+    assert a("HACCP certificate") == "an HACCP certificate"              # "aitch"
+    assert a("MSDS training") == "an MSDS training"
+    assert a("CPR card") == "a CPR card"
+    assert a("First aid") == "a First aid"
+    assert a("Alcohol server permit") == "an Alcohol server permit"
+    assert a("Universal precautions card") == "a Universal precautions card"
+    assert a("Hour of training") == "an Hour of training"
+    assert a("US work permit") == "a US work permit"
+
+
 def test_reminders_cadence_heads_ups_and_running_twice(tmp_path):
     async def scenario():
         async with HR(tmp_path) as hr:
@@ -634,8 +650,8 @@ def test_reminders_cadence_heads_ups_and_running_twice(tmp_path):
             assert len(ahead) == 1 and "runs out on 11/20/2026" in ahead[0]["title"]
             assert len(inbox("303", "cert_expiring")) == 1                # the 6-month heads-up
             assert {i["title"] for i in inbox("304", "cert_due")} == {
-                "You need a OLCC Service Permit by 11/1/2026. Add it in the HR portal.",
-                "You need a Oregon Food Handler Card by 11/24/2026. Add it in the HR portal."}
+                "You need an OLCC Service Permit by 11/1/2026. Add it in the HR portal.",
+                "You need an Oregon Food Handler Card by 11/24/2026. Add it in the HR portal."}
             # Max (the Pub's manager) and both HR admins get one message each.
             team = inbox("305", "cert_team")
             assert len(team) == 1 and team[0]["title"].startswith("3 certificates are expired or missing")

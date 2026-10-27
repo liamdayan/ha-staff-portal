@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <title>{{TITLE}}</title>
@@ -12,12 +14,22 @@
 {{SCRIPTS}}
 </head>
 <body>
-<header class="bar">
-  <a class="brand" href="#/" id="brand"><img src="/icon.png" alt="" width="28" height="28"><span>{{TITLE}}</span></a>
-  <button type="button" class="menu-btn" id="menu-btn" aria-expanded="false" aria-controls="nav" hidden>Menu</button>
+<header class="bar" id="bar">
+  <a class="brand" href="#/" id="brand">
+    <img class="brand-logo" src="/icon.png" alt="" width="36" height="36">
+    <span class="brand-text">
+      <span class="brand-line"><span class="brand-name" id="brand-name">{{TITLE}}</span><span class="hr-mark" title="HR portal">HR</span></span>
+      <span class="brand-sub" id="brand-sub">HR portal</span>
+    </span>
+  </a>
+  <a class="bar-avatar avatar sm" id="bar-avatar" href="#/account" aria-label="My account" hidden></a>
 </header>
 <nav id="nav" class="nav" aria-label="HR portal" hidden></nav>
-<main id="main" tabindex="-1"><p class="muted center">Loading…</p></main>
+<div id="nav-scrim" class="nav-scrim" hidden></div>
+<nav id="tabbar" class="tabbar" aria-label="HR portal, main pages" hidden>
+  <button type="button" class="tab" id="menu-btn" aria-expanded="false" aria-controls="nav" hidden>More</button>
+</nav>
+<main id="main" tabindex="-1"><div class="loading"><div class="spinner" role="status" aria-label="Loading"></div></div></main>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <dialog id="dialog"></dialog>
 <noscript><p class="center">The HR portal needs JavaScript turned on.</p></noscript>

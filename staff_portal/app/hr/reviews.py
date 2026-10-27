@@ -1207,6 +1207,7 @@ def view(svc, viewer, review: dict, person: dict, rel: str) -> dict:
     staff, status = rel in STAFF_RELS, review["status"]
     shared = status in ("shared", "closed")
     out = {"review": summary(db, review, person, rel, today), "relation": rel,
+           "today": today.isoformat(),   # HR's day: the page's default dates, never the device's
            "can": can_of(db, viewer, review, person, rel),
            "form": {"name": body["name"], "scale": body["scale"], "comment_at": body["comment_at"],
                     "sections": sections, "probation": review["kind"] == "probation",
