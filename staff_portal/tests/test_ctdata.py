@@ -192,9 +192,12 @@ def test_forms_and_submissions_as_plain_text(tmp_path):
          "answers": [{"question": "What's wrong?", "answer": "Tap <b>leaks</b>"},
                      {"question": "Where", "answer": "Room 4"},
                      {"question": "Urgent?", "answer": "Yes"},
-                     {"question": "Photos", "answer": "2 photos"}]},
+                     {"question": "Photos", "answer": "2 photos"}],
+         "photos": [{"url": "https://x/1.jpg", "name": ""}, {"url": "https://x/2.jpg", "name": ""}],
+         "manager": {"status": {}, "notes": {}}},
         {"id": "s2", "user_id": None, "name": "Anonymous", "submitted_at": "2026-10-21T08:00",
-         "answers": [{"question": "What's wrong?", "answer": ""}]}]
+         "answers": [{"question": "What's wrong?", "answer": ""}], "photos": [],
+         "manager": {"status": {}, "notes": {}}}]
     assert [s["id"] for s in later] == ["s2"]
     with pytest.raises(ValueError):
         go(ctdata.form_submissions("../users", date(2026, 10, 19), date(2026, 10, 25)))

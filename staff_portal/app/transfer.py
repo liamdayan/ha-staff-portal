@@ -824,19 +824,25 @@ def make_backup(db, branding, version: str) -> dict:
 
 def tasks_section(db) -> dict:
     """Tasks (with their history, the bin too), the forms that make them and the submissions
-    already seen, as a backup carries them (tasks.clean_backup_section reads them back)."""
+    already seen, and the Connecteam task sync's boards and linked tasks, as a backup carries
+    them (tasks.clean_backup_section reads them back)."""
     rows = lambda sql, *args: [dict(r) for r in db.conn.execute(sql, args)]
     newest = "SELECT id FROM tasks ORDER BY id DESC LIMIT ?"
     return {
         "tasks": rows(f"SELECT * FROM tasks WHERE id IN ({newest}) ORDER BY id", task_rules.MAX_TASKS),
-        "history": rows(f"""SELECT task_id, at, by_id, by_name, action, from_status, to_status
+        "history": rows(f"""SELECT task_id, at, by_id, by_name, action, from_status, to_status, note
                             FROM task_history WHERE task_id IN ({newest}) ORDER BY id DESC LIMIT ?""",
                         task_rules.MAX_TASKS, task_rules.MAX_HISTORY)[::-1],
         "forms": rows("""SELECT form_id, name, department_id, title_question, assign_submitter,
-                         picked_at, last_ok FROM task_forms"""),
+                         picked_at, last_ok, follow FROM task_forms"""),
         "seen": [list(r) for r in db.conn.execute(
             "SELECT form_id, submission_id FROM task_form_seen ORDER BY seen_at DESC LIMIT ?",
-            (task_rules.MAX_HISTORY,))]}
+            (task_rules.MAX_HISTORY,))],
+        "sync": {"enabled": db.settings().get("ct_tasks_on") == "1",
+                 "boards": rows("SELECT board_id, name, department_id, picked_at FROM task_ct_boards"),
+                 "seen": [list(r) for r in db.conn.execute(
+                     "SELECT ct_task_id, board_id FROM task_ct_seen ORDER BY seen_at DESC LIMIT ?",
+                     (task_rules.MAX_HISTORY,))]}}
 
 
 def log_sections(db) -> dict:

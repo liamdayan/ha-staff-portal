@@ -1263,6 +1263,8 @@ One Connecteam app (one Client ID and Secret) serves everything. Its permissions
 | **forms.read** | reports (required forms) and [tasks from forms](#tasks) |
 | **jobs.read** (optional) | job names in reports; without it, jobs show without names |
 | **time_off.read** (optional) | time off policy names in reports (Sick leave, Vacation); without it, leave shows as "Time off" |
+| **quick_tasks.read**, **quick_tasks.write**, **quick_tasks.delete** (optional) | the [two-way sync with Connecteam Quick Tasks](#tasks) |
+| **forms.write** (optional) | [forms that follow a status](#tasks) writing it back; without it, they only read it |
 
 Staff Access itself needs only the first two. **Test connection** says if reports and tasks are
 missing one, and a report or a form's card names the permission Connecteam refused, in
@@ -1518,7 +1520,8 @@ the person who made it, or a manager who could see it (its department, Everyone,
 them), can put it back. Finished tasks are kept for a year.
 
 **Deleting a department.** A department can't be deleted while a form still sends its tasks
-there: pick another department for the form first. Tasks already in a deleted department show
+there, or a Connecteam board's tasks belong to it: pick another department for the form or
+board first. Tasks already in a deleted department show
 as **Old department**: the people who made them or were given them still see them, and so does
 anyone whose role has **Manage tasks**, so they can move them to another department.
 
@@ -1544,9 +1547,73 @@ allowance, so they never hold up the time clock checks; if Connecteam can't be r
 says so and it tries again later. Staff Access's Connecteam app needs the **forms.read**
 permission (see [Connecteam permissions](#connecteam-permissions)).
 
+**Forms that follow a status.** If a form has a **Status** manager field in Connecteam (like a
+Maintenance Request with "Working on it" and "Done"), its tasks can follow it. On the form's card,
+click **Follow a manager field**, pick the field, and choose the task status for each of its
+values (and for no value chosen yet: To do or In progress). Then:
+
+- every submission from the last month that isn't done shows as a task for the form's
+  department, even ones sent before you chose the form. Done ones don't show;
+- when its status changes in Connecteam, the task follows: Done there is Done here. An In
+  progress task here stays In progress while Connecteam has no status yet;
+- when someone changes the task here, its value is written to the submission in Connecteam (this
+  needs the **forms.write** permission). Connecteam can't clear a status through its API, so
+  moving a task back to To do (no status) or to Won't do (when no value means it) leaves
+  Connecteam's status as it is, and the task says so;
+- the manager's **Note** shows on the task, read only.
+
+These tasks are for the whole department, and stay with their form: they aren't made as Quick
+Tasks. A followed form is read a month at a time, so it counts as two in the cost below.
+
+**Photos.** Photos sent with a form (and image files) show on its task in the staff app: tap one
+to see it big. The add-on fetches each photo from Connecteam itself, only from Connecteam's own
+addresses, only pictures of at most 10 MB, and keeps a smaller copy for two weeks, so the phone
+never loads anything from another site and a photo still shows after Connecteam's link to it
+expires. One that can't be had says **Photo unavailable**.
+
+**Two-way sync with Connecteam Quick Tasks.** Off until you turn it on, on the **Tasks** tab:
+
+1. Check that Staff Access's Connecteam app has **quick_tasks.read**, **quick_tasks.write** and
+   **quick_tasks.delete** (and **forms.write** for forms that follow a status). **Test** shows
+   which it has, and reads the list of boards. A Connecteam app's permissions can't be changed:
+   if one is missing, make a new OAuth app with all of them and enter its keys in Settings →
+   Connections.
+2. **Choose a board** for each department whose tasks should be in Connecteam (or one for
+   Everyone), and pick the department its tasks belong to.
+3. Tick **Sync tasks with Connecteam** and **Save**.
+
+From then on:
+
+- a quick task made here goes to the board of its department, for the person it's given to when
+  they're linked to Connecteam (otherwise it's an unassigned draft there, which Connecteam
+  requires). A department with no board keeps its tasks here, and they say so;
+- changes to the title, notes, due date, person and status go both ways. To do and In progress
+  are open in Connecteam (In progress is kept here); Done is completed;
+- Won't do and the bin archive the task in Connecteam, and putting it back unarchives it. An
+  unassigned draft can't be archived in Connecteam, so it's deleted there instead and made again
+  if it's reopened or put back;
+- tasks made on those boards in Connecteam show up here for the board's department, given to
+  the linked person. The first read of a board takes only its open tasks, not its whole past.
+  Archived or deleted in Connecteam, a task goes to the bin here;
+- when the same thing is changed on both sides before they've caught up, the newer change wins,
+  and the task's history says where each change came from. A change that came from Connecteam is
+  never sent back;
+- a task moved to another department here stays on the board it was made on. A due date can't be
+  cleared in Connecteam through its API, so removing one here leaves Connecteam's as it is;
+- tasks made before the sync was turned on, and tasks from forms, stay here only.
+
+Changes are sent as they're made (at most 200 a day; more wait for the next day). The boards are
+read for changes on the same schedule as the forms, and share their about 300 requests a day: each
+board costs one request a read per 100 tasks on it. If Connecteam refuses a permission or asks for
+fewer requests, only the sync pauses, with the reason on the Tasks tab, and it tries again later;
+**Test** or **Save** tries again at once. The time clock checks always carry on. Nothing is asked
+while the sync is off.
+
 **Backups.** Full backups and migration files carry the tasks (with their history and the bin),
-the forms that make tasks, and each role's Manage tasks. A backup from before tasks leaves the
-tasks here as they are.
+the forms that make tasks, each role's Manage tasks, the sync's boards and each task's Connecteam
+link. A restore turns the sync off, so a restored copy never sends anything to Connecteam on its
+own: check the boards and turn it on again; it reads Connecteam's copy of each task first. A
+backup from before tasks leaves the tasks here as they are.
 
 ## Seeing staff actions in Home Assistant
 

@@ -361,6 +361,29 @@
       and change a task's status. Only the person who made a task, or someone whose role has <b>Manage
       tasks</b> (on the <button class="linkish" data-goto="roles">Roles</button> tab), can edit or delete it.</p>
     <div class="settings">
+      <fieldset id="tk-sync">
+        <legend>Two-way sync with Connecteam Quick Tasks</legend>
+        <p class="hint">Quick tasks made here go to the Connecteam board you choose for their department,
+          for the person they're given to (when they're linked to Connecteam). Changes go both ways: title,
+          notes, due date, who it's for, Done, Won't do and the bin. Tasks made on those boards in
+          Connecteam show up here for the board's department. Tasks from forms stay with their form.</p>
+        <p class="hint">The Connecteam app in <button class="linkish" type="button" data-goto="settings"
+          data-open-conn="conn-connecteam">Settings → Connections</button> needs <b>quick_tasks.read</b>,
+          <b>quick_tasks.write</b> and <b>quick_tasks.delete</b> (and <b>forms.write</b> for forms that
+          follow a manager field). <b>Test</b> checks them.</p>
+        <label class="check-row"><input type="checkbox" id="tk-sync-on">
+          <span>Sync tasks with Connecteam <small>Off until you turn it on. Tasks made before stay here only.</small></span></label>
+        <p class="hint tk-form-error" id="tk-sync-problem" hidden></p>
+        <div id="tk-boards" class="cards"></div>
+        <div class="tk-pick" id="tk-board-pick">
+          <button class="btn" type="button" id="tk-add-board">Choose a board</button>
+        </div>
+        <div class="card-actions">
+          <button class="btn" type="button" id="tk-sync-test">Test</button>
+          <button class="btn primary" type="button" id="tk-sync-save">Save</button>
+        </div>
+        <ul class="conn-checks" id="tk-sync-checks" hidden></ul>
+      </fieldset>
       <fieldset>
         <legend>Tasks from Connecteam forms</legend>
         <p class="hint">Each new submission of a form chosen here becomes one task, with its answers in the

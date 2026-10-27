@@ -45,6 +45,8 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import ctdata
 import ctlink
+import ctphotos
+import ctsync
 import migrate
 import reports as reports_kit
 import transfer
@@ -166,8 +168,10 @@ connecteam = Connecteam(
                     lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})),
     reports_usage_store=(load_reports_connecteam_usage,
                          lambda u: db.update_settings({"reports_connecteam_usage": json.dumps(u)})))
-# Reports and tasks read Connecteam through ctdata, in their own lane of the same budget.
+# Reports and tasks read Connecteam through ctdata, in their own lane of the same budget; the
+# task sync (ctsync) reads and writes through that lane too.
 ctdata.configure(connecteam, lambda: report_zone())
+ctsync.configure(lambda: db, connecteam, lambda: report_zone())
 
 
 def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
@@ -3036,7 +3040,12 @@ def task_view(t: dict, member: dict, manager: bool, departments: dict[int, str])
             "made_by_me": t["created_by_id"] == member["id"],
             "source": t["source"], "form_name": t["form_name"], "source_url": t["source_url"],
             "deleted_at": t["deleted_at"], "deleted_by": t["deleted_by"],
-            "can_edit": tasks.can_edit(t, member, manager, departments)}
+            "can_edit": tasks.can_edit(t, member, manager, departments),
+            # The Connecteam sync: in Connecteam (as a Quick Task, or a followed submission),
+            # or why not; a form's photos (fetched through /photos/) and manager notes.
+            "connecteam": bool(t["ct_task_id"]) or bool(t["source"] == "form" and t["ct_status"] is not None),
+            "ct_note": t["ct_note"], "manager_note": t["manager_note"],
+            "photos": [p.get("name") or "" for p in json.loads(t["photos"] or "[]")]}
 
 
 def visible_task(task_id: str, member: dict, manager: bool) -> dict:
@@ -3098,6 +3107,7 @@ async def api_add_task(request: web.Request):
     except tasks.TaskError as err:
         return bad_request(str(err))
     task_id = db.add_task(fields, member, time.time())
+    ctsync.touch(task_id, new=True)
     db.log(actor_name(device, member), "Added a task", role=role_label(device, member),
            detail=fields["title"])
     return web.json_response({"task": task_view(db.task(task_id), member, manager,
@@ -3116,6 +3126,7 @@ async def api_edit_task(request: web.Request):
     except tasks.TaskError as err:
         return bad_request(str(err))
     db.edit_task(task["id"], fields, member, time.time())
+    ctsync.touch(task["id"])
     db.log(actor_name(device, member), "Changed a task", role=role_label(device, member),
            detail=fields["title"])
     return web.json_response({"task": task_view(db.task(task["id"]), member, manager,
@@ -3131,7 +3142,8 @@ async def api_task_status(request: web.Request):
         status = tasks.clean_status(data, task)
     except tasks.TaskError as err:
         return bad_request(str(err), 409, task=task_view(task, member, manager, task_departments()))
-    db.set_task_status(task["id"], status, member, time.time())
+    if db.set_task_status(task["id"], status, member, time.time()):
+        ctsync.touch(task["id"])
     return web.json_response({"task": task_view(db.task(task["id"]), member, manager,
                                                 task_departments())})
 
@@ -3142,9 +3154,28 @@ async def api_delete_task(request: web.Request):
     if not tasks.can_edit(task, member, manager, task_departments()):
         return bad_request("Only the person who made this task, or a manager, can delete it.", 403)
     db.bin_task(task["id"], member, time.time())
+    ctsync.touch(task["id"])
     db.log(actor_name(device, member), "Deleted a task", role=role_label(device, member),
            detail=task["title"])
     return web.json_response({"ok": True})
+
+
+def photo_dir() -> str:
+    return os.path.join(os.path.dirname(db.path), "task-photos")
+
+
+async def api_task_photo(request: web.Request):
+    """One of a task's photos, for someone who may see the task: fetched from Connecteam's own
+    hosts on the server (ctphotos), as a smaller copy kept a while, so the page needs no other
+    site (the staff app's CSP allows images from itself only)."""
+    device, member, manager = task_caller(request)
+    task = visible_task(request.match_info["id"], member, manager)
+    try:
+        body = await ctphotos.photo(task, int(request.match_info["n"]), photo_dir())
+    except ctphotos.Unavailable as err:
+        return bad_request(str(err), 404)
+    return web.Response(body=body, content_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=3600"})
 
 
 async def api_task_bin(request: web.Request):
@@ -3161,6 +3192,7 @@ async def api_restore_task(request: web.Request):
     if not task or not tasks.can_restore(task, member, manager, task_departments()):
         raise json_error(web.HTTPNotFound, "That task isn't in the bin any more.")
     db.bin_task(task["id"], member, time.time(), restore=True)
+    ctsync.touch(task["id"])
     db.log(actor_name(device, member), "Put back a task", role=role_label(device, member),
            detail=task["title"])
     return web.json_response({"ok": True})
@@ -3176,7 +3208,8 @@ async def check_task_forms(force: bool = False) -> int:
     """Turn new submissions of the chosen forms into tasks. Returns how many were made."""
     now = time.time()
     chosen = db.task_forms()
-    forms = [f for f in chosen if force or tasks.form_due(f, now, len(chosen))]
+    weight = ctsync.poll_weight(chosen)
+    forms = [f for f in chosen if force or tasks.form_due(f, now, weight)]
     if not forms:
         return 0
     if not connecteam_settings()[0]:
@@ -3192,6 +3225,9 @@ async def check_task_forms(force: bool = False) -> int:
     made = 0
     for form in forms:
         start, end = tasks.form_range(form, now, zone)
+        follow = tasks.follow_of(form)
+        if follow:   # a followed form reads back FORM_LOOKBACK_DAYS, a month at a time
+            start = datetime.fromtimestamp(now - tasks.FORM_LOOKBACK_DAYS * 86400, zone).date()
         try:
             subs = await ctdata.form_submissions(form["form_id"], start, end)
         except (ctdata.Unavailable, ValueError) as err:
@@ -3199,6 +3235,10 @@ async def check_task_forms(force: bool = False) -> int:
             continue
         form = db.task_form(form["form_id"])   # it may have been changed or removed meanwhile
         if not form:
+            continue
+        if follow and tasks.follow_of(form):
+            made += await ctsync.follow_submissions(form, subs, staff_by_ct, zone, time.time())
+            db.task_form_checked(form["form_id"], time.time(), None)
             continue
         ids = [str(sub.get("id"))[:80] for sub in subs
                if isinstance(sub, dict) and sub.get("id") not in (None, "")]
@@ -3218,13 +3258,18 @@ async def check_task_forms(force: bool = False) -> int:
 
 
 async def tasks_loop() -> None:
-    """Background loop: forms that are due, and once an hour the bin and old finished tasks."""
+    """Background loop: forms that are due, the Connecteam task sync, and once an hour the bin,
+    old finished tasks and old photo copies."""
     while True:
         try:
             if time.time() - tasks_purged[0] > 3600:
                 tasks_purged[0] = time.time()
                 db.purge_tasks(time.time(), tasks.BIN_DAYS, tasks.KEEP_FINISHED_DAYS)
+                ctphotos.tidy(photo_dir())
             await check_task_forms()
+            # The Connecteam task sync: changes waiting, then the boards that are due.
+            await ctsync.push_pending()
+            await ctsync.poll_due(ctsync.poll_weight(db.task_forms()))
         except Exception as err:  # noqa: BLE001 - the loop must keep running
             log.warning("Tasks from forms: %r", err)
         await asyncio.sleep(60)
@@ -3277,6 +3322,7 @@ def staff_app() -> web.Application:
     app.router.add_delete(r"/api/tasks/{id:\d{1,12}}", api_delete_task)
     app.router.add_post(r"/api/tasks/{id:\d{1,12}}/status", api_task_status)
     app.router.add_post(r"/api/tasks/{id:\d{1,12}}/restore", api_restore_task)
+    app.router.add_get(r"/api/tasks/{id:\d{1,12}}/photos/{n:\d{1,2}}", api_task_photo)
     # TT Hotel's lock records (door activity): the secret address is the only way in.
     app.router.add_post(r"/tthotel/records/{token:[A-Za-z0-9_-]{1,100}}", tthotel_records)
     app.on_shutdown.append(close_all_links)
@@ -4316,6 +4362,8 @@ async def admin_delete_department(request: web.Request):
         raise web.HTTPNotFound()
     # Its tasks would go nowhere: pick another department for the form first.
     forms = [f["name"] for f in db.task_forms() if f["department_id"] == dept["id"]]
+    forms += [f"The Connecteam board {b['name']}" for b in ctsync.boards()
+              if b["department_id"] == dept["id"]]
     if forms:
         return bad_request(f"{', '.join(forms)} still sends its tasks to {dept['name']}. On the "
                            "Tasks tab, pick another department for it (or Everyone) first.", 409)
@@ -7472,12 +7520,19 @@ def task_forms_view() -> list[dict]:
 
 
 def task_forms_body() -> dict:
-    """The chosen forms, and what checking them costs: how often, and about how many of the
-    reports lane's Connecteam requests a day."""
-    count = len(db.task_forms())
-    return {"forms": task_forms_view(), "check_minutes": tasks.form_interval(count) // 60,
-            "requests_a_day": tasks.form_requests_a_day(count),
-            "lane_a_day": connecteam_module.REPORTS_DAILY_CAP}
+    """The chosen forms, and what checking them and the Connecteam boards costs: how often, and
+    about how many of the reports lane's Connecteam requests a day (they share
+    tasks.FORM_DAILY_REQUESTS), and the task sync's state."""
+    weight = ctsync.poll_weight(db.task_forms())
+    departments = task_departments()
+    sync = ctsync.status()
+    sync["boards"] = [{**b, "department": "Everyone" if b["department_id"] is None
+                       else departments.get(b["department_id"], "Old department")}
+                      for b in sync["boards"]]
+    return {"forms": task_forms_view(), "check_minutes": tasks.form_interval(weight) // 60,
+            "requests_a_day": tasks.form_requests_a_day(weight),
+            "checks_a_day": tasks.FORM_DAILY_REQUESTS,
+            "lane_a_day": connecteam_module.REPORTS_DAILY_CAP, "sync": sync}
 
 
 async def admin_task_forms(request: web.Request):
@@ -7513,6 +7568,49 @@ async def admin_form_questions(request: web.Request):
     return web.json_response({"questions": questions[:100]})
 
 
+async def admin_form_fields(request: web.Request):
+    """A form's status manager fields with their values, to follow one (ctdata: from the list
+    of forms, or one request for the form)."""
+    try:
+        fields = await ctdata.form_fields(request.match_info["form_id"])
+    except ctdata.Unavailable as err:
+        return bad_request(str(err), 502)
+    except ValueError as err:
+        return bad_request(str(err), 404)
+    return web.json_response({"fields": [f for f in fields if f["type"] == "status"],
+                              "notes": [f["name"] for f in fields if f["type"] == "note"]})
+
+
+async def admin_task_sync(request: web.Request):
+    return web.json_response(task_forms_body())
+
+
+async def admin_save_task_sync(request: web.Request):
+    """Turn the Connecteam task sync on or off, and choose its boards and their departments."""
+    data = await read_json(request)
+    try:
+        ctsync.save(data.get("enabled") is True, data.get("boards", []), task_departments())
+    except tasks.TaskError as err:
+        return bad_request(str(err))
+    db.log(admin_name(request), "Turned on the Connecteam task sync" if data.get("enabled") is True
+           else "Turned off the Connecteam task sync",
+           detail=", ".join(b["name"] or b["board_id"] for b in ctsync.boards()))
+    return web.json_response(task_forms_body())
+
+
+async def admin_task_sync_boards(request: web.Request):
+    """Connecteam's Quick Tasks boards, to choose from (one request, when the owner asks)."""
+    try:
+        found = await ctsync.ct_boards()
+    except (ctsync.Paused, ctsync.Busy, ConnecteamError) as err:
+        return bad_request(str(err), 502)
+    return web.json_response({"boards": found})
+
+
+async def admin_test_task_sync(request: web.Request):
+    return web.json_response(await ctsync.test())
+
+
 async def admin_save_task_form(request: web.Request):
     form_id = request.match_info["form_id"]
     data = await read_json(request)
@@ -7524,6 +7622,8 @@ async def admin_save_task_form(request: web.Request):
     except tasks.TaskError as err:
         return bad_request(str(err))
     fields["name"] = fields["name"] or (old or {}).get("name") or f"Form {form_id}"
+    if "follow" not in data:
+        fields["follow"] = (old or {}).get("follow")   # left as it was
     db.set_task_form(form_id, fields, time.time())
     db.log(admin_name(request), "Changed a form that makes tasks" if old
            else "Chose a form to make tasks", detail=fields["name"])
@@ -7558,6 +7658,11 @@ def admin_app() -> web.Application:
     app.router.add_get(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}/questions", admin_form_questions)
     app.router.add_put(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}", admin_save_task_form)
     app.router.add_delete(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}", admin_delete_task_form)
+    app.router.add_get(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}/fields", admin_form_fields)
+    app.router.add_get("/api/tasks/sync", admin_task_sync)
+    app.router.add_put("/api/tasks/sync", admin_save_task_sync)
+    app.router.add_get("/api/tasks/sync/boards", admin_task_sync_boards)
+    app.router.add_post("/api/tasks/sync/test", admin_test_task_sync)
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)
     app.router.add_post("/api/connecteam/sync-staff", admin_sync_staff)

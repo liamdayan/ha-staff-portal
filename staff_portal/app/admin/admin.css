@@ -952,5 +952,10 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .tk-form-tools { display: flex; justify-content: flex-end; margin-top: -4px; }
 .tk-form-error { color: var(--danger) !important; }
 .tk-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.tk-follow { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.tk-follow-map { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 12px; }
+.tk-follow-map label > span { font-size: 13px; }
+.tk-follow .tk-form-tools { gap: 8px; margin-top: 0; }
+#tk-sync .card-actions { margin-top: 12px; }
 .role-check { margin: 6px 0 4px; font-weight: 600; font-size: 14px; }
 .role-check small { font-weight: 400; }

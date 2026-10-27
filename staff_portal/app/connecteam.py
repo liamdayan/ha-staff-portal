@@ -114,7 +114,12 @@ MAX_SAID = 300               # characters of Connecteam's own words kept from a 
 # time_clock.read; reports and tasks also need schedule.read and forms.read (jobs.read and
 # time_off.read are optional: job names, and the names of time off policies).
 SCOPES = {"/users/": "users.read", "/time-clock/": "time_clock.read", "/scheduler/": "schedule.read",
-          "/jobs/": "jobs.read", "/forms/": "forms.read", "/time-off/": "time_off.read"}
+          "/jobs/": "jobs.read", "/forms/": "forms.read", "/time-off/": "time_off.read",
+          "/tasks/": "quick_tasks.read"}
+# Writes (the task sync, ctsync.py): Quick Tasks are written with quick_tasks.write and deleted
+# with quick_tasks.delete; a form submission's manager fields are written with forms.write.
+WRITE_SCOPES = {("/tasks/", "POST"): "quick_tasks.write", ("/tasks/", "PUT"): "quick_tasks.write",
+                ("/tasks/", "DELETE"): "quick_tasks.delete", ("/forms/", "PUT"): "forms.write"}
 REPORT_SCOPES = ("schedule.read", "forms.read")
 APP_SCOPES = ("users.read, time_clock.read, schedule.read and forms.read (and jobs.read and "
               "time_off.read for job and time off names)")
@@ -157,6 +162,24 @@ class ReportsBusy(ConnecteamError):
     def __init__(self, message: str, wait: float | None = None):
         super().__init__(message)
         self.wait = wait
+
+
+class Rejected(ConnecteamError):
+    """Connecteam answered a request with an error (other than a refusal or "too many"): status
+    is its HTTP status, so a write knows the request arrived (a 4xx was never carried out)."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+class OwnTooMany(ReportsBusy):
+    """A 429 to a request that pauses only its own caller (the task sync), not the reports lane.
+    retry_after: Connecteam's Retry-After, in seconds, when it gave one."""
+
+    def __init__(self, message: str, retry_after: float | None):
+        super().__init__(message, None)
+        self.retry_after = retry_after
 
 
 class Connecteam:
@@ -518,49 +541,64 @@ class Connecteam:
         a reports or tasks request (ctdata.py; its lane, and a refusal raises ReportsRefused,
         never Halt). A 401 or 403 is asked once more with a fresh token (an expired or replaced
         one is refused too) before it counts as a refusal."""
+        return await self._request("GET", path, params, None, hr, reports)
+
+    async def _request(self, method: str, path: str, params=None, body=None, hr: bool = False,
+                       reports: bool = False, own_pause: bool = False) -> dict:
+        """One request (_get's rules). body: JSON sent with a write. own_pause: a 429 raises
+        OwnTooMany and leaves the lane as it is (the task sync pauses itself)."""
         for attempt in (1, 2):
             token = await self._access_token(hr, reports)
             self._lane_spend(hr, reports)
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             try:
-                async with self.session.get(f"{self._api()}{path}", params=params,
-                                            headers={"Authorization": f"Bearer {token}",
-                                                     "Accept": "application/json"}) as resp:
+                async with self.session.request(method, f"{self._api()}{path}", params=params,
+                                                json=body, headers=headers) as resp:
                     self._read_limits(resp)
                     if resp.status == 429:
+                        if own_pause:
+                            try:
+                                after = min(float(resp.headers.get("Retry-After", "")), MAX_RETRY_AFTER)
+                            except ValueError:
+                                after = None
+                            raise OwnTooMany("Connecteam asked for fewer requests.", after)
                         raise self._lane_too_many(resp, hr, reports)
                     if resp.status in (401, 403):
                         said = await _said(resp)
                         # A fresh token, once; not for reports when the token says the
                         # permission is missing (it would only throw away the clock's token).
                         if attempt == 1 and not (reports and self.scopes is not None
-                                                 and scope_for(path) not in self.scopes):
+                                                 and scope_for(path, method) not in self.scopes):
                             self._token = None
                             self._last_token_try = 0.0
                             continue
                         raise _refused(hr, reports, said,
-                                       self.refusal(path, resp.status, said, hr, reports))
-                    body = await resp.json(content_type=None)
+                                       self.refusal(path, resp.status, said, hr, reports, method))
+                    answer = await resp.json(content_type=None)
                     if resp.status >= 400:
-                        raise ConnecteamError(f"Connecteam couldn't answer {path} (HTTP {resp.status})"
-                                              f"{_quote(_words(body))}.")
+                        raise Rejected(f"Connecteam couldn't answer {path} (HTTP {resp.status})"
+                                       f"{_quote(_words(answer))}.", resp.status)
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
                 raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
-            if not isinstance(body, dict):
-                raise ConnecteamError("Connecteam sent an unexpected reply.")
+            if not isinstance(answer, dict):
+                if method != "GET" and answer is None:
+                    answer = {}
+                else:
+                    raise ConnecteamError("Connecteam sent an unexpected reply.")
             if hr:
                 self.hr_failures = 0
             if reports:
                 self.reports_failures = 0
-            data = body.get("data", body)
-            if isinstance(data, dict) and isinstance(body.get("paging"), dict) and reports:
-                data = {**data, "_paging": body["paging"]}   # where the next page starts
+            data = answer.get("data", answer)
+            if isinstance(data, dict) and isinstance(answer.get("paging"), dict) and reports:
+                data = {**data, "_paging": answer["paging"]}   # where the next page starts
             return data if isinstance(data, dict) else {"items": data}
 
     def refusal(self, path: str, status: int, said: str, hr: bool = False,
-                reports: bool = False) -> str:
+                reports: bool = False, method: str = "GET") -> str:
         """A refusal in plain words: Connecteam's own, then what's missing. A token that lists
         its permissions shows whether it's the permission or the plan."""
-        scope = scope_for(path)
+        scope = scope_for(path, method)
         who = " for the HR portal" if hr else " for reports" if reports else ""
         text = f"Connecteam refused {path}{who} (HTTP {status}){_quote(said)}."
         if self.scopes is not None and scope not in self.scopes:
@@ -958,8 +996,13 @@ def _words(body) -> str:
     return ""
 
 
-def scope_for(path: str) -> str:
+def scope_for(path: str, method: str = "GET") -> str:
     """The permission a request to this path needs."""
+    if method != "GET":
+        found = next((s for (prefix, how), s in WRITE_SCOPES.items()
+                      if how == method and path.startswith(prefix)), None)
+        if found:
+            return found
     return next((s for prefix, s in SCOPES.items() if path.startswith(prefix)), "users.read")
 
 

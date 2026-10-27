@@ -2,7 +2,9 @@
 
 A task belongs to a department or to Everyone, may be assigned to one person, and has a status:
 To do, In progress, Done or Won't do. Quick tasks are added by people in the staff app; others
-come from Connecteam forms chosen on the dashboard (one task per submission). This module holds
+come from Connecteam forms chosen on the dashboard (one task per submission), and from
+Connecteam's Quick Tasks when the task sync is on (ctsync.py). A form may follow one of its
+manager fields: its tasks then show the submission's status (follow_status). This module holds
 the rules: who sees and edits what, checking what's typed, and turning a form submission into a
 task. db.py stores them and main.py serves them; everything is checked again on the server for
 every request.
@@ -16,7 +18,7 @@ STATUSES = ("todo", "doing", "done", "wont")
 STATUS_NAMES = {"todo": "To do", "doing": "In progress", "done": "Done", "wont": "Won't do"}
 FINISHED = ("done", "wont")
 PRIORITIES = ("normal", "urgent")
-SOURCES = ("quick", "form")
+SOURCES = ("quick", "form", "connecteam")
 # One tap on a task's status chip moves it on; Won't do and Reopen are in its menu.
 NEXT_STATUS = {"todo": "doing", "doing": "done", "done": "todo", "wont": "todo"}
 HISTORY_ACTIONS = ("created", "status", "edited", "deleted", "restored")
@@ -37,6 +39,11 @@ FORM_OVERLAP = 3600      # a check looks back this far before the last good one 
                          # sent from a phone that was offline arrives late)
 FORM_LOOKBACK_DAYS = 31  # the most a check reaches back (after the add-on was off a while)
 MAX_FORMS = 50
+MAX_PHOTOS = 20          # photo links kept on a task
+MAX_URL = 2000
+MAX_OPTIONS = 30         # a followed manager field's status options
+MAX_NOTE = 60            # a history entry's note ("in Connecteam")
+CT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")   # a Connecteam task, board or option ID
 MAX_TASKS = 50_000       # in a backup (the newest)
 MAX_HISTORY = 500_000
 FORM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -171,14 +178,81 @@ def clean_status(data: dict, task: dict) -> str:
 
 def clean_form(data: dict, departments: dict[int, str]) -> dict:
     """A form's task settings from the dashboard: where its tasks go, which answer becomes the
-    title ("" = "Form name: submitter") and whether the person who sent it gets the task."""
+    title ("" = "Form name: submitter"), whether the person who sent it gets the task, and the
+    manager field its tasks follow (clean_follow; None: none)."""
     department_id = _id(data.get("department_id"))
     if department_id is not None and department_id not in departments:
         raise TaskError("That department doesn't exist any more.")
     name = clean_text(data.get("name"), MAX_FORM_NAME)
     return {"name": name, "department_id": department_id,
             "title_question": clean_text(data.get("title_question"), MAX_QUESTION),
-            "assign_submitter": 1 if data.get("assign_submitter") in (1, True, "1") else 0}
+            "assign_submitter": 1 if data.get("assign_submitter") in (1, True, "1") else 0,
+            "follow": clean_follow(data.get("follow"))}
+
+
+def clean_follow(raw) -> str | None:
+    """A form's followed manager field, as stored (JSON): {field, name, options: [{id, name,
+    color, status}], unset}. Each status option of the field maps to a task status; unset is
+    the status while none is chosen (To do or In progress). None: the form doesn't follow one."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raise TaskError("That manager field setting is damaged.") from None
+    if not raw:
+        return None
+    if not isinstance(raw, dict) or not CT_ID_RE.match(str(raw.get("field") or "")):
+        raise TaskError("Pick one of the form's status manager fields.")
+    options, ids = [], set()
+    for o in raw.get("options") if isinstance(raw.get("options"), list) else []:
+        oid = str(o.get("id") or "") if isinstance(o, dict) else ""
+        if not CT_ID_RE.match(oid) or oid in ids or len(options) >= MAX_OPTIONS:
+            continue
+        if o.get("status") not in STATUSES:
+            raise TaskError("Pick a task status for each of the field's values.")
+        ids.add(oid)
+        options.append({"id": oid, "name": clean_text(o.get("name"), 80),
+                        "color": clean_text(o.get("color"), 20), "status": o["status"]})
+    unset = raw.get("unset") if raw.get("unset") in ("todo", "doing") else "todo"
+    return json.dumps({"field": str(raw["field"]), "name": clean_text(raw.get("name"), 80),
+                       "options": options, "unset": unset}, separators=(",", ":"))
+
+
+def follow_of(form: dict) -> dict | None:
+    """A form's followed manager field (clean_follow's), read back; None: none (or damaged)."""
+    try:
+        return json.loads(clean_follow(form.get("follow")) or "null")
+    except TaskError:
+        return None
+
+
+def follow_status(follow: dict, option_id: str) -> str:
+    """The task status a submission's manager field status maps to ("" = none chosen; an option
+    the dashboard doesn't know yet counts as To do)."""
+    if not option_id:
+        return follow["unset"]
+    return next((o["status"] for o in follow["options"] if o["id"] == option_id), "todo")
+
+
+def follow_option(follow: dict, status: str) -> dict | None:
+    """The manager field option a task status is written back as: the first mapped to it. None:
+    no option is (To do while none chosen means it, and Connecteam can't clear a status)."""
+    return next((o for o in follow["options"] if o["status"] == status), None)
+
+
+def clean_photos(raw) -> str | None:
+    """A task's photo links, as stored (JSON [{url, name}]): only https links."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    found = [{"url": p["url"], "name": clean_text(p.get("name"), 120)}
+             for p in (raw if isinstance(raw, list) else [])[:MAX_PHOTOS]
+             if isinstance(p, dict) and isinstance(p.get("url"), str)
+             and p["url"].startswith("https://") and len(p["url"]) <= MAX_URL
+             and not CONTROL_RE.search(p["url"]) and " " not in p["url"]]
+    return json.dumps(found, separators=(",", ":")) if found else None
 
 
 def submitted_time(value, zone=None) -> float | None:
@@ -235,7 +309,11 @@ def task_from_submission(form: dict, sub: dict, staff_by_ct: dict[str, dict],
     lines = [f"Sent by {who} on {stamp}.", ""]
     lines += [f"{question or 'Question'}: {text or '-'}" for question, text in answers]
     person = staff_by_ct.get(str(sub.get("user_id") or "")) if form.get("assign_submitter") else None
+    notes = [clean_text(n, MAX_NOTES, lines=True) for n in
+             ((sub.get("manager") or {}).get("notes") or {}).values()]
     return {"title": title, "notes": clean_text("\n".join(lines), MAX_NOTES, lines=True),
+            "photos": clean_photos(sub.get("photos")),
+            "manager_note": clean_text("\n".join(n for n in notes if n), MAX_NOTES, lines=True) or None,
             "department_id": form["department_id"],
             "assigned_id": person["id"] if person else None,
             "assigned_name": person["name"][:MAX_NAME] if person else None,
@@ -311,7 +389,7 @@ def clean_backup_section(raw, now: float) -> dict | None:
             raise ValueError("The backup's tasks are damaged or too many.")
         return value
 
-    tasks, ids, submissions = [], set(), set()
+    tasks, ids, submissions, ct_ids = [], set(), set(), set()
     for row in rows("tasks", MAX_TASKS):
         if not isinstance(row, dict):
             continue
@@ -330,6 +408,10 @@ def clean_backup_section(raw, now: float) -> dict | None:
         except TaskError:
             due_date = due_time = None
         source = row.get("source") if row.get("source") in SOURCES else "quick"
+        ct_task_id = str(row.get("ct_task_id") or "")
+        ct_task_id = ct_task_id if CT_ID_RE.match(ct_task_id) and ct_task_id not in ct_ids else None
+        ct_ids.add(ct_task_id)
+        ct_board_id = str(row.get("ct_board_id") or "")
         form_id = str(row.get("form_id") or "")
         form_id = form_id if source == "form" and FORM_ID_RE.match(form_id) else None
         submission_id = clean_text(row.get("submission_id"), 80) or None if form_id else None
@@ -355,7 +437,13 @@ def clean_backup_section(raw, now: float) -> dict | None:
             "source_url": clean_url(row.get("source_url")),
             "updated_at": _when(row.get("updated_at"), now) or created_at,
             "deleted_at": _when(row.get("deleted_at"), now),
-            "deleted_by": clean_text(row.get("deleted_by"), MAX_NAME) or None})
+            "deleted_by": clean_text(row.get("deleted_by"), MAX_NAME) or None,
+            "ct_task_id": ct_task_id,
+            "ct_board_id": ct_board_id if ct_task_id and CT_ID_RE.match(ct_board_id) else None,
+            "ct_status": str(row.get("ct_status") or "")[:80] if CT_ID_RE.match(
+                str(row.get("ct_status") or "")) else None,
+            "photos": clean_photos(row.get("photos")),
+            "manager_note": clean_text(row.get("manager_note"), MAX_NOTES, lines=True) or None})
     history = []
     for row in rows("history", MAX_HISTORY):
         if not isinstance(row, dict) or row.get("task_id") not in ids:
@@ -368,7 +456,8 @@ def clean_backup_section(raw, now: float) -> dict | None:
                         "by_name": clean_text(row.get("by_name"), MAX_NAME),
                         "action": row["action"],
                         "from_status": row.get("from_status") if row.get("from_status") in STATUSES else None,
-                        "to_status": row.get("to_status") if row.get("to_status") in STATUSES else None})
+                        "to_status": row.get("to_status") if row.get("to_status") in STATUSES else None,
+                        "note": clean_text(row.get("note"), MAX_NOTE) or None})
     forms, form_ids = [], set()
     for row in rows("forms", MAX_FORMS):
         form_id = str(row.get("form_id") or "") if isinstance(row, dict) else ""
@@ -377,7 +466,12 @@ def clean_backup_section(raw, now: float) -> dict | None:
         if not FORM_ID_RE.match(form_id) or form_id in form_ids or department_id is False or not picked_at:
             continue
         form_ids.add(form_id)
+        try:
+            follow = clean_follow(row.get("follow"))
+        except TaskError:
+            follow = None
         forms.append({"form_id": form_id, "name": clean_text(row.get("name"), MAX_FORM_NAME),
+                      "follow": follow,
                       "department_id": department_id,
                       "title_question": clean_text(row.get("title_question"), MAX_QUESTION),
                       "assign_submitter": 1 if row.get("assign_submitter") in (1, True) else 0,
@@ -385,4 +479,27 @@ def clean_backup_section(raw, now: float) -> dict | None:
     seen = sorted({(str(row[0]), str(row[1])[:80]) for row in rows("seen", MAX_HISTORY)
                    if isinstance(row, list) and len(row) == 2 and FORM_ID_RE.match(str(row[0]))
                    and row[1] not in (None, "")})
-    return {"tasks": tasks, "history": history, "forms": forms, "seen": seen}
+    return {"tasks": tasks, "history": history, "forms": forms, "seen": seen,
+            "sync": _clean_sync(raw.get("sync"), now)}
+
+
+def _clean_sync(raw, now: float) -> dict:
+    """The Connecteam task sync's part of a backup: its boards (each with its department), the
+    Connecteam tasks already linked or passed over, and whether it was on (a restore turns it
+    off all the same: db._pause_task_sync)."""
+    raw = raw if isinstance(raw, dict) else {}
+    boards, board_ids = [], set()
+    for row in raw.get("boards") if isinstance(raw.get("boards"), list) else []:
+        board_id = str(row.get("board_id") or "") if isinstance(row, dict) else ""
+        department_id = _flag_id(row.get("department_id")) if board_id else False
+        if not CT_ID_RE.match(board_id) or board_id in board_ids or department_id is False \
+                or len(boards) >= MAX_FORMS:
+            continue
+        board_ids.add(board_id)
+        boards.append({"board_id": board_id, "name": clean_text(row.get("name"), MAX_FORM_NAME),
+                       "department_id": department_id,
+                       "picked_at": _when(row.get("picked_at"), now) or now})
+    seen = raw.get("seen") if isinstance(raw.get("seen"), list) else []
+    seen = sorted({(str(r[0]), str(r[1])) for r in seen[:MAX_HISTORY] if isinstance(r, list)
+                   and len(r) == 2 and CT_ID_RE.match(str(r[0])) and CT_ID_RE.match(str(r[1]))})
+    return {"boards": boards, "seen": seen, "enabled": raw.get("enabled") is True}

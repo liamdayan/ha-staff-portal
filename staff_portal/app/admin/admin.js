@@ -2344,8 +2344,97 @@
       toast(err.message, true);
       return;
     }
+    syncBoards = taskForms.sync.boards.map((b) => ({ ...b }));
+    $("#tk-sync-on").checked = taskForms.sync.enabled;
     renderTaskForms();
+    renderSync();
   }
+
+  // ---------------------------------------------------------------- the Connecteam task sync
+
+  // The boards chosen (being edited until Save) and the department each one's tasks belong to.
+  let syncBoards = [];
+
+  function renderSync() {
+    const sync = taskForms.sync;
+    const problem = !sync.connecteam ? "Turn on Connecteam in Settings → Connections first."
+      : sync.paused ? `Paused: ${sync.paused}` : sync.note;
+    $("#tk-sync-problem").textContent = problem || "";
+    $("#tk-sync-problem").hidden = !problem;
+    const list = $("#tk-boards");
+    if (!syncBoards.length) {
+      list.replaceChildren(h("div", { class: "empty small" }, "No boards yet. Choose a Connecteam Quick Tasks " +
+        "board for each department whose tasks should be in Connecteam."));
+      return;
+    }
+    list.replaceChildren(...syncBoards.map((b) => {
+      const dept = taskDeptSelect(b.department_id, `Department for ${b.name}`);
+      dept.addEventListener("change", () => { b.department_id = dept.value ? Number(dept.value) : null; });
+      const remove = h("button", { type: "button", class: "btn subtle" }, "Remove");
+      remove.addEventListener("click", () => {
+        syncBoards = syncBoards.filter((x) => x !== b);
+        renderSync();
+      });
+      const read = b.last_error ? h("p", { class: "hint tk-form-error" }, `Last read ${ago(b.last_poll).toLowerCase()}: ${b.last_error}`)
+        : h("p", { class: "hint" }, b.last_ok ? `Read ${ago(b.last_ok).toLowerCase()}` : "Not read yet: the first read takes only open tasks.");
+      return h("div", { class: "card tk-form-card" },
+        h("div", { class: "tk-form-head" }, h("strong", null, b.name || `Board ${b.board_id}`),
+          h("span", { class: "badge" }, `Board ${b.board_id}`)),
+        read,
+        h("div", { class: "row" }, h("label", null, "Its tasks are for", dept)),
+        h("div", { class: "card-actions" }, remove));
+    }));
+  }
+
+  $("#tk-add-board").addEventListener("click", () => run(async () => {
+    const pick = $("#tk-board-pick");
+    const button = $("#tk-add-board");
+    button.disabled = true;
+    let found;
+    try {
+      found = (await api("GET", "api/tasks/sync/boards")).boards;
+    } finally {
+      button.disabled = false;
+    }
+    const chosen = new Set(syncBoards.map((b) => b.board_id));
+    const left = found.filter((b) => !chosen.has(b.id) && !b.archived);
+    if (!left.length) return toast(found.length ? "Every board is chosen already." : "Connecteam has no task boards yet.");
+    const select = h("select", { "aria-label": "Connecteam board" }, left.map((b) => h("option", { value: b.id }, b.name)));
+    const add = h("button", { type: "button", class: "btn primary" }, "Add");
+    const cancel = h("button", { type: "button", class: "btn subtle" }, "Cancel");
+    const reset = () => pick.replaceChildren(button);
+    cancel.addEventListener("click", reset);
+    add.addEventListener("click", () => {
+      const board = left.find((b) => b.id === select.value);
+      syncBoards.push({ board_id: board.id, name: board.name, department_id: null });
+      reset();
+      renderSync();
+    });
+    pick.replaceChildren(h("label", { class: "inline-select" }, "Board", select), add, cancel);
+    select.focus();
+  }));
+
+  $("#tk-sync-save").addEventListener("click", () => run(async () => {
+    Object.assign(taskForms, await api("PUT", "api/tasks/sync", { enabled: $("#tk-sync-on").checked,
+      boards: syncBoards.map((b) => ({ board_id: b.board_id, name: b.name, department_id: b.department_id })) }));
+    syncBoards = taskForms.sync.boards.map((b) => ({ ...b }));
+    renderTaskForms();
+    renderSync();
+  }, "Saved."));
+
+  $("#tk-sync-test").addEventListener("click", () => run(async () => {
+    const button = $("#tk-sync-test");
+    button.disabled = true;
+    button.textContent = "Testing…";
+    try {
+      const r = await api("POST", "api/tasks/sync/test");
+      showChecks($("#tk-sync-checks"), r.checks);
+      toast(r.ok ? "The task sync can reach Connecteam." : "The task sync has a problem: see the list.", !r.ok);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Test";
+    }
+  }));
 
   function taskDeptSelect(value, label) {
     const select = h("select", { "aria-label": label },
@@ -2358,16 +2447,23 @@
     return select;
   }
 
-  // What checking the forms costs: they're checked less often as more are chosen, so they
-  // never use more than about 300 of the 1,000 Connecteam requests a day reports and tasks share.
+  // What checking the forms and the synced boards costs: they're checked less often as more are
+  // chosen, so together they never use more than about 300 of the 1,000 Connecteam requests a
+  // day reports and tasks share. Changes the sync sends are on top, at most write_cap a day.
   function taskFormsCost() {
     const n = taskForms.forms.length;
-    if (!n) return "Each form is checked every 10 minutes. Up to 2 forms are checked that often; " +
+    const sync = taskForms.sync;
+    const boards = sync.enabled ? sync.boards.length : 0;
+    const sends = sync.enabled ? ` The sync also sends each change as it's made (${sync.usage.writes || 0} today, ` +
+      `at most ${sync.write_cap} a day).` : "";
+    if (!n && !boards) return "Each form is checked every 10 minutes. Up to 2 forms are checked that often; " +
       "with more, each is checked less often, so they use at most about 300 Connecteam requests a day.";
-    return `${n === 1 ? "This form is" : `These ${n} forms are each`} checked every ${taskForms.check_minutes} minutes: ` +
-      `about ${taskForms.requests_a_day} Connecteam requests a day, of the ${taskForms.lane_a_day.toLocaleString()} ` +
-      "reports and tasks share (the time clock checks have their own)." +
-      (n > 2 ? " Each form you add makes the checks a little less frequent." : "");
+    const what = [n ? `${n} form${n === 1 ? "" : "s"}` : "", boards ? `${boards} Connecteam board${boards === 1 ? "" : "s"}` : ""]
+      .filter(Boolean).join(" and ");
+    return `${what}: each checked every ${taskForms.check_minutes} minutes, about ${taskForms.requests_a_day} ` +
+      `Connecteam requests a day (forms and boards share about ${taskForms.checks_a_day}), of the ` +
+      `${taskForms.lane_a_day.toLocaleString()} reports and tasks share (the time clock checks have their own).` +
+      sends + (n + boards > 2 ? " Each one you add makes the checks a little less frequent." : "");
   }
 
   function renderTaskForms() {
@@ -2409,11 +2505,12 @@
       }
     }));
     const assign = h("input", { type: "checkbox", checked: !!f.assign_submitter });
+    const follow = taskFollow(f);
     const save = h("button", { type: "button", class: "btn primary" }, isNew ? "Start making tasks" : "Save");
     save.addEventListener("click", () => run(async () => {
       Object.assign(taskForms, await api("PUT", `api/tasks/forms/${encodeURIComponent(f.form_id)}`, {
         name: f.name, department_id: dept.value ? Number(dept.value) : null,
-        title_question: question.value, assign_submitter: assign.checked }));
+        title_question: question.value, assign_submitter: assign.checked, follow: follow.value() }));
       renderTaskForms();
     }, isNew ? `New submissions of ${f.name} now become tasks.` : "Saved."));
     const remove = h("button", { type: "button", class: "btn danger" }, isNew ? "Cancel" : "Stop");
@@ -2434,7 +2531,70 @@
       h("label", { class: "check-row" }, assign,
         h("span", null, "Give the task to the person who sent it",
           h("small", null, "When they're linked to Connecteam here. Otherwise it's for anyone in the department."))),
+      follow.box,
       h("div", { class: "card-actions" }, remove, save));
+  }
+
+  // A form's tasks may follow one of its status manager fields: each of the field's values maps
+  // to a task status, both ways. Submissions that aren't done show as tasks (from the last month,
+  // even ones sent before the form was chosen); a Done one there is Done here.
+  const TK_STATUSES = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"], ["wont", "Won't do"]];
+
+  function taskFollow(f) {
+    let current = null;
+    try { current = f.follow ? JSON.parse(f.follow) : null; } catch { /* damaged: none */ }
+    let field = current;   // {field, name, options: [{id, name, color, status}], unset}
+    const box = h("div", { class: "tk-follow" });
+    const guess = (name) => /done|complete|closed|fixed|resolved/i.test(name) ? "done"
+      : /work|progress|started|doing/i.test(name) ? "doing" : "todo";
+    const statusSelect = (value, label, only) => {
+      const select = h("select", { "aria-label": label },
+        TK_STATUSES.filter(([k]) => !only || only.includes(k)).map(([k, name]) => h("option", { value: k }, name)));
+      select.value = value;
+      return select;
+    };
+    function draw() {
+      const list = h("button", { type: "button", class: "btn subtle" }, field ? "Pick another field" : "Follow a manager field");
+      list.addEventListener("click", () => run(async () => {
+        list.disabled = true;
+        try {
+          const { fields } = await api("GET", `api/tasks/forms/${encodeURIComponent(f.form_id)}/fields`);
+          if (!fields.length) return toast("This form has no status manager field in Connecteam.");
+          const pick = h("select", { "aria-label": "Manager field" }, fields.map((m) => h("option", { value: m.id }, m.name)));
+          const use = h("button", { type: "button", class: "btn primary" }, "Use it");
+          use.addEventListener("click", () => {
+            const m = fields.find((x) => x.id === pick.value);
+            field = { field: m.id, name: m.name, unset: "todo",
+              options: m.statuses.map((o) => ({ ...o, status: guess(o.name) })) };
+            draw();
+          });
+          box.replaceChildren(h("div", { class: "tk-pick" }, h("label", { class: "inline-select" }, "Field", pick), use));
+        } finally {
+          list.disabled = false;
+        }
+      }));
+      if (!field) {
+        box.replaceChildren(h("div", { class: "tk-form-tools" }, list));
+        return;
+      }
+      const stop = h("button", { type: "button", class: "btn subtle" }, "Don't follow it");
+      stop.addEventListener("click", () => { field = null; draw(); });
+      const unset = statusSelect(field.unset, "Status while none is chosen", ["todo", "doing"]);
+      unset.addEventListener("change", () => { field.unset = unset.value; });
+      box.replaceChildren(
+        h("p", { class: "hint" }, h("b", null, `Follows ${field.name || "its status"}. `),
+          "Open submissions from the last month show as tasks; a change of status goes both ways."),
+        h("div", { class: "tk-follow-map" },
+          h("label", null, h("span", null, h("i", null, "None chosen")), unset),
+          field.options.map((o) => {
+            const select = statusSelect(o.status, `Task status for ${o.name}`);
+            select.addEventListener("change", () => { o.status = select.value; });
+            return h("label", null, h("span", null, o.name), select);
+          })),
+        h("div", { class: "tk-form-tools" }, stop, list));
+    }
+    draw();
+    return { box, value: () => field };
   }
 
   $("#tk-add-form").addEventListener("click", () => run(async () => {

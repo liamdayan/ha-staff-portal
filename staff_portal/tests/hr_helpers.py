@@ -9,6 +9,7 @@ address points at the fake (or at a closed local port when no fake is running).
 
 import base64
 import json
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -54,6 +55,11 @@ class FakeConnecteam:
     - jobs: {instance ID (time clock or scheduler): [{"jobId", "title", "subJobs"}]};
     - forms: [form] and submissions: {form ID: [submission]};
     - policy_types: time off policy types [{"id", "name"}] (/time-off/v1/policy-types).
+    For the task sync (ctsync.py; build tasks with ct_task): boards: [{"id", "name",
+    "isArchived"}], board_tasks: {board ID (text): [task]}, read, made, changed and deleted as
+    Connecteam documents it; writes: each write as (method, path, body); hang_up: methods whose
+    reply never comes, though the write is done ("POST!": not done either); scope: the token's
+    permissions. A form's own GET and a submission's manager fields PUT work too.
     Lists are paged with limit and offset as Connecteam does (paging.offset when more follow),
     shifts are filtered by startTime and endTime, and submissions by submittingStartTimestamp and
     submittingEndTime."""
@@ -76,6 +82,12 @@ class FakeConnecteam:
         self.gone: set[str] = set()      # paths answered 404 (a feature the plan doesn't have)
         self.calls: list[str] = []
         self.tokens: list[str] = []
+        self.boards: list[dict] = []
+        self.board_tasks: dict[str, list[dict]] = {}
+        self.writes: list[tuple] = []
+        self.hang_up: set[str] = set()
+        self.scope = "users.read time_clock.read"
+        self.next_id = 100
         self.port = free_port()
         self.app = web.Application()
         self.app.router.add_route("*", "/{tail:.*}", self.handle)
@@ -96,7 +108,25 @@ class FakeConnecteam:
             auth = request.headers.get("Authorization", "").split()[-1]
             self.tokens.append(base64.b64decode(auth).decode().split(":")[0])
             return web.json_response({"access_token": "fake", "token_type": "Bearer", "expires_in": 3600,
-                                      "scope": "users.read time_clock.read"})
+                                      "scope": self.scope})
+        if path.startswith("/tasks/"):
+            return await self.quick_tasks(request, path)
+        if request.method == "PUT" and re.fullmatch(r"/forms/v1/forms/\d+/form-submissions/[^/]+", path):
+            body = await request.json()
+            self.writes.append(("PUT", path, body))
+            sub_id = path.split("/")[-1]
+            for sub in self.submissions.get(int(path.split("/")[4]), []):
+                if str(sub["formSubmissionId"]) == sub_id:
+                    for change in body["managerFields"]:
+                        sub["managerFields"] = [m for m in sub["managerFields"]
+                                                if m["managerFieldId"] != change["managerFieldId"]]
+                        sub["managerFields"].append({**change, "lastUpdatedTimestamp": int(time.time())})
+                    return web.json_response({"data": {"formSubmission": [sub]}})
+            return web.json_response({"detail": "Form or submission not found"}, status=404)
+        if re.fullmatch(r"/forms/v1/forms/\d+", path):
+            form = next((f for f in self.forms if str(f["formId"]) == path.split("/")[-1]), None)
+            return web.json_response({"data": form} if form else {"detail": "not here"},
+                                     status=200 if form else 404)
         if path == "/users/v1/users":
             source = self.archived if request.query.get("userStatus") == "archived" else self.users
             offset = int(request.query.get("offset", 0))
@@ -143,6 +173,48 @@ class FakeConnecteam:
             return self.page(request, "formSubmissions", found)
         return web.json_response({"error": "not here"}, status=404)
 
+    async def quick_tasks(self, request, path):
+        """Connecteam's Quick Tasks API: boards, and a board's tasks read, made, changed and
+        deleted (a task's description is read back as HTML, as Connecteam sends it)."""
+        if path == "/tasks/v1/taskboards":
+            return web.json_response({"data": {"taskBoards": self.boards}})
+        m = re.fullmatch(r"/tasks/v1/taskboards/([^/]+)/tasks(?:/([^/]+))?", path)
+        if not m:
+            return web.json_response({"error": "not here"}, status=404)
+        board, task_id = m.groups()
+        items = self.board_tasks.setdefault(board, [])
+        if request.method == "GET" and not task_id:
+            wanted = request.query.get("status", "all")
+            return self.page(request, "tasks", [t for t in items if wanted in ("all", t["status"])])
+        body = await request.json() if request.method in ("POST", "PUT") else None
+        self.writes.append((request.method, path, body))
+        if request.method + "!" in self.hang_up:
+            request.transport.close()   # lost on the way: nothing done, no reply
+            return web.Response()
+        found = next((t for t in items if t["id"] == task_id), None)
+        if request.method == "POST":
+            self.next_id += 1
+            found = ct_task(f"t{self.next_id}", body["title"], body["userIds"], body["status"],
+                            due=body.get("dueDate"), archived=body.get("isArchived", False),
+                            notes=(body.get("description") or {}).get("content", ""))
+            items.append(found)
+        elif not found:
+            return web.json_response({"detail": "Task not found"}, status=404)
+        elif request.method == "PUT":
+            found.update(title=body["title"], userIds=body["userIds"], status=body["status"],
+                         isArchived=body.get("isArchived", False))
+            if "dueDate" in body:
+                found["dueDate"] = body["dueDate"]
+            if "description" in body:
+                found["description"] = [{"type": "html", "html": f"<p>{body['description']['content']}</p>"}]
+        elif request.method == "DELETE":
+            items.remove(found)
+            found = {}
+        if request.method in self.hang_up:
+            request.transport.close()   # the reply never comes
+            return web.Response()
+        return web.json_response({"data": found})
+
     @staticmethod
     def page(request, key: str, items: list):
         """One page of a list, as Connecteam pages it."""
@@ -168,6 +240,13 @@ class FakeConnecteam:
 
     def count(self, path: str) -> int:
         return sum(1 for c in self.calls if c == path)
+
+
+def ct_task(task_id, title, users=(), status="published", due=None, archived=False, notes="") -> dict:
+    """A Quick Task as Connecteam lists it."""
+    return {"id": task_id, "title": title, "userIds": list(users), "status": status,
+            "type": "oneTime", "dueDate": due, "labelIds": [], "isArchived": archived,
+            "subTasks": [], "description": [{"type": "html", "html": f"<p>{notes}</p>"}] if notes else []}
 
 
 def ct_activity(user_id, shifts=(), breaks=(), time_offs=()) -> dict:
@@ -210,6 +289,7 @@ def ct_submission(submission_id, form_id, user_id, at, answers=()) -> dict:
 
 
 def fresh_connecteam() -> None:
+    main.ctsync.lift_pause()
     c = main.connecteam
     c.forget()
     c.paused_until = 0.0
