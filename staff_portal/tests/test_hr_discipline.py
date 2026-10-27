@@ -13,7 +13,7 @@ import asyncio
 import io
 import json
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -753,6 +753,49 @@ def test_hr_adjustments_voids_and_the_as_of_view(tmp_path, engine):
             assert {"Recorded an incident", "Approved an incident", "Adjusted points",
                     "Changed an incident's points", "Voided an incident", "Viewed an incident",
                     "Viewed discipline as of " + day(hr, -1)} <= actions
+    run(scenario())
+
+
+def test_adjusting_at_night_counts_from_hrs_today_not_the_devices(tmp_path, engine, monkeypatch):
+    """The Adjust points dialog's "Counts from" (and "As of a date") start at the section's
+    `today`: HR's day in its time zone. At 9 PM Pacific a device on UTC is already on tomorrow,
+    and points added from the device's date didn't count until then (the browser tests found it:
+    "Helen adds a point by mistake" showed 0 points in the evening)."""
+    real = time.time
+    nine_pm_pacific = datetime(2026, 10, 27, 4, 0, tzinfo=timezone.utc).timestamp()   # Oct 26th there
+    shift = nine_pm_pacific - real()
+    monkeypatch.setattr(time, "time", lambda: real() + shift)
+    pol, pts = engine
+    pol.publish()
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            assert today(hr) == date(2026, 10, 26)
+            status, page, _ = await hr.call("GET", "/api/people/401", cookie=s["hale"])
+            assert status == 200, page
+            sec = section(page, "discipline")
+            assert sec["today"] == "2026-10-26" and sec["can"]["adjust"]
+            # What the dialog now sends by default: a point that counts tonight.
+            status, r, _ = await hr.call("POST", "/api/people/401/points",
+                                         {"points": 1, "reason": "Late on Saturday.", "starts": sec["today"]},
+                                         s["hale"])
+            assert status == 200, r
+            status, d, _ = await hr.call("GET", "/api/people/401/discipline", cookie=s["hale"])
+            assert d["points"] == {"discipline": 1.0}
+            # What it sent before, from a device on UTC: it only counts from tomorrow.
+            status, r, _ = await hr.call("POST", "/api/people/402/points",
+                                         {"points": 1, "reason": "Late on Saturday.", "starts": "2026-10-27"},
+                                         s["hale"])
+            assert status == 200, r
+            status, d, _ = await hr.call("GET", "/api/people/402/discipline", cookie=s["hale"])
+            assert d["points"] == {"discipline": 0.0}
+            # The page's dates come from the section, never the device's clock.
+            status, body, _ = await hr.call("GET", "/static/hr-discipline.js")
+            assert status == 200
+            assert 'textField("starts", "Counts from", { type: "date", value: s.today })' in body
+            assert '"Show their points and records as they were on", { type: "date", value: s.today }' in body
+            assert "new Date()" not in body and "todayIso" not in body
     run(scenario())
 
 

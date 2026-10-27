@@ -24,10 +24,9 @@
     const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
     return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "";
   };
-  const todayIso = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
+  // Dates default to today in HR's time zone, as the add-on counts points (the section's
+  // `today`), never the device's date: in another time zone, or with a clock set to UTC, that's
+  // tomorrow in the evening, and added points wouldn't count until then.
   // Errors the portal already handled (signed out, moved to another page, a code not typed).
   const quiet = (err) => ["Signed out", "Moved on", "Not confirmed."].includes(err && err.message);
 
@@ -135,7 +134,7 @@
     if (!self && s.can && s.can.record) buttons.push(link("Record an incident", `#/record/${encodeURIComponent(p.id)}`, "button primary"));
     if (!self && s.can && s.can.as_of) {
       buttons.push(button("As of a date", async () => {
-        const value = await H.ask("Points as of a date", "Show their points and records as they were on", { type: "date", value: todayIso() });
+        const value = await H.ask("Points as of a date", "Show their points and records as they were on", { type: "date", value: s.today });
         if (value) location.hash = `#/discipline-history/${encodeURIComponent(p.id)}?on=${value}`;
       }));
     }
@@ -185,7 +184,7 @@
     const fields = [textField("points", "Points to add", { type: "number", attrs: { step: "0.25", min: "-100", max: "100", inputmode: "decimal" },
       hint: "Use a minus sign to take points away, like -1. Whole, half or quarter points." }),
     (s.tracks || []).length > 1 ? choiceField("track", "Point total", s.tracks.map((t) => [t, t]), s.tracks[0]) : null,
-    textField("starts", "Counts from", { type: "date", value: todayIso() }),
+    textField("starts", "Counts from", { type: "date", value: s.today }),
     textField("ends", "Stops counting (optional)", { type: "date" }), reasonField()].filter(Boolean);
     const values = await formDialog(`Adjust ${firstName(p.name)}'s points`, fields, "Adjust");
     if (!values) return;
@@ -737,8 +736,8 @@
 
   H.registerPage("discipline-history", { who: (me) => me.staff, render: async (main, parts, params) => {
     const pid = decodeURIComponent(parts[0] || "");
-    const on = params.get("on") || todayIso();
-    const d = await api("GET", `/api/people/${encodeURIComponent(pid)}/discipline?as_of=${encodeURIComponent(on)}`);
+    const on = params.get("on");   // none: today, as the add-on counts it
+    const d = await api("GET", `/api/people/${encodeURIComponent(pid)}/discipline${on ? `?as_of=${encodeURIComponent(on)}` : ""}`);
     const picker = h("input", { type: "date", value: d.as_of, max: d.today });
     picker.addEventListener("change", () => { if (picker.value) location.hash = `#/discipline-history/${encodeURIComponent(pid)}?on=${picker.value}`; });
     show(card(h("h1", null, `As of ${day(d.as_of)}`), field("Show another day", picker),
