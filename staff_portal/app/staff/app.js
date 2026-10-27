@@ -4692,8 +4692,8 @@
     const depts = tk.data.departments;
     const used = new Set(tk.data.tasks.map((t) => t.department_id));
     const deptSelect = h("select", { class: "tk-filter-select", "aria-label": "Department" },
-      h("option", { value: "all" }, "Department"),
-      h("option", { value: "everyone" }, "Everyone"),
+      h("option", { value: "all" }, "All departments"),
+      h("option", { value: "everyone" }, "Only tasks for Everyone"),
       depts.filter((d) => used.has(d.id) || (tk.data.me.department_ids || []).includes(d.id))
         .map((d) => h("option", { value: String(d.id) }, d.name)));
     deptSelect.value = [...deptSelect.options].some((o) => o.value === String(f.dept)) ? String(f.dept) : "all";

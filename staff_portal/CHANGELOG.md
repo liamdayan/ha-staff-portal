@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.2
+
+- **Tasks: the department filter's first choice is now "All departments",** and "Everyone" is
+  "Only tasks for Everyone", so it's clear which one shows every task.
+- **The task sync's steps run on their own:** a Connecteam form that answers oddly can no longer
+  stop changes made here from being sent, and the add-on log now says which step failed and why.
+
 ## 0.12.1
 
 - **A report's first look no longer times out.** Fetching a whole month from Connecteam can take

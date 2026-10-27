@@ -3312,18 +3312,23 @@ async def check_task_forms(force: bool = False) -> int:
 async def tasks_loop() -> None:
     """Background loop: forms that are due, the Connecteam task sync, and once an hour the bin,
     old finished tasks and old photo copies."""
+    async def tidy():
+        if time.time() - tasks_purged[0] > 3600:
+            tasks_purged[0] = time.time()
+            db.purge_tasks(time.time(), tasks.BIN_DAYS, tasks.KEEP_FINISHED_DAYS)
+            ctphotos.tidy(photo_dir())
+
+    # Each step on its own: one that fails (a form Connecteam answers oddly) never stops the
+    # others, so changes made here are still sent.
+    steps = (("Tasks: tidying up", tidy), ("Tasks from forms", check_task_forms),
+             ("Task sync: sending changes", ctsync.push_pending),
+             ("Task sync: reading boards", lambda: ctsync.poll_due(ctsync.poll_weight(db.task_forms()))))
     while True:
-        try:
-            if time.time() - tasks_purged[0] > 3600:
-                tasks_purged[0] = time.time()
-                db.purge_tasks(time.time(), tasks.BIN_DAYS, tasks.KEEP_FINISHED_DAYS)
-                ctphotos.tidy(photo_dir())
-            await check_task_forms()
-            # The Connecteam task sync: changes waiting, then the boards that are due.
-            await ctsync.push_pending()
-            await ctsync.poll_due(ctsync.poll_weight(db.task_forms()))
-        except Exception as err:  # noqa: BLE001 - the loop must keep running
-            log.warning("Tasks from forms: %r", err)
+        for what, step in steps:
+            try:
+                await step()
+            except Exception:  # noqa: BLE001 - the loop must keep running
+                log.exception("%s failed", what)
         await asyncio.sleep(60)
 
 
