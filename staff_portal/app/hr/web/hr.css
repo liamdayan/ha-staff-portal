@@ -339,6 +339,11 @@ label.check, .check {
 .search > input[type="search"]:focus { box-shadow: inset 0 0 0 2px var(--accent); }
 .search > button { flex: none; }
 
+/* Fieldsets and folds, wherever a part uses them. */
+fieldset { min-width: 0; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+legend { font-weight: 600; padding: 0 6px; }
+details > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+
 /* ---------------------------------------------------------------- buttons */
 
 button, .button {

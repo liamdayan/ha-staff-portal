@@ -2,12 +2,6 @@
    shared classes; this is only what's this part's own: quoted text, the incident form's live
    preview and write-up box, folded history, the statement to sign, and the paper printout. */
 
-/* Page-wide defaults this file always gave fieldsets and folds, which other parts (reviews, the
-   Google box in HR settings) still lean on. They belong in hr.css; kept here until they move. */
-fieldset { min-width: 0; margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
-legend { font-weight: 600; padding: 0 6px; }
-details > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
-
 /* A labelled block of text on a write-up or incident. */
 .text-block { margin: 4px 0 14px; }
 .text-block h3 { margin: 14px 0 4px; }
