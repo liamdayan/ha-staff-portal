@@ -517,7 +517,8 @@ def test_the_report_through_the_server_with_the_real_ctdata(tmp_path, monkeypatc
     p.db.update_staff(p.ana, department_id=front)
     p.db.update_staff(p.bob, department_id=maint)
     p.db.set_report("attendance", "test", enabled=True, view=[front], manage=[maint],
-                    settings={"who_sees": "own"})
+                    settings={"who_sees": "own", "rules": {"aliases": "Jon Reyes = Jonah Reyes"},
+                              "forms": [{"id": "5", "name": "Log", "applies_to": "Jonah Reyes, Front Office"}]})
     fresh_connecteam()
 
     def stamp(day, hm):
@@ -536,7 +537,9 @@ def test_the_report_through_the_server_with_the_real_ctdata(tmp_path, monkeypatc
             d = body["data"]
             assert body["manage"] is False and d["own_only"] is True
             assert {t["uid"] for t in d["timesheets"]} == {"7"} and d["users"] == {"7": "Maya Ortiz"}
+            # Not even in the settings sent with it (name matches, who must submit a form).
             assert d["departments"] == {"7": "Front Office"} and "Reyes" not in json.dumps(body)
+            assert body["settings"]["forms"][0]["applies_to"] == "Front Office"
             # Schedules weren't set up in the fake: the rest of the report still shows.
             assert d["have"]["timesheets"] is True
             status, body = await p.call("GET", path, bob)

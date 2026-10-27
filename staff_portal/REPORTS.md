@@ -117,7 +117,9 @@ only declared keys are kept, at most 48 KB as JSON (the staff app takes request 
 64 KB). Add `check_settings` to clean them (return the cleaned dict) or refuse them (raise
 `ValueError` with a plain sentence, which the person sees). Clean them again when you read
 `ctx.settings` too: a backup or an older version may have stored something else. Everyone else
-sees them read-only (`api.manage` is false).
+sees them read-only (`api.manage` is false). If settings name people some viewers mustn't see,
+return a trimmed copy as `settings` in what `data()` returns: someone who can't manage the
+report then gets that as `api.settings`, never what's stored.
 
 ### Who sees whom
 

@@ -514,10 +514,18 @@ def only_own(ctx, d: dict, users, dept_of: dict) -> dict:
     if d["gusto"]:
         text = gusto_for(d["gusto"]["text"], mine, set(keys.values()), aliases)
         d["gusto"] = dict(d["gusto"], text=text) if text else None
-    # Only the name matches for people this viewer sees.
+    # Only the name matches for people this viewer sees, and no one else named as having to
+    # submit a form (departments and jobs stay).
     kept = [line for line in aliases.split("\n")
             if len(parts := re.split(r"=|→|->", line)) > 1 and name_key(parts[1]) in mine]
-    d["settings"] = dict(d["settings"], rules=dict(d["settings"]["rules"], aliases="\n".join(kept)))
+    others = set(keys.values()) - mine
+    forms = [dict(f, applies_to=", ".join(x.strip() for x in re.split(r"[,;\n]", f["applies_to"])
+                                         if x.strip() and name_key(x) not in others))
+             for f in d["settings"]["forms"]]
+    d["settings"] = dict(d["settings"], forms=forms,
+                         rules=dict(d["settings"]["rules"], aliases="\n".join(kept)))
+    for f in d["forms"]:
+        f["applies_to"] = next((x["applies_to"] for x in forms if x["id"] == f["id"]), "")
     d["own_only"] = True
     return d
 

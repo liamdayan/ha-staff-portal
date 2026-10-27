@@ -2425,8 +2425,10 @@ async def api_report_data(request: web.Request):
         data = await report.data(ctx, params)
         if not isinstance(data, dict):
             raise TypeError("data() must return a dict")
-        body = json.dumps({"data": data, "settings": ctx.settings, "manage": manage,
-                           "params": params})
+        # Someone who can't manage the report gets the settings data() sent (trimmed to what
+        # they may see, when it trims them), not all that's stored.
+        shown = data["settings"] if not manage and isinstance(data.get("settings"), dict) else ctx.settings
+        body = json.dumps({"data": data, "settings": shown, "manage": manage, "params": params})
     except ctdata.Unavailable as err:
         return bad_request(str(err), 503, unavailable=True)
     except ValueError as err:
