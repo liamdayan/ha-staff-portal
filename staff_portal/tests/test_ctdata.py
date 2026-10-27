@@ -4,7 +4,7 @@ caps, and that a refusal or a "too many requests" stops only reports while the c
 running. Nothing here talks to a real Connecteam."""
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -86,9 +86,10 @@ def test_timesheets_from_every_clock_in_the_property_zone(tmp_path):
                      "sched_start": "2026-10-19T09:00", "sched_end": "2026-10-19T17:00"}
     assert brk["break_minutes"] == 30 and brk["hours"] is None and brk["job"] == "Break"
     assert second["job"] == "Front desk: Nights" and second["sched_start"] is None
-    # A day either side is asked (Connecteam's days are its own zone's), per clock.
+    # The whole month is asked, with a day either side (Connecteam's days are its own zone's),
+    # per clock.
     asked = [q for path, q in ct.asked if path.endswith("/time-activities")]
-    assert {(q["startDate"], q["endDate"]) for q in asked} == {("2026-10-18", "2026-10-26")}
+    assert {(q["startDate"], q["endDate"]) for q in asked} == {("2026-09-30", "2026-11-01")}
     assert len(asked) == 2
 
 
@@ -199,25 +200,44 @@ def test_forms_and_submissions_as_plain_text(tmp_path):
         go(ctdata.form_submissions("../users", date(2026, 10, 19), date(2026, 10, 25)))
 
 
-def test_the_same_range_is_asked_again_at_most_every_ten_mins(tmp_path):
+def test_a_whole_month_is_read_once_for_its_weeks_and_pay_periods(tmp_path):
     p = setup(tmp_path)
 
     async def scenario():
         async with p, fake() as ct:
             path = "/time-clock/v1/time-clocks/1/time-activities"
-            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
-            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))   # a week
+            await ctdata.timesheets(date(2026, 10, 16), date(2026, 10, 31))   # its pay period
+            await ctdata.timesheets(date(2026, 10, 1), date(2026, 10, 31))    # its month
+            await ctdata.shifts(date(2026, 10, 1), date(2026, 10, 31))
             assert ct.count(path) == 1
-            await ctdata.timesheets(date(2026, 10, 12), date(2026, 10, 18))   # another range
+            shifts = ct.count("/scheduler/v1/schedulers/30/shifts")
+            # A week across two months reads only the month not read yet.
+            rows = await ctdata.timesheets(date(2026, 9, 27), date(2026, 10, 3))
             assert ct.count(path) == 2
+            assert all("2026-09-27" <= r["date"] <= "2026-10-03" for r in rows)
             for key, (value, when) in list(ctdata._cache.items()):
-                ctdata._cache[key] = (value, when - ctdata.MIN_REFRESH - 1)
+                ctdata._cache[key] = (value, when - ctdata.PAST_TTL - 1)
             await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
             assert ct.count(path) == 3
+            await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
+            # Shifts were read with the timesheets (for their scheduled times): September's,
+            # then October's again, and not once more for the shifts themselves.
+            assert ct.count("/scheduler/v1/schedulers/30/shifts") == shifts + 2
             # The lists that hardly change (clocks, jobs, schedules, users) weren't asked again.
             assert ct.count("/time-clock/v1/time-clocks") == 1
             assert ct.count("/users/v1/users") == 1
     go(scenario())
+
+
+def test_this_month_is_asked_again_after_ten_mins_an_earlier_one_after_six_hours():
+    today = datetime.now(ctdata._zone()).date()
+    assert ctdata._month_age(today) == ctdata.MIN_REFRESH
+    assert ctdata._month_age(today - timedelta(days=ctdata.RECENT_DAYS)) == ctdata.MIN_REFRESH
+    assert ctdata._month_age(today - timedelta(days=ctdata.RECENT_DAYS + 1)) == ctdata.PAST_TTL
+    assert ctdata._months(date(2026, 12, 30), date(2027, 2, 2)) == [
+        (date(2026, 12, 1), date(2026, 12, 31)), (date(2027, 1, 1), date(2027, 1, 31)),
+        (date(2027, 2, 1), date(2027, 2, 28))]
 
 
 def test_nothing_is_asked_until_a_report_is_opened(tmp_path):

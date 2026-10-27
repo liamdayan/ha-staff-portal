@@ -1123,7 +1123,9 @@
             h("span", null, `Last signed in ${ago(m.last_seen).toLowerCase()}`)),
           m.connecteam_note && m.status === "disabled" ? h("div", { class: "meta wb-note" },
             `Turned off: ${m.connecteam_note}.`, m.connecteam_note.startsWith("No usable kiosk code")
-              ? " Give them a PIN with Edit, and tick Can sign in." : "") : null,
+              ? " Give them a PIN with Edit, and tick Can sign in." : "")
+            : m.status === "disabled" ? h("div", { class: "meta wb-note" },
+              "Turned off. To let them sign in again, use Edit and tick Can sign in.") : null,
           h("div", { class: "meta" }, phones.length
             ? `Can sign in on: ${phones.join(", ")}`
             : "Not on any shared phone yet"),
@@ -1443,6 +1445,10 @@
       : "4 to 8 digits. They enter it after tapping their name.";
     form.elements["active"].checked = !m || m.status !== "disabled";
     form.elements["active"].closest("label").hidden = !m;
+    // Turned off only for want of a kiosk code: typing a PIN is what was missing, so it turns
+    // "Can sign in" back on (the admin can still untick it).
+    form.elements["pin"].oninput = m?.status === "disabled" && m.connecteam_note?.startsWith("No usable kiosk code")
+      ? (e) => { if (e.target.value) form.elements["active"].checked = true; } : null;
     // Connecteam: who they're linked to, picked from the user list (one person per user; the
     // add-on checks that too). Shown while Connecteam is on, or for anyone linked.
     let ctId = m ? m.connecteam_user_id : ctUser?.id;

@@ -4,8 +4,11 @@ connecteam.py (at most REPORTS_MINUTE_CAP requests a minute and REPORTS_DAILY_CA
 once Staff Access has used half its daily share). A refusal or a "too many requests" stops only
 reports and tasks; the clock checks carry on.
 
-Nothing is asked until a report is opened or a task source is due. Answers are kept by range:
-the same range is asked again at most every MIN_REFRESH seconds, and the lists that hardly change
+Nothing is asked until a report is opened or a task source is due. Timesheets, shifts and form
+submissions are read a whole calendar month at a time and kept by month, so moving between a
+week, a pay period and the month around it is read once: a month that's still going (or ended
+within RECENT_DAYS) is asked again at most every MIN_REFRESH seconds, an older one every
+PAST_TTL. The lists that hardly change
 (time clocks, schedules, jobs, forms) are reused for LISTS_TTL. Each call raises Unavailable with
 a plain reason when Connecteam can't answer (a missing scope, the budget, or no connection).
 
@@ -39,14 +42,16 @@ from connecteam import ConnecteamError, ReportsBusy, ReportsRefused, scope_for
 
 log = logging.getLogger("staff_portal")
 
-MIN_REFRESH = 10 * 60      # the same range is asked again at most this often
+MIN_REFRESH = 10 * 60      # this month's timesheets, shifts and submissions: asked again at most this often
+PAST_TTL = 6 * 3600        # an earlier month's: punches are rarely fixed that late
+RECENT_DAYS = 3            # a month that ended this recently still counts as this month
 LISTS_TTL = 6 * 3600       # time clocks, schedules, jobs and forms
 USERS_TTL = 3600           # the user list (shared with Staff Access's own copy)
 MAX_RANGE_DAYS = 400       # the longest range one call may ask about
 CHUNK_DAYS = 90            # time activities: Connecteam allows at most 92 days per request
 MAX_PAGES = 20             # pages read for one list, at most
 MAX_WAIT = 70              # seconds a call waits for the minute's requests to have room
-MAX_CACHED = 64            # answers kept
+MAX_CACHED = 128           # answers kept
 MAX_ANSWER = 2000          # characters of one form answer
 MAX_ANSWERS = 200          # answers kept from one submission
 REFUSED_TTL = 30 * 60      # a permission Connecteam refused isn't asked again for this long
@@ -317,6 +322,33 @@ async def _policies() -> dict[str, str]:
                            lenient=True)
 
 
+def _months(start: date, end: date) -> list[tuple[date, date]]:
+    """The calendar months (first day, last day) that start..end touches."""
+    spans, first = [], start.replace(day=1)
+    while first <= end:
+        after = (first + timedelta(days=32)).replace(day=1)
+        spans.append((first, after - timedelta(days=1)))
+        first = after
+    return spans
+
+
+def _month_age(last: date) -> float:
+    """How long a month's answer is kept: a short while for this month, longer for earlier ones."""
+    today = datetime.now(_zone()).date()
+    return PAST_TTL if last < today - timedelta(days=RECENT_DAYS) else MIN_REFRESH
+
+
+async def _by_month(kind: str, start: date, end: date, fetch, day_of) -> list[dict]:
+    """fetch(first, last)'s rows for each month start..end touches (each month kept on its
+    own), those whose day_of(row) falls between start and end."""
+    rows = []
+    for first, last in _months(start, end):
+        rows.extend(await _kept((kind, first, last), _month_age(last),
+                                lambda first=first, last=last: fetch(first, last)))
+    lo, hi = start.isoformat(), end.isoformat()
+    return [r for r in rows if lo <= (day_of(r) or lo) <= hi]
+
+
 # ---------------------------------------------------------------- timesheets
 
 async def timesheets(start, end) -> list[dict]:
@@ -328,9 +360,10 @@ async def timesheets(start, end) -> list[dict]:
     clock_in and clock_out only for part of a day). clock_out is None while someone is still on
     the clock; hours is None then too. sched_start and sched_end are the scheduled shift the
     punch was for, when Connecteam links one. A punch on a sub-job is named "Job: Sub-job"."""
-    start, end = _range(start, end)
-    return await _kept(("timesheets", start, end), MIN_REFRESH,
-                       lambda: _fetch_timesheets(start, end))
+    rows = await _by_month("timesheets", *_range(start, end), _fetch_timesheets,
+                           lambda r: r["date"])
+    rows.sort(key=lambda r: (r["name"].lower(), r["clock_in"] or r["date"]))
+    return rows
 
 
 async def _fetch_timesheets(start: date, end: date) -> list[dict]:
@@ -444,7 +477,9 @@ async def shifts(start, end) -> list[dict]:
 
 
 async def _shift_rows(start: date, end: date) -> list[dict]:
-    return await _kept(("shifts", start, end), MIN_REFRESH, lambda: _fetch_shifts(start, end))
+    rows = await _by_month("shifts", start, end, _fetch_shifts, lambda r: r["date"])
+    rows.sort(key=lambda r: (r["start"] or "", r["name"].lower()))
+    return rows
 
 
 async def _fetch_shifts(start: date, end: date) -> list[dict]:
@@ -502,10 +537,18 @@ async def form_submissions(form_id, start, end) -> list[dict]:
     start, end = _range(start, end)
     if since and since.tzinfo is None:
         since = since.replace(tzinfo=_zone())
-    begin = int(since.timestamp()) if since else _midnight(start)
-    finish = min(_midnight(end + timedelta(days=1)) - 1, int(time.time()) + 60)
-    return await _kept(("submissions", form_id, begin, end), MIN_REFRESH,
-                       lambda: _fetch_submissions(form_id, begin, finish))
+    if since:   # a task source: only what's new since its last look, never kept by month
+        finish = min(_midnight(end + timedelta(days=1)) - 1, int(time.time()) + 60)
+        return await _kept(("submissions", form_id, int(since.timestamp()), end), MIN_REFRESH,
+                           lambda: _fetch_submissions(form_id, int(since.timestamp()), finish))
+
+    def month(first, last):
+        return _fetch_submissions(form_id, _midnight(first), min(
+            _midnight(last + timedelta(days=1)) - 1, int(time.time()) + 60))
+    rows = await _by_month(f"submissions:{form_id}", start, end, month,
+                           lambda r: (r["submitted_at"] or "")[:10])
+    rows.sort(key=lambda r: r["submitted_at"] or "")
+    return rows
 
 
 async def _fetch_submissions(form_id: str, begin: int, finish: int) -> list[dict]:

@@ -76,7 +76,8 @@ groups belongs to the first department in the list, as Staff Access itself does.
 
 ### ctx.ct: Connecteam
 
-All async, all cached (the same range is asked again at most every 10 minutes), all in the
+All async, all cached (timesheets, shifts and form submissions are read a calendar month at a
+time and kept by month: this month for 10 minutes, earlier months for 6 hours), all in the
 property's time zone. Times are `"YYYY-MM-DDTHH:MM"`, dates `"YYYY-MM-DD"`, user IDs text.
 `start` and `end` are dates (or `"YYYY-MM-DD"`), both included, at most 400 days apart.
 

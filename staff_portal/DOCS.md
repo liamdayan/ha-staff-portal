@@ -1406,8 +1406,9 @@ someone to another department, turning a report off or turning the person off ta
 once.
 
 **Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
-Staff Access's own Connecteam connection, only when someone opens one, and keep the answer for
-10 minutes. The first time a report is opened it can take a few seconds longer, because reports
+Staff Access's own Connecteam connection, only when someone opens one. They read a whole
+calendar month at a time, so moving between a week, its pay period and its month asks nothing
+new. This month is read again at most every 10 minutes, and earlier months every 6 hours. The first time a report is opened it can take a few seconds longer, because reports
 may only ask 15 things a minute (see [Staying within Connecteam's API
 limits](#staying-within-connecteams-api-limits)). For everything a report can show, the
 Connecteam app needs **users.read**, **time_clock.read**, **schedule.read**, **forms.read**, and
@@ -1436,8 +1437,9 @@ fill in a required form, and whether their sick time and PTO in Gusto cover the 
 missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, like any report.
 
 - **Where the numbers come from.** Timesheets (every time clock), schedules and form submissions
-  come from Connecteam, read only when someone opens the report or changes the period, and kept
-  for 10 minutes. Reports have their own small Connecteam allowance, so they never slow the
+  come from Connecteam, read a whole month at a time when someone opens the report, so switching
+  between Week, Pay period and Month is instant. This month is read again at most every 10
+  minutes, and earlier months every 6 hours. Reports have their own small Connecteam allowance, so they never slow the
   clock-in checks. If Connecteam refuses (a missing scope, the allowance used up, Connecteam
   down), the report says so in plain words and shows the rest. It needs the Connecteam
   permissions [Connecteam permissions](#connecteam-permissions) lists for reports.
