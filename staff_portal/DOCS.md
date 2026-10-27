@@ -1380,7 +1380,8 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   permissions [Connecteam permissions](#connecteam-permissions) lists for reports.
 - **Gusto balances.** In Gusto, open **Reports → Time Off Balances** and download it as CSV. On
   the report's **Leave balances** tab, someone who manages the report clicks **Upload Gusto CSV**.
-  It's kept on the add-on, so everyone who can see the report sees the newest one. Columns are
+  It's kept on the add-on, so everyone who can see the report sees the newest one (up to 256 KB:
+  Gusto's own file is a few KB). Columns are
   found by their names, whichever layout Gusto uses (one row per person, or one per policy).
 - **Matching people.** Connecteam people are matched by their Connecteam ID. Gusto has no
   Connecteam ID, so Gusto names are matched by name: "Patel, Dev" matches "Dev Patel", and common

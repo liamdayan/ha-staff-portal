@@ -483,6 +483,21 @@ def test_view_matches_nicknames_like_the_server(tmp_path):
     assert out["fuzzy"] == [["Thomas Baker", "Tom Baker"]] and out["balUnmatched"] == ["Devi Patel"]
 
 
+def test_a_gusto_upload_is_small_enough_to_filter_quickly():
+    """Filtering runs for each viewer's open, in the add-on's one event loop: the upload is capped
+    at 256 KB (Gusto's own file is a few KB), and the biggest one takes well under a second."""
+    import time
+    upload = rep.loaded.uploads[0]
+    assert upload["key"] == "gusto" and upload["max_bytes"] == 256 * 1024
+    everyone = {f"first{i} last{i}" for i in range(300)}
+    text = "Employee,Title,Policy,Balance\n" + "".join(
+        f'"Last{i % 400}, First{i % 400}",Desk,Sick,{i}\n' for i in range(8000))
+    text = text[:upload["max_bytes"]]
+    began = time.process_time()
+    rep.gusto_for(text, {"first1 last1"}, everyone, "")
+    assert time.process_time() - began < 1
+
+
 def test_settings_are_cleaned_and_kept_small():
     saved = rep.check_settings(dict(who_sees="everyone", rules=dict(aliases="x" * 50000),
                                     forms=[dict(id=str(i), applies_to="y" * 5000) for i in range(30)],

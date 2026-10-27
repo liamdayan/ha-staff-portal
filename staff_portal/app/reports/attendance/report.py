@@ -30,6 +30,7 @@ ALIASES_LEN = 12000          # characters of name matches
 APPLIES_LEN = 1000           # characters of a form's "who must submit"
 MAX_SKIP = 50                # departments and jobs not checked for early clock-outs
 SETTINGS_ROOM = 46 * 1024    # saved settings as JSON (the add-on takes at most 48 KB)
+GUSTO_MAX = 256 * 1024       # bytes of a Gusto upload
 
 
 # ---------------------------------------------------------------- settings
@@ -603,7 +604,9 @@ REPORT = dict(
     uploads=[dict(key="gusto", name="Gusto time off balances",
                   help="In Gusto: Reports › Time Off Balances, downloaded as CSV. "
                        "The newest upload is used.",
-                  accept=".csv,text/csv")],
+                  accept=".csv,text/csv",
+                  # Gusto's file is a few KB; a small cap keeps filtering it quick for each viewer.
+                  max_bytes=GUSTO_MAX)],
     settings=[dict(key="rules", name="Rules", default=DEFAULT_RULES),
               dict(key="forms", name="Required forms", default=[]),
               dict(key="who_sees", name="Who can see whom", default="all")],
