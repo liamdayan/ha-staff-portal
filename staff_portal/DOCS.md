@@ -1147,9 +1147,10 @@ they're **clocked in**. Staff you add by hand keep working exactly as before.
 API access needs Connecteam's **Expert plan or higher** (with the Operations hub for the time clock).
 
 1. In Connecteam, open **your name → Integration Center → OAuth 2.0** and click **Create app**.
-   Give it the **users.read** and **time_clock.read** scopes. Scopes can't be changed later: to
-   add one, create a new app and enter its keys. Staff Access and the HR portal only ever read
-   from Connecteam, so no write permissions are needed.
+   Give it the **users.read**, **time_clock.read**, **schedule.read** and **forms.read** scopes,
+   and **jobs.read** if you like (see [Connecteam permissions](#connecteam-permissions)). Scopes
+   can't be changed later: to add one, create a new app and enter its keys. Staff Access, the HR
+   portal, reports and tasks only ever read from Connecteam, so no write permissions are needed.
 2. Copy the **Client ID** and **Client Secret**. Connecteam only shows the secret once.
 3. In Staff Access, open **Settings → Connections → Connecteam**, tick **Link staff to
    Connecteam**, paste both keys, choose **Australia** under **Account hosted in** if your
@@ -1191,6 +1192,22 @@ How clocked-in sign-in works:
   **Unlink** them.
 - Turning off **Link staff to Connecteam** lets everyone sign in with their PIN again, without
   removing the links.
+
+### Connecteam permissions
+
+One Connecteam app (one Client ID and Secret) serves everything. Its permissions (scopes):
+
+| Permission | What needs it |
+|---|---|
+| **users.read** | Staff Access (people, kiosk codes, smart groups), the HR portal, and reports and tasks (names and departments) |
+| **time_clock.read** | Staff Access (who's clocked in) and reports (timesheets) |
+| **schedule.read** | reports (scheduled shifts) |
+| **forms.read** | reports (required forms) and [tasks from forms](#tasks) |
+| **jobs.read** (optional) | job names in reports; without it, jobs show without names |
+
+Staff Access itself needs only the first two. **Test connection** says if reports and tasks are
+missing one, and a report or a form's card names the permission Connecteam refused, in
+Connecteam's own words.
 
 ### Add everyone from Connecteam
 
@@ -1325,11 +1342,12 @@ once.
 **Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
 Staff Access's own Connecteam connection, only when someone opens one, and keep the answer for
 10 minutes. The first time a report is opened it can take a few seconds longer, because reports
-may only ask 15 things a minute. For everything a report can show, the Connecteam app needs these
-scopes (Integration Center → OAuth 2.0): **users.read**, **time_clock.read**, **schedule.read**,
-**forms.read**, and optionally **jobs.read** (job names; without it jobs show without names). If
-one is missing, the report says which, with Connecteam's own words. Scopes can't be added to an
-existing Connecteam app: make a new app with all of them, and paste its keys in Settings.
+may only ask 15 things a minute (see [Staying within Connecteam's API
+limits](#staying-within-connecteams-api-limits)). For everything a report can show, the
+Connecteam app needs **users.read**, **time_clock.read**, **schedule.read**, **forms.read**, and
+optionally **jobs.read** (see [Connecteam permissions](#connecteam-permissions)). If one is
+missing, the report says which, with Connecteam's own words. Scopes can't be added to an existing
+Connecteam app: make a new app with all of them, and paste its keys in Settings.
 
 **Uploaded files.** Files uploaded to a report are kept on the add-on (the newest 5 of each kind),
 so everyone who opens the report sees the latest. Only text files are taken (CSV and the like),
@@ -1355,8 +1373,8 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   come from Connecteam, read only when someone opens the report or changes the period, and kept
   for 10 minutes. Reports have their own small Connecteam allowance, so they never slow the
   clock-in checks. If Connecteam refuses (a missing scope, the allowance used up, Connecteam
-  down), the report says so in plain words and shows the rest. Reports need the Connecteam scopes
-  the Reports section lists.
+  down), the report says so in plain words and shows the rest. It needs the Connecteam
+  permissions [Connecteam permissions](#connecteam-permissions) lists for reports.
 - **Gusto balances.** In Gusto, open **Reports → Time Off Balances** and download it as CSV. On
   the report's **Leave balances** tab, someone who manages the report clicks **Upload Gusto CSV**.
   It's kept on the add-on, so everyone who can see the report sees the newest one. Columns are
@@ -1391,6 +1409,56 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
 
 Report settings (rules and required forms) are in backups and migration files. The Gusto file is
 in migration files but not in backups, like other report uploads.
+
+## Tasks
+
+Everyone who signs in with their own PIN (on a shared or role-based phone or computer) has a
+**Tasks** list in the staff app, next to the pages. It's each department's to-do list. A kiosk
+phone nobody signs in to has no tasks.
+
+**Who sees what.** People see the tasks for their department (the one set on the Staff tab, or
+by its Connecteam smart group), the tasks for **Everyone**, the tasks given to them, and the
+tasks they made. Anyone who sees a task can change its status. Only the person who made a task,
+or someone whose role has **Manage tasks** (Roles tab → the role → Tasks), can edit or delete it.
+On a shared kiosk computer, someone without a role of their own gets the computer's role here.
+All of this is checked by the add-on on every request, not by the phone.
+
+**A task** has a title, optional notes, a department (or Everyone), optionally a person it's
+given to, an optional due date and time, Normal or Urgent, and a status: **To do**, **In
+progress**, **Done** or **Won't do**. Each task keeps who made it, when, where it came from (a
+quick task or a Connecteam form) and a history of every change.
+
+**On the phone.** Tasks are listed by status, with coloured status chips, and urgent and overdue
+tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes to your own
+department unless you pick another (or Everyone), a person, or a due date. Tap a task's status
+chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
+computer) for **Won't do** and **Reopen**. Tap a task to see its notes and history, and to edit
+or delete it. The filters show only **Mine**, one department, or one status. Done tasks fold
+away after a day (**Show older**). On a tablet or computer the list becomes a board with a column
+for each status. The list updates by itself every few seconds.
+
+**The bin.** A deleted task goes to the **Bin** (at the bottom of the list) for 30 days, where
+the person who made it, or a manager, can put it back. Finished tasks are kept for a year.
+
+**Tasks from Connecteam forms.** On the dashboard's **Tasks** tab, **Choose a form** lists your
+Connecteam forms. For each one you pick:
+
+- which department its tasks go to (or Everyone);
+- which question's answer becomes the task's title (**List its questions** reads them from the
+  form in Connecteam). Leave it blank for "Form name: who sent it";
+- whether the person who sent it gets the task (when they're linked to Connecteam here).
+
+Each new submission becomes one task, with every answer in its notes. Only submissions sent after
+you chose the form count, and none becomes a task twice, even after its task is deleted. Each
+form is checked every 10 minutes, and nothing is asked of Connecteam while no form is chosen.
+The checks use the reports share of Staff Access's Connecteam allowance, so they never hold up the
+time clock checks; if Connecteam can't be reached or the allowance is used up, the form's card
+says so and it tries again later. Staff Access's Connecteam app needs the **forms.read**
+permission (see [Connecteam permissions](#connecteam-permissions)).
+
+**Backups.** Full backups and migration files carry the tasks (with their history and the bin),
+the forms that make tasks, and each role's Manage tasks. A backup from before tasks leaves the
+tasks here as they are.
 
 ## Seeing staff actions in Home Assistant
 
@@ -1523,6 +1591,11 @@ backups from older versions too. Restoring puts the setup back:
   it again on the new system.
 - Links to Home Assistant users are never saved in files. Restoring onto the same system keeps
   the links for phones and staff that still match; elsewhere, link them again.
+- [Reports](#reports) (which are on, who may view and manage them, and their settings) and
+  [tasks](#tasks) (with their history and the bin, the forms that make them, and each role's
+  Manage tasks) are included. Files uploaded to reports aren't: upload the newest again after a
+  restore (a migration file carries them). A backup from before 0.11.0 leaves the reports and
+  tasks here as they are.
 - **The activity log and the card history are merged, not replaced.** Entries in the backup that
   aren't here yet are added, and nothing here is removed, so restoring the same backup twice
   never adds anything twice. The usual limits still apply: the activity log keeps 50,000 lines and 180
@@ -1556,7 +1629,8 @@ Unlike a backup, a migration file carries everything, so nothing needs pairing o
 - staff PINs, phone PINs and links to Home Assistant users;
 - the TT Hotel Client Secret, password and sign-in, the Connecteam Client Secret, both request
   counts, and the Door activity address (TT Hotel's Callback URL keeps working);
-- the whole door list (with what each door is marked as), the activity log and the card history.
+- the whole door list (with what each door is marked as), the activity log and the card history;
+- the files uploaded to reports (such as the Gusto export).
 
 Door activity itself isn't carried: the new install's list starts empty (TT Hotel keeps its own
 six months).

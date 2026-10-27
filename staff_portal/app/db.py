@@ -245,6 +245,68 @@ CREATE TABLE IF NOT EXISTS reports (
     updated_at REAL,
     updated_by TEXT
 );
+-- Tasks (tasks.py): each department's to-do list in the staff app. No foreign keys, like the
+-- wristband tables: people, roles and departments are deleted and re-added by a restore. The
+-- names are kept beside the IDs, so a task still says who made it after they've gone.
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    department_id INTEGER,               -- NULL = Everyone
+    assigned_id INTEGER,                 -- staff.id, or NULL
+    assigned_name TEXT,
+    due_date TEXT,                       -- YYYY-MM-DD, the property's own date
+    due_time TEXT,                       -- HH:MM, only with a date
+    priority TEXT NOT NULL DEFAULT 'normal',   -- normal|urgent
+    status TEXT NOT NULL DEFAULT 'todo',       -- todo|doing|done|wont
+    status_at REAL NOT NULL,
+    status_by TEXT,
+    created_at REAL NOT NULL,
+    created_by_id INTEGER,               -- NULL for tasks from forms
+    created_by_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'quick',      -- quick|form
+    form_id TEXT,
+    form_name TEXT,
+    submission_id TEXT,
+    source_url TEXT,                     -- the submission in Connecteam, when it gives one
+    updated_at REAL NOT NULL,
+    deleted_at REAL,                     -- in the bin since (emptied after tasks.BIN_DAYS)
+    deleted_by TEXT
+);
+CREATE INDEX IF NOT EXISTS tasks_open ON tasks (status, status_at);
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_submission ON tasks (form_id, submission_id)
+    WHERE submission_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS task_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    at REAL NOT NULL,
+    by_id INTEGER,
+    by_name TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,                -- created|status|edited|deleted|restored
+    from_status TEXT,
+    to_status TEXT
+);
+CREATE INDEX IF NOT EXISTS task_history_task ON task_history (task_id, at);
+-- Connecteam forms whose submissions become tasks, and every submission already seen (so none
+-- becomes a task twice, even after its task was deleted).
+CREATE TABLE IF NOT EXISTS task_forms (
+    form_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    department_id INTEGER,               -- NULL = Everyone
+    title_question TEXT NOT NULL DEFAULT '',   -- '' = "Form name: submitter"
+    assign_submitter INTEGER NOT NULL DEFAULT 0,
+    picked_at REAL NOT NULL,             -- only submissions sent after this become tasks
+    last_check REAL,
+    last_ok REAL,
+    last_error TEXT,
+    made INTEGER NOT NULL DEFAULT 0      -- tasks made from it
+);
+CREATE TABLE IF NOT EXISTS task_form_seen (
+    form_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL,
+    seen_at REAL NOT NULL,
+    PRIMARY KEY (form_id, submission_id)
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -373,6 +435,8 @@ MIGRATIONS = {
         # Which wristbands and cards people with this role may make (JSON, see wristbands.py;
         # NULL = none).
         "wristbands": "TEXT",
+        # 1 = people with this role may edit and delete anyone's tasks (Manage tasks).
+        "manage_tasks": "INTEGER NOT NULL DEFAULT 0",
     },
     "departments": {
         # Whether people in it must be clocked in on Connecteam to sign in: 1 = everyone, 0 = no
@@ -806,6 +870,10 @@ class Database:
                           (None if permissions is None else json.dumps(permissions), role_id))
         self.conn.commit()
 
+    def set_role_manage_tasks(self, role_id: int, manage: bool) -> None:
+        self.conn.execute("UPDATE roles SET manage_tasks = ? WHERE id = ?", (1 if manage else 0, role_id))
+        self.conn.commit()
+
     def role_areas(self, role_id: int) -> dict[int, str]:
         rows = self.conn.execute("SELECT area_id, level FROM role_areas WHERE role_id = ?", (role_id,))
         return {r["area_id"]: r["level"] for r in rows}
@@ -824,14 +892,15 @@ class Database:
         return cur.lastrowid
 
     def duplicate_role(self, role_id: int, name: str) -> int:
-        """A new role with the same device, area, page and wristband settings. Phones and people
-        stay on the original."""
+        """A new role with the same device, area, page, wristband and task settings. Phones and
+        people stay on the original."""
         new_id = self.create_role(name)
         self.update_role(new_id, name, self.role_entities(role_id), self.role_areas(role_id))
         self.set_role_pages(new_id, self.role(role_id)["layout_pages"])
         # Copied as stored, so a damaged value stays damaged (no wristbands) in the copy too.
-        self.conn.execute("UPDATE roles SET wristbands = (SELECT wristbands FROM roles WHERE id = ?) "
-                          "WHERE id = ?", (role_id, new_id))
+        self.conn.execute("UPDATE roles SET wristbands = (SELECT wristbands FROM roles WHERE id = ?), "
+                          "manage_tasks = (SELECT manage_tasks FROM roles WHERE id = ?) "
+                          "WHERE id = ?", (role_id, role_id, new_id))
         self.conn.commit()
         return new_id
 
@@ -995,6 +1064,164 @@ class Database:
              json.dumps(current["manage"]), json.dumps(current["settings"]), time.time(),
              str(by)[:120]))
         self.conn.commit()
+
+    # Tasks (tasks.py has the rules: who sees and edits what)
+
+    def task(self, task_id) -> dict | None:
+        row = self.conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
+    def tasks_for(self, member: dict, since: float) -> list[dict]:
+        """The tasks someone may see (tasks.can_see), not in the bin: every open one, and finished
+        ones from `since` on. Urgent first, then by due date (none last), then newest."""
+        rows = self.conn.execute(
+            """SELECT * FROM tasks WHERE deleted_at IS NULL
+               AND (department_id IS NULL OR department_id = ? OR assigned_id = ? OR created_by_id = ?)
+               AND (status IN ('todo', 'doing') OR status_at >= ?)
+               ORDER BY priority = 'urgent' DESC, due_date IS NULL, due_date, due_time IS NULL,
+                        due_time, created_at DESC, id DESC""",
+            (member.get("department_id"), member["id"], member["id"], since))
+        return [dict(r) for r in rows]
+
+    def tasks_in_bin(self, member: dict, manager: bool) -> list[dict]:
+        """Deleted tasks this person may put back: their own, or every one for a manager."""
+        rows = self.conn.execute(
+            "SELECT * FROM tasks WHERE deleted_at IS NOT NULL AND (? OR created_by_id = ?) "
+            "ORDER BY deleted_at DESC LIMIT 200", (1 if manager else 0, member["id"]))
+        return [dict(r) for r in rows]
+
+    def task_history(self, task_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT at, by_name, action, from_status, to_status FROM task_history "
+            "WHERE task_id = ? ORDER BY at, id", (task_id,))]
+
+    def _task_event(self, task_id: int, at: float, by: dict | None, action: str,
+                    from_status: str | None = None, to_status: str | None = None) -> None:
+        self.conn.execute(
+            """INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status, to_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, at, by and by.get("id"), (by or {}).get("name", "")[:60], action,
+             from_status, to_status))
+
+    def add_task(self, fields: dict, by: dict | None, at: float, commit: bool = True) -> int:
+        """A new task (fields from tasks.clean_task or tasks.task_from_submission). by: the
+        person who made it ({"id", "name"}), or {"name": "Connecteam form"} for a form."""
+        row = {"source": "quick", "form_id": None, "form_name": None, "submission_id": None,
+               "source_url": None, **fields}
+        cur = self.conn.execute(
+            """INSERT INTO tasks (title, notes, department_id, assigned_id, assigned_name, due_date,
+               due_time, priority, status, status_at, created_at, created_by_id, created_by_name,
+               source, form_id, form_name, submission_id, source_url, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (row["title"], row["notes"], row["department_id"], row["assigned_id"],
+             row["assigned_name"], row["due_date"], row["due_time"], row["priority"], at, at,
+             by and by.get("id"), (by or {}).get("name", "")[:60], row["source"], row["form_id"],
+             row["form_name"], row["submission_id"], row["source_url"], at))
+        self._task_event(cur.lastrowid, at, by, "created", None, "todo")
+        if commit:
+            self.conn.commit()
+        return cur.lastrowid
+
+    def edit_task(self, task_id: int, fields: dict, by: dict, at: float) -> None:
+        keys = ("title", "notes", "department_id", "assigned_id", "assigned_name", "due_date",
+                "due_time", "priority")
+        self.conn.execute(f"UPDATE tasks SET {', '.join(f'{k} = ?' for k in keys)}, updated_at = ? "
+                          "WHERE id = ?", (*(fields[k] for k in keys), at, task_id))
+        self._task_event(task_id, at, by, "edited")
+        self.conn.commit()
+
+    def set_task_status(self, task_id: int, status: str, by: dict, at: float) -> bool:
+        """Move a task to a status. False when it was already there (nothing recorded)."""
+        old = self.task(task_id)
+        if not old or old["status"] == status:
+            return False
+        self.conn.execute("UPDATE tasks SET status = ?, status_at = ?, status_by = ?, updated_at = ? "
+                          "WHERE id = ?", (status, at, by["name"][:60], at, task_id))
+        self._task_event(task_id, at, by, "status", old["status"], status)
+        self.conn.commit()
+        return True
+
+    def bin_task(self, task_id: int, by: dict, at: float, restore: bool = False) -> None:
+        """Put a task in the bin (restore: take it out again)."""
+        self.conn.execute("UPDATE tasks SET deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ?",
+                          (None if restore else at, None if restore else by["name"][:60], at, task_id))
+        self._task_event(task_id, at, by, "restored" if restore else "deleted")
+        self.conn.commit()
+
+    def purge_tasks(self, now: float, bin_days: int, keep_days: int) -> int:
+        """Empty the bin of tasks deleted more than bin_days ago, and drop tasks finished more
+        than keep_days ago. Returns how many went."""
+        gone = [r[0] for r in self.conn.execute(
+            """SELECT id FROM tasks WHERE deleted_at < ?
+               OR (status IN ('done', 'wont') AND status_at < ?)""",
+            (now - bin_days * 86400, now - keep_days * 86400))]
+        for start in range(0, len(gone), 500):
+            part = gone[start:start + 500]
+            marks = ", ".join("?" * len(part))
+            self.conn.execute(f"DELETE FROM task_history WHERE task_id IN ({marks})", part)
+            self.conn.execute(f"DELETE FROM tasks WHERE id IN ({marks})", part)
+        # Submissions seen long ago can't come back (a check reaches back a month at most).
+        self.conn.execute("DELETE FROM task_form_seen WHERE seen_at < ?", (now - keep_days * 86400,))
+        self.conn.commit()
+        return len(gone)
+
+    def task_forms(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM task_forms ORDER BY name, form_id")]
+
+    def task_form(self, form_id: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM task_forms WHERE form_id = ?", (form_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_task_form(self, form_id: str, fields: dict, now: float) -> None:
+        """Choose a form, or change its settings. A form chosen now only makes tasks from
+        submissions sent from now on; changing its settings doesn't move that."""
+        self.conn.execute(
+            """INSERT INTO task_forms (form_id, name, department_id, title_question,
+               assign_submitter, picked_at) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (form_id) DO UPDATE SET name = excluded.name,
+               department_id = excluded.department_id, title_question = excluded.title_question,
+               assign_submitter = excluded.assign_submitter""",
+            (form_id, fields["name"], fields["department_id"], fields["title_question"],
+             fields["assign_submitter"], now))
+        self.conn.commit()
+
+    def delete_task_form(self, form_id: str) -> None:
+        self.conn.execute("DELETE FROM task_forms WHERE form_id = ?", (form_id,))
+        self.conn.commit()
+
+    def task_form_checked(self, form_id: str, now: float, error: str | None) -> None:
+        self.conn.execute(
+            "UPDATE task_forms SET last_check = ?, last_error = ?, last_ok = CASE WHEN ? IS NULL "
+            "THEN ? ELSE last_ok END WHERE form_id = ?", (now, error, error, now, form_id))
+        self.conn.commit()
+
+    def task_seen(self, form_id: str, submission_ids: list[str]) -> set[str]:
+        """Which of these submissions of a form have been seen before (or have a task)."""
+        seen = set()
+        for start in range(0, len(submission_ids), 400):
+            part = submission_ids[start:start + 400]
+            marks = ", ".join("?" * len(part))
+            seen |= {r[0] for r in self.conn.execute(
+                f"""SELECT submission_id FROM task_form_seen WHERE form_id = ? AND submission_id IN ({marks})
+                    UNION SELECT submission_id FROM tasks WHERE form_id = ? AND submission_id IN ({marks})""",
+                (form_id, *part, form_id, *part))}
+        return seen
+
+    def add_form_tasks(self, form_id: str, seen: list[str], new: list[dict], at: float) -> int:
+        """Record a check's new submissions as seen and add their tasks, all at once."""
+        try:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO task_form_seen (form_id, submission_id, seen_at) VALUES (?, ?, ?)",
+                [(form_id, sid, at) for sid in seen])
+            for fields in new:
+                self.add_task(fields, {"name": "Connecteam form"}, at, commit=False)
+            self.conn.execute("UPDATE task_forms SET made = made + ? WHERE form_id = ?",
+                              (len(new), form_id))
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        return len(new)
 
     # Devices (staff phones)
 
@@ -1242,6 +1469,35 @@ class Database:
         found["pages"] = len(self.layout().get("pages") or [])
         return {k: v for k, v in found.items() if v}
 
+    def _restore_tasks(self, section: dict | None) -> None:
+        """Part of replace_everything: the backup's tasks (tasks.clean_backup_section), or, for a
+        backup from before tasks, the ones here kept. Kept tasks stay with the people who made
+        them or have them only while those people are here under the same ID and name."""
+        c = self.conn
+        if section is None:
+            for column, name in (("assigned_id", "assigned_name"), ("created_by_id", "created_by_name")):
+                c.execute(f"""UPDATE tasks SET {column} = NULL WHERE {column} IS NOT NULL AND NOT EXISTS
+                              (SELECT 1 FROM staff s WHERE s.id = tasks.{column} AND s.name = tasks.{name})""")
+            return
+        for table in ("tasks", "task_history", "task_forms", "task_form_seen"):
+            c.execute(f"DELETE FROM {table}")
+        columns = ("id", "title", "notes", "department_id", "assigned_id", "assigned_name", "due_date",
+                   "due_time", "priority", "status", "status_at", "status_by", "created_at",
+                   "created_by_id", "created_by_name", "source", "form_id", "form_name",
+                   "submission_id", "source_url", "updated_at", "deleted_at", "deleted_by")
+        c.executemany(f"INSERT INTO tasks ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                      [tuple(t[k] for k in columns) for t in section["tasks"]])
+        c.executemany("""INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status,
+                         to_status) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      [(h["task_id"], h["at"], h["by_id"], h["by_name"], h["action"],
+                        h["from_status"], h["to_status"]) for h in section["history"]])
+        c.executemany("""INSERT INTO task_forms (form_id, name, department_id, title_question,
+                         assign_submitter, picked_at, last_ok) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      [(f["form_id"], f["name"], f["department_id"], f["title_question"],
+                        f["assign_submitter"], f["picked_at"], f["last_ok"]) for f in section["forms"]])
+        c.executemany("INSERT INTO task_form_seen (form_id, submission_id, seen_at) VALUES (?, ?, ?)",
+                      [(form_id, sid, time.time()) for form_id, sid in section["seen"]])
+
     def replace_everything(self, snap: dict) -> tuple[list[str], dict[str, int]]:
         """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
         of it lands or none of it does. The door list is kept, and so are the activity log and
@@ -1274,10 +1530,10 @@ class Database:
                           [(a["id"], a["name"], a["sort_order"], a["created_at"]) for a in snap["areas"]])
             c.executemany("INSERT INTO area_entities (area_id, entity_id) VALUES (?, ?)", snap["area_entities"])
             c.executemany("INSERT INTO area_ha_areas (area_id, ha_area_id) VALUES (?, ?)", snap["area_ha_areas"])
-            c.executemany("INSERT INTO roles (id, name, created_at, layout_pages, wristbands) "
-                          "VALUES (?, ?, ?, ?, ?)",
-                          [(r["id"], r["name"], r["created_at"], r["layout_pages"], r["wristbands"])
-                           for r in snap["roles"]])
+            c.executemany("INSERT INTO roles (id, name, created_at, layout_pages, wristbands, "
+                          "manage_tasks) VALUES (?, ?, ?, ?, ?, ?)",
+                          [(r["id"], r["name"], r["created_at"], r["layout_pages"], r["wristbands"],
+                            r.get("manage_tasks", 0)) for r in snap["roles"]])
             c.executemany("INSERT INTO role_entities (role_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["role_entities"].items()])
             c.executemany("INSERT INTO role_areas (role_id, area_id, level) VALUES (?, ?, ?)",
@@ -1315,6 +1571,7 @@ class Database:
                   m.get("archived_by"), m.get("archived_from")) for m in snap["staff"]])
             c.execute("UPDATE staff SET department_id = NULL WHERE department_id NOT IN "
                       "(SELECT id FROM departments)")
+            self._restore_tasks(snap.get("tasks"))
             c.executemany("INSERT INTO staff_entities (staff_id, entity_id, level) VALUES (?, ?, ?)",
                           [(*k, v) for k, v in snap["staff_entities"].items()])
             c.executemany("INSERT INTO staff_areas (staff_id, area_id, level) VALUES (?, ?, ?)",

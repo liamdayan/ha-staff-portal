@@ -64,6 +64,13 @@ REPORT = dict(
 | `ctx.tz` | the property's time zone (a `ZoneInfo`) |
 | `ctx.today` | today's date there |
 | `ctx.manage` | whether this person may manage the report |
+| `ctx.report` | the report's own details (key, name, uploads, settings declared) |
+
+A person's department in Connecteam terms: `await ctx.ct.users()` gives each Connecteam user's
+smart `groups`, and each department in `ctx.departments` follows one smart group
+(`smart_group_id`, or None). Someone in several mapped groups belongs to the first department in
+the list, as Staff Access itself does. `app/reports/attendance/report.py` (`department_map`) does
+exactly this.
 
 ### ctx.ct: Connecteam
 
@@ -86,9 +93,15 @@ await ctx.ct.form_submissions(form_id, start, end)
 await ctx.ct.users()                       # [{user_id, name, groups}]
 ```
 
-Each raises `ctx.ct.Unavailable(message)` when Connecteam can't answer: a missing scope (the
-message names it and quotes Connecteam), the reports budget, or no connection. Let it pass: the
-app shows the message with **Try again**. Catch it only to carry on without optional data.
+Each raises `ctx.ct.Unavailable(message)` when Connecteam can't answer: a missing permission
+(the message names it and quotes Connecteam), the reports budget, or no connection. Let it pass:
+the app shows the message with **Try again**. Catch it only to carry on without optional data
+(the attendance report catches it per part, so the rest of the report still shows).
+
+The permissions (scopes) each needs: `users()` users.read, `timesheets()` time_clock.read,
+`shifts()` schedule.read, `forms()` and `form_submissions()` forms.read; job names need
+jobs.read, and come back empty without it. DOCS.md, "Connecteam permissions", lists them for the
+owner.
 
 ### Uploads
 
@@ -100,15 +113,29 @@ use `ctx.uploads(key)[0]` for the latest. Uploads go in migration files, not in 
 ### Settings
 
 Declare the keys in `settings`. Managers save them from the view with `api.saveSettings({...})`;
-only declared keys are kept, at most 48 KB as JSON. Add `check_settings` to clean or refuse them.
-Everyone else sees them read-only (`api.manage` is false).
+only declared keys are kept, at most 48 KB as JSON (the staff app takes request bodies up to
+64 KB). Add `check_settings` to clean them (return the cleaned dict) or refuse them (raise
+`ValueError` with a plain sentence, which the person sees). Clean them again when you read
+`ctx.settings` too: a backup or an older version may have stored something else. Everyone else
+sees them read-only (`api.manage` is false).
+
+### Who sees whom
+
+Access decides who may open a report; what's in it is up to `data()`. When a report shows people,
+think about whether a viewer should see everyone. The attendance report has a setting for it
+(`who_sees`: `"all"`, the default, or `"own"`): with `"own"`, someone who only views it gets the
+people in their own departments (`ctx.person["departments"]`), and `ctx.manage` sees everyone.
+Filter in `data()`, before returning: anything returned reaches the browser, whatever the view
+shows.
 
 ## 3. view.js
 
 ```js
 StaffReports.register("<key>", {
   render(el, data, api) {
-    // el: the box to draw in. data: what data() returned. Redrawn from scratch each time.
+    // el: the box to draw in. data: what data() returned. Called again, with a new box, after
+    // refresh(), an upload or saved settings: keep what the person picked (a tab, say) in a
+    // variable outside render().
     el.replaceChildren(api.h("p", null, `${data.people.length} people`));
   },
 });
@@ -122,9 +149,9 @@ StaffReports.register("<key>", {
 | | |
 |---|---|
 | `h(tag, attrs, ...children)` | builds elements; children are always text, never HTML |
-| `refresh(params)` | runs data() again with these params (merged with the current ones) and redraws |
-| `upload(key, file)` | uploads a `File` (from an `<input type="file">`); redraws when done |
-| `saveSettings(obj)` | saves settings; redraws when done |
+| `refresh(params)` | runs data() again with these params (merged with the current ones), then calls `render()` again with the new data |
+| `upload(key, file)` | uploads a `File` (from an `<input type="file">`); resolves to `{ok, error?}`, shows a message itself, and calls `render()` again when it worked |
+| `saveSettings(obj)` | saves settings; resolves to `{ok, settings?, error?}`, shows a message itself, and calls `render()` again when it worked |
 | `toast(text, isError)` | a short message |
 | `download(name, text)` | saves text as a file (CSV) |
 | `csvCell(value)` | one CSV cell, quoted when needed |
@@ -139,10 +166,12 @@ Shared classes in the app's styles, light and dark: `rp-card`, `rp-toolbar`, `rp
 
 ## 4. The rules
 
-- **Budget.** Connecteam is only asked through `ctx.ct`, which has its own lane: at most 4 requests
-  a minute and 300 a day, and none once Staff Access has used half its daily share, so the clock
-  checks always have room. Ask for the range the person is looking at, not more. Never ask
-  Connecteam (or anything else) directly, and don't fetch anything in the background.
+- **Budget.** Connecteam is only asked through `ctx.ct`, which has its own lane (shared with
+  tasks from forms): at most 15 requests a minute and 1,000 a day, none once Staff Access has used
+  half its daily share, and never the clock checks' last 10 of a minute. When the minute is full,
+  `ctx.ct` waits for room (up to about a minute) rather than failing. Ask for the range the person
+  is looking at, not more. Never ask Connecteam (or anything else) directly, and don't fetch
+  anything in the background.
 - **CSP.** The staff app's strict rules apply: no inline scripts, `onclick=` attributes,
   `style=` attributes, `eval`, or scripts and fonts from other sites. Use `api.h` with `on...`
   handlers in attrs, classes in `view.css`, and the app's own fonts. (`el.style.x = ...` from
@@ -163,7 +192,9 @@ add-on does and calls `data()` with a `FakeCtx` whose `ct` is a `StubCt` (both i
 check what comes back. `StubCt(unavailable="...")` makes every call raise `Unavailable`. To test
 against a fake Connecteam instead, `tests/hr_helpers.py` has `FakeConnecteam` with time
 activities, schedules, jobs, forms and submissions (`ct_activity`, `ct_shift`, `ct_form`,
-`ct_submission`).
+`ct_submission`). `tests/test_report_attendance.py` is a fuller example: a `StubCt` that refuses
+some calls, the view's calculations run under Node, and the report opened through the staff
+server with the real `ctdata` against `FakeConnecteam`.
 
 ```
 cd staff_portal && /path/to/venv/bin/python -B -m pytest -q -p no:cacheprovider tests/test_report_<key>.py

@@ -30,7 +30,7 @@ import secrets
 import signal
 import sqlite3
 import time
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import segno
@@ -52,6 +52,7 @@ from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 import doorlog
+import tasks
 import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
 from tthotel import TTHotel, TTHotelError
@@ -1263,6 +1264,8 @@ async def api_entities(request: web.Request):
         # Whether to offer Reports: someone signed in may see at least one (each report checks
         # again on every request).
         "reports": bool(visible_reports(member)),
+        # Tasks: for anyone signed in with their own PIN (each request checks again).
+        "tasks": bool(member),
     })
 
 
@@ -2971,6 +2974,252 @@ async def staff_headers(request: web.Request, handler):
     return response
 
 
+# ---------------------------------------------------------------- tasks (staff app)
+# Each department's to-do list (tasks.py has the rules). Only someone signed in with their own
+# PIN has tasks; every request checks who they are, their department and their role again, and
+# nothing the page sends about them is trusted.
+
+NO_TASKS = "Sign in with your own PIN to see tasks."
+TASK_CHANGES_PER_MINUTE = 60
+recent_task_changes: dict[int, list[float]] = {}
+
+
+def manages_tasks(device: dict, member: dict) -> bool:
+    """Whether this person may edit and delete anyone's tasks: their role's Manage tasks (on a
+    kiosk device, the device's role when they have none of their own)."""
+    role_id = member.get("role_id") or (None if role_based(device) else device.get("role_id"))
+    role = db.role(role_id) if role_id else None
+    return bool(role and role.get("manage_tasks"))
+
+
+def task_caller(request: web.Request, change: bool = False) -> tuple[dict, dict, bool]:
+    """(device, signed-in person, whether they manage tasks) for a Tasks request, or the error."""
+    device, member = authenticate(request, active=change)
+    if not member:
+        raise json_error(web.HTTPForbidden, NO_TASKS)
+    if change:
+        now = time.time()
+        times = [t for t in recent_task_changes.get(member["id"], []) if now - t < 60]
+        if len(times) >= TASK_CHANGES_PER_MINUTE:
+            raise json_error(web.HTTPTooManyRequests, "Too many changes at once. Wait a moment.")
+        recent_task_changes[member["id"]] = [*times, now]
+    return device, member, manages_tasks(device, member)
+
+
+def task_departments() -> dict[int, str]:
+    return {d["id"]: d["name"] for d in db.departments()}
+
+
+def task_people() -> dict[int, dict]:
+    """People who may be given tasks: everyone not turned off or archived."""
+    return {r["id"]: dict(r) for r in db.conn.execute(
+        f"SELECT id, name, department_id FROM staff WHERE {STAFF_ON} ORDER BY name COLLATE NOCASE")}
+
+
+def task_view(t: dict, member: dict, manager: bool, departments: dict[int, str]) -> dict:
+    """A task as the staff app shows it. Text is sent as text; the page never treats it as HTML."""
+    dept = t["department_id"]
+    return {"id": t["id"], "title": t["title"], "notes": t["notes"],
+            "department_id": dept,
+            "department": "Everyone" if dept is None else departments.get(dept, "Old department"),
+            "assigned_id": t["assigned_id"], "assigned_name": t["assigned_name"],
+            "mine": t["assigned_id"] == member["id"],
+            "due_date": t["due_date"], "due_time": t["due_time"], "priority": t["priority"],
+            "status": t["status"], "status_at": t["status_at"], "status_by": t["status_by"],
+            "created_at": t["created_at"], "created_by": t["created_by_name"],
+            "made_by_me": t["created_by_id"] == member["id"],
+            "source": t["source"], "form_name": t["form_name"], "source_url": t["source_url"],
+            "deleted_at": t["deleted_at"], "deleted_by": t["deleted_by"],
+            "can_edit": tasks.can_edit(t, member, manager)}
+
+
+def visible_task(task_id: str, member: dict) -> dict:
+    """The task, if this person may see it (else Not found, the same as a task that isn't)."""
+    task = db.task(int(task_id))
+    if not task or not tasks.can_see(task, member):
+        raise json_error(web.HTTPNotFound, "That task isn't there any more.")
+    return task
+
+
+async def api_tasks(request: web.Request):
+    """Everything on the Tasks screen. ?v= the version the page has: unchanged, it gets just
+    that back, so a poll costs almost nothing."""
+    device, member, manager = task_caller(request)
+    departments = task_departments()
+    since = time.time() - tasks.LIST_FINISHED_DAYS * 86400
+    body = {"tasks": [task_view(t, member, manager, departments)
+                      for t in db.tasks_for(member, since) if tasks.can_see(t, member)],
+            "departments": [{"id": k, "name": v} for k, v in departments.items()],
+            "me": {"id": member["id"], "name": member["name"],
+                   "department_id": member["department_id"]
+                   if member["department_id"] in departments else None,
+                   "manager": manager},
+            "bin": len(db.tasks_in_bin(member, manager))}
+    version = hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
+    if request.query.get("v") == version:
+        return web.json_response({"v": version, "unchanged": True})
+    return web.json_response({**body, "v": version})
+
+
+async def api_task_people(request: web.Request):
+    """Who a task can be given to (names and departments only), for the task form."""
+    task_caller(request)
+    return web.json_response({"people": [{"id": p["id"], "name": p["name"],
+                                          "department_id": p["department_id"]}
+                                         for p in task_people().values()]})
+
+
+async def api_task(request: web.Request):
+    device, member, manager = task_caller(request)
+    task = db.task(int(request.match_info["id"]))
+    if not task or not (tasks.can_see(task, member) or tasks.can_restore(task, member, manager)):
+        raise json_error(web.HTTPNotFound, "That task isn't there any more.")
+    return web.json_response({"task": task_view(task, member, manager, task_departments()),
+                              "history": db.task_history(task["id"])})
+
+
+async def api_add_task(request: web.Request):
+    device, member, manager = task_caller(request, change=True)
+    data = await read_json(request)
+    if "department_id" not in data:
+        data["department_id"] = member["department_id"]   # their own (none: Everyone)
+    try:
+        fields = tasks.clean_task(data, task_departments(),
+                                  {k: p["name"] for k, p in task_people().items()})
+    except tasks.TaskError as err:
+        return bad_request(str(err))
+    task_id = db.add_task(fields, member, time.time())
+    db.log(actor_name(device, member), "Added a task", role=role_label(device, member),
+           detail=fields["title"])
+    return web.json_response({"task": task_view(db.task(task_id), member, manager,
+                                                task_departments())})
+
+
+async def api_edit_task(request: web.Request):
+    device, member, manager = task_caller(request, change=True)
+    task = visible_task(request.match_info["id"], member)
+    if not tasks.can_edit(task, member, manager):
+        return bad_request("Only the person who made this task, or a manager, can change it.", 403)
+    data = await read_json(request)
+    try:
+        fields = tasks.clean_task(data, task_departments(),
+                                  {k: p["name"] for k, p in task_people().items()}, task)
+    except tasks.TaskError as err:
+        return bad_request(str(err))
+    db.edit_task(task["id"], fields, member, time.time())
+    db.log(actor_name(device, member), "Changed a task", role=role_label(device, member),
+           detail=fields["title"])
+    return web.json_response({"task": task_view(db.task(task["id"]), member, manager,
+                                                task_departments())})
+
+
+async def api_task_status(request: web.Request):
+    """Anyone who sees a task may change its status; it's saved at once, in its history."""
+    device, member, manager = task_caller(request, change=True)
+    task = visible_task(request.match_info["id"], member)
+    data = await read_json(request)
+    try:
+        status = tasks.clean_status(data, task)
+    except tasks.TaskError as err:
+        return bad_request(str(err), 409, task=task_view(task, member, manager, task_departments()))
+    db.set_task_status(task["id"], status, member, time.time())
+    return web.json_response({"task": task_view(db.task(task["id"]), member, manager,
+                                                task_departments())})
+
+
+async def api_delete_task(request: web.Request):
+    device, member, manager = task_caller(request, change=True)
+    task = visible_task(request.match_info["id"], member)
+    if not tasks.can_edit(task, member, manager):
+        return bad_request("Only the person who made this task, or a manager, can delete it.", 403)
+    db.bin_task(task["id"], member, time.time())
+    db.log(actor_name(device, member), "Deleted a task", role=role_label(device, member),
+           detail=task["title"])
+    return web.json_response({"ok": True})
+
+
+async def api_task_bin(request: web.Request):
+    device, member, manager = task_caller(request)
+    departments = task_departments()
+    return web.json_response({"tasks": [task_view(t, member, manager, departments)
+                                        for t in db.tasks_in_bin(member, manager)],
+                              "days": tasks.BIN_DAYS})
+
+
+async def api_restore_task(request: web.Request):
+    device, member, manager = task_caller(request, change=True)
+    task = db.task(int(request.match_info["id"]))
+    if not task or not tasks.can_restore(task, member, manager):
+        raise json_error(web.HTTPNotFound, "That task isn't in the bin any more.")
+    db.bin_task(task["id"], member, time.time(), restore=True)
+    db.log(actor_name(device, member), "Put back a task", role=role_label(device, member),
+           detail=task["title"])
+    return web.json_response({"ok": True})
+
+
+# Tasks from Connecteam forms: every form chosen on the dashboard is checked every 10 minutes
+# (tasks.FORM_CHECK_SECONDS), through ctdata in the reports lane of the Connecteam budget.
+# Nothing is asked while no form is chosen.
+tasks_purged = [0.0]
+
+
+async def check_task_forms(force: bool = False) -> int:
+    """Turn new submissions of the chosen forms into tasks. Returns how many were made."""
+    now = time.time()
+    forms = [f for f in db.task_forms() if force or tasks.form_due(f, now)]
+    if not forms:
+        return 0
+    if not connecteam_settings()[0]:
+        for form in forms:
+            db.task_form_checked(form["form_id"], now, "Connecteam is turned off in Settings.")
+        return 0
+    if not db.settings().get("wb_time_zone"):
+        await ha_time_zone()   # so report_zone() knows Home Assistant's zone
+    zone = report_zone()   # the zone ctdata gives times in
+    staff_by_ct = {r["connecteam_user_id"]: dict(r) for r in db.conn.execute(
+        f"SELECT id, name, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL "
+        f"AND {STAFF_ON}")}
+    made = 0
+    for form in forms:
+        start, end = tasks.form_range(form, now, zone)
+        try:
+            subs = await ctdata.form_submissions(form["form_id"], start, end)
+        except (ctdata.Unavailable, ValueError) as err:
+            db.task_form_checked(form["form_id"], time.time(), str(err)[:300])
+            continue
+        form = db.task_form(form["form_id"])   # it may have been changed or removed meanwhile
+        if not form:
+            continue
+        ids = [str(sub.get("id"))[:80] for sub in subs
+               if isinstance(sub, dict) and sub.get("id") not in (None, "")]
+        seen, marked, new = db.task_seen(form["form_id"], ids), [], []
+        for sub in subs:
+            sid = str(sub.get("id"))[:80] if isinstance(sub, dict) and sub.get("id") not in (None, "") else ""
+            if not sid or sid in seen or sid in marked:
+                continue
+            marked.append(sid)
+            # ctdata gives times to the minute: one sent in the minute it was chosen counts.
+            when = tasks.submitted_time(sub.get("submitted_at"), zone)
+            if when is not None and when >= form["picked_at"] - 60:
+                new.append(tasks.task_from_submission(form, sub, staff_by_ct, when, zone))
+        made += db.add_form_tasks(form["form_id"], marked, new, time.time())
+        db.task_form_checked(form["form_id"], time.time(), None)
+    return made
+
+
+async def tasks_loop() -> None:
+    """Background loop: forms that are due, and once an hour the bin and old finished tasks."""
+    while True:
+        try:
+            if time.time() - tasks_purged[0] > 3600:
+                tasks_purged[0] = time.time()
+                db.purge_tasks(time.time(), tasks.BIN_DAYS, tasks.KEEP_FINISHED_DAYS)
+            await check_task_forms()
+        except Exception as err:  # noqa: BLE001 - the loop must keep running
+            log.warning("Tasks from forms: %r", err)
+        await asyncio.sleep(60)
+
+
 def staff_app() -> web.Application:
     app = web.Application(middlewares=[staff_headers], client_max_size=64 * 1024)
     app[BODY_SECONDS] = 10.0
@@ -3009,6 +3258,15 @@ def staff_app() -> web.Application:
                         api_report_upload)
     app.router.add_put(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}/settings", api_report_settings)
     app.router.add_get(r"/reports/{key:[a-z][a-z0-9_]{0,39}}/{file:view\.js|view\.css}", report_file)
+    app.router.add_get("/api/tasks", api_tasks)
+    app.router.add_post("/api/tasks", api_add_task)
+    app.router.add_get("/api/tasks/people", api_task_people)
+    app.router.add_get("/api/tasks/bin", api_task_bin)
+    app.router.add_get(r"/api/tasks/{id:\d{1,12}}", api_task)
+    app.router.add_put(r"/api/tasks/{id:\d{1,12}}", api_edit_task)
+    app.router.add_delete(r"/api/tasks/{id:\d{1,12}}", api_delete_task)
+    app.router.add_post(r"/api/tasks/{id:\d{1,12}}/status", api_task_status)
+    app.router.add_post(r"/api/tasks/{id:\d{1,12}}/restore", api_restore_task)
     # TT Hotel's lock records (door activity): the secret address is the only way in.
     app.router.add_post(r"/tthotel/records/{token:[A-Za-z0-9_-]{1,100}}", tthotel_records)
     app.on_shutdown.append(close_all_links)
@@ -3739,9 +3997,14 @@ async def admin_update_role(request: web.Request):
         db.set_role_pages(role_id, pages)
     if wristband_perms is not KEEP:
         db.set_role_wristbands(role_id, wristband_perms)
+    manage = bool(data["manage_tasks"]) if "manage_tasks" in data else KEEP
+    if manage is not KEEP:
+        db.set_role_manage_tasks(role_id, manage)
     detail = f"{len(cleaned)} devices" + (f", {len(areas)} areas" if areas else "")
     if wristband_perms is not KEEP and wristband_perms != role["wristbands"]:
         detail += ", wristband rules changed" if wristband_perms else ", no wristbands"
+    if manage is not KEEP and manage != bool(role["manage_tasks"]):
+        detail += ", manages tasks" if manage else ", doesn't manage tasks"
     db.log(admin_name(request), f"Updated role {name}", role=name, detail=detail)
     return web.json_response({"ok": True})
 
@@ -6747,6 +7010,75 @@ async def admin_guard(request: web.Request, handler):
     return response
 
 
+# ---------------------------------------------------------------- tasks from forms (dashboard)
+
+def task_forms_view() -> list[dict]:
+    departments = task_departments()
+    return [{**f, "department": "Everyone" if f["department_id"] is None
+             else departments.get(f["department_id"], "Old department")}
+            for f in db.task_forms()]
+
+
+async def admin_task_forms(request: web.Request):
+    return web.json_response({"forms": task_forms_view(),
+                              "connecteam": connecteam_settings()[0],
+                              "check_minutes": tasks.FORM_CHECK_SECONDS // 60})
+
+
+async def admin_connecteam_forms(request: web.Request):
+    """Connecteam's forms, to choose from (one request in the reports lane, then cached)."""
+    try:
+        forms = await ctdata.forms()
+    except ctdata.Unavailable as err:
+        return bad_request(str(err), 502)
+    return web.json_response({"forms": [{"id": str(f["id"]), "name": str(f.get("name") or "")}
+                                        for f in forms]})
+
+
+async def admin_form_questions(request: web.Request):
+    """A form's questions, to pick the one whose answer is the title (from ctdata's list of
+    forms: one request in the reports lane, then cached)."""
+    form_id = request.match_info["form_id"]
+    try:
+        forms = await ctdata.forms()
+    except ctdata.Unavailable as err:
+        return bad_request(str(err), 502)
+    form = next((f for f in forms if str(f["id"]) == form_id), None)
+    if not form:
+        return bad_request("That form isn't in Connecteam any more.", 404)
+    questions = []
+    for q in form.get("questions") or []:
+        text = tasks.clean_text(q.get("title"), tasks.MAX_QUESTION)
+        if text and text not in questions and q.get("type") != "description":
+            questions.append(text)
+    return web.json_response({"questions": questions[:100]})
+
+
+async def admin_save_task_form(request: web.Request):
+    form_id = request.match_info["form_id"]
+    data = await read_json(request)
+    old = db.task_form(form_id)
+    if not old and len(db.task_forms()) >= tasks.MAX_FORMS:
+        return bad_request(f"At most {tasks.MAX_FORMS} forms can make tasks.")
+    try:
+        fields = tasks.clean_form(data, task_departments())
+    except tasks.TaskError as err:
+        return bad_request(str(err))
+    fields["name"] = fields["name"] or (old or {}).get("name") or f"Form {form_id}"
+    db.set_task_form(form_id, fields, time.time())
+    db.log(admin_name(request), "Changed a form that makes tasks" if old
+           else "Chose a form to make tasks", detail=fields["name"])
+    return web.json_response({"forms": task_forms_view()})
+
+
+async def admin_delete_task_form(request: web.Request):
+    form = db.task_form(request.match_info["form_id"])
+    if form:
+        db.delete_task_form(form["form_id"])
+        db.log(admin_name(request), "Stopped a form making tasks", detail=form["name"])
+    return web.json_response({"forms": task_forms_view()})
+
+
 def admin_app() -> web.Application:
     app = web.Application(middlewares=[admin_guard], client_max_size=MAX_ADMIN_BODY)
     app[BODY_SECONDS] = 300.0   # a big backup over a slow connection
@@ -6762,6 +7094,11 @@ def admin_app() -> web.Application:
     app.router.add_post(r"/api/import/{kind:roles|staff|departments}", admin_import)
     app.router.add_get("/api/backup", admin_backup)
     app.router.add_get("/api/connecteam/users", admin_connecteam_users)
+    app.router.add_get("/api/connecteam/forms", admin_connecteam_forms)
+    app.router.add_get("/api/tasks/forms", admin_task_forms)
+    app.router.add_get(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}/questions", admin_form_questions)
+    app.router.add_put(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}", admin_save_task_form)
+    app.router.add_delete(r"/api/tasks/forms/{form_id:[A-Za-z0-9_-]{1,40}}", admin_delete_task_form)
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)
     app.router.add_post("/api/connecteam/sync-staff", admin_sync_staff)
@@ -6872,6 +7209,7 @@ async def main():
     clock_task = asyncio.create_task(connecteam.run())
     sync_task = asyncio.create_task(staff_sync_loop())   # only while Add everyone is on
     doors_task = asyncio.create_task(tthotel.run())
+    tasks_task = asyncio.create_task(tasks_loop())   # forms only once one is chosen
     raise_file_limit()
     if hr_service.enabled():
         hr_service.start()   # locked until the recovery key is typed, if its key is missing
@@ -6899,6 +7237,7 @@ async def main():
         clock_task.cancel()
         sync_task.cancel()
         doors_task.cancel()
+        tasks_task.cancel()
         for runner in runners:
             await runner.cleanup()
         await hr_service.stop()
