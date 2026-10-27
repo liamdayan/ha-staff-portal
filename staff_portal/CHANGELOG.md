@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.6
+
+- **A followed form shows every open submission from the last month,** including ones sent
+  before the form was chosen. Before, choosing a form first (without following its status) marked
+  its older submissions as seen, and following it afterwards skipped them.
+- **A followed form's statuses match by name too,** in case Connecteam's option IDs on a
+  submission differ from the form's.
+- **Tasks made in Staff Access say who made them in Connecteam:** the description's last line is
+  "Added by … in Staff Access" (Connecteam's API can't set who created a task; that's always the
+  account the keys belong to). Staff Access doesn't read that line back into its notes.
+
+## 0.12.5
+
+- **Task sync checked against Connecteam's Tasks guide:** changes no longer send a task's
+  sub-tasks back (they have their own place in Connecteam's API, and sending them could make them
+  again), as Connecteam's own "complete a task" example does. Everything else already matched:
+  title, people and status always sent, no one means a draft that isn't archived, 100 a page.
+
 ## 0.12.4
 
 - **Task sync, fitted to Connecteam's real rules:** a start or due date already in the past isn't

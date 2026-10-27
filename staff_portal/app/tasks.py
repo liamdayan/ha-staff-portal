@@ -227,12 +227,15 @@ def follow_of(form: dict) -> dict | None:
         return None
 
 
-def follow_status(follow: dict, option_id: str) -> str:
-    """The task status a submission's manager field status maps to ("" = none chosen; an option
-    the dashboard doesn't know yet counts as To do)."""
-    if not option_id:
+def follow_status(follow: dict, option_id: str, name: str = "") -> str:
+    """The task status a submission's manager field status maps to ("" = none chosen), found by
+    the option's ID, else by its name (Connecteam doesn't promise a submission's option IDs are
+    the form's); one the dashboard doesn't know yet counts as To do."""
+    if not option_id and not name:
         return follow["unset"]
-    return next((o["status"] for o in follow["options"] if o["id"] == option_id), "todo")
+    found = next((o for o in follow["options"] if option_id and o["id"] == option_id), None) or next(
+        (o for o in follow["options"] if name and o["name"].strip().lower() == name.strip().lower()), None)
+    return found["status"] if found else "todo"
 
 
 def follow_option(follow: dict, status: str) -> dict | None:

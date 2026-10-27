@@ -192,6 +192,10 @@ class FakeConnecteam:
             request.transport.close()   # lost on the way: nothing done, no reply
             return web.Response()
         found = next((t for t in items if t["id"] == task_id), None)
+        refused = self.task_rules(body) if body is not None else None
+        if refused:
+            return web.json_response({"details": {"error_message": "Request body is invalid",
+                                                  "error_code": 1002}, "error": refused}, status=400)
         if request.method == "POST":
             self.next_id += 1
             found = ct_task(f"t{self.next_id}", body["title"], body["userIds"], body["status"],
@@ -214,6 +218,27 @@ class FakeConnecteam:
             request.transport.close()   # the reply never comes
             return web.Response()
         return web.json_response({"data": found})
+
+    @staticmethod
+    def task_rules(body: dict) -> dict | None:
+        """The rules the real Connecteam holds a task to (some are in its docs, some only in its
+        replies): title, userIds and status are needed; with no one it must be a draft, not
+        archived; dates can't be in the past; a due date needs a start time; sub-tasks aren't
+        sent by Staff Access."""
+        now, wrong = time.time(), {}
+        for key in ("title", "userIds", "status"):
+            if key not in body:
+                wrong[f"body.{key}"] = {"message": "Field required"}
+        if not body.get("userIds") and (body.get("status") != "draft" or body.get("isArchived")):
+            wrong["body.status"] = {"message": "A task with no users must be a draft and not archived"}
+        for key in ("startTime", "dueDate"):
+            if isinstance(body.get(key), int) and body[key] < now - 5:
+                wrong[f"body.{key}"] = {"message": f"Value error, Task {key} is in the past"}
+        if "dueDate" in body and "startTime" not in body:
+            wrong["body.dueDate"] = {"message": "Value error, '<' not supported between instances of 'int' and 'NoneType'"}
+        if "subTasks" in body:
+            wrong["body.subTasks"] = {"message": "not expected from Staff Access"}
+        return wrong or None
 
     @staticmethod
     def page(request, key: str, items: list):

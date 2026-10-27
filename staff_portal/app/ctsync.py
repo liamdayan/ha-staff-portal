@@ -249,7 +249,7 @@ def html_text(raw) -> str:
         if isinstance(p, str):
             p = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h\d)>", "\n", p)
             text.append(html.unescape(re.sub(r"<[^>]*>", "", p)))
-    return tasks.clean_text("\n".join(text), tasks.MAX_NOTES, lines=True)
+    return tasks.clean_text(BY_RE.sub("", "\n".join(text)), tasks.MAX_NOTES, lines=True)
 
 
 def ct_view(r: dict) -> dict:
@@ -265,12 +265,27 @@ def ct_view(r: dict) -> dict:
             "archived": r.get("isArchived") is True}
 
 
-def _payload(v: dict) -> dict:
-    """A task as Connecteam takes it: without anyone it must be a draft, and not archived."""
+BY_LINE = "Added by {} in Staff Access"
+BY_RE = re.compile(r"\n*Added by [^\n]{1,80} in Staff Access\s*$")
+
+
+def _by(t: dict) -> str:
+    """Who made a task here, for its description in Connecteam: its API can't set who created a
+    task (that's always the account the keys belong to). "" when Staff Access didn't make it."""
+    name = (t.get("created_by_name") or "").strip()
+    return name[:60] if name and t.get("source") == "quick" else ""
+
+
+def _payload(v: dict, by: str = "") -> dict:
+    """A task as Connecteam takes it: without anyone it must be a draft, and not archived. by:
+    who made it here, as the description's last line (read back without it)."""
+    notes = v["notes"] or ""
+    if by:
+        notes = (notes + "\n\n" if notes else "") + BY_LINE.format(by)
     body = {"title": v["title"] or "Untitled", "userIds": list(v["users"]),
             "status": ("completed" if v["done"] else "published") if v["users"] else "draft",
             "isArchived": bool(v["archived"] and v["users"]),
-            "description": {"content": v["notes"] or ""}}
+            "description": {"content": notes}}
     if v["due"] and v["due"] > time.time():
         body["dueDate"] = v["due"]   # Connecteam refuses a date in the past, even one it had
     return body
@@ -456,7 +471,7 @@ async def _push(t: dict) -> bool:
             _gone(t, board["board_id"])
             return True
         data = await _ask("PUT", path, body=_with_start({**await _kept_fields(board["board_id"], t["ct_task_id"]),
-                                                         **_payload(merged)}))
+                                                         **_payload(merged, _by(t))}))
     except Rejected as err:
         if err.status == 404:   # deleted there: made again unless it's finished with
             _gone(t, board["board_id"])
@@ -474,9 +489,9 @@ async def _push(t: dict) -> bool:
 
 
 async def _kept_fields(board_id: str, task_id: str) -> dict:
-    """What Connecteam holds on a task that Staff Access doesn't (its start time, labels, type
-    and sub-tasks), read just before a change: an update replaces the whole task, so they're
-    sent back as they are. {} when it can't be read (the change still goes)."""
+    """What Connecteam holds on a task that Staff Access doesn't (its start time while it's
+    still ahead, labels and type), read just before a change and sent back as they are. {} when
+    it can't be read (the change still goes)."""
     try:
         data = await _ask("GET", f"/tasks/v1/taskboards/{board_id}/tasks",
                           [("taskIds", task_id), ("status", "all"), ("limit", str(PAGE))])
@@ -492,9 +507,8 @@ async def _kept_fields(board_id: str, task_id: str) -> dict:
         kept["labelIds"] = [str(x) for x in r["labelIds"] if isinstance(x, (str, int))][:50]
     if r.get("type") in ("oneTime", "recurring"):
         kept["type"] = r["type"]
-    if isinstance(r.get("subTasks"), list):
-        kept["subTasks"] = [{"title": str(x.get("title"))[:500], "isCompleted": x.get("isCompleted") is True}
-                            for x in r["subTasks"][:100] if isinstance(x, dict) and x.get("title")]
+    # Sub-tasks have endpoints of their own and Connecteam's own "complete a task" example
+    # leaves them out, so they're never sent: sending them could make them again.
     return kept
 
 
@@ -533,7 +547,7 @@ async def _create(t: dict, board: dict, sa: dict) -> bool:
     board_id = board["board_id"]
     _save(t["id"], ct_sync={"creating": time.time(), "board": board_id, "base": sa})
     try:
-        data = await _ask("POST", f"/tasks/v1/taskboards/{board_id}/tasks", body=_with_start(_payload(sa)))
+        data = await _ask("POST", f"/tasks/v1/taskboards/{board_id}/tasks", body=_with_start(_payload(sa, _by(t))))
     except (Paused, Busy):
         _save(t["id"], ct_sync={"board": board_id})   # never asked
         raise
@@ -819,12 +833,14 @@ async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zo
                 continue
             option = ((sub.get("manager") or {}).get("status") or {}).get(follow["field"]) or {}
             option_id, at = option.get("id") or "", option.get("at") or now
-            want = tasks.follow_status(follow, option_id)
+            want = tasks.follow_status(follow, option_id, option.get("name") or "")
             row = db.conn.execute("SELECT * FROM tasks WHERE form_id = ? AND submission_id = ?",
                                   (form["form_id"], sid)).fetchone()
             if row is None:
-                if want == "done" or db.task_seen(form["form_id"], [sid]):
-                    continue   # done ones aren't tasks; one made before stays gone
+                if want == "done":
+                    continue   # done ones aren't tasks
+                # (Submissions seen before following, which only marks them so as not to make
+                # tasks of old ones, count: a followed form makes a task of every open one.)
                 when = tasks.submitted_time(sub.get("submitted_at"), zone) or now
                 fields = tasks.task_from_submission(form, sub, staff_by_ct, when, zone)
                 new.append({**fields, "status": "doing" if want == "doing" else "todo",

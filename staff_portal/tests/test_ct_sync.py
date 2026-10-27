@@ -83,7 +83,7 @@ def test_new_tasks_go_to_their_departments_board_and_changes_follow(tmp_path):
             [made] = ct.board_tasks["501"]
             assert (made["title"], made["userIds"], made["status"]) == ("Fix gate", [7], "published")
             assert made["dueDate"] == ctsync.due_stamp("2026-11-02", "09:30", main.report_zone())
-            assert writes(ct, "POST")[0][2]["description"] == {"content": "Hinge\nloose"}
+            assert writes(ct, "POST")[0][2]["description"] == {"content": "Hinge\nloose\n\nAdded by Ana in Staff Access"}
             row = p.db.task(t["id"])
             assert (row["ct_task_id"], row["ct_board_id"], row["ct_pending"]) == (made["id"], "501", None)
             # Title, notes and assignee changes go too. Dee isn't linked: an unassigned draft.
@@ -93,7 +93,7 @@ def test_new_tasks_go_to_their_departments_board_and_changes_follow(tmp_path):
             method, path, body = writes(ct)[-1]
             assert (method, path) == ("PUT", f"/tasks/v1/taskboards/501/tasks/{made['id']}")
             assert (body["title"], body["userIds"], body["status"], body["description"]) == (
-                "Fix the gate", [], "draft", {"content": "Now"})
+                "Fix the gate", [], "draft", {"content": "Now\n\nAdded by Ana in Staff Access"})
             assert (await p.listed(ana))["Fix the gate"]["connecteam"] is True
             # A date with no time is the end of that day there.
             await p.call("PUT", f"/api/tasks/{t['id']}", ana, {"due_date": "2026-11-05", "due_time": ""})
@@ -999,3 +999,24 @@ def test_connecteams_reasons_are_shown_and_refused_changes_are_tried_again(tmp_p
             assert ctsync.retry_refused() == 1 and p.db.task(t["id"])["ct_pending"]
             assert ctsync.retry_refused() == 0
     run(scenario())
+
+
+def test_who_made_it_goes_in_the_description_and_isnt_read_back():
+    """Connecteam's API can't set who created a task, so the description's last line says."""
+    view = {"title": "x", "notes": "Fix the tap", "users": [7], "done": False, "archived": False, "due": None}
+    body = ctsync._payload(view, "Ana Ray")
+    assert body["description"]["content"] == "Fix the tap\n\nAdded by Ana Ray in Staff Access"
+    assert ctsync._payload({**view, "notes": ""}, "Ana Ray")["description"]["content"] == "Added by Ana Ray in Staff Access"
+    read = [{"type": "html", "html": "<p>Fix the tap</p><p>Added by Ana Ray in Staff Access</p>"}]
+    assert ctsync.html_text(read) == "Fix the tap"
+    assert ctsync._by({"created_by_name": "Ana Ray", "source": "quick"}) == "Ana Ray"
+    assert ctsync._by({"created_by_name": "Connecteam form", "source": "form"}) == ""
+
+
+def test_a_followed_form_matches_status_by_name_too():
+    follow = {"unset": "todo", "options": [{"id": "o1", "name": "Working on it", "status": "doing"},
+                                           {"id": "o2", "name": "Done", "status": "done"}]}
+    assert tasks.follow_status(follow, "o2") == "done"
+    assert tasks.follow_status(follow, "other-id", "Done") == "done"   # IDs that don't match
+    assert tasks.follow_status(follow, "", "") == "todo"
+    assert tasks.follow_status(follow, "x", "Unknown") == "todo"
