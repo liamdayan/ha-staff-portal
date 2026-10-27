@@ -20,10 +20,6 @@
   const real = (nodes) => nodes.flat().filter((n) => n != null && n !== false && n !== "");
   const fill = (el, ...nodes) => el.append(...real(nodes));
   const refill = (el, ...nodes) => el.replaceChildren(...real(nodes));
-  const today = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
 
   async function act(fn, okText) {
     try {
@@ -131,7 +127,9 @@
   }
 
   // Add a file: a kind, a title, the document's date (first in its name in Drive) and the file.
-  function addForm(personId, kinds, limitMb, redraw, note) {
+  // today: HR's day from the server (its time zone), never the device's clock: at night a device
+  // on another zone is already on tomorrow.
+  function addForm(personId, kinds, limitMb, redraw, note, today) {
     if (!kinds.length) return null;
     const file = h("input", { type: "file", name: "file", required: true,
       accept: "image/jpeg,image/png,image/webp,application/pdf" });
@@ -159,7 +157,7 @@
     h("label", null, "Kind", h("select", { name: "kind" }, kinds.map((k) => h("option", { value: k.id }, k.name)))),
     h("label", null, "Title", h("small", null, "Leave it blank to use the kind's name."),
       h("input", { name: "title", maxlength: "120", autocomplete: "off" })),
-    h("label", null, "Date on the document", h("input", { name: "date", type: "date", value: today(), required: true })),
+    h("label", null, "Date on the document", h("input", { name: "date", type: "date", value: today, required: true })),
     h("label", null, "File", h("small", null, `A photo (JPEG, PNG or WebP) or a PDF, up to ${limitMb} MB.`), file),
     h("div", { class: "actions" }, button));
     return form;
@@ -182,7 +180,7 @@
         h("p", { class: "muted small" }, "Only HR admins see these. Each look is in the audit log."),
         r.warning ? h("p", { class: "warn small" }, r.warning) : null,
         docList(r.documents, redraw),
-        addForm(person.id, r.kinds, r.limit_mb, redraw, null),
+        addForm(person.id, r.kinds, r.limit_mb, redraw, null, r.today),
         h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
           restricted.replaceChildren(restrictedSummary());
         } }, "Hide restricted files")));
@@ -244,7 +242,7 @@
     const binned = s.documents.filter((d) => d.status === "deleted");
     box.append(docList(shown, redraw));
     if (binned.length) box.append(h("h3", null, "Recycle bin"), h("ul", { class: "list" }, binned.map((d) => docItem(d, redraw))));
-    const form = addForm(person.id, s.kinds, s.limit_mb, redraw, null);
+    const form = addForm(person.id, s.kinds, s.limit_mb, redraw, null, s.today);
     if (form) box.append(form);
     if (s.hr) box.append(hrBox(s, person, redraw));
   });

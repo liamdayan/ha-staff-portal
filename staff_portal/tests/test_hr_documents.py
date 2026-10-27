@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 
 import aiohttp
 import pytest
@@ -493,6 +494,32 @@ def test_uploads_are_checked_cleaned_named_by_date_and_wait_for_hr(tmp_path, mon
             assert "waiting for HR to accept or reject it" in hr.svc.migration_blocker()
             assert "Added a document (waiting for HR)" in actions(hr)
             assert {"Accepted a document", "Didn't accept a document"} <= set(actions(hr))
+    run(scenario())
+
+
+def test_the_date_on_the_document_starts_at_hrs_today_not_the_devices(tmp_path, monkeypatch):
+    """The add form's "Date on the document" starts at the section's `today` (and the restricted
+    list's): HR's day in its time zone. At 9 PM Pacific a device on UTC is already on tomorrow."""
+    real = time.time
+    nine_pm_pacific = datetime(2026, 10, 27, 4, 0, tzinfo=timezone.utc).timestamp()   # Oct 26th there
+    shift = nine_pm_pacific - real()
+    monkeypatch.setattr(time, "time", lambda: real() + shift)
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await people(hr)
+            assert notify.local_day(hr.hdb) == "2026-10-26"
+            for role in ("self", "manager", "hr"):
+                status, page, _ = await hr.call("GET", "/api/people/202", cookie=s[role])
+                assert status == 200 and section(page)["today"] == "2026-10-26", role
+            status, r, _ = await hr.call("GET", "/api/people/202/documents/restricted", cookie=s["hr"])
+            assert status == 200 and r["today"] == "2026-10-26"
+            status, body, _ = await hr.call("GET", "/static/hr-documents.js")
+            assert status == 200
+            assert 'h("label", null, "Date on the document", h("input", { name: "date", type: "date", value: today, required: true }))' in body
+            assert "addForm(person.id, s.kinds, s.limit_mb, redraw, null, s.today)" in body
+            assert "addForm(person.id, r.kinds, r.limit_mb, redraw, null, r.today)" in body
+            assert "new Date()" not in body
     run(scenario())
 
 

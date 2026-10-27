@@ -208,6 +208,37 @@ def add_years(d: date, years: int) -> date:
         return d.replace(year=d.year + years, day=28)
 
 
+# Initialisms said letter by letter that start with a vowel sound ("an OLCC permit", "an MSDS").
+_VOWEL_LETTERS = set("AEFHILMNORSX")
+# Words spelt with a vowel that start with a consonant sound, and the reverse.
+_A_WORDS = ("uni", "use", "usu", "uti", "eu", "one", "once", "ure", "uro")
+_AN_WORDS = ("hour", "honest", "honor", "honour", "heir")
+
+
+def a_or_an(name: str) -> str:
+    """The name with "a" or "an" before it, by how it sounds: "an OLCC Service Permit", "an
+    Oregon Food Handler Card", "a Food Handler Card", "a Universal permit", "an HACCP plan"."""
+    name = str(name or "").strip()
+    word = re.sub(r"[^A-Za-z0-9]", "", name.split(" ")[0]) if name else ""
+    if not word:
+        return f"a {name}".strip()
+    if word.upper() in ("US", "USA", "UK", "UN", "EU"):    # "you-ess": a consonant sound
+        article = "a"
+    elif len(word) > 1 and word.isupper() and word.isalpha():
+        # An initialism (OLCC, HACCP, MSDS): the first letter's name decides. Real words in
+        # capitals (CARD) are rare in certificate names, so they're read as initialisms too.
+        article = "an" if word[0] in _VOWEL_LETTERS else "a"
+    else:
+        low = word.lower()
+        if low.startswith(_AN_WORDS):
+            article = "an"
+        elif low.startswith(_A_WORDS):
+            article = "a"
+        else:
+            article = "an" if low[0] in "aeiou" else "a"
+    return f"{article} {name}"
+
+
 def us(value) -> str:
     """6/14/2029, for messages."""
     d = date.fromisoformat(value) if isinstance(value, str) else value
@@ -1010,7 +1041,7 @@ def reminders(db, on: date) -> dict:
                     counts["lapsed"] += 1
                     title = (f"Your {t['name']} expired on {us(s['expires'])}. Add your new one in "
                              "the HR portal." if s["status"] == "expired" else
-                             f"You need a {t['name']}. Add it in the HR portal.")
+                             f"You need {a_or_an(t['name'])}. Add it in the HR portal.")
                     notify.notify(p["id"], "cert_lapsed", urgent=True, db=db, title=title,
                                   link="#/my-certificates", once=f"cert-lapse-{key}-{day}")
                     for pid in staff:
@@ -1032,7 +1063,7 @@ def reminders(db, on: date) -> dict:
                 mark(p["id"], key, "due")
                 counts["due"] += 1
                 notify.notify(p["id"], "cert_due", db=db, link="#/my-certificates",
-                              title=f"You need a {t['name']} by {us(s['due'])}. Add it in the "
+                              title=f"You need {a_or_an(t['name'])} by {us(s['due'])}. Add it in the "
                                     "HR portal.", once=f"cert-due-{key}-{s['due']}")
     db.conn.commit()
     for pid, n in lapsed_for.items():
@@ -1223,7 +1254,7 @@ def certificate_todos(svc, v: access.Viewer) -> list[dict]:
             found.append({"text": f"Your {s['name']} {'expired' if s['status'] == 'expired' else 'is missing'}"
                                   ". Add your new one.", "link": "#/my-certificates"})
         elif s["required"] and s["status"] == "due":
-            found.append({"text": f"You need a {s['name']} by {us(s['due'])}.", "link": "#/my-certificates"})
+            found.append({"text": f"You need {a_or_an(s['name'])} by {us(s['due'])}.", "link": "#/my-certificates"})
     if v.is_hr:
         waiting = db.conn.execute("SELECT COUNT(*) FROM certificates WHERE status = 'waiting' AND "
                                   "person_id != ?", (v.id,)).fetchone()[0]

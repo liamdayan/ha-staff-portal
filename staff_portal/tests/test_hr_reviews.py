@@ -15,7 +15,7 @@ import sqlite3
 import sys
 import time
 import types
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -675,6 +675,29 @@ def test_private_notes_comments_and_hidden_text(tmp_path):
             # An emptied note is gone.
             await hr.call("PUT", path + "/note", {"text": ""}, cookie=s["303"])
             assert "MAX-NOTE" not in (await seen("306"))[1]
+    run(scenario())
+
+
+def test_the_meeting_date_starts_at_hrs_today_not_the_devices(tmp_path, monkeypatch):
+    """Share it's "Meeting date" starts at the review's `today`: HR's day in its time zone. At 9 PM
+    Pacific a device on UTC is already on tomorrow, so the device's date would be a day late."""
+    real = time.time
+    nine_pm_pacific = datetime(2026, 10, 27, 4, 0, tzinfo=timezone.utc).timestamp()   # Oct 26th there
+    shift = nine_pm_pacific - real()
+    monkeypatch.setattr(time, "time", lambda: real() + shift)
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            assert today(hr) == date(2026, 10, 26)
+            rid = open_review(hr, "301", kind="adhoc")
+            for who in ("303", "306"):   # the writer and HR (the employee sees it once shared)
+                status, data, _ = await hr.call("GET", f"/api/reviews/{rid}", cookie=s[who])
+                assert status == 200 and data["today"] == "2026-10-26", (who, status)
+            status, body, _ = await hr.call("GET", "/static/hr-reviews.js")
+            assert status == 200
+            assert 'const date = h("input", { type: "date", value: data.today, required: true });' in body
+            assert 'toLocaleDateString("en-CA"), required: true' not in body
     run(scenario())
 
 

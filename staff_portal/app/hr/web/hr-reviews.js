@@ -375,7 +375,7 @@
           } }, "Send back"))));
     }
     if (can.share) {
-      const date = h("input", { type: "date", value: new Date().toLocaleDateString("en-CA"), required: true });
+      const date = h("input", { type: "date", value: data.today, required: true });   // HR's day, not the device's
       cards.push(card(h("h2", null, "Share it"), h("p", null, `Go through it with ${firstName(r.person.name)} at your meeting, then share it. They can read it, comment, and acknowledge it in the HR portal.`),
         h("label", null, "Meeting date", date),
         h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: async () => {
