@@ -232,9 +232,10 @@
     };
 
     // timesheets: work punches, breaks, and time off
-    const punchJobs = new Set();
+    const punchJobs = new Set(), inTimesheets = new Set();
     for (const t of d.timesheets || []) {
       const p = ref(t.name, t.uid); if (!p) continue;
+      inTimesheets.add(p);
       const type = t.type || "";
       if (type && TIMEOFF_RE.test(type) && !BREAK_RE.test(type)) {
         let hrs = t.hours;
@@ -358,6 +359,8 @@
       noBal: list.filter(p => !p.bal).map(p => p.name),
       fuzzy: fuzzy.filter(([a, b]) => { const id = a + "|" + b; if (seenFuzzy.has(id)) return false; seenFuzzy.add(id); return true; }),
       hasTimesheet, hasSchedule: list.some(p => p.shifts.length),
+      // scheduled, but not one punch or time off in the dates read: maybe not on a time clock yet
+      noPunches: hasTimesheet ? list.filter(p => p.shifts.length && !inTimesheets.has(p)).map(p => p.name) : [],
       // a shift can only be a no-show on a date the timesheets were read for
       covered: (p, day) => hasTimesheet && fetched(day),
       scheduled: (day, job) => shiftCount > 0 && fetched(day) && (!job || schedJobs.has(job.toLowerCase())),
@@ -372,6 +375,13 @@
     const d = dt(day), y = d.getUTCFullYear(), m = d.getUTCMonth() + 1, last = new Date(Date.UTC(y, m, 0)).getUTCDate();
     if (kind === "pay") return d.getUTCDate() <= 15 ? { start: ymd(y, m, 1), end: ymd(y, m, 15) } : { start: ymd(y, m, 16), end: ymd(y, m, last) };
     return { start: ymd(y, m, 1), end: ymd(y, m, last) };
+  }
+  // The day to show after switching period: a longer period holds the one being looked at (a past week's month);
+  // a shorter one goes to today's (Month → Week is this week), as does any switch while today is in view.
+  const PERIOD_SIZE = { week: 0, pay: 1, month: 2 };
+  function switchAnchor(P, from, to, today) {
+    if (today >= P.start && today <= P.end) return today;
+    return PERIOD_SIZE[to] < PERIOD_SIZE[from] ? today : P.start;
   }
   function periodLabel(P, kind) {
     if (kind === "month") { const d = dt(P.start); return `${MONTHS_LONG[d.getUTCMonth()]} ${d.getUTCFullYear()}`; }
@@ -706,12 +716,17 @@
 
   function header() {
     const tab = (key, label, dot) => h("button", { class: "att-tab" + (ui.tab === key ? " active" : ""), type: "button", "aria-pressed": String(ui.tab === key),
-      onclick: () => { ui.tab = key; if (key === "rules" && canManage() && !ui.formList) { ui.formList = true; load(); } else draw(); } },
-      label, dot ? h("span", { class: "att-dot", "aria-label": "needs attention" }) : null);
+      onclick: () => {
+        // Unsaved rules are kept (on every tab, until Save or Undo); say so when leaving them.
+        if (ui.tab === "rules" && key !== "rules" && ui.dirty) toast("Your rule changes aren’t saved yet. They’re kept on the Rules tab until you Save or Undo.");
+        ui.tab = key; if (key === "rules" && canManage() && !ui.formList) { ui.formList = true; load(); } else draw();
+      } },
+      label, dot ? h("span", { class: "att-dot", "aria-label": typeof dot === "string" ? dot : "needs attention", title: typeof dot === "string" ? dot : null }) : null);
+    // The app shows the report's name above it, so only the tabs here.
     return h("div", { class: "att-head" },
-      h("div", { class: "att-brand" }, h("span", { class: "att-eyebrow" }, "Connecteam × Gusto"), h("h1", { class: "att-title" }, "Attendance & Leave")),
       h("div", { class: "att-tabs att-noprint", role: "group", "aria-label": "Sections" },
-        tab("report", "Report"), tab("gusto", "Leave balances", !ctx.data.gusto || !model.gustoOk), tab("rules", "Rules")));
+        tab("report", "Report"), tab("gusto", "Leave balances", !ctx.data.gusto || !model.gustoOk),
+        tab("rules", "Rules", ui.dirty && "changes not saved")));
   }
 
   function banner() {
@@ -743,7 +758,7 @@
     const seg = (key, label) => h("button", { type: "button", class: "att-seg-btn" + (ui.period === key ? " active" : ""), "aria-pressed": String(ui.period === key),
       onclick: () => {
         if (ui.period === key) return;
-        const anchor = Math.min(Math.max(P.start, d.today > P.end ? P.start : d.today), P.end);
+        const anchor = switchAnchor(P, ui.period, key, d.today);
         ui.period = key; remember(); stepTo(anchor);
       } }, label);
     const prevOk = P.start > d.today - 730, nextOk = P.end < d.today;
@@ -781,7 +796,9 @@
       d.gusto ? `Gusto balances uploaded ${when(d.gusto.uploaded_at)}${d.gusto.by ? ` by ${d.gusto.by}` : ""}` : "Gusto balances not uploaded",
       "Connecteam data is kept for 10 minutes",
     ];
-    return h("section", { class: "att-report" }, bar, actions, printHead(W), kpis,
+    const noPunch = model.noPunches.filter(n => W.rows.some(r => r.p.name === n && r.missed.length));
+    const noPunchNote = noPunch.length ? h("p", { class: "att-warn-text att-noprint" }, `On the schedule but with no punches at all: ${noPunch.join(", ")}. If they aren’t on a Connecteam time clock yet, their shifts count as no-shows.`) : null;
+    return h("section", { class: "att-report" }, bar, actions, printHead(W), kpis, noPunchNote,
       h("div", { class: "att-panel" }, h("div", { class: "att-panel-head" }, h("h2", null, ui.period === "week" ? "Staff this week" : "Staff this period"), h("p", { class: "att-noprint" }, "Tap a name to see each day's punches.")), roster(W, P)),
       h("div", { class: "att-panel att-forms-panel" }, h("div", { class: "att-panel-head" }, h("h2", null, "Required forms"), h("p", { class: "att-noprint" }, "Tap a form to see every day, hour by hour.")), formsTable(W)),
       h("div", { class: "att-foot-note" }, notes.map(n => h("span", null, n))),
@@ -855,6 +872,7 @@
       cells.push(h("div", { class: "att-day" + (empty ? " off" : "") }, kids));
     }
     const foot = [];
+    if (model.noPunches.includes(r.p.name)) foot.push("No punches at all in these dates. If they aren’t on a Connecteam time clock yet, their shifts show as no-shows.");
     if (r.formMisses.length) foot.push(`Forms missed: ${r.formMisses.join(", ")}`);
     if (r.offHrs) foot.push(`Leave recorded: ${fmtH(r.offHrs)}`);
     if (r.noOut) foot.push(`${plural(r.noOut, "shift")} without a clock-out`);
@@ -1053,7 +1071,8 @@
       manage ? h("div", { class: "att-actions" },
         h("button", { type: "button", class: "att-btn", onclick: () => { D.rules = { ...DEFAULT_RULES, aliases: R.aliases, earlySkip: [] }; changed(); } }, "Reset to defaults"),
         h("button", { type: "button", class: "att-btn primary", disabled: !ui.dirty, onclick: saveRules }, "Save"),
-        ui.dirty ? h("button", { type: "button", class: "att-btn", onclick: () => { ui.draft = null; ui.dirty = false; draw(); } }, "Undo changes") : null)
+        ui.dirty ? h("button", { type: "button", class: "att-btn", onclick: () => { ui.draft = null; ui.dirty = false; draw(); } }, "Undo changes") : null,
+        ui.dirty ? h("p", { class: "att-hint att-unsaved", role: "status" }, "Not saved yet. Changes here and under Required forms are kept while you look at other tabs, and saved together.") : null)
         : h("p", null, "Only people who manage this report can change these."));
     return h("section", { class: "att-rules-tab" }, h("div", { class: "att-panel" }, top, form), formsEditor(D, ro, changed));
   }
@@ -1114,7 +1133,7 @@
 
   // ---------------------------------------------------------------- hook up
   const core = { parseCSV, parseHours, normKey, niceName, firstNamesAlike, NICKNAMES, gustoTable, buildModel, computePeriod, periodOf, periodLabel, blocksFor, daySlots, hoursSetting, freqText,
-    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, DEFAULT_RULES };
+    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, switchAnchor, DEFAULT_RULES };
   if (typeof module === "object" && module.exports) module.exports = core;
   if (typeof StaffReports !== "undefined") StaffReports.register("attendance", { render });
 })();

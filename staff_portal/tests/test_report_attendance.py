@@ -338,6 +338,39 @@ def test_view_a_clock_in_and_out_in_the_same_minute_is_a_blip(tmp_path):
 
 
 @need_node
+def test_view_notes_people_scheduled_with_no_punches_at_all(tmp_path):
+    """Jonah is scheduled and never punched: his no-show gets the original's hint that he may not
+    be on a time clock yet."""
+    _, ctx = sample()
+    out = view(tmp_path, run(ctx))
+    assert out["noPunches"] == ["Jonah Reyes"]
+    _, ctx = sample(fail={"timesheets"})
+    assert view(tmp_path, run(ctx))["noPunches"] == []
+
+
+@need_node
+def test_view_switching_period_goes_where_expected(tmp_path):
+    """Month → Week shows this week, even from a past month; a longer period holds the one
+    being looked at."""
+    _, ctx = sample()
+    d = run(ctx)
+    today = d["today"]
+    sept = (today - 50, today - 21)               # a past month
+    week = (today - 16, today - 10)               # a past week
+    out = view(tmp_path, d, anchors=[[*sept, "month", "week", today], [*sept, "month", "pay", today],
+                                     [*week, "week", "month", today], [*week, "week", "pay", today],
+                                     [today - 3, today + 3, "week", "month", today]])
+    assert out["anchors"] == [today, today, week[0], week[0], today]
+
+
+def test_view_shows_the_title_once():
+    """The staff app puts the report's name above it; the view doesn't repeat it."""
+    js = open(VIEW).read()
+    head = js[js.index("function header()"):js.index("function banner()")]
+    assert "Attendance & Leave" not in head and '"h1"' not in head
+
+
+@need_node
 def test_view_without_timesheets_checks_nobody(tmp_path):
     _, ctx = sample(fail={"timesheets"})
     out = view(tmp_path, run(ctx))

@@ -19,7 +19,6 @@
 }
 .att.att-loading .att-report, .att.att-loading .att-panel { opacity: 0.6; transition: opacity 0.2s; }
 .att h1, .att h2 { margin: 0; letter-spacing: -0.015em; }
-.att-title { font-size: 28px; font-weight: 800; line-height: 1.1; }
 .att h2 { font-size: 19px; font-weight: 700; }
 .att-eyebrow { font-size: 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--att-red); }
 .att .num { font-variant-numeric: tabular-nums; }
@@ -32,7 +31,7 @@
 
 /* Header and tabs */
 .att-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 20px; margin-top: 6px; }
-.att-brand { display: grid; gap: 2px; min-width: 0; }
+.att-unsaved { flex-basis: 100%; margin: 0; }
 .att-tabs, .att-seg { display: inline-flex; gap: 4px; padding: 4px; background: var(--card-2); border-radius: 16px; max-width: 100%; }
 .att-tab, .att-seg-btn {
   border: 0; background: none; color: var(--muted); font-weight: 600; min-height: 38px; padding: 0 14px;
