@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.17
+
+- **The dashboard updates by itself while it's open:** changes made by another admin, by a
+  Connecteam sync in the background or by someone signing in show up within about 12 seconds,
+  without reloading. The header says when it last checked, and new Activity lines appear at the
+  top as they happen.
+- **It never gets in your way:** nothing changes under an open dialog or while you're typing. If
+  you have unsaved changes, a "Changed elsewhere meanwhile — Show it" note waits for you.
+- **These checks only read Staff Access's own records:** they never use your Connecteam or TT
+  Hotel requests, and they pause while the page isn't showing.
+- **Fixed:** after saving the layout, the Phones tab showed the old page names until a reload.
+- **Fixed:** after renaming a door or changing its kind or Show, the Door activity list,
+  departments and key card lines showed the old name until a reload.
+
 ## 0.12.16
 
 - **Task cards say more:** a form's task shows its first answers under the title ("Room 214 ·
