@@ -342,7 +342,7 @@
         const p = lookup(s); return [p ? p.key : keyOf(s)];
       }))];
       const who = appliesTo.split(/[,;\n]/).map(s => s.trim().toLowerCase()).filter(Boolean);
-      return { id: f.id, name: f.name || "Untitled form", frequency: f.frequency || "shift", appliesTo, applies, who, every: hoursSetting(f.every, 1), nightEvery: hoursSetting(f.night_every, hoursSetting(f.every, 1)),
+      return { id: f.id, name: f.name || "Untitled form", frequency: f.frequency || "shift", appliesTo, applies, who, every: hoursSetting(f.every, 1), nightEvery: hoursSetting(f.night_every, hoursSetting(f.every, 1)), ...checkHours(f),
         subs, times: times.sort((a, b) => a.t - b.t), rows, unmatched: [...unmatched], hasFile: f.loaded !== false };
     });
 
@@ -431,28 +431,35 @@
 
   // Hourly team checks (e.g. tub temperatures): each time slot in which someone matching the form's job or title
   // was clocked in for at least 30 minutes needs one submission from anyone. A missed slot counts against
-  // everyone who was on that job for 15 minutes or more of it. Overnight (10p–6a) can use a longer interval.
-  const NIGHT_START = 22 * 60, NIGHT_END = 6 * 60;
+  // everyone who was on that job for 15 minutes or more of it. The form's checked hours (6a–10p unless set) use
+  // one interval; the rest of the night another, or none (0), and unchecked times aren't shown at all.
+  const DAY_FROM = 6 * 60, DAY_UNTIL = 22 * 60;
+  const clockMinutes = v => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || "")); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : null; };
+  function checkHours(f) {
+    const from = clockMinutes(f.day_from), until = clockMinutes(f.day_until) === 0 ? 1440 : clockMinutes(f.day_until);
+    return from == null || until == null || until <= from ? { from: DAY_FROM, until: DAY_UNTIL } : { from, until };
+  }
+  const span = f => `${fmtClock(f.from).replace(":00", "")}–${fmtClock(f.until).replace(":00", "")}`;
   // An interval of 0 switches checks off for that part of the day; blank means the default.
   const hoursSetting = (v, d) => v === "" || v == null || isNaN(+v) ? d : +v <= 0 ? 0 : Math.max(0.5, +v);
   const freqText = f => {
-    const day = f.every === 0 ? "Not checked 6a–10p" : `Every ${f.every === 1 ? "hour" : fmtH(f.every)}`;
+    const day = (f.every === 0 ? "Not checked " : `Every ${f.every === 1 ? "hour" : fmtH(f.every)} `) + span(f);
     const night = f.nightEvery === 0 ? (f.every === 0 ? " or overnight" : ", not overnight") : f.nightEvery !== f.every ? `, every ${fmtH(f.nightEvery)} overnight` : "";
     return day + night;
   };
-  function daySlots(every, nightEvery) {
+  function daySlots(every, nightEvery, from, until) {
     const out = []; let m = 0;
     while (m < 1440) {
-      const night = m >= NIGHT_START || m < NIGHT_END;
+      const night = m >= until || m < from;
       const iv = night ? nightEvery : every;
-      const edge = m < NIGHT_END ? NIGHT_END : m < NIGHT_START ? NIGHT_START : 1440;
+      const edge = m < from ? from : m < until ? until : 1440;
       const end = iv === 0 ? edge : Math.min(m + iv * 60, edge);
       out.push([m, end, iv === 0]); m = end;
     }
     return out;
   }
   function hourlyForm(f, rows, lo, hi, model, NOW) {
-    const slots = daySlots(f.every, f.nightEvery);
+    const slots = daySlots(f.every, f.nightEvery, f.from, f.until);
     const slotAt = abs => { const d = Math.floor(abs / 1440), m = abs - d * 1440; const s = slots.find(x => m >= x[0] && m < x[1]); return [d * 1440 + s[0], d * 1440 + s[1], s[2]]; };
     const cov = new Map(); // slot start -> { end, total, people: Map(rec -> minutes) }
     for (const r of rows) {
@@ -501,7 +508,10 @@
     for (let d = Math.floor(lo / 1440); d < Math.floor(hi / 1440); d++) {
       grid.push({ d, cells: slots.map(([s0, s1, off]) => { const ss = d * 1440 + s0; const x = slotState.get(ss) || { st: off ? "off" : (d * 1440 + s1) > NOW ? "later" : "none", on: [], by: f.times.filter(t => t.t >= ss && t.t < d * 1440 + s1) }; return { ss, se: d * 1440 + s1, ...x }; }) });
     }
-    return { ...f, expected, done, missed: expected - done, misses, grid, slots };
+    // times that aren't checked (an interval of 0) are left out of the grid
+    const shown = slots.map((x, i) => x[2] ? -1 : i).filter(i => i >= 0);
+    grid.forEach(g => { g.cells = shown.map(i => g.cells[i]); });
+    return { ...f, expected, done, missed: expected - done, misses, grid, slots: shown.map(i => slots[i]) };
   }
 
   // The report for one period. opts: { R: rules, dept: '' for all, now: abs minutes, today: day }
@@ -933,8 +943,7 @@
           h("thead", null, h("tr", null, h("th"), f.slots.map(([s0, s1]) => h("th", null, slotLabel(s0, s1))), h("th", { class: "r" }, "Missed"))),
           h("tbody", null, rows))),
         h("div", { class: "att-legend" }, h("span", null, sample("done", "✓"), "Done"), h("span", null, sample("missed", "✗"), "Missed"), h("span", null, sample("light", "·"), "On shift under 30 min"),
-          h("span", null, sample("none"), "Nobody on shift"), h("span", null, sample("open", "…"), "Not over yet"), f.slots.some(x => x[2]) ? h("span", null, sample("off"), "Not checked (set to 0)") : null,
-          h("span", null, "Hover or tap a square for who was on and who submitted.")),
+          h("span", null, sample("none"), "Nobody on shift"), h("span", null, sample("open", "…"), "Not over yet"),           h("span", null, "Hover or tap a square for who was on and who submitted.")),
         list.length ? h("details", { class: "att-misslist", open: !!ui.printing }, h("summary", null, `${plural(list.length, "missed check")}: times and who was on`), h("ul", null, list)) : null);
     }
     if (!f.people.length) return h("div", { class: "att-empty" }, "Nobody this form applies to worked in this period.");
@@ -1081,7 +1090,7 @@
     const info = new Map(model.forms.map(f => [f.id, f]));
     const items = D.forms.map((f, idx) => {
       const hourly = f.frequency === "hour";
-      const due = h("select", { class: "att-input", disabled: ro, "aria-label": "Due", onchange: e => { f.frequency = e.target.value; if (f.frequency === "hour" && !f.every) { f.every = 1; f.night_every = 1; } changed(); } },
+      const due = h("select", { class: "att-input", disabled: ro, "aria-label": "Due", onchange: e => { f.frequency = e.target.value; if (f.frequency === "hour" && !f.every) { f.every = 1; f.night_every = 0; } changed(); } },
         [["shift", "Every shift worked"], ["week", "Once a week"], ["hour", "On a timer, by whoever is on shift"]].map(([v, t]) => h("option", { value: v, selected: f.frequency === v }, t)));
       const fi = info.get(f.id);
       return h("div", { class: "att-form-item" },
@@ -1090,9 +1099,7 @@
           h("div", { class: "att-field" }, h("label", null, "Due"), due),
           whoPicker(f, ro, changed),
           ro ? null : h("button", { type: "button", class: "att-btn ghost", onclick: () => { D.forms.splice(idx, 1); changed(); } }, "Remove")),
-        hourly ? h("div", { class: "att-form-row two" },
-          h("div", { class: "att-field" }, h("label", null, "Every (hours), 6a–10p · 0 = don’t check"), h("input", { class: "att-input", type: "number", min: "0", step: "0.5", value: String(hoursSetting(f.every, 1)), disabled: ro, onchange: e => { f.every = e.target.value; changed(); } })),
-          h("div", { class: "att-field" }, h("label", null, "Every (hours), overnight 10p–6a · 0 = don’t check"), h("input", { class: "att-input", type: "number", min: "0", step: "0.5", value: String(hoursSetting(f.night_every, hoursSetting(f.every, 1))), disabled: ro, onchange: e => { f.night_every = e.target.value; changed(); } }))) : null,
+        hourly ? hourFields(f, ro, changed) : null,
         fi && fi.unmatched.length ? h("div", { class: "att-warn-text" }, `Submitted by people not seen working this period: ${fi.unmatched.slice(0, 8).join(", ")}`) : null);
     });
     let add = null;
@@ -1103,13 +1110,28 @@
         const sel = h("select", { class: "att-input", "aria-label": "Connecteam form" }, choices.map(c => h("option", { value: c.id }, c.name)));
         add = h("div", { class: "att-add-form" }, sel, h("button", { type: "button", class: "att-btn", onclick: () => {
           const c = choices.find(x => x.id === sel.value); if (!c) return;
-          D.forms.push({ id: c.id, name: c.name, frequency: "shift", applies_to: "", every: 1, night_every: 1 }); changed();
+          D.forms.push({ id: c.id, name: c.name, frequency: "shift", applies_to: "", every: 1, night_every: 0, day_from: "06:00", day_until: "22:00" }); changed();
         } }, "Add form"));
       } else add = h("p", { class: "att-hint" }, ui.loading ? "Loading Connecteam forms…" : (ctx.data.form_choices || []).length ? "Every Connecteam form is already here." : "No Connecteam forms found. If Connecteam data didn't load, try again in a few minutes.");
     }
     return h("div", { class: "att-panel" },
       h("div", { class: "att-panel-head" }, h("h2", null, "Required forms"), h("p", null, "Connecteam forms people must fill in: every shift, once a week, or on a timer by whoever is on shift. Saved with the rules.")),
       h("div", { class: "att-pad att-form-list" }, items.length ? items : h("p", { class: "att-muted" }, "None yet."), add));
+  }
+
+  // A timed form's checked hours and how often in them, and how often outside them (0: not at all).
+  function hourFields(f, ro, changed) {
+    const hrs = checkHours(f);
+    const clock = m => `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    const time = (key, value, label) => h("input", { class: "att-input", type: "time", step: "1800", value: clock(value), disabled: ro, "aria-label": label,
+      onchange: e => { f[key] = e.target.value; changed(); } });
+    const num = (key, value, label) => h("input", { class: "att-input", type: "number", min: "0", step: "0.5", value: String(value), disabled: ro, "aria-label": label,
+      onchange: e => { f[key] = e.target.value; changed(); } });
+    return h("div", { class: "att-form-row four" },
+      h("div", { class: "att-field" }, h("label", null, "Checked from"), time("day_from", hrs.from, "Checked from")),
+      h("div", { class: "att-field" }, h("label", null, "Until"), time("day_until", hrs.until, "Until")),
+      h("div", { class: "att-field" }, h("label", null, "Every (hours)"), num("every", hoursSetting(f.every, 1), "Every how many hours")),
+      h("div", { class: "att-field" }, h("label", null, "Rest of the night (hours) · 0 = not checked"), num("night_every", hoursSetting(f.night_every, hoursSetting(f.every, 1)), "Rest of the night, every how many hours")));
   }
 
   function whoPicker(f, ro, changed) {

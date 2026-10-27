@@ -223,7 +223,8 @@ textarea.att-input { min-height: 100px; padding: 10px 12px; resize: vertical; }
 .att-form-item { display: grid; gap: 10px; padding: 12px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px var(--line); }
 .att-form-row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.6fr) auto; gap: 10px; align-items: end; }
 .att-form-row.two { grid-template-columns: repeat(2, minmax(0, 220px)); }
-@media (max-width: 760px) { .att-form-row, .att-form-row.two { grid-template-columns: minmax(0, 1fr); } }
+.att-form-row.four { grid-template-columns: repeat(2, minmax(0, 160px)) repeat(2, minmax(0, 220px)); }
+@media (max-width: 760px) { .att-form-row, .att-form-row.two { grid-template-columns: minmax(0, 1fr); } .att-form-row.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .att-add-form { display: flex; flex-wrap: wrap; gap: 8px; }
 .att-add-form select { flex: 1 1 200px; width: auto; }
 .att-ms { position: relative; }

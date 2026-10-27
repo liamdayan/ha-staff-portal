@@ -1471,7 +1471,10 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   30 minutes for shifts of 6 hours or more), the low-balance flags, when someone needs action,
   which jobs are checked for early clock-outs, and the name matches. Under **Required forms**, pick
   Connecteam forms and say when each is due (every shift worked, once a week, or on a timer by
-  whoever is on shift, such as an hourly tub check) and for whom. People who **manage** the report
+  whoever is on shift, such as an hourly tub check) and for whom. A timed form has its own checked
+  hours (**Checked from** and **Until**, 6 AM to 10 PM unless changed) and how often in them, and
+  how often the rest of the night: 0, the default for new forms, means not checked, and those
+  hours are left off its grid. People who **manage** the report
   change these and click **Save**; everyone else sees them read-only.
 - **Reading it.** Six numbers at the top, then everyone who worked or was scheduled, worst first
   (**Action**, **Watch**, **Clear**). Tap a name for their day-by-day punches. Tap a form for its

@@ -86,7 +86,8 @@ def test_rules_and_forms_are_cleaned():
     forms = rep.clean_forms([dict(id="a", frequency="hour", every="", night_every=0), dict(id="a"),
                              dict(id="", name="no id"), "junk", dict(id="b", frequency="daily", every=99)]
                             + [dict(id=str(i)) for i in range(40)])
-    assert forms[0] == dict(id="a", name="Untitled form", frequency="hour", applies_to="", every=1, night_every=0)
+    assert forms[0] == dict(id="a", name="Untitled form", frequency="hour", applies_to="", every=1, night_every=0,
+                            day_from="06:00", day_until="22:00")
     assert forms[1]["id"] == "b" and forms[1]["frequency"] == "shift" and forms[1]["every"] == 24
     assert len(forms) == rep.MAX_FORMS
 
@@ -267,7 +268,8 @@ def test_view_forms(tmp_path):
     tub = forms["Tub temperature check"]
     assert (tub["expected"], tub["done"], tub["missed"]) == (7, 6, 1)
     wed = tub["grid"][3].split(",")
-    assert wed[0] == "off" and wed[-1] == "off" and wed[9:16] == ["done", "done", "missed", "done", "done", "done", "done"]
+    # unchecked times (overnight, set to 0) aren't shown: 6a to 10p, one square an hour
+    assert len(wed) == 16 and "off" not in wed and wed[8:15] == ["done", "done", "missed", "done", "done", "done", "done"]
     lena = by_name(out)["Lena Brooks"]
     assert lena["formsMissed"] == 2 and lena["formMisses"] == ["Shift handoff log ×1", "Tub temperature check ×1"]
     assert out["totals"]["formsExpected"] == 12 and out["totals"]["formsMissed"] == 2
@@ -391,7 +393,7 @@ def test_view_period_in_progress(tmp_path):
     assert out["inProgress"] is True and "On the clock" in rows["Lena Brooks"]["flags"]
     assert rows["Jonah Reyes"]["missed"] == 0 and out["totals"]["missed"] == 0
     tub = {f["name"]: f for f in out["forms"]}["Tub temperature check"]
-    assert tub["expected"] == 1 and tub["grid"][3].split(",")[9:12] == ["done", "open", "later"]
+    assert tub["expected"] == 1 and tub["grid"][3].split(",")[8:11] == ["done", "open", "later"]
 
 
 @need_node
@@ -619,3 +621,30 @@ def test_the_report_through_the_server_with_the_real_ctdata(tmp_path, monkeypatc
             status, body = await p.call("GET", path, ana)
             assert {t["uid"] for t in body["data"]["timesheets"]} == {"7", "8"}
     asyncio.run(scenario())
+
+
+def test_a_timed_forms_checked_hours():
+    hours = lambda **f: {k: v for k, v in rep.clean_forms([dict(id="a", frequency="hour", **f)])[0].items()
+                         if k.startswith("day_")}
+    assert hours(day_from="7:30", day_until="23:00") == dict(day_from="07:30", day_until="23:00")
+    assert hours(day_from="08:00", day_until="00:00") == dict(day_from="08:00", day_until="00:00")   # to midnight
+    for bad in (dict(day_from="22:00", day_until="06:00"), dict(day_from="25:00", day_until="23:00"),
+                dict(day_from="<b>", day_until=""), {}):
+        assert hours(**bad) == dict(day_from="06:00", day_until="22:00")
+
+
+@need_node
+def test_view_a_timed_form_checks_only_its_own_hours(tmp_path):
+    _, ctx = sample()
+    data = run(ctx)
+    tub = next(f for f in data["settings"]["forms"] if f["name"] == "Tub temperature check")
+    tub.update(day_from="15:00", day_until="20:00", every=1, night_every=0)
+    for f in data["forms"]:
+        if f["name"] == tub["name"]:
+            f.update(day_from="15:00", day_until="20:00", every=1, night_every=0)
+    out = view(tmp_path, data)
+    got = {f["name"]: f for f in out["forms"]}["Tub temperature check"]
+    wed = got["grid"][3].split(",")
+    # 3p to 8p only: five squares, the 4pm check still missed
+    assert len(wed) == 5 and wed == ["done", "missed", "done", "done", "done"]
+    assert (got["expected"], got["missed"]) == (5, 1)

@@ -28,6 +28,7 @@ MAX_FORMS = 20
 NAME_LEN = 120
 ALIASES_LEN = 12000          # characters of name matches
 APPLIES_LEN = 1000           # characters of a form's "who must submit"
+DAY_FROM, DAY_UNTIL = "06:00", "22:00"   # a timed form's checked hours unless set
 MAX_SKIP = 50                # departments and jobs not checked for early clock-outs
 SETTINGS_ROOM = 46 * 1024    # saved settings as JSON (the add-on takes at most 48 KB)
 GUSTO_MAX = 256 * 1024       # bytes of a Gusto upload
@@ -74,6 +75,20 @@ def _interval(value, default):
     return _number(value, default, 24)
 
 
+def _hhmm(value) -> int | None:
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or ""))
+    return int(m[1]) * 60 + int(m[2]) if m and int(m[1]) < 24 and int(m[2]) < 60 else None
+
+
+def _check_hours(f: dict) -> dict:
+    """A timed form's checked hours, "HH:MM" (until "00:00" is midnight); 6a to 10p unless both
+    are set and from comes first."""
+    start, until = _hhmm(f.get("day_from")), _hhmm(f.get("day_until"))
+    if start is None or until is None or (until or 1440) <= start:
+        return dict(day_from=DAY_FROM, day_until=DAY_UNTIL)
+    return dict(day_from=f"{start // 60:02d}:{start % 60:02d}", day_until=f"{until // 60:02d}:{until % 60:02d}")
+
+
 def clean_forms(raw) -> list[dict]:
     """The required forms: which Connecteam form, how often it's due, and for whom."""
     found, seen = [], set()
@@ -88,7 +103,8 @@ def clean_forms(raw) -> list[dict]:
         found.append(dict(id=form_id, name=_text(f.get("name"), NAME_LEN).strip() or "Untitled form",
                           frequency=f.get("frequency") if f.get("frequency") in FREQUENCIES else "shift",
                           applies_to=_text(f.get("applies_to"), APPLIES_LEN),
-                          every=every, night_every=_interval(f.get("night_every"), every)))
+                          every=every, night_every=_interval(f.get("night_every"), every),
+                          **_check_hours(f)))
     return found[:MAX_FORMS]
 
 
