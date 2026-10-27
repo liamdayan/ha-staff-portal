@@ -701,6 +701,31 @@ def test_the_meeting_date_starts_at_hrs_today_not_the_devices(tmp_path, monkeypa
     run(scenario())
 
 
+def test_an_extra_reviews_due_date_starts_at_hrs_today_not_the_devices(tmp_path, monkeypatch):
+    """"Start a review"'s "Due" starts two weeks after the section's `today`: HR's day in its time
+    zone. At 9 PM Pacific a device on UTC is already on tomorrow, so its date would be a day late."""
+    real = time.time
+    nine_pm_pacific = datetime(2026, 10, 27, 4, 0, tzinfo=timezone.utc).timestamp()   # Oct 26th there
+    shift = nine_pm_pacific - real()
+    monkeypatch.setattr(time, "time", lambda: real() + shift)
+
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            s = await setup(hr)
+            assert today(hr) == date(2026, 10, 26)
+            for who in ("303", "306"):   # the manager and HR, who can start one
+                status, page, _ = await hr.call("GET", "/api/people/301", cookie=s[who])
+                sec = next(x for x in page["sections"] if x["name"] == "reviews")
+                assert status == 200 and sec["can_start"], who
+                assert (sec["today"], sec["start_due"]) == ("2026-10-26", "2026-11-09"), who
+            status, body, _ = await hr.call("GET", "/static/hr-reviews.js")
+            assert status == 200
+            assert 'const due = h("input", { type: "date", value: s.start_due, required: true });' in body
+            assert "Date.now()" not in body and "new Date()" not in body
+            assert 'toLocaleDateString("en-CA")' not in body
+    run(scenario())
+
+
 def test_roles_on_review_actions(tmp_path):
     async def scenario():
         async with HR(tmp_path) as hr:
