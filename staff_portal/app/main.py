@@ -3323,6 +3323,7 @@ async def tasks_loop() -> None:
     steps = (("Tasks: tidying up", tidy), ("Tasks from forms", check_task_forms),
              ("Task sync: sending changes", ctsync.push_pending),
              ("Task sync: reading boards", lambda: ctsync.poll_due(ctsync.poll_weight(db.task_forms()))))
+    ctsync.retry_refused()
     while True:
         for what, step in steps:
             try:

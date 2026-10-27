@@ -965,3 +965,24 @@ def test_without_delete_permission_an_unassigned_task_stays_on_the_board(tmp_pat
             status, body = await p.admin_call("POST", "/api/tasks/sync/test")
             assert body["ok"] and any(c["check"] == "Unassigned tasks" for c in body["checks"])
     run(scenario())
+
+
+def test_connecteams_reasons_are_shown_and_refused_changes_are_tried_again(tmp_path):
+    """A 400 or 422 says what Connecteam said (nested, or its validation errors with where), and
+    a change it refused goes again once after the add-on starts."""
+    assert connecteam._words({"error": {"message": "Due date must be after start time"}}) == \
+        "Due date must be after start time"
+    assert connecteam._words({"detail": [{"loc": ["body", "dueDate"], "msg": "bad"}]}) == "body.dueDate: bad"
+    assert connecteam._compact({"code": 17}) == '{"code":17}'
+
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            ana = await p.sign_in(p.ana)
+            t = await p.add(ana, title="Count towels", assigned_id=p.ana)
+            await ctsync.settle()
+            p.db.conn.execute("UPDATE tasks SET ct_note = ?, ct_pending = NULL WHERE id = ?",
+                              ("Connecteam didn't take the last change: x", t["id"]))
+            assert ctsync.retry_refused() == 1 and p.db.task(t["id"])["ct_pending"]
+            assert ctsync.retry_refused() == 0
+    run(scenario())

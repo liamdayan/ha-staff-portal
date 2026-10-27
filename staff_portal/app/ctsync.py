@@ -103,6 +103,16 @@ def configure(get_db, connecteam, zone) -> None:
     _db, _ct, _zone = get_db, connecteam, zone
 
 
+def retry_refused() -> int:
+    """Once at start: changes Connecteam refused (it said no to what was sent) are tried again,
+    in case an update to the add-on fixed what it didn't like. Returns how many."""
+    db = _db()
+    cur = db.conn.execute("UPDATE tasks SET ct_pending = ? WHERE ct_pending IS NULL AND "
+                          "ct_note LIKE 'Connecteam didn''t take%'", (time.time(),))
+    db.conn.commit()
+    return cur.rowcount
+
+
 def on() -> bool:
     s = _db().settings()
     return s.get("ct_tasks_on") == "1" and s.get("connecteam_enabled") == "1"
@@ -437,7 +447,8 @@ async def _push(t: dict) -> bool:
                 return False
             _gone(t, board["board_id"])
             return True
-        data = await _ask("PUT", path, body=_payload(merged))
+        data = await _ask("PUT", path, body={**await _kept_fields(board["board_id"], t["ct_task_id"]),
+                                             **_payload(merged)})
     except Rejected as err:
         if err.status == 404:   # deleted there: made again unless it's finished with
             _gone(t, board["board_id"])
@@ -452,6 +463,31 @@ async def _push(t: dict) -> bool:
     _save(t["id"], ct_sync={"seen": _answered(data, merged), "base": sa}, ct_note=None, clear_pending=True,
           pending_was=t["ct_pending"])
     return True
+
+
+async def _kept_fields(board_id: str, task_id: str) -> dict:
+    """What Connecteam holds on a task that Staff Access doesn't (its start time, labels, type
+    and sub-tasks), read just before a change: an update replaces the whole task, so they're
+    sent back as they are. {} when it can't be read (the change still goes)."""
+    try:
+        data = await _ask("GET", f"/tasks/v1/taskboards/{board_id}/tasks",
+                          [("taskIds", task_id), ("status", "all"), ("limit", str(PAGE))])
+    except Rejected:
+        return {}
+    r = next((r for r in data.get("tasks") or [] if isinstance(r, dict) and str(r.get("id")) == task_id), None)
+    if r is None:
+        return {}
+    kept = {}
+    if isinstance(r.get("startTime"), int) and not isinstance(r["startTime"], bool):
+        kept["startTime"] = r["startTime"]
+    if isinstance(r.get("labelIds"), list):
+        kept["labelIds"] = [str(x) for x in r["labelIds"] if isinstance(x, (str, int))][:50]
+    if r.get("type") in ("oneTime", "recurring"):
+        kept["type"] = r["type"]
+    if isinstance(r.get("subTasks"), list):
+        kept["subTasks"] = [{"title": str(x.get("title"))[:500], "isCompleted": x.get("isCompleted") is True}
+                            for x in r["subTasks"][:100] if isinstance(x, dict) and x.get("title")]
+    return kept
 
 
 def _answered(data: dict, sent: dict) -> dict:

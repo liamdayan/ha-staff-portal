@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.3
+
+- **When Connecteam refuses a task change, its own reason now shows** on the task and in the
+  add-on log (it said only "HTTP 400" before).
+- **Changes to a Connecteam task keep what Staff Access doesn't manage:** its start time, labels
+  and sub-tasks are read just before the change and sent back as they were, since Connecteam
+  replaces the whole task.
+- **Changes Connecteam refused are tried again once** after the add-on starts.
+
 ## 0.12.2
 
 - **Tasks: the department filter's first choice is now "All departments",** and "Everyone" is

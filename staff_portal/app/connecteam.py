@@ -576,8 +576,12 @@ class Connecteam:
                                        self.refusal(path, resp.status, said, hr, reports, method))
                     answer = await resp.json(content_type=None)
                     if resp.status >= 400:
+                        said = _words(answer) or _compact(answer)
+                        if method != "GET":
+                            log.warning("Connecteam refused %s %s (HTTP %s): %s", method, path,
+                                        resp.status, _compact(answer, 600))
                         raise Rejected(f"Connecteam couldn't answer {path} (HTTP {resp.status})"
-                                       f"{_quote(_words(answer))}.", resp.status)
+                                       f"{_quote(said)}.", resp.status)
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
                 raise ConnecteamError(f"Can't reach Connecteam: {err or type(err).__name__}") from err
             if not isinstance(answer, dict):
@@ -985,19 +989,38 @@ async def _said(resp: aiohttp.ClientResponse) -> str:
         return " ".join(re.sub(r"<[^>]*>", " ", raw).split())[:MAX_SAID]
 
 
-def _words(body) -> str:
-    """The message in a JSON error reply: detail (text, or validation errors' msg), message,
-    error_description or error."""
-    if not isinstance(body, dict):
+def _words(body, depth: int = 0) -> str:
+    """The message in a JSON error reply: detail (text, or validation errors' msg, with where),
+    message, error_description, error or errors, looking inside a nested object too."""
+    if not isinstance(body, dict) or depth > 2:
         return ""
-    for key in ("detail", "message", "error_description", "error", "title"):
+    for key in ("detail", "message", "error_description", "error", "errors", "title"):
         value = body.get(key)
+        if isinstance(value, dict):
+            value = _words(value, depth + 1)
         if isinstance(value, list):
-            value = "; ".join(str(v.get("msg") or v) if isinstance(v, dict) else str(v)
-                              for v in value[:5])
+            value = "; ".join(_one_error(v) for v in value[:5])
         if isinstance(value, (str, int)) and str(value).strip():
             return " ".join(str(value).split())[:MAX_SAID]
     return ""
+
+
+def _one_error(v) -> str:
+    """One validation error: its msg, and where ("body.dueDate") when it says."""
+    if not isinstance(v, dict):
+        return str(v)
+    where = ".".join(str(x) for x in v.get("loc") or [] if isinstance(x, (str, int)))
+    text = str(v.get("msg") or v.get("message") or _compact(v))
+    return f"{where}: {text}" if where else text
+
+
+def _compact(body, limit: int = MAX_SAID) -> str:
+    """A reply as short JSON, for when it has no message we know (never anything we sent)."""
+    try:
+        text = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(body)
+    return " ".join(text.split())[:limit] if body not in (None, {}, []) else ""
 
 
 def scope_for(path: str, method: str = "GET") -> str:
