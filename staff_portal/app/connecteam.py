@@ -996,7 +996,11 @@ def _words(body, depth: int = 0) -> str:
         return ""
     for key in ("detail", "message", "error_description", "error", "errors", "title"):
         value = body.get(key)
-        if isinstance(value, dict):
+        if isinstance(value, dict) and value and all(isinstance(v, dict) for v in value.values()):
+            # {"body.startTime": {"message": ...}}: each field and what's wrong with it
+            value = "; ".join(f"{k}: {v.get('message') or v.get('msg') or _compact(v)}"
+                              for k, v in list(value.items())[:5])
+        elif isinstance(value, dict):
             value = _words(value, depth + 1)
         if isinstance(value, list):
             value = "; ".join(_one_error(v) for v in value[:5])

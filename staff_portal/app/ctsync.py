@@ -271,8 +271,16 @@ def _payload(v: dict) -> dict:
             "status": ("completed" if v["done"] else "published") if v["users"] else "draft",
             "isArchived": bool(v["archived"] and v["users"]),
             "description": {"content": v["notes"] or ""}}
-    if v["due"]:
-        body["dueDate"] = v["due"]
+    if v["due"] and v["due"] > time.time():
+        body["dueDate"] = v["due"]   # Connecteam refuses a date in the past, even one it had
+    return body
+
+
+def _with_start(body: dict) -> dict:
+    """Connecteam takes a due date only with a start time (it compares them), and refuses one
+    in the past: the task's own when it's still ahead, otherwise a minute from now."""
+    if "dueDate" in body and "startTime" not in body:
+        body["startTime"] = min(int(time.time()) + 60, body["dueDate"])
     return body
 
 
@@ -447,8 +455,8 @@ async def _push(t: dict) -> bool:
                 return False
             _gone(t, board["board_id"])
             return True
-        data = await _ask("PUT", path, body={**await _kept_fields(board["board_id"], t["ct_task_id"]),
-                                             **_payload(merged)})
+        data = await _ask("PUT", path, body=_with_start({**await _kept_fields(board["board_id"], t["ct_task_id"]),
+                                                         **_payload(merged)}))
     except Rejected as err:
         if err.status == 404:   # deleted there: made again unless it's finished with
             _gone(t, board["board_id"])
@@ -478,8 +486,8 @@ async def _kept_fields(board_id: str, task_id: str) -> dict:
     if r is None:
         return {}
     kept = {}
-    if isinstance(r.get("startTime"), int) and not isinstance(r["startTime"], bool):
-        kept["startTime"] = r["startTime"]
+    if isinstance(r.get("startTime"), int) and not isinstance(r["startTime"], bool) and r["startTime"] > time.time():
+        kept["startTime"] = r["startTime"]   # one in the past is refused, so it's left as it is
     if isinstance(r.get("labelIds"), list):
         kept["labelIds"] = [str(x) for x in r["labelIds"] if isinstance(x, (str, int))][:50]
     if r.get("type") in ("oneTime", "recurring"):
@@ -525,7 +533,7 @@ async def _create(t: dict, board: dict, sa: dict) -> bool:
     board_id = board["board_id"]
     _save(t["id"], ct_sync={"creating": time.time(), "board": board_id, "base": sa})
     try:
-        data = await _ask("POST", f"/tasks/v1/taskboards/{board_id}/tasks", body=_payload(sa))
+        data = await _ask("POST", f"/tasks/v1/taskboards/{board_id}/tasks", body=_with_start(_payload(sa)))
     except (Paused, Busy):
         _save(t["id"], ct_sync={"board": board_id})   # never asked
         raise

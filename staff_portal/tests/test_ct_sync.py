@@ -974,6 +974,19 @@ def test_connecteams_reasons_are_shown_and_refused_changes_are_tried_again(tmp_p
         "Due date must be after start time"
     assert connecteam._words({"detail": [{"loc": ["body", "dueDate"], "msg": "bad"}]}) == "body.dueDate: bad"
     assert connecteam._compact({"code": 17}) == '{"code":17}'
+    said = {"details": {"error_message": "Request body is invalid", "error_code": 1002},
+            "error": {"body.startTime": {"message": "Value error, Task start date is in the past"}}}
+    assert connecteam._words(said) == "body.startTime: Value error, Task start date is in the past"
+    # Dates already past aren't sent: Connecteam refuses them, even ones it had.
+    old, soon = int(time.time()) - 3600, int(time.time()) + 3600
+    view = {"title": "x", "notes": "", "users": [7], "done": True, "archived": False}
+    assert "dueDate" not in ctsync._payload({**view, "due": old})
+    assert ctsync._payload({**view, "due": soon})["dueDate"] == soon
+    # A due date goes with a start time (Connecteam compares them): a minute from now at most.
+    body = ctsync._with_start(ctsync._payload({**view, "due": soon}))
+    assert time.time() <= body["startTime"] <= min(time.time() + 61, soon)
+    assert "startTime" not in ctsync._with_start(ctsync._payload({**view, "due": None}))
+    assert ctsync._with_start({"dueDate": soon, "startTime": soon - 5})["startTime"] == soon - 5
 
     async def scenario():
         p, ct = synced(tmp_path)

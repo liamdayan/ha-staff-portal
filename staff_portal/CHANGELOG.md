@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.4
+
+- **Task sync, fitted to Connecteam's real rules:** a start or due date already in the past isn't
+  sent (Connecteam refuses one, even one it had), and a due date always goes with a start time
+  (the task's own when it's still ahead, otherwise a minute from now), which Connecteam needs.
+- **Connecteam's reasons read plainly,** field by field ("body.startTime: Task start date is in
+  the past").
+
 ## 0.12.3
 
 - **When Connecteam refuses a task change, its own reason now shows** on the task and in the
