@@ -4533,7 +4533,7 @@
         root: h("div", { class: "tk" }),
         data: null, v: null, loading: false, seq: 0, minute: 0, people: null,
         filter: { mine: !!saved.mine, dept: saved.dept ?? "all", status: saved.status || "all" },
-        showOlder: new Set(), sheet: null, pending: new Map(),
+        showOlder: new Set(), sheet: null, pending: new Map(), unfolded: new Set(),
       };
       fill(tk.root, h("div", { class: "wb-loading" }, h("div", { class: "spinner", "aria-label": "Loading" })));
       tkLoad();
@@ -4755,14 +4755,43 @@
       t.connecteam ? h("span", { class: "tk-tag tk-ct", title: t.ct_recurring || t.repeats ? "Repeats in Connecteam" : "In Connecteam" },
         tkIcon("sync"), t.ct_recurring || t.repeats ? "Repeats · Connecteam" : "Connecteam") : null,
     ];
+    // A form's task shows its first answers (so requests can be told apart), and folds open on
+    // the card to every answer; another task, its notes.
+    const answers = tkAnswers(t);
+    const preview = answers.length ? answers.slice(0, 3).map(([, a]) => a).join(" · ")
+      : t.notes ? t.notes.split("\n").find((l) => l.trim()) || "" : "";
+    const more = answers.length || t.manager_note || (t.notes && (t.notes.includes("\n") || t.notes.length > 80));
+    let fold = null;
+    if (more) {
+      fold = h("details", { class: "tk-more", open: tk.unfolded.has(t.id) ? "" : null },
+        h("summary", null, tkIcon("chevron", "tk-more-icon"), "Details"),
+        answers.length
+          ? h("dl", { class: "tk-qa" }, answers.flatMap(([q, a]) => [h("dt", null, q || "Answer"), h("dd", null, a)]))
+          : h("p", { class: "tk-more-notes" }, t.notes || ""),
+        answers.length && t.notes ? h("p", { class: "tk-more-sent" }, t.notes.split("\n")[0]) : null,
+        t.manager_note ? h("p", { class: "tk-more-note" }, h("b", null, "Note in Connecteam: "), t.manager_note) : null);
+      fold.addEventListener("toggle", () => { if (fold.open) tk.unfolded.add(t.id); else tk.unfolded.delete(t.id); });
+    }
     const card = h("article", { class: `tk-card ${t.status}${t.priority === "urgent" ? " is-urgent" : ""}${overdue ? " is-overdue" : ""}`,
       "data-id": String(t.id) },
-      h("button", { class: "tk-card-main", type: "button", onclick: () => tkOpenTask(t.id) },
-        h("span", { class: "tk-card-title" }, t.title),
-        t.notes ? h("span", { class: "tk-card-notes" }, t.notes.split("\n").find((l) => l.trim()) || "") : null,
-        h("span", { class: "tk-meta" }, meta)),
+      h("div", { class: "tk-card-body" },
+        h("button", { class: "tk-card-main", type: "button", onclick: () => tkOpenTask(t.id) },
+          h("span", { class: "tk-card-title" }, t.title),
+          preview ? h("span", { class: "tk-card-notes" }, preview) : null,
+          h("span", { class: "tk-meta" }, meta)),
+        fold),
       tkChip(t));
     return card;
+  }
+
+  // A form task's answers from its notes ("Sent by …", a blank line, then "Question: answer"
+  // lines), as [question, answer], leaving out blank ones.
+  function tkAnswers(t) {
+    if (t.source !== "form" || !t.notes) return [];
+    return t.notes.split("\n").slice(1).map((l) => l.trim()).filter(Boolean).map((l) => {
+      const at = l.indexOf(": ");
+      return at > 0 ? [l.slice(0, at), l.slice(at + 2)] : ["", l];
+    }).filter(([, a]) => a && a !== "-");
   }
 
   // The status chip: a tap moves the task on, a long press (or right click) offers every status.

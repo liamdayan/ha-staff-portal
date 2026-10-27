@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.16
+
+- **Task cards say more:** a form's task shows its first answers under the title ("Room 214 ·
+  Toilet keeps running…") instead of "Sent by …", so requests can be told apart at a glance.
+- **Details on the card:** tap **Details** to unfold every answer (and the manager's note in
+  Connecteam) right on the card, without opening the task. It stays open while the list updates.
+
 ## 0.12.15
 
 - **Tasks from Connecteam forms can go to several departments:** tick any number (or Everyone)

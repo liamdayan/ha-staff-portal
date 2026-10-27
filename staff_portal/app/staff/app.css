@@ -1361,6 +1361,23 @@ body.desk-shell .rp-title { display: block; font-size: 26px; margin: 8px 0 4px; 
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .tk-card-notes { color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tk-card-body { flex: 1; min-width: 0; display: grid; gap: 4px; }
+/* A card's Details fold: every answer of a form's task, read without opening it */
+.tk-more > summary {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 10px 0 6px; border-radius: 999px;
+  color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; list-style: none; user-select: none;
+}
+.tk-more > summary::-webkit-details-marker { display: none; }
+.tk-more > summary:hover { background: var(--card-2); color: var(--text); }
+.tk-more-icon { display: inline-flex; width: 16px; height: 16px; transition: transform 0.15s; }
+.tk-more-icon svg { width: 16px; height: 16px; }
+.tk-more[open] .tk-more-icon { transform: rotate(90deg); }
+.tk-qa { display: grid; grid-template-columns: minmax(0, 38%) minmax(0, 1fr); gap: 4px 12px; margin: 6px 0 4px; font-size: 14px; }
+.tk-qa dt { color: var(--muted); }
+.tk-qa dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+@container (max-width: 420px) { .tk-qa { grid-template-columns: minmax(0, 1fr); } .tk-qa dd { margin-bottom: 4px; } }
+.tk-more-notes { margin: 6px 0 4px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tk-more-sent, .tk-more-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .tk-card.done .tk-card-title, .tk-card.wont .tk-card-title { color: var(--muted); }
 .tk-card.wont .tk-card-title { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 .tk-card.done, .tk-card.wont { background: color-mix(in srgb, var(--card) 70%, var(--bg)); }
