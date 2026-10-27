@@ -83,6 +83,14 @@ def configure(connecteam, zone) -> None:
     forget()
 
 
+def forget_submissions(form_id) -> None:
+    """Drop the copies kept of a form's submissions by month, so the next read asks again (a
+    form that follows a manager field must see its statuses as they are now)."""
+    kind = f"submissions:{str(form_id).strip()}"
+    for key in [k for k in _cache if k and k[0] == kind]:
+        _cache.pop(key, None)
+
+
 def forget() -> None:
     """Drop every copy kept (the Connecteam settings changed)."""
     _cache.clear()

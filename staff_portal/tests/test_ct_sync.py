@@ -634,6 +634,7 @@ def test_photos_come_through_the_staff_server_only_for_who_may_see_them(tmp_path
     async def scenario():
         p = Tasks(tmp_path)
         async with p, PhotoHost() as host:
+            monkeypatch.setattr(ctphotos, "PORTS", (host.port,))
             ana = await p.sign_in(p.ana)
             t = await p.add(ana, title="With photos")
             base = f"http://127.0.0.1:{host.port}"
@@ -672,3 +673,264 @@ def test_only_connecteams_own_hosts_over_https():
     many = [{"url": f"https://cdn.connecteam.com/{i}.jpg"} for i in range(40)] + [{"url": "http://x/1.jpg"}]
     assert len(json.loads(tasks.clean_photos(many))) == tasks.MAX_PHOTOS
     assert tasks.clean_photos([{"url": "http://x/1.jpg"}]) is None
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_photo_links_that_parsers_read_differently_are_refused():
+    ok = ctphotos.host_ok
+    for bad in ("https://@cdn.connecteam.com/a", "https://:@cdn.connecteam.com/a",
+                "https://evil.com\\@cdn.connecteam.com/a", "https://cdn.connecteam.com\\evil.com/a",
+                "https://cdn.connecteam.com:8443/a", "https://cdn.connecteam.com\t.evil.com/a",
+                "https://evil.com%40cdn.connecteam.com/a", "https://evıl.connecteam.com/a",
+                "https://cdn.connecteam.com%2f@evil.com/a", "https://evil.com#@cdn.connecteam.com/a",
+                "https://[::1]/a", "https://169.254.169.254/a", "https:// cdn.connecteam.com/a", None):
+        assert not ok(bad), bad
+    assert ok("https://cdn.connecteam.com:443/a.jpg?sig=x") and ok("https://CDN.connecteam.com./a")
+    # Only public addresses are connected to.
+    for private in ("127.0.0.1", "10.1.2.3", "192.168.1.5", "169.254.169.254", "100.64.0.1", "::1",
+                    "fe80::1%eth0", "::ffff:10.0.0.1", "fc00::1", "0.0.0.0", "224.0.0.1", "nonsense"):
+        assert not ctphotos.public_ip(private), private
+    assert ctphotos.public_ip("8.8.8.8") and ctphotos.public_ip("2606:4700::1")
+
+
+def test_a_connecteam_name_that_points_inside_the_network_is_never_fetched(monkeypatch):
+    import aiohttp
+    asked = []
+
+    async def resolve(self, host, port=0, family=0):
+        asked.append(host)
+        return [{"hostname": host, "host": "127.0.0.1", "port": port, "family": 2, "proto": 0, "flags": 0},
+                {"hostname": host, "host": "::ffff:192.168.0.9", "port": port, "family": 10, "proto": 0,
+                 "flags": 0}]
+    monkeypatch.setattr(aiohttp.ThreadedResolver, "resolve", resolve)
+
+    async def scenario():
+        with pytest.raises(OSError):
+            await ctphotos.PublicResolver().resolve("cdn.connecteam.com", 443)
+        with pytest.raises(ctphotos.Unavailable):
+            await ctphotos._fetch("https://cdn.connecteam.com/a.jpg")
+        # A mixed answer keeps only the public address.
+        monkeypatch.setattr(aiohttp.ThreadedResolver, "resolve", lambda *a, **k: _done(
+            [{"hostname": "h", "host": "10.0.0.1", "port": 443, "family": 2, "proto": 0, "flags": 0},
+             {"hostname": "h", "host": "8.8.8.8", "port": 443, "family": 2, "proto": 0, "flags": 0}]))
+        assert [r["host"] for r in await ctphotos.PublicResolver().resolve("h", 443)] == ["8.8.8.8"]
+    run(scenario())
+    assert asked == ["cdn.connecteam.com", "cdn.connecteam.com"]   # the fetch went through it
+
+
+async def _done(value):
+    return value
+
+
+def test_a_photo_that_failed_isnt_fetched_again_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctphotos, "HOSTS", ("127.0.0.1",))
+    monkeypatch.setattr(ctphotos, "SCHEMES", ("http",))
+    ctphotos._failed.clear()
+
+    async def scenario():
+        async with PhotoHost() as host:
+            monkeypatch.setattr(ctphotos, "PORTS", (host.port,))
+            task = {"id": 1, "photos": json.dumps([{"url": f"http://127.0.0.1:{host.port}/gone.png"}])}
+            for _ in range(3):
+                with pytest.raises(ctphotos.Unavailable):
+                    await ctphotos.photo(task, 0, str(tmp_path))
+            assert host.asked == ["gone.png"]
+            ctphotos._failed.clear()
+            with pytest.raises(ctphotos.Unavailable):
+                await ctphotos.photo(task, 0, str(tmp_path))
+            assert host.asked == ["gone.png", "gone.png"]
+    run(scenario())
+
+
+def test_a_bad_partial_or_missing_board_read_never_bins_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctsync, "MAX_PAGES", 4)
+
+    def room():   # a fresh minute in the reports lane
+        main.connecteam._reports_recent.clear()
+        main.connecteam._recent.clear()
+
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            ana = await p.sign_in(p.ana)
+            t = await p.add(ana, title="Keep me", assigned_id=p.ana)
+            await ctsync.settle()
+            [remote] = ct.board_tasks["501"]
+            real = ct.quick_tasks
+
+            async def odd(request, path):
+                if request.method == "GET" and path.endswith("/tasks"):
+                    return web.json_response(reply)
+                return await real(request, path)
+            ct.quick_tasks = odd
+            # A reply without a list of tasks: an error, not an empty board.
+            for reply in ({"data": {}}, {"data": {"tasks": None}}, {"data": []}):
+                await poll(p)
+                assert p.db.task(t["id"])["deleted_at"] is None, reply
+            # Paging that doesn't move on: not the whole board, so nothing's taken as gone.
+            others = [ct_task(f"o{i}", f"Other {i}", [9]) for i in range(ctsync.PAGE)]
+            reply = {"data": {"tasks": others}, "paging": {"offset": 0}}
+            await poll(p)
+            row = p.db.task(t["id"])
+            assert row["deleted_at"] is None and row["ct_task_id"] == remote["id"]
+            # The paging cap reached: the same.
+            reply = {"data": {"tasks": others}, "paging": {"offset": 1}}
+            calls = iter(range(1, 1000))
+
+            async def endless(request, path):
+                if request.method == "GET" and path.endswith("/tasks"):
+                    return web.json_response({"data": {"tasks": others}, "paging": {"offset": next(calls) * 100}})
+                return await real(request, path)
+            ct.quick_tasks = endless
+            room()
+            await poll(p)
+            assert p.db.task(t["id"])["deleted_at"] is None
+            assert ctsync.boards()[0]["pages"] == ctsync.MAX_PAGES
+            # A deleted (or archived) board that reads as empty: nothing binned, the Tasks tab says so.
+            room()
+            ct.quick_tasks = real
+            ct.board_tasks["501"].clear()
+            ct.boards = [b for b in ct.boards if b["id"] != 501]
+            await poll(p)
+            row = p.db.task(t["id"])
+            assert row["deleted_at"] is None and row["ct_task_id"] == remote["id"]
+            assert ctsync.boards()[0]["last_error"] == "That board isn't in Connecteam any more."
+            ct.boards.append({"id": 501, "name": "Front desk board", "isArchived": True})
+            await poll(p)
+            assert p.db.task(t["id"])["deleted_at"] is None
+    run(scenario())
+
+
+def test_a_create_that_timed_out_isnt_made_again_after_a_partial_read(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            ana = await p.sign_in(p.ana)
+            ct.hang_up.add("POST")
+            t = await p.add(ana, title="Only once", assigned_id=p.ana)
+            await ctsync.settle()
+            ct.hang_up.clear()
+            real = ct.quick_tasks
+            others = [ct_task(f"o{i}", f"Other {i}", [9]) for i in range(ctsync.PAGE)]
+
+            async def stuck(request, path):   # the made task is beyond what's read
+                if request.method == "GET" and path.endswith("/tasks"):
+                    return web.json_response({"data": {"tasks": others}, "paging": {"offset": 0}})
+                return await real(request, path)
+            ct.quick_tasks = stuck
+            await sent(p)
+            await sent(p)
+            assert len(writes(ct, "POST")) == 1 and '"creating"' in p.db.task(t["id"])["ct_sync"]
+            ct.quick_tasks = real
+            await sent(p)
+            assert len(writes(ct, "POST")) == 1
+            assert p.db.task(t["id"])["ct_task_id"] == ct.board_tasks["501"][0]["id"]
+    run(scenario())
+
+
+def test_a_hidden_department_keeps_its_board_and_forms_and_the_rest_still_saves(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        async with p, ct:
+            p.db.set_task_form("55", {"name": "Maintenance", "department_id": p.desk, "title_question": "",
+                                      "assign_submitter": 0}, time.time())
+            p.db.update_department(p.desk, hidden=1)
+            board = {"board_id": "501", "name": "Front desk board", "department_id": p.desk}
+            status, body = await p.admin_call("PUT", "/api/tasks/sync", {"enabled": False, "boards": [board]})
+            assert status == 200, body
+            assert ctsync.boards()[0]["department_id"] == p.desk and not ctsync.on()
+            # A hidden department can't be newly picked.
+            status, _ = await p.admin_call("PUT", "/api/tasks/sync", {"enabled": False, "boards": [
+                board, {"board_id": "502", "name": "House", "department_id": p.desk}]})
+            assert status == 400
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "department_id": p.desk, "title_question": "Problem"})
+            assert status == 200, body
+            assert p.db.task_form("55")["title_question"] == "Problem"
+            status, _ = await p.admin_call("PUT", "/api/tasks/forms/56", {"department_id": p.desk})
+            assert status == 400
+    run(scenario())
+
+
+def test_someone_who_hasnt_signed_in_yet_can_be_given_a_connecteam_task(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path)
+        p.db.update_staff(p.dee, connecteam_user_id="9", status="pending")
+        ct.board_tasks["501"] = [ct_task("c1", "Learn the till", [9])]
+        async with p, ct:
+            await poll(p)
+            [row] = p.db.conn.execute("SELECT * FROM tasks").fetchall()
+            assert row["assigned_id"] == p.dee
+            await sent(p)
+            assert not writes(ct)   # nothing to send back
+    run(scenario())
+
+
+def test_nothing_is_written_while_connecteam_itself_is_off(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path, on=False)
+        p.db.update_settings({"wb_time_zone": "UTC"})
+        ct.forms = [maintenance_form()]
+        sub = ct_submission("s1", 55, 7, int(time.time()) - 86400, [
+            {"questionId": "q1", "questionType": "openEnded", "value": "Leaky tap", "wasSubmittedEmpty": False}])
+        sub["managerFields"] = status_field()
+        ct.submissions = {55: [sub]}
+        async with p, ct:
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_id": p.house, "title_question": "Problem",
+                "follow": FOLLOW})
+            assert status == 200, body
+            assert await main.check_task_forms() == 1
+            [t] = p.db.conn.execute("SELECT * FROM tasks").fetchall()
+            p.db.update_settings({"connecteam_enabled": "0"})
+            cy = await p.sign_in(p.cy)
+            await p.call("POST", f"/api/tasks/{t['id']}/status", cy, {"status": "done"})
+            await sent(p)
+            assert not writes(ct) and p.db.task(t["id"])["ct_pending"]   # waits
+            p.db.update_settings({"connecteam_enabled": "1"})
+            await sent(p)
+            assert writes(ct)[-1][2]["managerFields"][0]["status"]["statusOptionId"] == "o2"
+    run(scenario())
+
+
+def test_a_followed_forms_status_written_here_isnt_undone_by_an_older_read(tmp_path):
+    async def scenario():
+        p, ct = synced(tmp_path, on=False)
+        p.db.update_settings({"wb_time_zone": "UTC"})
+        ct.forms = [maintenance_form()]
+        working = {"statusOptionId": "o1", "name": "Working on it", "color": "#f5a623"}
+        sub = ct_submission("s1", 55, 7, int(time.time()) - 86400, [
+            {"questionId": "q1", "questionType": "openEnded", "value": "Lamp", "wasSubmittedEmpty": False}])
+        sub["managerFields"] = status_field(working, int(time.time()) - 3600)
+        ct.submissions = {55: [sub]}
+        async with p, ct:
+            status, body = await p.admin_call("PUT", "/api/tasks/forms/55", {
+                "name": "Maintenance Request", "department_id": p.house, "title_question": "Problem",
+                "follow": FOLLOW})
+            assert status == 200, body
+            assert await main.check_task_forms() == 1
+            [t] = p.db.conn.execute("SELECT * FROM tasks").fetchall()
+            assert t["status"] == "doing"
+            cy = await p.sign_in(p.cy)
+            await p.call("POST", f"/api/tasks/{t['id']}/status", cy, {"status": "done"})
+            await ctsync.settle()
+            assert writes(ct)[-1][2]["managerFields"][0]["status"]["statusOptionId"] == "o2"
+            # The next check reads afresh (no copy kept from before the write): still Done.
+            p.db.conn.execute("UPDATE task_forms SET last_check = NULL")
+            asked = ct.calls.count("/forms/v1/forms/55/form-submissions")
+            await main.check_task_forms()
+            assert ct.calls.count("/forms/v1/forms/55/form-submissions") > asked
+            row = p.db.task(t["id"])
+            assert (row["status"], row["ct_status"]) == ("done", "o2")
+            # A read that began before the write (here: the old reply) changes nothing.
+            old = [{"id": "s1", "manager": {"status": {"mf1": {"id": "o1", "name": "Working on it",
+                                                               "at": time.time() - 3600}}, "notes": {}},
+                    "user_id": "7", "name": "Ana", "submitted_at": None, "answers": [], "photos": []}]
+            form = p.db.task_form("55")
+            await ctsync.follow_submissions(form, old, {}, main.report_zone(), time.time(), time.time() - 30)
+            assert p.db.task(t["id"])["status"] == "done"
+            # A read after it does: Working on it again there is In progress here.
+            await ctsync.follow_submissions(form, old, {}, main.report_zone(), time.time(), time.time())
+            assert p.db.task(t["id"])["status"] == "doing"
+    run(scenario())

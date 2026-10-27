@@ -140,8 +140,9 @@ async def _ask(method: str, path: str, params=None, body=None) -> dict:
     down. Raises Paused or Busy (nothing asked), Rejected, or ConnecteamError (no answer: it
     may have arrived)."""
     global failures
-    if _ct is None:
-        raise Paused("Connecteam isn't set up.")
+    if _ct is None or _db().settings().get("connecteam_enabled") != "1":
+        # Turned off in Settings: nothing is asked (a followed form's status waits too).
+        raise Paused("Connecteam is turned off in Settings → Connections.")
     if time.time() < paused_until:
         raise Paused(pause_reason or "The task sync is paused.")
     write = method != "GET"
@@ -203,14 +204,15 @@ def due_parts(stamp, zone) -> tuple[str | None, str | None]:
 
 def _links() -> tuple[dict[int, int], dict[int, dict]]:
     """Linked people: {staff ID: Connecteam user ID} for everyone, and {Connecteam user ID:
-    person} for those who may be given tasks."""
+    person} for those who may be given tasks (as in the staff app: anyone not turned off or
+    archived, so someone who hasn't signed in yet too)."""
     to_ct, to_staff = {}, {}
     for r in _db().conn.execute("SELECT id, name, status, archived_at, connecteam_user_id FROM staff "
                                 "WHERE connecteam_user_id IS NOT NULL"):
         uid = str(r["connecteam_user_id"])
         if uid.isdigit() and len(uid) < 16:
             to_ct[r["id"]] = int(uid)
-            if r["status"] == "active" and not r["archived_at"]:
+            if r["status"] not in ("disabled", "archived") and not r["archived_at"]:
                 to_staff.setdefault(int(uid), dict(r))
     return to_ct, to_staff
 
@@ -510,7 +512,8 @@ async def _push_form(t: dict) -> bool:
         _save(t["id"], ct_note=f"Connecteam didn't take the status: {err}"[:300],
               clear_pending=True, pending_was=t["ct_pending"])
         return False
-    _save(t["id"], ct_status=option["id"], ct_note=None, clear_pending=True, pending_was=t["ct_pending"])
+    _save(t["id"], ct_status=option["id"], ct_sync={"wrote": time.time()}, ct_note=None,
+          clear_pending=True, pending_was=t["ct_pending"])
     return True
 
 
@@ -534,16 +537,21 @@ async def poll_due(weight: int) -> None:
 
 
 async def _list(board_id: str) -> tuple[list[dict], bool, int]:
-    """Every task on a board: (tasks, whether that's all of them, pages read)."""
+    """Every task on a board: (tasks, whether that's all of them, pages read). A reply without
+    a list of tasks is an error, never an empty board."""
     found, offset = [], 0
     for page_no in range(1, MAX_PAGES + 1):
         data = await _ask("GET", f"/tasks/v1/taskboards/{board_id}/tasks",
                           [("status", "all"), ("limit", str(PAGE)), ("offset", str(offset))])
-        page = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+        page = data.get("tasks")
+        if not isinstance(page, list):
+            raise ConnecteamError("Connecteam sent an unexpected list of tasks.")
         found += [r for r in page if isinstance(r, dict) and CT_ID_RE.match(str(r.get("id") or ""))]
         nxt = (data.get("_paging") or {}).get("offset")
-        if len(page) < PAGE or not isinstance(nxt, int) or isinstance(nxt, bool) or nxt <= offset:
+        if len(page) < PAGE or nxt is None:
             return found, True, page_no
+        if not isinstance(nxt, int) or isinstance(nxt, bool) or nxt <= offset:
+            return found, False, page_no   # paging that doesn't move on: not all of them
         offset = nxt
     return found, False, MAX_PAGES
 
@@ -587,11 +595,18 @@ async def _poll(b: dict) -> None:
                 v["done"] = base["done"]
             _save(t["id"], ct_task_id=match, ct_board_id=board_id,
                   ct_sync={"seen": v, "base": base}, ct_note=None)
-        else:
+        elif complete:
             _save(t["id"], ct_sync={"board": board_id})   # never arrived: made when next sent
     # Tasks linked here: their changes, or their deletion.
     linked = [dict(r) for r in db.conn.execute(
         "SELECT * FROM tasks WHERE ct_task_id IS NOT NULL AND ct_board_id = ?", (board_id,))]
+    if complete and not remote and linked and not await _board_listed(board_id):
+        # An empty board that isn't among Connecteam's boards (deleted or archived): its tasks
+        # here stay as they are, rather than every one going to the bin.
+        db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_error = ? WHERE board_id = ?",
+                        (now, "That board isn't in Connecteam any more.", board_id))
+        db.conn.commit()
+        return
     for t in linked:
         r = by_id.get(t["ct_task_id"])
         if r is not None:
@@ -613,6 +628,11 @@ async def _poll(b: dict) -> None:
     db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_ok = ?, last_error = NULL, "
                     "pages = ? WHERE board_id = ?", (now, now, pages, board_id))
     db.conn.commit()
+
+
+async def _board_listed(board_id: str) -> bool:
+    """Whether a board is still among Connecteam's boards, not archived (one request)."""
+    return any(b["id"] == board_id and not b["archived"] for b in await ct_boards())
 
 
 def _import(b: dict, cid: str, v: dict, to_ct, to_staff) -> None:
@@ -717,11 +737,13 @@ def _bin(t: dict, now: float, deleted: bool, note: str = IN_CT) -> None:
 
 # ---------------------------------------------------------------- forms that follow a manager field
 
-async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zone, now: float) -> int:
+async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zone, now: float,
+                             read_at: float | None = None) -> int:
     """A followed form's submissions (FORM_LOOKBACK_DAYS of them, older than the form's choosing
     too): one that isn't done becomes a task in the status its manager field maps to, and a
     task's status follows the field's. A status changed here and not yet sent wins when it's
-    newer than the field's last change. Returns how many tasks were made."""
+    newer than the field's last change, and a read that began before a task's status was last
+    written there (read_at) says nothing about it. Returns how many tasks were made."""
     follow = tasks.follow_of(form)
     db = _db()
     made, new, marked = 0, [], []
@@ -749,8 +771,9 @@ async def follow_submissions(form: dict, subs: list[dict], staff_by_ct: dict, zo
             if (fresh["photos"], fresh["manager_note"]) != (t["photos"], t["manager_note"]):
                 db.conn.execute("UPDATE tasks SET photos = ?, manager_note = ? WHERE id = ?",
                                 (fresh["photos"], fresh["manager_note"], t["id"]))
-            if option_id == (t["ct_status"] or ""):
-                continue
+            if option_id == (t["ct_status"] or "") or (
+                    read_at is not None and (_sync(t).get("wrote") or 0) > read_at):
+                continue   # the same, or read before the last write there (the next read tells)
             if t["deleted_at"] or (t["ct_pending"] or 0) > at:
                 if not t["deleted_at"]:
                     db._task_event(t["id"], now, {"name": "Staff Access"}, "edited",
@@ -797,16 +820,19 @@ def status() -> dict:
 
 def save(enabled: bool, chosen, departments: dict[int, str]) -> None:
     """The owner's choice: on or off, and the boards with their departments. A board kept keeps
-    when it was last read; one added starts afresh (its first read takes only open tasks)."""
+    when it was last read; one added starts afresh (its first read takes only open tasks). A board
+    may keep the department it has even once that's hidden (its tasks are then seen as a gone
+    department's are), so the rest can still be saved."""
     if not isinstance(chosen, list) or len(chosen) > MAX_BOARDS:
         raise tasks.TaskError(f"Pick at most {MAX_BOARDS} boards.")
-    rows, ids = [], set()
+    rows, ids, had = [], set(), {b["board_id"]: b["department_id"] for b in boards()}
     for b in chosen:
         board_id = str(b.get("board_id") or "") if isinstance(b, dict) else ""
         if not CT_ID_RE.match(board_id) or board_id in ids:
             raise tasks.TaskError("That isn't a Connecteam board.")
         department_id = tasks._id(b.get("department_id"))
-        if department_id is not None and department_id not in departments:
+        if department_id is not None and department_id not in departments and (
+                board_id not in had or had[board_id] != department_id):
             raise tasks.TaskError("That department doesn't exist any more.")
         ids.add(board_id)
         rows.append((board_id, tasks.clean_text(b.get("name"), tasks.MAX_FORM_NAME), department_id))

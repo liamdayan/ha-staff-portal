@@ -5,8 +5,9 @@ don't say where those live or for how long they work (its own file downloads com
 cdn.connecteam.com, and its upload links are signed and expire), and the staff app's CSP only
 shows images from itself. So the staff server fetches a photo itself, for someone who may see
 the task (main.api_task_photo checks), and only:
-- from HOSTS (Connecteam's own: connecteam.com and its subdomains), over https, following at
-  most MAX_REDIRECTS redirects that stay on those hosts;
+- from HOSTS (Connecteam's own: connecteam.com and its subdomains), over https on port 443, no
+  user name in the link, following at most MAX_REDIRECTS redirects that stay on those hosts, and
+  only to public addresses (PublicResolver: a name that points inside the network is refused);
 - an image (image/*, not SVG), at most MAX_BYTES, that Pillow can read as a photo;
 and sends back a smaller JPEG (at most MAX_SIDE pixels a side), kept on disk for KEEP_SECONDS so a
 photo isn't fetched again on every look (and still shows after its link expires). A photo that
@@ -16,18 +17,23 @@ can't be had says "Photo unavailable".
 import asyncio
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import os
+import re
+import socket
 import time
 import urllib.parse
 
 import aiohttp
+import yarl
 
 log = logging.getLogger("staff_portal")
 
 HOSTS = ("connecteam.com",)   # and their subdomains (cdn.connecteam.com)
 SCHEMES = ("https",)
+PORTS = (443,)
 MAX_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 50_000_000     # a photo bigger than this (in pixels) isn't opened
 MAX_SIDE = 1600
@@ -37,21 +43,59 @@ KEEP_SECONDS = 14 * 86400   # copies kept this long...
 MAX_KEPT = 200 * 1024 * 1024   # ...and at most this much of them (oldest go first)
 UNAVAILABLE = "Photo unavailable."
 FORMATS = ("JPEG", "PNG", "GIF", "WEBP", "MPO", "BMP", "TIFF")
+HOST_RE = re.compile(r"^[a-z0-9.-]{1,253}$")
+FAILED_SECONDS = 600        # a photo that couldn't be had isn't asked for again for this long
+MAX_FAILED = 500
+_failed: dict[str, float] = {}
 
 
 class Unavailable(Exception):
     pass
 
 
+def _on_hosts(host) -> bool:
+    host = str(host or "").lower().rstrip(".")
+    return bool(HOST_RE.match(host)) and any(host == h or host.endswith("." + h) for h in HOSTS)
+
+
 def host_ok(url: str) -> bool:
-    """Whether a link is on Connecteam's own hosts (HOSTS), over https."""
+    """Whether a link is on Connecteam's own hosts (HOSTS), over https on 443, with no user name
+    and nothing two URL parsers could read differently (spaces, backslashes, odd host letters)."""
+    if not isinstance(url, str) or re.search(r"[\x00-\x20\x7f\\]", url):
+        return False
     try:
         parts = urllib.parse.urlsplit(url)
+        port = parts.port
+        other = yarl.URL(url)   # what aiohttp will ask, which must say the same
     except ValueError:
         return False
-    host = (parts.hostname or "").lower().rstrip(".")
-    return parts.scheme in SCHEMES and not parts.username and not parts.password and any(
-        host == h or host.endswith("." + h) for h in HOSTS)
+    return (parts.scheme in SCHEMES and "@" not in parts.netloc and port in (None, other.port)
+            and other.port in PORTS and _on_hosts(parts.hostname) and other.scheme == parts.scheme
+            and (other.host or "").lower().rstrip(".") == parts.hostname.lower().rstrip(".")
+            and not other.user and not other.password)
+
+
+def public_ip(address: str) -> bool:
+    """Whether an address is on the public internet (not this computer, the local network, or
+    any reserved range; IPv4 inside IPv6 is checked as IPv4)."""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+class PublicResolver(aiohttp.ThreadedResolver):
+    """Looks names up as usual, then drops addresses that aren't public, so a Connecteam name
+    pointed inside the network (or rebound between checks) is never connected to."""
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
+        found = [r for r in await super().resolve(host, port, family) if public_ip(r["host"])]
+        if not found:
+            raise OSError(f"{host} has no public address")
+        return found
 
 
 def _cache_file(folder: str, task_id: int, index: int, url: str) -> str:
@@ -77,8 +121,18 @@ async def photo(task: dict, index: int, folder: str) -> bytes:
                 return f.read()
     except OSError:
         pass
-    raw = await _fetch(url)
-    small = await asyncio.to_thread(_shrink, raw)
+    # One that failed lately isn't fetched again for every look (or every tap on it).
+    now = time.time()
+    if now - _failed.get(path, 0) < FAILED_SECONDS:
+        raise Unavailable(UNAVAILABLE)
+    try:
+        small = await asyncio.to_thread(_shrink, await _fetch(url))
+    except Unavailable:
+        if len(_failed) >= MAX_FAILED:
+            for key in [k for k, at in _failed.items() if now - at >= FAILED_SECONDS] or list(_failed):
+                del _failed[key]
+        _failed[path] = now
+        raise
     try:
         os.makedirs(folder, exist_ok=True)
         with open(path + ".part", "wb") as f:
@@ -92,11 +146,13 @@ async def photo(task: dict, index: int, folder: str) -> bytes:
 async def _fetch(url: str) -> bytes:
     timeout = aiohttp.ClientTimeout(total=TIMEOUT)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        connector = aiohttp.TCPConnector(resolver=PublicResolver())
+        # No proxy from the environment (trust_env off), and redirects followed here, one by one.
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=False) as session:
             for _ in range(MAX_REDIRECTS + 1):
                 if not host_ok(url):
                     raise Unavailable(UNAVAILABLE)
-                async with session.get(url, allow_redirects=False) as resp:
+                async with session.get(yarl.URL(url), allow_redirects=False) as resp:
                     if resp.status in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
                         url = urllib.parse.urljoin(url, resp.headers["Location"])
                         continue
@@ -111,7 +167,7 @@ async def _fetch(url: str) -> bytes:
                         if len(body) > MAX_BYTES:
                             raise Unavailable(UNAVAILABLE)
                     return bytes(body)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError):
         raise Unavailable(UNAVAILABLE) from None
     raise Unavailable(UNAVAILABLE)
 

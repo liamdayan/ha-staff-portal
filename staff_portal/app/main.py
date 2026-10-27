@@ -3246,8 +3246,10 @@ async def check_task_forms(force: bool = False) -> int:
     for form in forms:
         start, end = tasks.form_range(form, now, zone)
         follow = tasks.follow_of(form)
-        if follow:   # a followed form reads back FORM_LOOKBACK_DAYS, a month at a time
+        if follow:   # a followed form reads back FORM_LOOKBACK_DAYS, a month at a time, afresh
             start = datetime.fromtimestamp(now - tasks.FORM_LOOKBACK_DAYS * 86400, zone).date()
+            ctdata.forget_submissions(form["form_id"])
+        read_at = time.time()
         try:
             subs = await ctdata.form_submissions(form["form_id"], start, end)
         except (ctdata.Unavailable, ValueError) as err:
@@ -3257,7 +3259,7 @@ async def check_task_forms(force: bool = False) -> int:
         if not form:
             continue
         if follow and tasks.follow_of(form):
-            made += await ctsync.follow_submissions(form, subs, staff_by_ct, zone, time.time())
+            made += await ctsync.follow_submissions(form, subs, staff_by_ct, zone, time.time(), read_at)
             db.task_form_checked(form["form_id"], time.time(), None)
             continue
         ids = [str(sub.get("id"))[:80] for sub in subs
@@ -7778,7 +7780,10 @@ async def admin_save_task_form(request: web.Request):
     if not old and len(db.task_forms()) >= tasks.MAX_FORMS:
         return bad_request(f"At most {tasks.MAX_FORMS} forms can make tasks.")
     try:
-        fields = tasks.clean_form(data, task_departments())
+        # It may keep the department it has, even once that's hidden (so its other settings
+        # can still be saved).
+        kept = {old["department_id"]: ""} if old and old["department_id"] is not None else {}
+        fields = tasks.clean_form(data, {**kept, **task_departments()})
     except tasks.TaskError as err:
         return bad_request(str(err))
     fields["name"] = fields["name"] or (old or {}).get("name") or f"Form {form_id}"
