@@ -5,7 +5,7 @@
   "use strict";
   const H = window.HRPortal;
   if (!H) return;
-  const { h, api, toast, ask, confirmDialog, openDialog, show, when } = H;
+  const { h, api, toast, ask, confirmDialog, openDialog, show, when, pageHead, emptyState, initial } = H;
 
   // This part's styles, versioned like hr.css.
   const version = (document.querySelector('link[href^="/static/hr.css"]')?.getAttribute("href") || "").split("?v=")[1];
@@ -16,6 +16,8 @@
   const dateOf = (ts) => (ts ? new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "");
   const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  // A file's status as a badge: waiting for HR (amber), in the recycle bin (grey), not accepted (red).
+  const STATUS_BADGE = { waiting: "badge warn", deleted: "badge quiet" };
   // append() and replaceChildren() would show a missing node as the text "null".
   const real = (nodes) => nodes.flat().filter((n) => n != null && n !== false && n !== "");
   const fill = (el, ...nodes) => el.append(...real(nodes));
@@ -60,24 +62,25 @@
 
   function docItem(d, redraw) {
     const badges = [];
-    if (d.status !== "active") badges.push(h("span", { class: d.status === "waiting" ? "badge" : "badge bad" }, d.status_word));
-    if (d.restricted) badges.push(h("span", { class: "badge" }, "Restricted"));
+    if (d.status !== "active") badges.push(h("span", { class: STATUS_BADGE[d.status] || "badge bad" }, d.status_word));
+    if (d.restricted) badges.push(h("span", { class: "badge quiet" }, "Restricted"));
     const sub = [day(d.date), d.type === "pdf" ? "PDF" : "Photo", sizeText(d.size), d.added_by ? `Added by ${d.mine ? "you" : d.added_by}` : null]
       .filter(Boolean).join(" · ");
     const buttons = [];
+    const btn = (label, onclick, cls = "") => h("button", { type: "button", class: `small-btn ${cls}`.trim(), onclick }, label);
     if (d.url) {
       buttons.push(d.type === "pdf"
-        ? h("a", { class: "button", href: d.url, download: "" }, "Download")
-        : h("button", { type: "button", onclick: () => openFile(d) }, "Open"));
+        ? h("a", { class: "button small-btn", href: d.url, download: "" }, "Download")
+        : btn("Open", () => openFile(d)));
     }
-    if (d.drive_link) buttons.push(h("a", { class: "button", href: d.drive_link, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive"));
+    if (d.drive_link) buttons.push(h("a", { class: "button small-btn", href: d.drive_link, target: "_blank", rel: "noopener noreferrer" }, "Open in Google Drive"));
     if (d.can_check) {
-      buttons.push(h("button", { type: "button", class: "primary", onclick: () => act(async () => {
+      buttons.push(btn("Accept", () => act(async () => {
         const r = await api("POST", `/api/documents/${d.id}/accept`, {});
         await redraw();
         return r;
-      }) }, "Accept"));
-      buttons.push(h("button", { type: "button", onclick: async () => {
+      }), "primary"));
+      buttons.push(btn("Don't accept", async () => {
         const reason = await ask("Not accepted", "Why? Whoever added it sees this.");
         if (reason === null) return;
         await act(async () => {
@@ -85,44 +88,45 @@
           await redraw();
           return r;
         });
-      } }, "Don't accept"));
+      }));
     }
     if (d.can_delete) {
-      buttons.push(h("button", { type: "button", class: "danger", onclick: async () => {
+      buttons.push(btn("Delete", async () => {
         if (!(await confirmDialog(`Delete “${d.title}”? It stays in the recycle bin for 30 days and can be restored until then.`, "Delete", true))) return;
         await act(async () => {
           const r = await api("DELETE", `/api/documents/${d.id}`);
           await redraw();
           return r;
         });
-      } }, "Delete"));
+      }, "danger"));
     }
     if (d.can_restore) {
-      buttons.push(h("button", { type: "button", onclick: () => act(async () => {
+      buttons.push(btn("Restore", () => act(async () => {
         const r = await api("POST", `/api/documents/${d.id}/restore`, {});
         await redraw();
         return r;
-      }) }, "Restore"));
+      })));
     }
     const copies = (d.deliveries || []).map((c) => h("div", { class: c.status === "attention" ? "small error" : "muted small" },
       `${c.word}: ${c.status_word}${c.error ? `. ${c.error}` : ""}`));
     return h("li", null, h("div", { class: "item" },
-      h("div", { class: "title" }, d.title, " ", badges),
+      h("div", { class: "title" }, d.title),
       h("div", { class: "sub" }, sub),
+      badges.length ? h("div", { class: "chips" }, badges) : null,
       d.reason ? h("p", { class: "warn small doc-note" }, `Not accepted: ${d.reason}`) : null,
       d.bin_until ? h("div", { class: "muted small" }, `Removed for good on ${dateOf(d.bin_until)}.`) : null,
       copies,
-      buttons.length ? h("div", { class: "actions" }, buttons) : null));
+      buttons.length ? h("div", { class: "actions doc-buttons" }, buttons) : null));
   }
 
   function docList(docs, redraw) {
-    if (!docs.length) return h("p", { class: "muted" }, "No files yet.");
+    if (!docs.length) return emptyState("No files yet.");
     const groups = new Map();
     for (const d of docs) {
       if (!groups.has(d.kind_name)) groups.set(d.kind_name, []);
       groups.get(d.kind_name).push(d);
     }
-    return h("div", null, [...groups].flatMap(([name, list]) => [h("h3", null, name),
+    return h("div", { class: "doc-groups" }, [...groups].flatMap(([name, list]) => [h("h3", { class: "eyebrow" }, name),
       h("ul", { class: "list" }, list.map((d) => docItem(d, redraw)))]));
   }
 
@@ -134,7 +138,7 @@
     const file = h("input", { type: "file", name: "file", required: true,
       accept: "image/jpeg,image/png,image/webp,application/pdf" });
     const button = h("button", { type: "submit", class: "primary" }, "Add");
-    const form = h("form", { class: "doc-add", onsubmit: async (e) => {
+    const form = h("form", { class: "doc-add doc-part", onsubmit: async (e) => {
       e.preventDefault();
       const f = form.elements;
       const chosen = f.file.files[0];
@@ -154,16 +158,21 @@
     } },
     h("h3", null, "Add a file"),
     note ? h("p", { class: "muted small" }, note) : null,
-    h("label", null, "Kind", h("select", { name: "kind" }, kinds.map((k) => h("option", { value: k.id }, k.name)))),
+    h("div", { class: "row" },
+      h("label", null, "Kind", h("select", { name: "kind" }, kinds.map((k) => h("option", { value: k.id }, k.name)))),
+      h("label", null, "Date on the document", h("input", { name: "date", type: "date", value: today, required: true }))),
     h("label", null, "Title", h("small", null, "Leave it blank to use the kind's name."),
       h("input", { name: "title", maxlength: "120", autocomplete: "off" })),
-    h("label", null, "Date on the document", h("input", { name: "date", type: "date", value: today, required: true })),
     h("label", null, "File", h("small", null, `A photo (JPEG, PNG or WebP) or a PDF, up to ${limitMb} MB.`), file),
     h("div", { class: "actions" }, button));
     return form;
   }
 
   // ---------------------------------------------------------------- HR's part of the section
+
+  // A panel's header: its h3 and a status badge on the right.
+  const panelHead = (title, status, cls = "quiet") => h("div", { class: "card-head" }, h("h3", null, title),
+    status ? h("span", { class: `badge ${cls}` }, status) : null);
 
   function hrBox(s, person, redraw) {
     const x = s.hr;
@@ -172,31 +181,36 @@
     if (x.drive) box.append(h("p", { class: "warn small" }, x.drive));
 
     // Restricted files: only on request, and every look is logged.
-    const restricted = h("div", { class: "doc-restricted" });
+    const restricted = h("div", { class: "doc-restricted sub-card" });
     const showRestricted = async () => {
       const r = await act(() => api("GET", `${base}/documents/restricted`));
       if (!r) return;
-      refill(restricted, h("h3", null, "Restricted files"),
+      // Open, it holds a list and a form: a part of the card rather than an inset panel.
+      restricted.classList.replace("sub-card", "doc-part");
+      refill(restricted, panelHead("Restricted files", "HR admins only"),
         h("p", { class: "muted small" }, "Only HR admins see these. Each look is in the audit log."),
         r.warning ? h("p", { class: "warn small" }, r.warning) : null,
         docList(r.documents, redraw),
         addForm(person.id, r.kinds, r.limit_mb, redraw, null, r.today),
-        h("div", { class: "actions" }, h("button", { type: "button", onclick: () => {
+        h("div", { class: "actions" }, h("button", { type: "button", class: "small-btn", onclick: () => {
+          restricted.classList.replace("doc-part", "sub-card");
           restricted.replaceChildren(restrictedSummary());
         } }, "Hide restricted files")));
     };
-    const restrictedSummary = () => h("div", null, h("h3", null, "Restricted files"),
+    const restrictedSummary = () => h("div", null, panelHead("Restricted files", "HR admins only"),
       h("p", { class: "muted small" }, `${x.restricted.kinds.join(", ")}: ${x.restricted.count ? plural(x.restricted.count, "file", "files") : "none yet"}. Only HR admins see these.`),
-      h("div", { class: "actions" }, h("button", { type: "button", onclick: showRestricted }, "Show restricted files")));
-    if (x.restricted.kinds.length) restricted.append(restrictedSummary());
-    box.append(restricted);
+      h("div", { class: "actions" }, h("button", { type: "button", class: "small-btn", onclick: showRestricted }, "Show restricted files")));
+    if (x.restricted.kinds.length) {
+      restricted.append(restrictedSummary());
+      box.append(restricted);
+    }
 
     // Legal hold.
     const hold = x.hold;
-    fill(box, h("h3", null, "Legal hold"),
+    fill(box, h("div", { class: "sub-card" }, panelHead("Legal hold", hold ? "On" : "Off", hold ? "bad" : "quiet"),
       hold ? h("p", { class: "warn small" }, `On since ${dateOf(hold.set_at)} (${hold.set_by}): ${hold.reason || ""}. Nothing in this file can be deleted.`)
         : h("p", { class: "muted small" }, "Off. A legal hold stops every deletion in this file."),
-      h("div", { class: "actions" }, h("button", { type: "button", onclick: async () => {
+      h("div", { class: "actions" }, h("button", { type: "button", class: "small-btn", onclick: async () => {
         let body = { on: false };
         if (!hold) {
           const reason = await ask("Legal hold", "Why? (for example, the claim or request it's for)");
@@ -208,40 +222,46 @@
           await redraw();
           return r;
         });
-      } }, hold ? "Lift legal hold" : "Put on legal hold")));
+      } }, hold ? "Lift legal hold" : "Put on legal hold"))));
 
     // Former employees: retention, and their Drive folder.
     if (x.archived) {
       const ret = x.retention;
-      fill(box, h("h3", null, "After leaving"),
+      fill(box, h("div", { class: "sub-card" }, panelHead("After leaving", ret?.past ? "Past the time kept" : null, "warn"),
         ret ? h("p", { class: ret.past ? "warn small" : "muted small" }, ret.past
           ? `Past the time records are kept (since ${dateOf(ret.due_at)}). Review the files, then delete them if they're no longer needed.`
           : `Records are kept until ${dateOf(ret.due_at)}, then listed for HR to review. Nothing is deleted by itself.`) : null,
         h("div", { class: "actions" },
-          x.can_move_folder ? h("button", { type: "button", onclick: () => act(async () => {
+          x.can_move_folder ? h("button", { type: "button", class: "small-btn", onclick: () => act(async () => {
             const r = await api("POST", `${base}/drive-folder/former`, {});
             await redraw();
             return r;
           }) }, "Move Drive folder to Former employees") : null,
-          ret?.past && !hold ? h("button", { type: "button", class: "danger", onclick: async () => {
+          ret?.past && !hold ? h("button", { type: "button", class: "small-btn danger", onclick: async () => {
             if (!(await confirmDialog(`Delete all of ${person.name}'s files? They stay in the recycle bin for 30 days.`, "Delete all", true))) return;
             await act(async () => {
               const r = await api("POST", `${base}/documents/delete-all`, {});
               await redraw();
               return r;
             });
-          } }, "Delete their files") : null));
+          } }, "Delete their files") : null)));
     }
     return box;
   }
 
   H.registerSection("documents", (box, s, person, redraw) => {
-    box.append(h("h2", null, s.title));
-    if (s.waiting_note && s.kinds.length) box.append(h("p", { class: "muted small" }, s.waiting_note));
     const shown = s.documents.filter((d) => d.status !== "deleted");
     const binned = s.documents.filter((d) => d.status === "deleted");
+    const toCheck = shown.filter((d) => d.status === "waiting").length;
+    box.append(h("div", { class: "card-head" }, h("h2", null, s.title),
+      toCheck ? h("span", { class: "badge warn" }, `${toCheck} waiting for HR`)
+        : shown.length ? h("span", { class: "badge quiet" }, plural(shown.length, "file", "files")) : null));
+    if (s.waiting_note && s.kinds.length) box.append(h("p", { class: "muted small" }, s.waiting_note));
     box.append(docList(shown, redraw));
-    if (binned.length) box.append(h("h3", null, "Recycle bin"), h("ul", { class: "list" }, binned.map((d) => docItem(d, redraw))));
+    if (binned.length) {
+      box.append(h("div", { class: "doc-part doc-bin" }, panelHead("Recycle bin", plural(binned.length, "file", "files")),
+        h("ul", { class: "list" }, binned.map((d) => docItem(d, redraw)))));
+    }
     const form = addForm(person.id, s.kinds, s.limit_mb, redraw, null, s.today);
     if (form) box.append(form);
     if (s.hr) box.append(hrBox(s, person, redraw));
@@ -254,39 +274,49 @@
     const data = await api("GET", "/api/documents/attention");
     const again = () => (location.hash === seq ? showAttention() : undefined);
     const personLink = (i) => h("a", { href: `#/people/${encodeURIComponent(i.person_id)}` }, i.name);
-    const card = (title, intro, items) => h("section", { class: "card" }, h("h2", null, title),
+    // A card: its header with a count, a line under it, and its rows (or an empty state).
+    const card = (title, intro, items, tone = "quiet") => h("section", { class: "card" },
+      h("div", { class: "card-head" }, h("h2", null, title),
+        items.length ? h("span", { class: `badge ${tone}` }, String(items.length)) : null),
       intro ? h("p", { class: "muted small" }, intro) : null,
-      items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted" }, "Nothing here."));
-    const stuck = data.stuck.map((i) => h("li", null, h("div", { class: "item" },
-      h("div", { class: "title" }, `${i.word}: `, personLink(i)),
-      i.title ? h("div", { class: "sub" }, i.title) : null,
-      h("p", { class: "small error" }, i.error || "It didn't work."),
-      h("div", { class: "muted small" }, `${plural(i.tries, "try", "tries")}.`),
-      h("div", { class: "actions" },
-        h("button", { type: "button", class: "primary", onclick: () => act(async () => {
-          const r = await api("POST", `/api/deliveries/${i.id}/retry`, {});
-          await again();
-          return r;
-        }) }, "Retry")))));
+      items.length ? h("ul", { class: "list" }, items) : emptyState("Nothing here."));
+    // A person's row: their initial, name and a line under it.
+    const personRow = (id, name, sub) => h("li", null, h("a", { class: "item with-avatar", href: `#/people/${encodeURIComponent(id)}` },
+      h("span", { class: "avatar", "aria-hidden": "true" }, initial(name)),
+      h("div", { class: "item-text" }, h("div", { class: "title" }, name), h("div", { class: "sub" }, sub))));
+    const stuck = data.stuck.map((i) => h("li", null, h("div", { class: "item split" },
+      h("div", { class: "item-text" },
+        h("div", { class: "title" }, `${i.word}: `, personLink(i)),
+        i.title ? h("div", { class: "sub" }, i.title) : null,
+        h("p", { class: "small error doc-note" }, i.error || "It didn't work."),
+        h("div", { class: "muted small" }, `${plural(i.tries, "try", "tries")}.`)),
+      h("button", { type: "button", class: "small-btn primary", onclick: () => act(async () => {
+        const r = await api("POST", `/api/deliveries/${i.id}/retry`, {});
+        await again();
+        return r;
+      }) }, "Retry"))));
     const waiting = data.waiting.map((i) => h("li", null, h("div", { class: "item" },
       h("div", { class: "title" }, `${i.word}: `, personLink(i)),
       i.title ? h("div", { class: "sub" }, i.title) : null,
       h("div", { class: "muted small" }, [i.error, `Next try: ${when(i.due_at)}`].filter(Boolean).join(" · ")))));
-    const checks = data.checks.map((c) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(c.person_id)}` },
-      h("div", { class: "title" }, c.name), h("div", { class: "sub" }, `${plural(c.count, "file", "files")} to check`))));
-    const retention = data.retention.map((r) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(r.id)}` },
-      h("div", { class: "title" }, r.name),
-      h("div", { class: "sub" }, `Left ${dateOf(r.left_at)} · ${plural(r.documents, "file", "files")} · past since ${dateOf(r.due_at)}`))));
-    const holds = data.holds.map((x) => h("li", null, h("a", { class: "item", href: `#/people/${encodeURIComponent(x.person_id)}` },
-      h("div", { class: "title" }, x.name), h("div", { class: "sub" }, `Since ${dateOf(x.since)}${x.by ? ` (${x.by})` : ""}`))));
-    show(h("section", { class: "card" }, h("h1", null, "Needs attention"),
-      h("p", { class: "muted small" }, "Files waiting for HR, uploads to Google Drive that need a person, and records past the time they're kept."),
-      data.drive ? h("p", { class: "warn small" }, data.drive) : null),
-    card("Waiting for HR to check", null, checks),
-    card("Couldn't be sent", "Tried 8 times, or something only a person can fix. Fix it, then press Retry.", stuck),
-    data.waiting.length ? card("Waiting to be sent", "These are tried again by themselves.", waiting) : null,
-    card("Past the time records are kept", `Former employees' records are kept ${plural(data.years, "year", "years")} after they leave, then listed here. Nothing is deleted by itself. Open someone to review and delete their files.`, retention),
-    data.holds.length ? card("Legal holds", null, holds) : null);
+    const checks = data.checks.map((c) => personRow(c.person_id, c.name, `${plural(c.count, "file", "files")} to check`));
+    const retention = data.retention.map((r) => personRow(r.id, r.name,
+      `Left ${dateOf(r.left_at)} · ${plural(r.documents, "file", "files")} · past since ${dateOf(r.due_at)}`));
+    const holds = data.holds.map((x) => personRow(x.person_id, x.name, `Since ${dateOf(x.since)}${x.by ? ` (${x.by})` : ""}`));
+    const stat = (n, label, alert) => h("div", { class: n && alert ? "stat alert" : "stat" },
+      h("span", { class: "stat-value" }, String(n)), h("span", { class: "stat-label" }, label));
+    show(pageHead("Needs attention", "Files waiting for HR, uploads to Google Drive that need a person, and records past the time they're kept."),
+      data.drive ? h("p", { class: "warn small" }, data.drive) : null,
+      h("div", { class: "stats" },
+        stat(data.checks.reduce((n, c) => n + c.count, 0), "Files to check", true),
+        stat(data.stuck.length, "Couldn't be sent", true),
+        stat(data.waiting.length, "Waiting to be sent"),
+        stat(data.retention.length, "Past the time kept", true)),
+      card("Waiting for HR to check", null, checks, "warn"),
+      card("Couldn't be sent", "Tried 8 times, or something only a person can fix. Fix it, then press Retry.", stuck, "bad"),
+      data.waiting.length ? card("Waiting to be sent", "These are tried again by themselves.", waiting) : null,
+      card("Past the time records are kept", `Former employees' records are kept ${plural(data.years, "year", "years")} after they leave, then listed here. Nothing is deleted by itself. Open someone to review and delete their files.`, retention, "warn"),
+      data.holds.length ? card("Legal holds", null, holds) : null);
   }
 
   H.registerPage("attention", { nav: "Needs attention", who: (me) => me.hr, render: showAttention });
@@ -322,16 +352,17 @@
       if (r) await again();
     }
 
-    fill(box, h("h2", null, "Kinds of document"),
+    fill(box, h("div", { class: "card-head" }, h("h2", null, "Kinds of document"),
+      h("button", { type: "button", class: "small-btn primary", onclick: () => kindDialog(null) }, "Add a kind")),
       h("p", { class: "muted small" }, "Who can see each kind, its folder in Google Drive, and who may add one. Files anyone but HR adds wait for HR to check them."),
       data.drive ? h("p", { class: "warn small" }, data.drive) : null,
       data.restricted_warning ? h("p", { class: "warn small" }, data.restricted_warning) : null,
       h("ul", { class: "list" }, data.kinds.map((k) => h("li", null, h("div", { class: "item split doc-kind" },
-        h("div", null, h("div", { class: "title" }, k.name, k.restricted ? h("span", { class: "badge" }, "Restricted") : null),
+        h("div", { class: "item-text" }, h("div", { class: "title" }, k.name),
           h("div", { class: "sub" }, [levelWord(k.visibility), `Drive: ${k.folder}`,
             k.owned ? "Shown in its own section" : data.uploaders[k.uploaders],
-            plural(k.count, "file", "files")].filter(Boolean).join(" · "))),
-        h("button", { type: "button", class: "linkish", onclick: () => kindDialog(k) }, "Change"))))),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: () => kindDialog(null) }, "Add a kind")));
+            plural(k.count, "file", "files")].filter(Boolean).join(" · ")),
+          k.restricted ? h("div", { class: "chips" }, h("span", { class: "badge quiet" }, "Restricted")) : null),
+        h("button", { type: "button", class: "small-btn", onclick: () => kindDialog(k) }, "Change"))))));
   });
 })();

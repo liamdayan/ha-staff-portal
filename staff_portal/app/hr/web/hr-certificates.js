@@ -7,7 +7,7 @@
 
   const H = window.HRPortal;
   if (!H) return;
-  const { h, api, toast, ask, openDialog, show, when } = H;
+  const { h, api, toast, ask, openDialog, show, when, pageHead, emptyState, initial } = H;
 
   // This part's stylesheet, from this address like hr.css (so the page's policy allows it).
   const version = (document.querySelector('link[href*="/static/hr.css"]')?.getAttribute("href") || "").split("v=")[1] || "";
@@ -22,7 +22,11 @@
     return `${m}/${d}/${y}`;
   };
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  const badge = (status, word) => h("span", { class: `cert-badge s-${status}` }, word);
+  // Statuses as the design system's badges: valid green, soon or waiting amber, lapsed red.
+  const TONE = { valid: "ok", expiring: "warn", due: "warn", waiting: "warn", expired: "bad", missing: "bad",
+    waived: "quiet", confirmed: "ok", rejected: "bad", replaced: "quiet", withdrawn: "quiet" };
+  const badge = (status, word) => h("span", { class: `badge ${TONE[status] || "quiet"}` }, word);
+  const PROBLEMS = ["expired", "missing", "due"];
 
   async function run(fn, okText) {
     try {
@@ -50,10 +54,12 @@
     return "";
   }
 
+  // "May not serve alcohol" and the OLCC notes, as a row of badges under the line.
   function flags(s) {
-    return [s.flag ? h("p", { class: "cert-flag" }, s.flag) : null,
-      s.temporary ? h("span", { class: "badge" }, "Temporary permit") : null,
-      s.under_21 ? h("span", { class: "badge bad" }, "Under 21: may not mix drinks or bartend") : null];
+    const chips = [s.flag ? h("span", { class: "badge bad cert-flag" }, s.flag) : null,
+      s.temporary ? h("span", { class: "badge quiet" }, "Temporary permit") : null,
+      s.under_21 ? h("span", { class: "badge warn" }, "Under 21: may not mix drinks or bartend") : null].filter(Boolean);
+    return chips.length ? h("div", { class: "chips" }, chips) : null;
   }
 
   function readLine(c) {
@@ -80,41 +86,43 @@
     const self = view.relation === "self";
     const nodes = [];
     if (view.statuses.length) {
-      nodes.push(h("ul", { class: "list" }, view.statuses.map((s) => h("li", { class: "cert-item" },
+      nodes.push(h("ul", { class: "list" }, view.statuses.map((s) => h("li", { class: "cert-item" }, h("div", { class: "item" },
         h("div", { class: "cert-head" }, h("span", { class: "title" }, s.name), badge(s.status, s.status_word)),
         h("div", { class: "sub" }, statusText(s), s.via ? ` · ${nameOf(s.via)} accepted` : "",
           s.required ? "" : " · Not needed for their job"),
         flags(s),
-        view.can_add && s.status !== "waiting" && s.status !== "waived" ? h("div", { class: "actions" },
-          h("a", { class: "button" + (["expired", "missing", "due"].includes(s.status) ? " primary-link" : ""),
+        view.can_add && s.status !== "waiting" && s.status !== "waived" ? h("div", { class: "actions cert-buttons" },
+          h("a", { class: "button small-btn" + (PROBLEMS.includes(s.status) ? " primary" : ""),
             href: `#/card/add/${enc(view.person.id)}?type=${enc(s.type_key)}` },
           s.card_id ? (self ? "Renew" : "Add a new card") : (self ? "Add my card" : "Add a card"))) : null,
-        view.can_check && s.waiting_id ? h("div", { class: "actions" },
-          h("a", { class: "button", href: `#/certificates/check/${enc(view.person.id)}/${s.waiting_id}` }, "Check it")) : null))));
+        view.can_check && s.waiting_id ? h("div", { class: "actions cert-buttons" },
+          h("a", { class: "button small-btn primary", href: `#/certificates/check/${enc(view.person.id)}/${s.waiting_id}` }, "Check it")) : null)))));
     } else {
-      nodes.push(h("p", { class: "muted" }, "No certificates are needed for their job."));
+      nodes.push(emptyState("No certificates are needed for their job."));
     }
     const recent = view.cards.filter((c) => c.status === "waiting" || c.status === "rejected"
       || (c.status === "confirmed" && (self || view.relation === "hr")));
     if (recent.length) {
-      nodes.push(h("h3", null, "Cards added"), h("ul", { class: "list" }, recent.map((c) => h("li", { class: "cert-item" },
-        h("div", { class: "cert-head" }, h("span", { class: "title" }, c.type), h("span", { class: "muted small" }, c.status_word)),
+      nodes.push(h("h3", { class: "eyebrow cert-group" }, "Cards added"), h("ul", { class: "list" }, recent.map((c) => h("li", { class: "cert-item" }, h("div", { class: "item" },
+        h("div", { class: "cert-head" }, h("span", { class: "title" }, c.type), badge(c.status, c.status_word)),
         h("div", { class: "sub" }, [`Added ${when(c.added_at)}`, c.added_by ? `by ${c.added_by}` : null,
           c.expires ? `expires ${day(c.expires)}` : null, c.number ? `number ${c.number}` : null].filter(Boolean).join(" · ")),
-        readLine(c) ? h("p", { class: "small" }, readLine(c)) : null,
-        c.reason ? h("p", { class: "warn" }, `Not accepted: ${c.reason}`) : null,
-        h("div", { class: "actions" },
-          c.photo ? h("button", { type: "button", onclick: () => showPhoto(c) }, c.pdf ? "PDF" : "See the photo") : null,
-          view.can_check && c.status === "waiting" ? h("a", { class: "button", href: `#/certificates/check/${enc(view.person.id)}/${c.id}` }, "Check it") : null)))));
+        readLine(c) ? h("p", { class: "small cert-line" }, readLine(c)) : null,
+        c.reason ? h("p", { class: "warn small cert-line" }, `Not accepted: ${c.reason}`) : null,
+        c.photo || (view.can_check && c.status === "waiting") ? h("div", { class: "actions cert-buttons" },
+          c.photo ? h("button", { type: "button", class: "small-btn", onclick: () => showPhoto(c) }, c.pdf ? "PDF" : "See the photo") : null,
+          view.can_check && c.status === "waiting" ? h("a", { class: "button small-btn primary", href: `#/certificates/check/${enc(view.person.id)}/${c.id}` }, "Check it") : null) : null)))));
     }
     if (view.waivers.length) {
-      nodes.push(h("h3", null, "Waived"), h("ul", { class: "list" }, view.waivers.map((w) => h("li", { class: "cert-item" },
-        h("div", { class: "title" }, `${w.type}, until ${day(w.ends)}`),
-        w.reason ? h("div", { class: "sub" }, `${w.reason}${w.set_by ? ` (${w.set_by})` : ""}`) : null,
-        view.can_waive ? h("button", { type: "button", class: "linkish", onclick: () => run(async () => {
-          await api("DELETE", `/api/people/${enc(view.person.id)}/certificates/waivers/${w.id}`);
-          await redraw();
-        }, "The waiver has ended.") }, "End the waiver") : null))));
+      nodes.push(h("h3", { class: "eyebrow cert-group" }, "Waived"), h("ul", { class: "list" }, view.waivers.map((w) => h("li", { class: "cert-item" },
+        h("div", { class: "item split" },
+          h("div", { class: "item-text" },
+            h("div", { class: "title" }, `${w.type}, until ${day(w.ends)}`),
+            w.reason ? h("div", { class: "sub" }, `${w.reason}${w.set_by ? ` (${w.set_by})` : ""}`) : null),
+          view.can_waive ? h("button", { type: "button", class: "small-btn", onclick: () => run(async () => {
+            await api("DELETE", `/api/people/${enc(view.person.id)}/certificates/waivers/${w.id}`);
+            await redraw();
+          }, "The waiver has ended.") }, "End the waiver") : null)))));
     }
     const buttons = [];
     if (view.can_add) {
@@ -143,7 +151,12 @@
   }
 
   H.registerSection("certificates", (box, s, person, redraw) => {
-    box.append(...[h("h2", null, s.title), ...certBody(s.certs, redraw)].flat().filter(Boolean));
+    const problems = s.certs.statuses.filter((x) => PROBLEMS.includes(x.status) || x.flag).length;
+    const waiting = s.certs.statuses.filter((x) => x.status === "waiting").length;
+    const head = h("div", { class: "card-head" }, h("h2", null, s.title),
+      problems ? h("span", { class: "badge bad" }, `${problems} to sort out`)
+        : waiting ? h("span", { class: "badge warn" }, "Waiting for HR") : null);
+    box.append(...[head, ...certBody(s.certs, redraw)].flat().filter(Boolean));
   });
 
   // ---------------------------------------------------------------- My certificates
@@ -151,9 +164,8 @@
   async function renderMine() {
     const view = await api("GET", `/api/people/${enc(H.me.id)}/certificates`);
     const again = () => renderMine();
-    show(h("section", { class: "card" }, h("h1", null, "My certificates"),
-      h("p", { class: "muted small" }, "Cards your job needs, such as a Food Handler Card or an OLCC Service Permit. Add a photo of a new card here: HR checks it."),
-      H.me.staff ? h("p", null, h("a", { href: "#/certificates" }, "See the certificate board")) : null),
+    show(pageHead("My certificates", "Cards your job needs, such as a Food Handler Card or an OLCC Service Permit. Add a photo of a new card here: HR checks it.",
+      H.me.staff ? h("div", { class: "page-actions" }, h("a", { class: "button small-btn", href: "#/certificates" }, "See the certificate board")) : null),
     h("section", { class: "card" }, certBody(view, again)));
   }
 
@@ -206,7 +218,8 @@
     const view = await api("GET", `/api/people/${enc(personId)}/certificates`);
     const self = view.relation === "self";
     if (!view.can_add) {
-      return show(h("section", { class: "card" }, h("p", null, "You can't add a card for them."), h("a", { href: "#/" }, "Go home")));
+      return show(h("section", { class: "card" }, emptyState("You can't add a card for them."),
+        h("div", { class: "actions" }, h("a", { class: "button", href: "#/" }, "Go home"))));
     }
     const needed = view.statuses.map((s) => s.type_key);
     const wanted = params.get("type") || needed.find((k) => !["valid", "waiting", "waived"].includes(view.statuses.find((s) => s.type_key === k)?.status)) || needed[0];
@@ -251,24 +264,27 @@
       }
     } },
     h("label", null, "Which card", type),
-    h("h3", null, "Front of the card"),
-    h("div", { class: "actions" },
-      chooser("Take a photo", "image/jpeg", true, pick("front", frontBox)),
-      chooser("Choose a file", "image/jpeg,image/png,image/webp,application/pdf", false, pick("front", frontBox))),
-    frontBox,
-    h("h3", null, "Back of the card (if it has dates on it)"),
-    h("div", { class: "actions" }, chooser("Take a photo of the back", "image/jpeg", true, pick("back", backBox))),
-    backBox, error,
+    h("div", { class: "sub-card cert-side-box" },
+      h("h3", null, "Front of the card"),
+      h("div", { class: "actions" },
+        chooser("Take a photo", "image/jpeg", true, pick("front", frontBox)),
+        chooser("Choose a file", "image/jpeg,image/png,image/webp,application/pdf", false, pick("front", frontBox))),
+      frontBox),
+    h("div", { class: "sub-card cert-side-box" },
+      h("h3", null, "Back of the card (if it has dates on it)"),
+      h("div", { class: "actions" }, chooser("Take a photo of the back", "image/jpeg", true, pick("back", backBox))),
+      backBox),
+    error,
     h("div", { class: "actions full" }, send));
-    show(h("section", { class: "card" },
-      h("h1", null, self ? "Add or renew a card" : `Add a card for ${view.person.name}`),
-      h("p", { class: "muted small" }, view.relation === "hr"
+    show(h("header", { class: "page-head" },
+      h("a", { class: "back-link", href: self ? "#/my-certificates" : `#/people/${enc(personId)}` }, "Back"),
+      h("h1", { class: "page-title" }, self ? "Add or renew a card" : `Add a card for ${view.person.name}`),
+      h("p", { class: "page-sub" }, view.relation === "hr"
         ? "Next you check the date and confirm it."
-        : "HR checks every card before it counts."),
-      h("h2", null, "Photo tips"), h("ul", { class: "cert-tips" }, view.tips.map((t) => h("li", null, t))),
-      view.reading ? null : h("p", { class: "muted small" }, "HR types the date from the photo."),
-      form),
-    h("p", null, h("a", { href: self ? "#/my-certificates" : `#/people/${enc(personId)}` }, "Back")));
+        : "HR checks every card before it counts.")),
+    h("section", { class: "card" }, h("h2", null, "Photo tips"), h("ul", { class: "cert-tips" }, view.tips.map((t) => h("li", null, t))),
+      view.reading ? null : h("p", { class: "muted small" }, "HR types the date from the photo.")),
+    h("section", { class: "card" }, form));
   }
 
   // "We read: expires 6/14/2029. HR will confirm." The page asks for a few seconds while Google
@@ -276,10 +292,10 @@
   async function showReading(view, card) {
     const line = h("p", { class: "cert-reading", role: "status" }, readLine(card) || "");
     const where = location.hash;
-    show(h("section", { class: "card" }, h("h1", null, "Sent to HR"),
-      h("p", null, `${card.type} for ${view.relation === "self" ? "you" : view.person.name}.`), line,
-      h("div", { class: "actions" },
-        h("a", { class: "button primary-link", href: view.relation === "self" ? "#/my-certificates" : `#/people/${enc(view.person.id)}` }, "Done"))));
+    show(pageHead("Sent to HR", `${card.type} for ${view.relation === "self" ? "you" : view.person.name}.`),
+      h("section", { class: "card" }, line,
+        h("div", { class: "actions full" },
+          h("a", { class: "button primary", href: view.relation === "self" ? "#/my-certificates" : `#/people/${enc(view.person.id)}` }, "Done"))));
     for (let i = 0; i < 20 && card.read_state === "pending"; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       if (location.hash !== where) return;
@@ -294,7 +310,8 @@
   H.registerPage("card", {
     render: async (_main, parts, params) => {
       if (parts[0] === "add" && parts[1]) return renderAdd(decodeURIComponent(parts[1]), params);
-      show(h("section", { class: "card" }, h("p", null, "That page isn't here."), h("a", { href: "#/" }, "Go home")));
+      show(h("section", { class: "card" }, emptyState("That page isn't here."),
+        h("div", { class: "actions" }, h("a", { class: "button", href: "#/" }, "Go home"))));
     },
   });
 
@@ -316,81 +333,101 @@
     return form;
   }
 
+  // A person and one certificate: their initial, name (a link to their page), the status on the right.
   function boardRow(r) {
-    return h("li", { class: "cert-item" },
-      h("div", { class: "cert-head" }, h("a", { class: "title", href: `#/people/${enc(r.person_id)}` }, r.name), badge(r.status, r.status_word)),
-      h("div", { class: "sub" }, [r.type, statusText(r), r.departments.join(", ")].filter(Boolean).join(" · ")),
-      flags(r));
+    return h("li", { class: "cert-item" }, h("div", { class: "item with-avatar" },
+      h("span", { class: "avatar", "aria-hidden": "true" }, initial(r.name)),
+      h("div", { class: "item-text" },
+        h("div", { class: "cert-head" }, h("a", { class: "title", href: `#/people/${enc(r.person_id)}` }, r.name), badge(r.status, r.status_word)),
+        h("div", { class: "sub" }, [r.type, statusText(r), r.departments.join(", ")].filter(Boolean).join(" · ")),
+        flags(r))));
   }
 
   async function renderBoard(params) {
     const q = new URLSearchParams();
     for (const name of ["group", "type", "status", "within"]) if (params.get(name)) q.set(name, params.get(name));
     const data = await api("GET", `/api/certificates/board${q.toString() ? `?${q}` : ""}`);
-    const counts = Object.entries(data.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${data.statuses[k].toLowerCase()}`);
-    const hrLinks = data.hr ? h("div", { class: "actions" },
-      data.waiting ? h("a", { class: "button primary-link", href: "#/certificates/check" }, `${data.waiting} to check`) : null,
-      h("button", { type: "button", onclick: () => run(async () => {
+    const counts = Object.entries(data.counts).filter(([, n]) => n);
+    const statusLink = (k) => {
+      const p = new URLSearchParams(q);
+      p.set("status", k);
+      return `#/certificates?${p}`;
+    };
+    const actions = h("div", { class: "page-actions" },
+      data.hr && data.waiting ? h("a", { class: "button small-btn primary", href: "#/certificates/check" }, `${data.waiting} to check`) : null,
+      h("a", { class: "button small-btn", href: "#/my-certificates" }, "My certificates"),
+      data.hr ? h("button", { type: "button", class: "small-btn", onclick: () => run(async () => {
         const r = await api("POST", "/api/certificates/export", Object.fromEntries(q));
         const link = h("a", { href: URL.createObjectURL(new Blob([r.csv], { type: "text/csv" })), download: r.name });
         document.body.append(link);
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(link.href), 30000);
-      }, "Downloaded.") }, "Download (spreadsheet)")) : null;
-    show(h("section", { class: "card" },
-      h("h1", null, data.hr ? "Certificate board" : "Team certificates"),
-      h("p", { class: "muted small" }, data.hr ? "Everyone's certificates and when they run out." : "The certificates your team needs. Photos are only seen by the person and HR."),
-      h("p", null, h("a", { href: "#/my-certificates" }, "My certificates")),
-      data.banners.map((b) => h("p", { class: "cert-banner", role: "alert" }, b)),
-      hrLinks, filterForm(data, params),
-      h("p", { class: "muted small" }, counts.length ? `Everyone: ${counts.join(", ")}.` : "No one needs a certificate yet. HR chooses who needs each one in HR settings.")),
-    h("section", { class: "card" },
+      }, "Downloaded.") }, "Download (spreadsheet)") : null);
+    show(pageHead(data.hr ? "Certificate board" : "Team certificates",
+      data.hr ? "Everyone's certificates and when they run out." : "The certificates your team needs. Photos are only seen by the person and HR.",
+      actions),
+    data.banners.map((b) => h("p", { class: "note bad", role: "alert" }, b)),
+    counts.length ? h("div", { class: "stats" }, counts.map(([k, n]) => h("a", {
+      class: TONE[k] === "bad" ? "stat alert" : "stat", href: statusLink(k), "aria-label": `${n} ${data.statuses[k].toLowerCase()}` },
+    h("span", { class: "stat-value" }, String(n)), h("span", { class: "stat-label" }, data.statuses[k])))) : null,
+    h("section", { class: "card" }, filterForm(data, params),
+      counts.length ? null : h("p", { class: "muted small" }, "No one needs a certificate yet. HR chooses who needs each one in HR settings.")),
+    h("section", { class: "card flush" },
       data.rows.length ? h("ul", { class: "list" }, data.rows.map(boardRow))
-        : h("p", { class: "muted" }, data.total ? "No one matches." : "Nothing to show yet.")));
+        : emptyState(data.total ? "No one matches." : "Nothing to show yet.")));
   }
 
   // ---------------------------------------------------------------- HR: checking cards
 
   async function renderWaiting() {
     const data = await api("GET", "/api/certificates/waiting");
-    show(h("section", { class: "card" }, h("h1", null, "Cards to check"),
-      h("p", { class: "muted small" }, "Oldest first. Another HR admin checks your own."),
+    show(h("header", { class: "page-head" },
+      h("a", { class: "back-link", href: "#/certificates" }, "Certificate board"),
+      h("h1", { class: "page-title" }, "Cards to check"),
+      h("p", { class: "page-sub" }, "Oldest first. Another HR admin checks your own.")),
+    h("section", { class: "card flush" },
       data.cards.length ? h("ul", { class: "list" }, data.cards.map((c) => h("li", null,
-        h("a", { class: "item", href: `#/certificates/check/${enc(c.person_id)}/${c.id}` },
-          h("div", { class: "title" }, `${c.name}: ${c.type}`),
-          h("div", { class: "sub" }, [`Added ${when(c.added_at)}`, c.added_by ? `by ${c.added_by}` : null].filter(Boolean).join(" · ")),
-          readLine(c) ? h("div", { class: "sub" }, readLine(c)) : null))))
-        : h("p", { class: "muted" }, "Nothing to check."),
-      h("p", null, h("a", { href: "#/certificates" }, "Certificate board"))));
+        h("a", { class: "item with-avatar", href: `#/certificates/check/${enc(c.person_id)}/${c.id}` },
+          h("span", { class: "avatar", "aria-hidden": "true" }, initial(c.name)),
+          h("div", { class: "item-text" },
+            h("div", { class: "title" }, `${c.name}: ${c.type}`),
+            h("div", { class: "sub" }, [`Added ${when(c.added_at)}`, c.added_by ? `by ${c.added_by}` : null].filter(Boolean).join(" · ")),
+            readLine(c) ? h("div", { class: "sub" }, readLine(c)) : null)))))
+        : emptyState("Nothing to check.", "Cards people add wait here for HR.")));
   }
 
   async function renderCheck(personId, cardId) {
     const d = await api("GET", `/api/people/${enc(personId)}/certificates/${enc(cardId)}`);
     const c = d.card;
-    const back = h("p", null, h("a", { href: "#/certificates/check" }, "Cards to check"), " · ",
-      h("a", { href: `#/people/${enc(personId)}` }, `${d.person.name}'s page`));
+    // The page's head: back to the cards, the person's initial, name and card, and a link to their page.
+    const head = (sub) => h("header", { class: "page-head with-avatar" },
+      h("a", { class: "back-link", href: "#/certificates/check" }, "Cards to check"),
+      h("span", { class: "avatar lg", "aria-hidden": "true" }, initial(d.person.name)),
+      h("h1", { class: "page-title" }, `${d.person.name}: ${d.type.name}`),
+      sub ? h("p", { class: "page-sub" }, sub) : null,
+      h("div", { class: "page-actions" }, h("a", { class: "button small-btn", href: `#/people/${enc(personId)}` }, `${d.person.name}'s page`)));
+    const added = [`Added ${when(c.added_at)}`, c.added_by ? `by ${c.added_by}` : null].filter(Boolean).join(" · ");
     // The photo: zoom and turn (turning asks the server for an upright copy).
     let zoom = 1;
     let turn = 0;
     const img = c.photo && !c.pdf ? h("img", { src: c.photo, alt: `Photo of ${d.person.name}'s ${d.type.name}` }) : null;
     const setZoom = (z) => { zoom = Math.min(4, Math.max(1, z)); img.style.width = `${zoom * 100}%`; };
     const photo = h("section", { class: "card cert-side" }, h("h2", null, "The card"),
-      img ? [h("div", { class: "cert-photo" }, img), h("div", { class: "actions" },
-        h("button", { type: "button", onclick: () => setZoom(zoom - 0.5), "aria-label": "Zoom out" }, "−"),
-        h("button", { type: "button", onclick: () => setZoom(zoom + 0.5), "aria-label": "Zoom in" }, "+"),
+      img ? [h("div", { class: "cert-photo" }, img), h("div", { class: "actions cert-buttons" },
+        h("button", { type: "button", class: "small-btn", onclick: () => setZoom(zoom - 0.5), "aria-label": "Zoom out" }, "−"),
+        h("button", { type: "button", class: "small-btn", onclick: () => setZoom(zoom + 0.5), "aria-label": "Zoom in" }, "+"),
         // Turning works while the photo waits here; a confirmed card opens as its document.
-        c.status === "waiting" ? h("button", { type: "button", onclick: () => { turn = (turn + 90) % 360; img.src = `${c.photo}?turn=${turn}`; } }, "Turn") : null,
-        h("a", { class: "button", href: c.photo, target: "_blank", rel: "noopener" }, "Full size"))]
+        c.status === "waiting" ? h("button", { type: "button", class: "small-btn", onclick: () => { turn = (turn + 90) % 360; img.src = `${c.photo}?turn=${turn}`; } }, "Turn") : null,
+        h("a", { class: "button small-btn", href: c.photo, target: "_blank", rel: "noopener" }, "Full size"))]
         : c.photo ? h("a", { class: "button", href: c.photo, download: "" }, "Download the PDF")
-          : h("p", { class: "muted" }, "The photo isn't kept here any more."));
+          : emptyState("The photo isn't kept here any more."));
     const read = h("section", { class: "card cert-side" }, h("h2", null, "What Google read"),
       d.segments.length ? h("div", { class: "cert-text" }, d.segments.map((s) => (s.d ? h("mark", null, s.t) : s.l ? h("strong", null, s.t) : s.t)))
-        : h("p", { class: "muted" }, c.read_note || (c.read_state === "pending" ? "Still reading it. Type the date from the photo, or come back in a minute." : "Nothing was read.")),
-      d.warnings.length ? h("ul", { class: "cert-warnings" }, d.warnings.map((w) => h("li", { class: "warn" }, w))) : null);
+        : h("p", { class: "note" }, c.read_note || (c.read_state === "pending" ? "Still reading it. Type the date from the photo, or come back in a minute." : "Nothing was read.")),
+      d.warnings.length ? h("ul", { class: "cert-warnings" }, d.warnings.map((w) => h("li", { class: "warn small" }, w))) : null);
     if (c.status !== "waiting") {
-      return show(h("section", { class: "card" }, h("h1", null, `${d.person.name}: ${d.type.name}`),
-        h("p", null, `This card was already decided: ${c.status_word.toLowerCase()}.`), back), photo);
+      return show(head(added), h("p", { class: "note" }, `This card was already decided: ${c.status_word.toLowerCase()}.`), photo);
     }
     const expires = h("input", { type: "date", name: "expires", required: true, value: d.suggest.expires || "" });
     const issued = h("input", { type: "date", name: "issued", value: d.suggest.issued || "" });
@@ -409,13 +446,13 @@
       }
     } },
     h("label", null, "Expires", h("small", null, d.suggest.expires ? `${c.how_word || "Read from card"}: ${day(d.suggest.expires)}. Correct it if it's wrong.` : "Not found on the card: type it from the photo."), expires),
-    h("label", null, "Issued", h("small", null, "If it's on the card"), issued),
-    h("label", null, d.type.olcc ? "Permit number" : "Card number", h("small", null, "If it's on the card"), number),
+    h("div", { class: "row cert-row" },
+      h("label", null, "Issued", h("small", null, "If it's on the card"), issued),
+      h("label", null, d.type.olcc ? "Permit number" : "Card number", h("small", null, "If it's on the card"), number)),
     d.type.olcc ? [tick("temporary", "It's a temporary permit", d.suggest.temporary),
       tick("under_21", "Under 21: may not mix drinks or bartend", d.suggest.under_21)] : null,
     tick("checked_issuer", d.type.olcc ? "Checked with OLCC" : "Checked with the issuer", false),
     h("div", { class: "actions" },
-      h("button", { type: "submit", class: "primary" }, "Confirm"),
       h("button", { type: "button", class: "danger", onclick: async () => {
         const reason = await ask("Don't accept this card", `Why? ${d.person.name} sees this, so say what to fix.`);
         if (reason === null) return;
@@ -424,12 +461,12 @@
           toast(r.message);
           next();
         }
-      } }, "Don't accept")));
-    show(h("section", { class: "card" }, h("h1", null, `${d.person.name}: ${d.type.name}`),
-      h("p", { class: "muted small" }, [`Added ${when(c.added_at)}`, c.added_by ? `by ${c.added_by}` : null].filter(Boolean).join(" · ")),
-      d.current ? h("p", { class: "small" }, `It replaces the card that expires ${day(d.current.expires)}.`) : null, back),
-    h("div", { class: "cert-check" }, photo, read),
-    h("section", { class: "card" }, h("h2", null, "Confirm the dates"), form));
+      } }, "Don't accept"),
+      h("button", { type: "submit", class: "primary" }, "Confirm")));
+    show(head(added),
+      d.current ? h("p", { class: "note" }, `It replaces the card that expires ${day(d.current.expires)}.`) : null,
+      h("div", { class: "cert-check" }, photo, read),
+      h("section", { class: "card" }, h("h2", null, "Confirm the dates"), form));
   }
 
   H.registerPage("certificates", {
@@ -448,8 +485,8 @@
     const chosenPeople = new Set(t.people);
     const peopleList = h("ul", { class: "list" });
     const drawPeople = () => peopleList.replaceChildren(...[...chosenPeople].map((id) => h("li", null, h("div", { class: "item split" },
-      h("span", null, data.people.find((p) => p.id === id)?.name || id),
-      h("button", { type: "button", class: "linkish", onclick: () => { chosenPeople.delete(id); drawPeople(); } }, "Remove")))));
+      h("span", { class: "title" }, data.people.find((p) => p.id === id)?.name || id),
+      h("button", { type: "button", class: "small-btn", onclick: () => { chosenPeople.delete(id); drawPeople(); } }, "Remove")))));
     drawPeople();
     const addPerson = h("select", { "aria-label": "Add someone who needs it" }, h("option", { value: "" }, "Add someone…"),
       data.people.map((p) => h("option", { value: p.id }, p.name)));
@@ -483,20 +520,23 @@
     h("label", { class: "check" }, h("input", { type: "checkbox", name: "flag_until_valid", checked: !!t.flag_until_valid }), "Show the message until it's valid, even during a new hire's days"),
     h("label", { class: "check" }, h("input", { type: "checkbox", name: "olcc", checked: !!t.olcc }), "Ask about OLCC temporary permits and under 21"),
     h("label", null, "How its dates are read", h("select", { name: "reader" }, Object.entries(data.readers).map(([k, v]) => h("option", { value: k, selected: k === t.reader }, v)))),
-    h("h4", null, "Departments that need it"),
-    t.groups_confirmed ? null : h("p", { class: "warn" }, t.suggested.length
+    h("h3", null, "Departments that need it"),
+    t.groups_confirmed ? null : h("p", { class: "warn small" }, t.suggested.length
       ? "Suggested from the department names. Check them and save: nobody needs it until you do."
       : "Choose the departments and save: nobody needs it until you do."),
     data.departments.length ? data.departments.map((d) => h("label", { class: "check" },
       h("input", { type: "checkbox", name: `g-${d.group}`, checked: groups.has(d.group) }), d.name))
       : h("p", { class: "muted small" }, "No departments yet: they come from Connecteam's smart groups."),
-    h("h4", null, "People who need it too"), peopleList, addPerson,
-    others.length ? [h("h4", null, "Accepted in its place"), ...others.map((o) => h("label", { class: "check" },
+    h("h3", null, "People who need it too"), peopleList, addPerson,
+    others.length ? [h("h3", null, "Accepted in its place"), ...others.map((o) => h("label", { class: "check" },
       h("input", { type: "checkbox", name: `a-${o.key}`, checked: t.accepts.includes(o.key) }), o.name))] : null,
+    h("h3", null, "Tracking"),
     h("label", { class: "check" }, h("input", { type: "checkbox", name: "active", checked: !!t.active }), "Track this certificate"),
     h("div", { class: "actions" }, h("button", { type: "submit", class: "primary" }, `Save ${t.name}`)));
+    const chips = [t.active ? null : h("span", { class: "badge quiet" }, "Not tracked"),
+      t.groups_confirmed ? null : h("span", { class: "badge warn" }, "Departments to confirm")].filter(Boolean);
     return h("details", { class: "cert-type", open: !t.groups_confirmed || null },
-      h("summary", null, t.name, t.active ? "" : " (not tracked)", t.groups_confirmed ? "" : " · departments to confirm"), form);
+      h("summary", null, h("span", { class: "title" }, t.name), chips.length ? h("span", { class: "chips" }, chips) : null), form);
   }
 
   H.registerSettings("certificates", (box, data, again) => {
@@ -505,7 +545,7 @@
       run(() => api("PUT", "/api/settings/certificates", { remind_every: remind.elements.remind_every.value }), "Saved.");
     } }, h("label", null, "Remind about expired or missing cards every (days)", h("small", null, "1 to 14. The person, their managers and HR are reminded."),
       h("input", { name: "remind_every", type: "number", min: "1", max: "14", value: data.remind_every })),
-    h("div", { class: "actions" }, h("button", { type: "submit" }, "Save")));
+    h("button", { type: "submit" }, "Save"));
     const add = h("form", { class: "row cert-inline", onsubmit: (e) => {
       e.preventDefault();
       run(async () => {
@@ -514,11 +554,11 @@
       }, "Added. Set it up below.");
     } }, h("label", null, "Add a kind of certificate", h("small", null, "Such as CPR and First Aid, or a pool operator's certificate"),
       h("input", { name: "name", maxlength: "60", required: true })),
-    h("div", { class: "actions" }, h("button", { type: "submit" }, "Add")));
+    h("button", { type: "submit" }, "Add"));
     box.append(...[h("h2", null, "Certificates"),
       h("p", { class: "muted small" }, "Which certificates people need and when. Cards are checked by HR before they count."),
       remind,
-      data.types.map((t) => typeForm(t, data, again)),
+      h("div", { class: "cert-types" }, data.types.map((t) => typeForm(t, data, again))),
       add].flat().filter(Boolean));
   });
 })();
