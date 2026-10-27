@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.11.0
+
+**Reports in the staff app**
+
+- **A new Reports page** lists the reports a person's department may see. It shows on shared and
+  role-based phones and computers after someone signs in with their own PIN, and never on a kiosk
+  phone with no one signed in.
+- **New Reports tab in Staff Access:** turn each report on or off, and pick the departments that
+  may view it and the ones that may manage it (upload its files and change its settings). The
+  add-on checks this on every request.
+- **Reports read Connecteam only when someone opens one:** timesheets, schedules and forms. They
+  have their own share of requests (at most 15 a minute and 1,000 a day, none once Staff Access
+  has used half its day), and the same week is asked again at most every 10 minutes. Together
+  with the HR portal they never take the last 10 requests of a minute, so the clock checks always
+  have room. If Connecteam refuses a report's request or says "too many requests", only reports
+  and tasks wait; the clock checks carry on.
+- **Files uploaded to a report** (such as a Gusto export) are kept on the add-on, the newest 5 of
+  each kind, so everyone who opens the report sees the latest.
+- **Adding a report** is dropping a folder into the add-on. REPORTS.md is the guide, with a
+  working template report and a test template.
+
+**Attendance & Leave report**
+
+- **Late arrivals, early clock-outs, missed lunches and shifts, required forms** (every shift,
+  weekly, or hour by hour) **and Gusto leave cover**, by week, pay period or month, from
+  Connecteam timesheets, schedules and form submissions.
+- **Gusto balances:** someone who manages the report uploads Gusto's Time Off Balances CSV once,
+  and everyone who can see the report sees it. Rules and required forms are set on the report's
+  Rules tab.
+- **Departments come from Connecteam smart groups:** each person shows under the Staff Access
+  department whose smart group they're in, otherwise their Gusto title.
+- **Who can see whom:** a new setting on the Rules tab. Everyone who may view the report sees all
+  departments (as before, the default), or viewers see only the people in their own department
+  while those who manage the report see everyone. The add-on leaves the others out before
+  anything is sent.
+- **Copy a summary, download a CSV, or print or save a PDF** (everyone's days, only the rows you
+  opened, or just the summary).
+
+**Tasks**
+
+- **A to-do list for each department** in the staff app, for everyone signed in with their own
+  PIN. People see the tasks for their department, for Everyone, and those given to them or made
+  by them.
+- **Quick tasks in a couple of taps** (a title, plus optional department, person, due date and
+  time, and Urgent). Tap a status chip to move it on (To do → In progress → Done); hold it for
+  Won't do or Reopen. Every change is kept in the task's history.
+- **Phones show a list grouped by status**, with urgent and overdue markers. Tablets and
+  computers show a board. Filters for Mine, department and status. Done tasks fold away after a
+  day, and the list updates live.
+- **Only the person who made a task, or a role with the new Manage tasks setting,** can edit or
+  delete it. Deleted tasks stay in a bin for 30 days.
+- **Dashboard Tasks tab:** choose Connecteam forms whose new submissions become tasks, with their
+  department, which answer is the title (picked from the form's questions), and whether the
+  person who sent it gets the task. Forms are checked every 10 minutes in the reports' share of
+  Connecteam requests, and no submission becomes a task twice.
+
+**Connecteam permissions**
+
+- **Reports and tasks need two more permissions** besides users.read and time_clock.read:
+  schedule.read and forms.read (and jobs.read, optionally, for job names). Connecteam can't add
+  permissions to an existing app: create a new OAuth app with all of them and enter its keys in
+  Settings → Connections. **Test connection** says when reports and tasks lack one, and a report
+  or a form's card names the permission Connecteam refused, in its own words.
+
+**Backups**
+
+- Backups carry which reports are on, who may view and manage them, and their settings, plus
+  tasks (with their history and the bin), the forms that make tasks, and roles' Manage tasks.
+  Migration files also carry the files uploaded to reports.
+
 ## 0.10.4
 
 **HR portal: Connecteam is read only**

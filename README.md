@@ -48,6 +48,29 @@ system.
   them, without changing anyone else's.
 - **Dark and light mode**, following the device.
 
+### Reports and tasks (staff app)
+
+For people signed in with their own PIN (never on a kiosk phone nobody signs in to).
+
+- **Reports:** a **Reports** page lists the reports a person's department may view. You turn each
+  report on and pick which departments view it and which manage it (upload its files, change its
+  settings), checked by the add-on on every request.
+- **Attendance & Leave report:** late arrivals, early clock-outs, missed lunches and shifts,
+  required forms (every shift, weekly, or hour by hour) and whether sick time and PTO in Gusto
+  cover missed shifts, by week, pay period or month. Timesheets, schedules and form submissions
+  come from Connecteam; managers upload Gusto's Time Off Balances CSV once for everyone. Copy a
+  summary, download a CSV, or print or save a PDF. Optionally, viewers see only their own
+  department's people.
+- **Adding a report** is dropping a folder of code into the add-on, with a guide
+  ([REPORTS.md](staff_portal/REPORTS.md)), a template and a test template.
+- **Tasks:** each department's to-do list. Quick tasks in a couple of taps; tap a status chip to
+  move a task on (To do, In progress, Done), hold it for Won't do or Reopen; urgent and overdue
+  markers, filters, a board on wider screens, live updates, history and a 30-day bin. Tasks can
+  also come from Connecteam forms you choose, one per new submission.
+- **Connecteam stays within its limits:** reports and tasks have their own small share of
+  requests, ask only when someone opens a report or a form is due, and never hold up the clock
+  checks.
+
 ### Access control
 
 - **Roles** give each device **Hidden**, **View** or **Control**, one by one or a whole area at
@@ -145,8 +168,7 @@ and each person sees only what their role allows.
   reasons, introductory periods and disciplinary probation.
 - **Performance reviews:** scheduled and extra reviews on forms HR builds, with self-reviews, HR's
   approval, the employee's acknowledgement and a PDF in Google Drive.
-- **Notifications** in the portal's inbox and, optionally, as Connecteam chat messages that never
-  say what they're about, with quiet hours and a daily summary.
+- **Notifications** in the portal's inbox, on each person's home page.
 - **Audit log** of every sign-in, look at a file and change, for HR admins only. Private details
   and files are encrypted, and the HR key can be kept out of Home Assistant's backups.
 
@@ -177,7 +199,11 @@ and each person sees only what their role allows.
   badge and staff card defaults, Door activity, and every card made.
 - **Settings → Connections:** TT Hotel and Connecteam, each folded to one line saying whether it
   works and how many requests Staff Access has used against its limit, with its own Save button;
-  plus Google Drive (HR files) and Connecteam for HR for the HR portal.
+  plus Google Drive (HR files) for the HR portal.
+- **Reports:** turn each report on, and pick the departments that view it and the ones that
+  manage it.
+- **Tasks:** choose Connecteam forms whose new submissions become tasks (their department, which
+  answer is the title, and whether the sender gets the task), and give roles **Manage tasks**.
 - **HR portal tab:** turn the HR portal on, choose HR admins, and emergency controls (unlock,
   reset sign-in, sign everyone out).
 - **Branding:** property name (shown in the staff app instead of "Staff Portal"), home-screen
