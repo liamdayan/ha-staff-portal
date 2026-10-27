@@ -50,6 +50,7 @@
       <h2>Staff members</h2>
       <div class="head-actions">
         <button class="btn" id="sync-staff" hidden>Sync staff now</button>
+        <button class="btn" id="link-staff" hidden>Link existing staff</button>
         <button class="btn" id="add-from-connecteam" hidden>Add from Connecteam</button>
         <button class="btn primary" id="add-staff">Add staff member</button>
       </div>
@@ -679,7 +680,7 @@
                 <small>Add staff from your Connecteam user list, and only let them sign in and use controls
                 while they're clocked in on a Connecteam time clock (you can turn that off per department or
                 per person).
-                Staff you add by hand aren't affected.</small></span></label>
+                Staff you add by hand aren't affected until you link them (Link existing staff).</small></span></label>
               <p class="hint">In Connecteam, open <b>your name → Integration Center → OAuth 2.0</b>, click
                 <b>Create app</b> and give it the <b>users.read</b> and <b>time_clock.read</b> scopes (they can't be
                 changed later: for other scopes, make a new app). Copy the Client Secret straight away: Connecteam
@@ -717,16 +718,34 @@
                 <button class="btn" type="button" id="ct-test">Test connection</button>
               </div>
               <ul class="conn-checks" id="ct-checks" hidden></ul>
+              <div class="ct-status">
+                <span id="ct-link-status" class="hint">Link the staff you added by hand to their Connecteam
+                  users.</span>
+                <button class="btn" type="button" id="ct-link">Link existing staff</button>
+              </div>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_staff">
                 <span>Add everyone from Connecteam
                 <small>Every active Connecteam user becomes a staff member here, in the department whose
                 smart group they're in (Staff tab, Departments), with their kiosk code as their PIN. Checked
                 about once an hour, inside the same request limits. People archived in Connecteam are turned
-                off, never deleted. People you add by hand are never changed.</small></span></label>
+                off, never deleted. Someone here with the same name waits to be linked instead of being
+                added twice. People you add by hand are never changed, apart from their department
+                once linked.</small></span></label>
               <label class="check-row"><input type="checkbox" name="connecteam_auto_clock_in">
                 <span>People added this way must be clocked in to sign in
                 <small>Unless their department sets its own (Staff tab, Departments). You can change it for
                 anyone on their row on the Staff tab; the sync never changes it back.</small></span></label>
+              <label class="check-row"><input type="checkbox" name="connecteam_auto_departments">
+                <span>Make a department for each smart group
+                <small>Each Connecteam smart group gets a department here, with no role, no key card and
+                each person's own clock-in rule until you set them. Its name follows the smart group's
+                unless you rename it. A smart group removed in Connecteam leaves its department, marked
+                as removed: it's never deleted. Linked people join the department of their smart group
+                (the first in the department order, if they're in several).</small></span></label>
+              <div class="ct-status">
+                <span id="ct-dept-status" class="hint"></span>
+                <button class="btn" type="button" id="ct-departments">Add departments now</button>
+              </div>
               <div class="ct-status">
                 <span id="ct-sync-status" class="hint"></span>
                 <button class="btn" type="button" id="ct-sync">Sync staff now</button>
@@ -997,8 +1016,8 @@
       <input name="pin" inputmode="numeric" pattern="\d{4,8}" autocomplete="off"></label>
     <label class="check"><input type="checkbox" name="active"> Can sign in</label>
     <div class="ct-link" data-ct hidden>
-      <div class="ct-link-head"><span data-ct-label></span>
-        <button class="btn subtle" type="button" data-ct-unlink>Unlink</button></div>
+      <div class="ct-link-head"><span data-ct-label>Connecteam user</span></div>
+      <div data-ct-pick></div>
       <label class="check"><input type="checkbox" name="use_kiosk_code"> <span data-kiosk-label>Use their kiosk code as their PIN</span></label>
       <label class="check"><input type="checkbox" name="require_clock_in"> Only allow sign-in while clocked in</label>
       <p class="hint" data-ct-note hidden></p>
@@ -1028,6 +1047,34 @@
   <div class="preview-stage" data-stage>
     <div class="preview-box phone"><iframe title="Layout preview" data-frame></iframe></div>
   </div>
+</dialog>
+
+<dialog id="link-dialog" class="wide">
+  <form method="dialog" id="link-form">
+    <h2 data-title>Link existing staff</h2>
+    <p class="hint" data-link-msg>Loading your Connecteam users…</p>
+    <div class="link-tools" data-link-tools hidden>
+      <label class="check"><input type="checkbox" data-relink> Relink everyone</label>
+      <span class="count" data-link-count></span>
+    </div>
+    <div class="link-rows" data-link-rows></div>
+    <div class="link-options" data-link-options hidden>
+      <p class="hint">For the people being linked:</p>
+      <label class="check"><input type="checkbox" name="follow_department" checked>
+        <span>Put them in their smart group's department <small>Otherwise their department stays, as
+          set by hand.</small></span></label>
+      <label class="check"><input type="checkbox" name="use_kiosk_code">
+        <span>Also use their kiosk code as their PIN <small>Their PIN stays if the code is missing or
+          someone else's.</small></span></label>
+      <label class="check"><input type="checkbox" name="require_clock_in">
+        <span>Also require them to be clocked in to sign in <small>Otherwise linking never makes them
+          clock in.</small></span></label>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" type="button" data-link-apply disabled>Link selected</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="ct-dialog" class="wide">

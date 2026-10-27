@@ -44,6 +44,7 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
                     visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
 import ctdata
+import ctlink
 import migrate
 import reports as reports_kit
 import transfer
@@ -3418,11 +3419,12 @@ async def admin_connecteam_users(request: web.Request):
     except ConnecteamError as err:
         return bad_request(str(err), 502)
     linked = {r["connecteam_user_id"]: r for r in db.conn.execute(
-        "SELECT name, status, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
+        "SELECT id, name, status, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
     # Kiosk codes stay on the server: the dashboard only learns whether there is one.
     return web.json_response({"users": [
         {"id": u["id"], "name": u["name"], "has_kiosk_code": bool(u["kiosk_code"]),
          "linked_to": linked[u["id"]]["name"] if u["id"] in linked else None,
+         "linked_id": linked[u["id"]]["id"] if u["id"] in linked else None,
          "linked_archived": u["id"] in linked and linked[u["id"]]["status"] == "archived"}
         for u in users]})
 
@@ -3477,6 +3479,227 @@ def parse_connecteam_link(data: dict, staff_id: int | None = None) -> dict:
     return fields
 
 
+# ---------------------------------------------------------------- Link existing staff
+# People added by hand (before Connecteam was connected, say) linked to their Connecteam users
+# in one go: suggestions by name (ctlink), checked and confirmed by the owner. Relink everyone
+# offers the same for people already linked. Uses the cached user list, like Add from
+# Connecteam. Linking never changes a PIN or role, and never turns on a clock-in requirement
+# unless asked; their department follows their smart group unless the owner keeps theirs.
+
+def cached_user_name(uid: str | None) -> str | None:
+    """A Connecteam user's name from the last user list read (never asks Connecteam)."""
+    found = connecteam._users
+    return next((u["name"] for u in found[0] if u["id"] == uid), None) if uid and found else None
+
+
+def link_plan(users: list[dict]) -> dict:
+    """What Link existing staff shows: the active Connecteam users, and each person here (not
+    archived) with their link and the suggested one, for linking the unlinked ("suggested", among
+    users no one is linked to) and for Relink everyone ("relink", among all users but those of
+    archived people)."""
+    staff = [dict(r) for r in db.conn.execute(
+        "SELECT id, name, status, connecteam_user_id, connecteam_auto, department_id, "
+        "department_set FROM staff ORDER BY name COLLATE NOCASE")]
+    by_id = {u["id"]: u for u in users}
+    owner = {m["connecteam_user_id"]: m for m in staff if m["connecteam_user_id"]}
+    here = [m for m in staff if m["status"] != "archived"]
+    free = [u for u in users if u["id"] not in owner]
+    suggested = ctlink.suggest([m for m in here if not m["connecteam_user_id"]], free)
+    relink = ctlink.suggest(here, [u for u in users if owner.get(u["id"], {}).get("status")
+                                   != "archived"])
+    ordered = db.departments()
+
+    def pick(found):
+        return {"id": found[0]["id"], "name": found[0]["name"],
+                "why": ctlink.WHY[found[1]]} if found else None
+    return {
+        "users": [{"id": u["id"], "name": u["name"], "has_kiosk_code": bool(u["kiosk_code"]),
+                   "linked_to": owner[u["id"]]["id"] if u["id"] in owner else None,
+                   "linked_archived": owner.get(u["id"], {}).get("status") == "archived",
+                   "department_id": (smart_group_department(u, ordered) or {}).get("id")}
+                  for u in users],
+        "staff": [{"id": m["id"], "name": m["name"], "connecteam_user_id": m["connecteam_user_id"],
+                   "link_name": by_id[m["connecteam_user_id"]]["name"]
+                   if m["connecteam_user_id"] in by_id else None,
+                   # Linked to someone Connecteam no longer lists (archived or removed there).
+                   "broken": bool(m["connecteam_user_id"]) and m["connecteam_user_id"] not in by_id,
+                   "auto": bool(m["connecteam_auto"]), "suggested": pick(suggested.get(m["id"])),
+                   "relink": pick(relink.get(m["id"]))} for m in here],
+        # People the sync added stay linked to their own user while it runs.
+        "auto_locked": staff_sync_enabled(),
+    }
+
+
+async def admin_connecteam_links(request: web.Request):
+    if not connecteam_settings()[0]:
+        return bad_request("Turn on Connecteam and save the settings first.")
+    try:
+        users = await connecteam.users()
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    return web.json_response(link_plan(users))
+
+
+def link_log_text(name: str, old: str | None, new: str | None) -> tuple[str, str]:
+    """The Activity line for one person's Connecteam link changing (names or IDs)."""
+    if not old:
+        return f"Linked {name} to Connecteam", f"Connecteam user {new}"
+    if not new:
+        return f"Unlinked {name} from Connecteam", f"Was Connecteam user {old}"
+    return f"Changed {name}'s Connecteam link", f"From {old} to {new}"
+
+
+def link_fields(member: dict, uid: str | None, user: dict | None, *, follow_department: bool,
+                clock_in: bool, departments: list[dict], rules: dict) -> dict:
+    """The changes linking (or unlinking) one person makes, apart from their PIN. Newly linked:
+    their smart group's department (follow_department, else the one they have is kept as set by
+    hand), and a clock-in requirement only if asked (clock_in): it never just switches on."""
+    fields = {"connecteam_user_id": uid}
+    if member["connecteam_auto"]:
+        fields["connecteam_auto"] = 0   # from now on, a person added by hand
+    if not uid:
+        return {**fields, "pin_from_connecteam": 0, "department_set": 0}
+    if member["connecteam_user_id"]:
+        return fields   # relinked: their department and clock-in rule stay as they were
+    dept = smart_group_department(user, departments) if follow_department else None
+    if dept:
+        fields["department_id"] = dept["id"]
+    fields["department_set"] = 0 if follow_department else 1
+    after = {**member, **fields}
+    if db.clock_in_rule(after, rules)[0] != clock_in:
+        fields["require_clock_in"] = 1 if clock_in else 0
+        if after.get("clock_in_set") or rules.get(after.get("department_id")) is not None:
+            fields["clock_in_set"] = 1   # theirs, beating their department's
+    return fields
+
+
+async def admin_save_links(request: web.Request):
+    """Link selected: {"links": [{"staff_id", "connecteam_user_id" (None: unlink)}],
+    "use_kiosk_code", "follow_department", "require_clock_in"}. All or nothing, in one
+    transaction, so two people's links can be swapped. Links already as asked are left alone."""
+    if not connecteam_settings()[0]:
+        return bad_request("Turn on Connecteam and save the settings first.")
+    data = await read_json(request)
+    rows = data.get("links")
+    if not isinstance(rows, list) or not rows or len(rows) > 2000:
+        return bad_request("Choose who to link.")
+    wanted: dict[int, str | None] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not re.fullmatch(r"\d{1,12}", str(row.get("staff_id"))):
+            return bad_request("links must be a list of staff and Connecteam users.")
+        uid = row.get("connecteam_user_id")
+        uid = None if uid in (None, "") else str(uid).strip()
+        if uid is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", uid):
+            return bad_request("That Connecteam user ID doesn't look right.")
+        if int(row["staff_id"]) in wanted:
+            return bad_request("Each person can only be linked once.")
+        wanted[int(row["staff_id"])] = uid
+    flag = lambda key: data.get(key) in (True, 1, "1", "on")
+    use_kiosk, follow, clock_in = (flag("use_kiosk_code"), data.get("follow_department", True)
+                                   not in (False, 0, "0"), flag("require_clock_in"))
+    try:
+        users = await connecteam.users()   # cached: the list the dashboard just showed
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    by_id = {u["id"]: u for u in users}
+    async with staff_sync_lock:   # the sync never adds or moves anyone meanwhile
+        def check() -> tuple[dict, list]:
+            """Who changes, checked against the database as it is now."""
+            members = {}
+            for staff_id, uid in wanted.items():
+                m = db.staff(staff_id)
+                if not m:
+                    raise web.HTTPBadRequest(text="Someone in the list was deleted meanwhile. "
+                                                  "Open Link existing staff again.")
+                if m["status"] == "archived":
+                    raise web.HTTPBadRequest(text=f"{m['name']} is archived. Restore them first.")
+                if uid == m["connecteam_user_id"]:
+                    continue   # already so
+                if uid and uid not in by_id:
+                    raise web.HTTPBadRequest(text=f"The Connecteam user chosen for {m['name']} "
+                                                  "isn't an active Connecteam user.")
+                if m["connecteam_auto"] and staff_sync_enabled():
+                    raise web.HTTPBadRequest(text=f"{m['name']} was added from Connecteam, so they "
+                                                  "stay linked while Add everyone from "
+                                                  "Connecteam is on.")
+                members[staff_id] = m
+            # One Connecteam user, one person, after every change (archived people included).
+            after = {r["id"]: r["connecteam_user_id"] for r in db.conn.execute(
+                "SELECT id, connecteam_user_id FROM staff WHERE connecteam_user_id IS NOT NULL")}
+            after.update({sid: wanted[sid] for sid in members})
+            holders = collections.Counter(uid for uid in after.values() if uid)
+            for staff_id in members:
+                uid = wanted[staff_id]
+                if uid and holders[uid] > 1:
+                    other = next(sid for sid, u in after.items() if u == uid and sid != staff_id)
+                    raise web.HTTPBadRequest(
+                        text=f"{by_id[uid]['name']} would be linked to both {members[staff_id]['name']} "
+                             f"and {(db.staff(other) or {}).get('name', 'someone else')}. "
+                             "One Connecteam user can be linked to one person.")
+            return members, [sid for sid in members if wanted[sid]
+                             and not members[sid]["connecteam_user_id"]]
+        try:
+            members, newly = check()
+        except web.HTTPBadRequest as err:
+            return bad_request(err.text)
+        if not members:
+            return web.json_response({"changed": 0, "pins": 0, "pins_kept": []})
+        # Kiosk codes as PINs (newly linked people only): one each, used by no one else.
+        pins, kept = {}, []
+        if use_kiosk:
+            in_use = collections.Counter(u["kiosk_code"] for u in users if u["kiosk_code"])
+            codes = {sid: by_id[wanted[sid]]["kiosk_code"] for sid in newly}
+            stored = db.staff_pins()
+
+            def owners() -> dict:
+                return {c: {sid for sid, h in stored if check_pin(c, h)}
+                        for c in set(filter(None, codes.values()))}
+            found = await asyncio.to_thread(owners)
+            for sid, code in codes.items():
+                if code and in_use[code] == 1 and not (found[code] - {sid}):
+                    pins[sid] = code
+                else:
+                    kept.append(members[sid]["name"])
+            hashes = dict(zip(pins, await asyncio.to_thread(
+                lambda: [hash_pin(c) for c in pins.values()])))
+            # PINs given meanwhile may be one of these codes.
+            if any(pair not in stored for pair in db.staff_pins()):
+                return bad_request("Staff PINs changed while linking. Try again.", 409)
+        try:
+            members, newly = check()   # nothing is awaited from here on
+        except web.HTTPBadRequest as err:
+            return bad_request(err.text)
+        departments, rules = db.departments(), db.department_clock_ins()
+        changes, logs = [], []
+        for staff_id, m in members.items():
+            uid = wanted[staff_id]
+            fields = link_fields(m, uid, by_id.get(uid), follow_department=follow,
+                                 clock_in=clock_in, departments=departments, rules=rules)
+            extra = []
+            if staff_id in pins and staff_id in newly:
+                fields.update(pin_hash=hashes[staff_id], pin_length=len(pins[staff_id]),
+                              pin_from_connecteam=1, failed_pins=0)
+                extra.append("PIN set to their kiosk code")
+            if fields.get("department_id", m["department_id"]) != m["department_id"]:
+                extra.append(f"department: {next(d['name'] for d in departments if d['id'] == fields['department_id'])}")
+            if "require_clock_in" in fields:
+                extra.append("must be clocked in to sign in" if fields["require_clock_in"]
+                             else "may sign in without clocking in")
+            changes.append((staff_id, fields))
+            action, detail = link_log_text(
+                m["name"], m["connecteam_user_id"] and (cached_user_name(m["connecteam_user_id"])
+                                                        or f"{m['connecteam_user_id']} (no longer in Connecteam)"),
+                uid and by_id[uid]["name"])
+            logs.append((action, "; ".join([detail, *extra])))
+        db.update_staff_many(changes)
+    for action, detail in logs:
+        db.log(admin_name(request), action, detail=detail)
+    for staff_id, fields in changes:
+        if "pin_hash" in fields:
+            staff_sessions_end(staff_id)
+    return web.json_response({"changed": len(changes), "pins": len(pins), "pins_kept": kept})
+
+
 # ---------------------------------------------------------------- Connecteam staff sync
 # With "Add everyone from Connecteam" on, every active Connecteam user becomes a person here,
 # in the department whose smart group they're in. It uses Connecteam's cached user list (one
@@ -3502,8 +3725,26 @@ pin_length_tried: dict[int, str] = {}
 
 
 def staff_sync_enabled() -> bool:
+    """Add everyone from Connecteam is on."""
     s = db.settings()
     return s.get("connecteam_enabled") == "1" and s.get("connecteam_auto_staff") == "1"
+
+
+def departments_sync_enabled() -> bool:
+    """Make a department for each smart group is on."""
+    s = db.settings()
+    return s.get("connecteam_enabled") == "1" and s.get("connecteam_auto_departments") == "1"
+
+
+def connecteam_sync_wanted() -> bool:
+    """Whether the regular sync has anything to do: adding everyone, making departments, or
+    keeping linked people in their smart group's department."""
+    if staff_sync_enabled() or departments_sync_enabled():
+        return True
+    return connecteam_settings()[0] and db.conn.execute(
+        "SELECT 1 FROM staff WHERE connecteam_user_id IS NOT NULL AND department_set = 0 "
+        "AND status != 'archived' AND EXISTS (SELECT 1 FROM departments "
+        "WHERE smart_group_id IS NOT NULL) LIMIT 1").fetchone() is not None
 
 
 def sync_staff_soon() -> None:
@@ -3513,7 +3754,8 @@ def sync_staff_soon() -> None:
 
 
 def staff_sync_state() -> dict:
-    return {"enabled": staff_sync_enabled(), "synced_at": staff_sync["at"],
+    return {"enabled": staff_sync_enabled(), "departments": departments_sync_enabled(),
+            "running": connecteam_sync_wanted(), "synced_at": staff_sync["at"],
             "result": staff_sync["result"], "error": staff_sync["error"]}
 
 
@@ -3521,9 +3763,9 @@ def kiosk_fingerprint(pin_hash: str, code: str) -> str:
     return hashlib.sha256(f"{pin_hash}:{code}".encode()).hexdigest()
 
 
-def unique_staff_name(name: str, taken: set[str]) -> str:
+def unique_staff_name(name: str, taken: set[str], fallback: str = "Connecteam user") -> str:
     """name, or "name (2)", "name (3)"... whichever nobody here has (ignoring capitals)."""
-    name = clean_name(name, 40) or "Connecteam user"
+    name = clean_name(name, 40) or fallback
     candidate, n = name, 1
     while candidate.lower() in taken:
         n += 1
@@ -3535,20 +3777,110 @@ def unique_staff_name(name: str, taken: set[str]) -> str:
 def summarize_sync(counts: dict) -> str:
     parts = [f"{counts['added']} added", f"{counts['updated']} updated",
              f"{counts['turned_off']} turned off", f"{counts['turned_on']} turned on",
-             f"{counts['no_code']} without a kiosk code"]
+             f"{counts['no_code']} without a kiosk code",
+             f"{counts.get('waiting', 0)} waiting to be linked (same name as someone here)",
+             plural_text(counts.get("departments_added", 0), "department made", "departments made"),
+             plural_text(counts.get("departments_renamed", 0), "department renamed",
+                         "departments renamed")]
     return ", ".join(p for p in parts if not p.startswith("0 ")) or "No changes"
 
 
-async def sync_connecteam_staff(fresh: bool = False) -> dict:
-    """Bring the people added from Connecteam in line with its active users. Returns counts
-    {"added", "updated", "turned_off", "turned_on", "no_code"}; raises ConnecteamError.
-    fresh: Sync staff now (the user list may be at most a minute old)."""
+def plural_text(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def sync_changed(counts: dict) -> bool:
+    """Whether a sync changed anything (people waiting to be linked are no change)."""
+    return any(v for k, v in counts.items() if k != "waiting")
+
+
+async def sync_connecteam_staff(fresh: bool = False, actor: str = "Staff Portal") -> dict:
+    """Bring departments and linked people in line with Connecteam: a department for each smart
+    group (if that's on), the people added from Connecteam in line with its active users (if
+    that's on) and everyone linked in their smart group's department. Returns counts {"added",
+    "updated", "turned_off", "turned_on", "no_code", "waiting", "departments_added",
+    "departments_renamed"}; raises ConnecteamError. fresh: Sync staff now (the user list may be
+    at most a minute old). Both lists are the cached ones (users: minutes, smart groups: hours)."""
     users = await connecteam.users(max_age=STAFF_SYNC_GAP if fresh else USERS_TTL)
     if not users:
         # Never take an empty answer to mean everyone left.
         raise ConnecteamError("Connecteam listed no active users, so no one was changed.")
+    groups = await connecteam.smart_groups() if departments_sync_enabled() else None
     async with staff_sync_lock:
-        return await apply_staff_sync(users)
+        counts = sync_departments(groups, actor) if groups is not None else {
+            "departments_added": 0, "departments_renamed": 0}
+        return {**await apply_staff_sync(users, actor), **counts}
+
+
+GROUP_GONE = "Smart group removed in Connecteam"
+
+
+def smart_group_department(user: dict, departments: list[dict]) -> dict | None:
+    """The department a Connecteam user belongs in: the first, in the Staff tab's department
+    order, whose smart group they're in."""
+    return next((d for d in departments if d["smart_group_id"]
+                 and d["smart_group_id"] in user["groups"]), None)
+
+
+def sync_departments(groups: list[dict], actor: str) -> dict:
+    """A department for each smart group that has none, made with no role, no key card and each
+    person's own clock-in rule; a department of the same name made by hand (with no smart group)
+    follows the group instead. Names follow a renamed group unless renamed here. A group no
+    longer listed leaves its department marked GROUP_GONE, never deleted. Nothing is awaited."""
+    counts = {"departments_added": 0, "departments_renamed": 0}
+    if not groups:
+        return counts   # never take an empty list to mean every group went
+    listed = {g["id"]: g for g in groups}
+    depts = db.departments()
+    taken = {d["name"].lower(): d for d in depts}
+    followed = set()
+    for d in depts:
+        if not d["smart_group_id"]:
+            continue
+        followed.add(d["smart_group_id"])
+        g = listed.get(d["smart_group_id"])
+        if d["group_gone"] != (0 if g else 1):
+            db.update_department(d["id"], group_gone=0 if g else 1)
+            if not g:
+                db.log(actor, f"Department {d['name']}: {GROUP_GONE.lower()}",
+                       detail="The department and its people are kept.")
+        name = clean_name(g["name"], 40) if g and d["group_named"] else ""
+        if name and name != d["name"] and taken.get(name.lower(), d)["id"] == d["id"]:
+            db.update_department(d["id"], name=name)
+            taken.pop(d["name"].lower(), None)
+            taken[name.lower()] = d
+            db.log(actor, f"Renamed department {d['name']} to {name}",
+                   detail="Its smart group was renamed in Connecteam")
+            counts["departments_renamed"] += 1
+    for g in groups:
+        if g["id"] in followed:
+            continue
+        name = clean_name(g["name"], 40) or f"Group {g['id']}"
+        same = taken.get(name.lower())
+        if same and not same["smart_group_id"]:
+            db.update_department(same["id"], smart_group_id=g["id"])
+            db.log(actor, f"Department {same['name']} now follows the smart group {g['name']}",
+                   detail="Same name as the smart group")
+            continue
+        name = unique_staff_name(name, set(taken), "Smart group")
+        dept_id = db.create_department(name, smart_group_id=g["id"], group_named=1)
+        taken[name.lower()] = db.department(dept_id)
+        db.log(actor, f"Made department {name} from a Connecteam smart group",
+               detail="No role, no key card; clock-in: each person's own setting")
+        counts["departments_added"] += 1
+    return counts
+
+
+def department_move_detail(m: dict, dept: dict, rules: dict) -> str | None:
+    """What moving someone to a department does to their clock-in rule, so it's never changed
+    quietly (None: nothing)."""
+    before = db.clock_in_rule(m, rules)[0]
+    after, source = db.clock_in_rule({**m, "department_id": dept["id"]}, rules)
+    if before == after or not m.get("connecteam_user_id"):
+        return None
+    return (f"now must be clocked in to sign in ({dept['name']}'s rule)" if after
+            else f"no longer needs to clock in ({dept['name']}'s rule)" if source == "department"
+            else "no longer needs to clock in")
 
 
 async def backfill_pin_lengths(users: list[dict], linked: dict) -> None:
@@ -3574,21 +3906,30 @@ async def backfill_pin_lengths(users: list[dict], linked: dict) -> None:
             db.update_staff(m["id"], pin_length=len(code))
 
 
-async def apply_staff_sync(users: list[dict]) -> dict:
-    counts = {"added": 0, "updated": 0, "turned_off": 0, "turned_on": 0, "no_code": 0}
+async def apply_staff_sync(users: list[dict], actor: str = "Staff Portal") -> dict:
+    counts = {"added": 0, "updated": 0, "turned_off": 0, "turned_on": 0, "no_code": 0,
+              "waiting": 0}
+    adding = staff_sync_enabled()
     clock = 1 if db.settings().get("connecteam_auto_clock_in") == "1" else 0
-    departments = {d["id"]: d for d in db.departments()}
-    mapped = [d for d in departments.values() if d["smart_group_id"]]
+    ordered = db.departments()
+    departments = {d["id"]: d for d in ordered}
     roles = {r["id"] for r in db.roles()}
 
     def department_for(user):
-        return next((d for d in mapped if d["smart_group_id"] in user["groups"]), None)
+        return smart_group_department(user, ordered)
     linked = {r["connecteam_user_id"]: dict(r) for r in db.conn.execute(
         "SELECT * FROM staff WHERE connecteam_user_id IS NOT NULL")}
-    new = [u for u in users if u["id"] not in linked]
+    new = [u for u in users if u["id"] not in linked] if adding else []
+    # Someone here (not archived) with the same name and no link is probably them: never a
+    # second person, but a suggestion in Link existing staff, for the owner to confirm.
+    unlinked = [r["name"] for r in db.conn.execute(
+        "SELECT name FROM staff WHERE connecteam_user_id IS NULL AND status != 'archived'")]
+    waiting = [u for u in new if any(ctlink.same_name(n, u["name"]) for n in unlinked)]
+    new = [u for u in new if u not in waiting]
+    counts["waiting"] = len(waiting)
     # Archived people stay linked (so they're never added again) but are left alone.
     ours = [(u, linked[u["id"]]) for u in users
-            if u["id"] in linked and linked[u["id"]]["connecteam_auto"]
+            if adding and u["id"] in linked and linked[u["id"]]["connecteam_auto"]
             and linked[u["id"]]["status"] != "archived"]
     await backfill_pin_lengths(users, linked)
 
@@ -3682,25 +4023,27 @@ async def apply_staff_sync(users: list[dict]) -> dict:
     db.conn.commit()
 
     signed_out = set()
+    rules = db.department_clock_ins()
     for u, old in ours:
         m = db.staff(old["id"])
         if (not m or not m["connecteam_auto"] or m["connecteam_user_id"] != u["id"]
                 or m["status"] == "archived"):   # archived meanwhile
             continue
         fields = {}
+        # Their smart group's department, unless it was chosen by hand; no group: left as is.
         dept = department_for(u)
         was = departments.get(m["department_id"])
-        if dept and m["department_id"] != dept["id"]:
+        if dept and m["department_id"] != dept["id"] and not m["department_set"]:
             fields["department_id"] = dept["id"]
-        elif not dept and m["department_id"] is not None and (not was or was["smart_group_id"]):
-            # Left the smart group: out of its department (one without a smart group, chosen
-            # by hand, stays).
-            fields["department_id"] = None
-        if (dept and dept["role_id"] in roles and not m["role_set"]
-                and m["role_id"] != dept["role_id"]):
-            fields["role_id"] = dept["role_id"]
+            db.log(actor, f"Moved {m['name']} to {dept['name']}",
+                   detail="; ".join(filter(None, ["their Connecteam smart group",
+                                                  department_move_detail(m, dept, rules)])))
+        now_in = departments.get(fields.get("department_id", m["department_id"]))
+        if (now_in and now_in["role_id"] in roles and not m["role_set"]
+                and m["role_id"] != now_in["role_id"]):
+            fields["role_id"] = now_in["role_id"]
         elif ("department_id" in fields and not m["role_set"] and was and was["role_id"]
-              and m["role_id"] == was["role_id"] and not (dept and dept["role_id"])):
+              and m["role_id"] == was["role_id"] and not (now_in and now_in["role_id"])):
             fields["role_id"] = None   # the role came with the department they left
         if not m["clock_in_set"] and m["require_clock_in"] != clock:
             fields["require_clock_in"] = clock
@@ -3721,12 +4064,27 @@ async def apply_staff_sync(users: list[dict]) -> dict:
         if fields:
             db.update_staff(m["id"], **fields)
 
+    # People added by hand and linked: only their department follows their smart group (unless
+    # chosen by hand). Their role, PIN, clock-in rule and status are theirs.
+    for u in users:
+        m = db.staff(linked[u["id"]]["id"]) if u["id"] in linked else None
+        if (not m or m["connecteam_auto"] or m["connecteam_user_id"] != u["id"]
+                or m["status"] == "archived" or m["department_set"]):
+            continue
+        dept = department_for(u)
+        if dept and m["department_id"] != dept["id"]:
+            db.update_staff(m["id"], department_id=dept["id"])
+            db.log(actor, f"Moved {m['name']} to {dept['name']}",
+                   detail="; ".join(filter(None, ["their Connecteam smart group",
+                                                  department_move_detail(m, dept, rules)])))
+            counts["updated"] += 1
+
     # Archived in Connecteam, or no longer listed: turned off, never deleted.
     active = {u["id"] for u in users}
     for staff_id, uid in db.conn.execute(
             "SELECT id, connecteam_user_id FROM staff WHERE connecteam_auto = 1 "
             f"AND {STAFF_ON} AND connecteam_user_id IS NOT NULL").fetchall():
-        if uid not in active:
+        if adding and uid not in active:
             db.update_staff(staff_id, status="disabled", connecteam_note=LEFT_CONNECTEAM)
             signed_out.add(staff_id)
             counts["turned_off"] += 1
@@ -3740,7 +4098,7 @@ async def run_staff_sync(actor: str = "Staff Portal", fresh: bool = False) -> di
     ConnecteamError for the Sync staff now button; the regular sync catches it."""
     staff_sync["tried"] = time.time()
     try:
-        counts = await sync_connecteam_staff(fresh)
+        counts = await sync_connecteam_staff(fresh, actor)
     except ConnecteamError as err:
         if actor != "Staff Portal" or staff_sync["error"] != str(err):
             db.log(actor, "Synced staff from Connecteam", detail=str(err), ok=False)
@@ -3748,7 +4106,7 @@ async def run_staff_sync(actor: str = "Staff Portal", fresh: bool = False) -> di
         raise
     staff_sync.update(at=time.time(), result=counts, error=None)
     # The hourly sync only writes to the log when it changed something.
-    if actor != "Staff Portal" or any(counts.values()):
+    if actor != "Staff Portal" or sync_changed(counts):
         db.log(actor, "Synced staff from Connecteam", detail=summarize_sync(counts))
     return counts
 
@@ -3758,7 +4116,7 @@ def staff_sync_due() -> bool:
     and the last try was an hour ago (a minute, after Save)."""
     gap = STAFF_SYNC_GAP if staff_sync["soon"] else STAFF_SYNC_EVERY
     now = time.time()
-    return (staff_sync_enabled() and not connecteam.stop_reason() and now >= connecteam.paused_until
+    return (connecteam_sync_wanted() and not connecteam.stop_reason() and now >= connecteam.paused_until
             and now - staff_sync["tried"] >= gap)
 
 
@@ -3783,9 +4141,9 @@ async def staff_sync_loop() -> None:
 
 async def admin_sync_staff(request: web.Request):
     """Sync staff now (Staff tab)."""
-    if not staff_sync_enabled():
-        return bad_request("Turn on Connecteam and Add everyone from Connecteam, and save the "
-                           "settings first.")
+    if not connecteam_sync_wanted():
+        return bad_request("Turn on Connecteam and Add everyone from Connecteam (or Make a "
+                           "department for each smart group), and save the settings first.")
     if time.time() - staff_sync["tried"] < STAFF_SYNC_GAP:
         return bad_request("Staff were synced less than a minute ago. Wait a moment and try "
                            "again.", 429)
@@ -3794,6 +4152,30 @@ async def admin_sync_staff(request: web.Request):
     except ConnecteamError as err:
         return bad_request(str(err), 502)
     return web.json_response({**counts, "detail": summarize_sync(counts)})
+
+
+departments_synced = [0.0]
+
+
+async def admin_sync_departments(request: web.Request):
+    """Add departments now: a department for each smart group, as the sync makes them."""
+    if not departments_sync_enabled():
+        return bad_request("Turn on Connecteam and Make a department for each smart group, and "
+                           "save the settings first.")
+    if time.time() - departments_synced[0] < STAFF_SYNC_GAP:
+        return bad_request("Departments were added less than a minute ago. Wait a moment and "
+                           "try again.", 429)
+    departments_synced[0] = time.time()
+    try:
+        groups = await connecteam.smart_groups(max_age=STAFF_SYNC_GAP)
+    except ConnecteamError as err:
+        return bad_request(str(err), 502)
+    if not groups:
+        return bad_request("Connecteam listed no smart groups, so no department was made.")
+    async with staff_sync_lock:
+        counts = sync_departments(groups, admin_name(request))
+    sync_staff_soon()   # people join their group's department (the user list is cached)
+    return web.json_response(counts)
 
 
 async def admin_smart_groups(request: web.Request):
@@ -3833,6 +4215,8 @@ def clean_department(data: dict, current: dict | None) -> dict:
         if db.name_taken("departments", name, current and current["id"]):
             raise ValueError("A department with that name already exists.")
         fields["name"] = name
+        if current and name != current["name"]:
+            fields["group_named"] = 0   # renamed here: no longer follows its smart group's name
     if "smart_group_id" in data:
         group = transfer.smart_group_id(data["smart_group_id"])
         if data["smart_group_id"] not in (None, "") and group is None:
@@ -3842,6 +4226,8 @@ def clean_department(data: dict, current: dict | None) -> dict:
         if other:
             raise ValueError(f"{other['name']} already follows that smart group.")
         fields["smart_group_id"] = group
+        if current and group != current["smart_group_id"]:
+            fields.update(group_named=0, group_gone=0)
     if "role_id" in data:
         fields["role_id"] = parse_role(data["role_id"])
     if "card_access" in data:
@@ -3899,7 +4285,7 @@ async def admin_update_department(request: web.Request):
     db.log(admin_name(request), f"Updated department {fields.get('name', dept['name'])}",
            detail=None if clock_in == dept["clock_in"] else DEPARTMENT_CLOCK_IN[clock_in])
     if "smart_group_id" in fields or "role_id" in fields:
-        if staff_sync_enabled():
+        if connecteam_sync_wanted():
             sync_staff_soon()   # people move in or out (the user list is cached)
     return web.json_response({"ok": True})
 
@@ -4574,6 +4960,15 @@ async def admin_create_staff(request: web.Request):
         link["require_clock_in"] = 1  # clocked-in only unless the admin says otherwise
     role_id = parse_role(data.get("role_id"))
     department_id = parse_department(data.get("department_id"))
+    if link.get("connecteam_user_id"):
+        # Their smart group's department (from the user list just shown), unless another was
+        # chosen: that one is kept, and the sync leaves it alone.
+        user = next((u for u in (connecteam._users or ([], 0))[0]
+                     if u["id"] == link["connecteam_user_id"]), None)
+        group = (smart_group_department(user, db.departments()) or {}).get("id") if user else None
+        if department_id is None:
+            department_id = group
+        link["department_set"] = 1 if department_id != group and department_id else 0
     if "require_clock_in" in data and link.get("connecteam_user_id"):
         # Not what their department says: theirs, set by hand, which beats the department's.
         rule = db.department_clock_ins().get(department_id)
@@ -4606,6 +5001,9 @@ async def admin_update_staff(request: web.Request):
     if "name" in data and clean_name(data["name"], 40):
         fields["name"] = clean_name(data["name"], 40)
     link = parse_connecteam_link(data, member["id"])
+    newly_linked = bool(link.get("connecteam_user_id")) and not member["connecteam_user_id"]
+    if newly_linked and "require_clock_in" not in link:
+        link["require_clock_in"] = 0   # linking never switches it on by itself
     if member["connecteam_auto"] and link.get("connecteam_user_id",
                                               member["connecteam_user_id"]) != member[
                                                   "connecteam_user_id"]:
@@ -4652,6 +5050,7 @@ async def admin_update_staff(request: web.Request):
             fields["role_set"] = 1
     if "department_id" in data:
         fields["department_id"] = parse_department(data["department_id"])
+    department_link_fields(member, data, fields)
     clock_in_fields(member, data, fields)
     try:
         if "layout_pages" in data:
@@ -4681,7 +5080,42 @@ async def admin_update_staff(request: web.Request):
         detail = "clock-in rule from their department"
     db.log(admin_name(request), f"Updated staff member {fields.get('name', member['name'])}",
            detail=detail)
+    if fields.get("connecteam_user_id", member["connecteam_user_id"]) != member["connecteam_user_id"]:
+        action, detail = link_log_text(
+            fields.get("name", member["name"]),
+            member["connecteam_user_id"] and (cached_user_name(member["connecteam_user_id"])
+                                              or member["connecteam_user_id"]),
+            fields["connecteam_user_id"] and (cached_user_name(fields["connecteam_user_id"])
+                                              or fields["connecteam_user_id"]))
+        db.log(admin_name(request), action, detail=detail)
+    if "department_set" in fields and not fields["department_set"] and member["department_set"]:
+        db.log(admin_name(request), f"{member['name']}'s department follows Connecteam again")
     return web.json_response({"ok": True})
+
+
+def department_link_fields(member: dict, data: dict, fields: dict) -> None:
+    """A linked person's department: chosen by hand (it differs from theirs), it's kept so and
+    the sync leaves it alone; department_set: false (Follow Connecteam) undoes that. Newly linked,
+    or following again, they go to their smart group's department straight away, when the
+    cached user list knows it. Unlinked: nothing is kept for Connecteam."""
+    uid = fields.get("connecteam_user_id", member["connecteam_user_id"])
+    if not uid:
+        if member["department_set"]:
+            fields["department_set"] = 0
+        return
+    if "department_id" in fields and fields["department_id"] != member["department_id"]:
+        fields["department_set"] = 1
+        return
+    fields.pop("department_id", None)   # sent unchanged
+    follow = data.get("department_set") is False or (
+        not member["connecteam_user_id"] and data.get("department_set") is not True)
+    if not follow:
+        return
+    fields["department_set"] = 0
+    user = next((u for u in (connecteam._users or ([], 0))[0] if u["id"] == uid), None)
+    dept = smart_group_department(user, db.departments()) if user else None
+    if dept:
+        fields["department_id"] = dept["id"]
 
 
 def clock_in_fields(member: dict, data: dict, fields: dict) -> None:
@@ -4808,8 +5242,8 @@ async def admin_activity(request: web.Request):
 BOOL_SETTINGS = ("ha_logbook", "allow_phone_reorder", "phones_via_tunnel_only", "require_pin",
                  "control_lock", "connecteam_enabled", "wristbands_enabled", "wb_lockout_daypass",
                  "wb_lockout_overnight", "wb_lockout_staff", "wb_lockout_contractor",
-                 "connecteam_auto_staff", "connecteam_auto_clock_in", "wb_remote_lockout",
-                 "wb_lost_card_alert")
+                 "connecteam_auto_staff", "connecteam_auto_clock_in", "connecteam_auto_departments",
+                 "wb_remote_lockout", "wb_lost_card_alert")
 PIN_PAUSE_MIN_MS, PIN_PAUSE_MAX_MS = 200, 5000
 REMOTE_LOCKOUT_APIS = ("reversed", "plain")   # TT Hotel's two calls for enrolling a card number
 NUMBER_SETTINGS = (("pin_timeout_minutes", 1, 1440), ("pin_timeout_computer_minutes", 1, 1440),
@@ -5036,18 +5470,22 @@ async def admin_update_settings(request: web.Request):
     if values.get("wb_remote_lockout_api", current.get("wb_remote_lockout_api")) != current.get(
             "wb_remote_lockout_api"):
         values["wb_remote_lockout_tested"] = ""   # the other format hasn't been tried at a door
-    sync_before = staff_sync_enabled()
+    sync_before = connecteam_sync_wanted()
     db.update_settings(values)
     branding.invalidate()
     if connecteam_settings() != ct_before:
         connecteam.forget()   # also wakes the clock check, which runs only if someone needs it
-    if staff_sync_enabled() and (not sync_before or connecteam_settings() != ct_before
-                                 or "connecteam_auto_clock_in" in values):
+    if connecteam_sync_wanted() and (not sync_before or connecteam_settings() != ct_before
+                                     or any(k in values for k in SYNC_SETTINGS)):
         sync_staff_soon()     # at most once a minute
     if tthotel_settings() != tt_before:
         tthotel.forget()      # another account (or Wristbands turned on): a fresh start with it
     db.log(admin_name(request), settings_log_text(values))
     return web.json_response({"ok": True})
+
+
+# Saving any of these changes what the sync does: it runs again soon.
+SYNC_SETTINGS = ("connecteam_auto_clock_in", "connecteam_auto_staff", "connecteam_auto_departments")
 
 
 def settings_log_text(values: dict) -> str:
@@ -7102,6 +7540,9 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/connecteam/test", admin_connecteam_test)
     app.router.add_get("/api/connecteam/smart-groups", admin_smart_groups)
     app.router.add_post("/api/connecteam/sync-staff", admin_sync_staff)
+    app.router.add_post("/api/connecteam/departments", admin_sync_departments)
+    app.router.add_get("/api/connecteam/links", admin_connecteam_links)
+    app.router.add_post("/api/connecteam/links", admin_save_links)
     app.router.add_get("/api/hr-google", admin_google)
     app.router.add_put("/api/hr-google", admin_save_google)
     app.router.add_post("/api/hr-google/script", admin_google_script)
@@ -7207,7 +7648,7 @@ async def main():
     recover_wristband_jobs()
     discovery.scan_soon()   # only while Wristbands is on and a computer's encoder is Automatic
     clock_task = asyncio.create_task(connecteam.run())
-    sync_task = asyncio.create_task(staff_sync_loop())   # only while Add everyone is on
+    sync_task = asyncio.create_task(staff_sync_loop())   # only while it has something to do
     doors_task = asyncio.create_task(tthotel.run())
     tasks_task = asyncio.create_task(tasks_loop())   # forms only once one is chosen
     raise_file_limit()

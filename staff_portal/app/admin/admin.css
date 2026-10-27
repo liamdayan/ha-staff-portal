@@ -554,6 +554,42 @@ dialog input.code-input {
 .ct-user:disabled { opacity: 0.55; cursor: default; }
 .ct-user small { color: var(--muted); }
 #ct-dialog input[type="search"][hidden] { display: none; }
+/* Connecteam user picker: a button that opens a searchable list */
+.ct-pick { position: relative; min-width: 0; }
+.ct-pick-btn { width: 100%; text-align: left; padding: 8px 32px 8px 12px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--card-2); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; position: relative; }
+.ct-pick-btn::after { content: "\25BE"; position: absolute; right: 12px; color: var(--muted); }
+.ct-pick-btn.none { color: var(--muted); }
+.ct-pick-panel { display: grid; gap: 6px; margin-top: 6px; padding: 8px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); background: var(--card); }
+.ct-pick-panel input { width: 100%; }
+.ct-pick-list { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
+.ct-pick-item { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 0;
+  border-radius: 8px; background: none; text-align: left; }
+.ct-pick-item:hover, .ct-pick-item:focus-visible { background: var(--card-2); }
+.ct-pick-item[aria-selected="true"] { background: var(--accent-soft); }
+.ct-pick-item small { color: var(--muted); }
+/* Link existing staff */
+.link-tools { display: flex; align-items: center; gap: 12px; margin: 4px 0 8px; }
+.link-rows { display: grid; gap: 8px; max-height: min(55vh, 520px); overflow-y: auto; }
+.link-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 12px; align-items: start;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.link-row.differs { border-color: var(--warn); background: var(--warn-bg); }
+.link-row.clash { border-color: var(--danger); }
+.link-who { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
+.link-who > span { display: grid; min-width: 0; }
+.link-who small { color: var(--muted); }
+.link-warn { grid-column: 1 / -1; color: var(--danger); }
+.link-options { display: grid; gap: 6px; margin-top: 10px; }
+.link-options .check { align-items: flex-start; }
+.link-options .check input { margin-top: 3px; }
+.link-options small { display: block; color: var(--muted); }
+.link-options .hint { margin: 0; }
+.dept-rule { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 560px) {
+  .link-row { grid-template-columns: minmax(0, 1fr); }
+}
 .choice.danger strong { color: var(--danger); }
 
 /* Settings > Connections: each one folded to its status and requests until opened */
