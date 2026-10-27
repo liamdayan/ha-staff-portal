@@ -1199,3 +1199,64 @@ body.desk-shell .wb-log-row { min-height: 48px; padding: 8px 10px; border-radius
 body.desk-shell .wb-log-side { font-size: 13px; }
 .who-name { display: grid; gap: 1px; }
 .who-name small { font-size: 13px; font-weight: 500; color: var(--muted); }
+
+/* Reports: the list, one report's frame, and shared classes a report's view.js may use (rp-card,
+   rp-toolbar, rp-btn, rp-table, rp-kpis, rp-field, rp-muted). See REPORTS.md. */
+.rp { min-width: 0; }
+.rp .center { min-height: 200px; }
+.rp-list { display: grid; gap: 10px; }
+.rp-item {
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px;
+  width: 100%; text-align: left; border: 0; border-radius: var(--radius-sm);
+  background: var(--card); box-shadow: var(--shadow); padding: 14px 16px; min-height: 64px;
+}
+.rp-item:active { transform: scale(0.99); }
+.rp-item-name { font-weight: 700; font-size: 17px; overflow-wrap: anywhere; }
+.rp-item-sub { grid-column: 1; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.rp-item-go { grid-column: 2; grid-row: 1 / span 2; color: var(--muted); font-size: 24px; }
+.rp-head { display: grid; gap: 6px; margin: 4px 0 6px; }
+.rp-head .page-title { margin-top: 4px; overflow-wrap: anywhere; }
+/* On a computer the header says "Reports"; the open report keeps its own name. */
+body.desk-shell .rp-title { display: block; font-size: 26px; margin: 8px 0 4px; }
+.rp-body { min-width: 0; transition: opacity 0.15s; }
+.rp-loading { opacity: 0.55; pointer-events: none; }
+.rp-view { display: grid; gap: 14px; min-width: 0; }
+.rp-msg { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 18px; }
+.rp-msg h2 { margin: 0 0 6px; font-size: 18px; }
+.rp-msg p { margin: 0 0 4px; color: var(--muted); overflow-wrap: anywhere; }
+.rp-card { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 14px 16px; min-width: 0; }
+.rp-card h2 { margin: 0 0 8px; font-size: 17px; }
+.rp-muted { color: var(--muted); font-size: 14px; margin: 4px 0; }
+.rp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rp-toolbar strong { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }
+.rp-btn {
+  border: 0; border-radius: 999px; background: var(--card); box-shadow: var(--shadow);
+  color: var(--text); font-weight: 600; font-size: 15px; min-height: 38px; padding: 0 14px;
+}
+.rp-btn.primary { background: var(--accent); color: #fff; }
+.rp-btn:active { transform: scale(0.96); }
+.rp-btn[disabled] { opacity: 0.5; }
+.rp-field { display: grid; gap: 6px; font-weight: 600; font-size: 14px; }
+.rp-field input, .rp-field select, .rp-field textarea {
+  font-weight: 400; min-height: 40px; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card-2); max-width: 100%;
+}
+.rp-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.rp-kpi { background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 12px 14px; }
+.rp-kpi b { display: block; font-size: 24px; letter-spacing: -0.02em; }
+.rp-kpi span { color: var(--muted); font-size: 13px; }
+/* Tables scroll inside their box, never the page. */
+.rp-table-wrap { overflow-x: auto; background: var(--card); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.rp-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.rp-table th, .rp-table td { padding: 9px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.rp-table th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
+.rp-table tr:last-child td { border-bottom: 0; }
+.rp-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Printing a report (the browser's Print, or Save as PDF): only the report itself. */
+@media print {
+  .bar, .tabbar, .desk-side, .desk-head, .rp-head .back-btn, .rp-noprint, .toast { display: none !important; }
+  body, .screen { background: #fff; color: #000; padding: 0; max-width: none; }
+  .rp-card, .rp-kpi, .rp-table-wrap, .rp-msg { box-shadow: none; border: 1px solid #ccc; }
+  .rp-table-wrap { overflow: visible; }
+}

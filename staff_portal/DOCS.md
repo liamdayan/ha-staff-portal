@@ -1277,6 +1277,11 @@ a small, steady share:
   the time clock always has room. A chat message is one request; copying a one-page card to
   Connecteam is three. If Connecteam refuses an HR request (a missing permission or plan feature,
   or "too many requests"), only that HR feature stops or waits: the time clock checks carry on.
+- Reports and tasks have a share of their own in the same way: at most 4 requests a minute and 300
+  a day, and none once Staff Access has used half of its daily share. Nothing is asked until
+  someone opens a report (or a form's tasks are due), and the same week is asked again at most
+  every 10 minutes. If Connecteam refuses a report's request or says "too many requests", only
+  reports stop or wait; the time clock checks carry on. See [Reports](#reports).
 
 **Settings → Connections** shows how many requests Staff Access made today on Connecteam's line.
 Open **Connecteam** for how many your account has left (once Connecteam has answered) and, while
@@ -1286,6 +1291,44 @@ clocked in can't sign in.
 The Client Secret is never shown again after saving (leave the box blank to keep it), and it isn't
 included in backups. After restoring a backup on a new system, enter it again (a migration file
 brings it across, encrypted).
+
+## Reports
+
+Reports show in the staff app under **Reports**, next to the pages, for people who signed in with
+their own PIN (on a role-based or shared device). A kiosk device nobody signs in to never shows
+them. Who gets which report depends on their **department**.
+
+1. Open the **Reports** tab in Staff Access.
+2. For each report, tick **Turn on**, then pick the departments that may **view** it, and the
+   departments that may **manage** it. People who manage a report can also upload its files
+   (such as a Gusto time-off export) and change its settings; they see it too.
+3. Click **Save**. Staff see the change within a few seconds.
+
+Someone without a department sees no reports. Access is checked on every request, so moving
+someone to another department, turning a report off or turning the person off takes effect at
+once.
+
+**Where the data comes from.** Reports read Connecteam (timesheets, schedules and forms) through
+Staff Access's own Connecteam connection, only when someone opens one, and keep the answer for
+10 minutes. The first time a report is opened it can take a minute or so, because reports may
+only ask 4 things a minute. For everything a report can show, the Connecteam app needs these
+scopes (Integration Center → OAuth 2.0): **users.read**, **time_clock.read**, **schedule.read**,
+**forms.read**, and optionally **jobs.read** (job names; without it jobs show without names). If
+one is missing, the report says which, with Connecteam's own words. Scopes can't be added to an
+existing Connecteam app: make a new app with all of them, and paste its keys in Settings.
+
+**Uploaded files.** Files uploaded to a report are kept on the add-on (the newest 5 of each kind),
+so everyone who opens the report sees the latest. Only text files are taken (CSV and the like),
+up to 2 MB.
+
+**Backups.** A Staff Access backup carries which reports are on, who may view and manage them, and
+their settings. It doesn't carry uploaded files: they hold staff data and change every week, so
+upload the newest one again after restoring a backup. A migration file carries them too.
+
+### Adding a report
+
+Each report is a folder of code in the add-on (`app/reports/<name>/`). Adding one needs no other
+change: see [REPORTS.md](REPORTS.md), the guide for Claude or a developer.
 
 ## Seeing staff actions in Home Assistant
 

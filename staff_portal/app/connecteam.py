@@ -41,10 +41,16 @@ refusal of an HR request raises HRRefused, and a "too many requests" pauses only
 (hr_too_many): neither ever stops or pauses Staff Access's own requests, so the clock checks
 that let clocked-in-only staff use controls keep running. Only the account itself running low
 (its rate-limit headers) pauses everyone, as it always has.
+
+Reports and tasks (ctdata.py) ask through a lane of their own in the same way (reports_room and
+reports_spend): at most REPORTS_MINUTE_CAP a minute and REPORTS_DAILY_CAP a day, and nothing once
+Staff Access has used REPORTS_STOP_SHARE of its daily share. A refusal raises ReportsRefused and a
+"too many requests" pauses only that lane (reports_too_many); the clock checks carry on.
 """
 
 import asyncio
 import collections
+import json
 import logging
 import os
 import time
@@ -78,6 +84,9 @@ MAX_SHIFT_HOURS = 24         # an open shift older than this doesn't count (a fo
 HR_MINUTE_CAP = 6            # the HR portal's lane: requests a minute...
 HR_DAILY_CAP = 500           # ...and a day...
 HR_STOP_SHARE = 0.5          # ...and none once Staff Access has used this share of its daily cap
+REPORTS_MINUTE_CAP = 4       # reports and tasks (ctdata.py): requests a minute...
+REPORTS_DAILY_CAP = 300      # ...and a day...
+REPORTS_STOP_SHARE = 0.5     # ...and none once Staff Access has used this share of its daily cap
 FIELDS_TTL = 24 * 3600       # how long the list of profile fields (custom fields) is reused
 MAX_FIELDS = 100             # profile fields kept for one user (in memory only, never stored)
 
@@ -101,8 +110,28 @@ class HRBusy(ConnecteamError):
     budget = True
 
 
+class ReportsRefused(ConnecteamError):
+    """Connecteam refused a reports request (a missing scope or plan feature). Only reports and
+    tasks stop; Staff Access's own requests carry on. said: Connecteam's own words, if any."""
+
+    def __init__(self, message: str, said: str | None = None):
+        super().__init__(message)
+        self.said = said
+
+
+class ReportsBusy(ConnecteamError):
+    """The reports lane is used up for now, or paused. wait: seconds until a request fits again
+    this minute (None: not soon)."""
+    budget = True
+
+    def __init__(self, message: str, wait: float | None = None):
+        super().__init__(message)
+        self.wait = wait
+
+
 class Connecteam:
-    def __init__(self, get_settings, wanted, usage_store, user_agent: str, hr_usage_store=None):
+    def __init__(self, get_settings, wanted, usage_store, user_agent: str, hr_usage_store=None,
+                 reports_usage_store=None):
         # get_settings() -> (enabled, client_id, client_secret, region, poll_minutes)
         self._get_settings = get_settings
         self._wanted = wanted                  # () -> whether anyone needs the clock checked
@@ -115,6 +144,15 @@ class Connecteam:
         self.hr_paused_until = 0.0              # no HR requests before this (HR's own 429s)
         self.hr_pause_reason: str | None = None
         self.hr_failures = 0
+        # Reports and tasks (ctdata.py): their own count for today, kept like HR's.
+        held_reports = {}
+        self._load_reports_usage, self._save_reports_usage = reports_usage_store or (
+            lambda: held_reports.get("u", {}), lambda u: held_reports.update(u=u))
+        self._reports_recent = collections.deque()
+        self.reports_paused_until = 0.0
+        self.reports_pause_reason: str | None = None
+        self.reports_failures = 0
+        self.on_forget: list = []               # called by forget() (ctdata drops its copies)
         self._fields: tuple[list[dict], float] | None = None
         self._user_agent = user_agent
         self.session: aiohttp.ClientSession | None = None
@@ -245,6 +283,76 @@ class Connecteam:
         log.info("Connecteam: %s", self.hr_pause_reason)
         return HRBusy(self.hr_pause_reason)
 
+    def reports_usage(self) -> dict:
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        u = self._load_reports_usage()
+        return u if isinstance(u, dict) and u.get("day") == today and isinstance(
+            u.get("count"), int) else {"day": today, "count": 0}
+
+    def reports_room(self, n: int = 1) -> None:
+        """Whether n more reports requests fit right now, in their lane and in Staff Access's
+        caps; raises ReportsBusy if not (with how long until the minute has room, when that's
+        all it is). Spends nothing."""
+        now = time.time()
+        for recent in (self._reports_recent, self._recent):
+            while recent and now - recent[0] > 60:
+                recent.popleft()
+        if self.halted:
+            raise ReportsBusy(f"Connecteam requests are stopped: {self.halted}")
+        if now < self.reports_paused_until:
+            raise ReportsBusy(self.reports_pause_reason or "Waiting before asking Connecteam again.")
+        if now < self.paused_until:
+            raise ReportsBusy(f"Connecteam requests are paused: {self.pause_reason}")
+        if self.reports_usage()["count"] + n > REPORTS_DAILY_CAP:
+            raise ReportsBusy(f"Reports used their {REPORTS_DAILY_CAP} Connecteam requests for "
+                              "today. They continue after midnight UTC.")
+        if self.usage()["count"] + n > self.daily_cap() * REPORTS_STOP_SHARE:
+            raise ReportsBusy("Staff Access has used half of its Connecteam requests for today, so "
+                              "reports wait until after midnight UTC and leave the rest for the "
+                              "time clock.")
+        for recent, cap in ((self._reports_recent, REPORTS_MINUTE_CAP), (self._recent, MINUTE_CAP)):
+            if len(recent) + n > cap:
+                wait = 60 - (now - recent[len(recent) + n - cap - 1]) + 0.5 if n <= cap else None
+                raise ReportsBusy("Reports have made enough Connecteam requests for this minute. "
+                                  "Try again in a minute.", wait)
+
+    def reports_spend(self) -> None:
+        """Count a reports request against its lane and then Staff Access's caps, or refuse it
+        with ReportsBusy."""
+        self.reports_room(1)
+        self._spend()
+        self._reports_recent.append(time.time())
+        u = self.reports_usage()
+        u["count"] += 1
+        self._save_reports_usage(u)
+
+    def reports_too_many(self, resp: aiohttp.ClientResponse) -> ReportsBusy:
+        """A 429 to a reports request: only the reports lane waits (backing off)."""
+        self.reports_failures += 1
+        wait = min(3600, 60 * 2 ** min(self.reports_failures - 1, 6))
+        try:
+            wait = max(wait, min(MAX_RETRY_AFTER, int(float(resp.headers.get("Retry-After", 0)))))
+        except (ValueError, OverflowError):
+            pass
+        self.reports_paused_until = max(self.reports_paused_until, time.time() + wait)
+        self.reports_pause_reason = ("Connecteam asked for fewer requests, so reports wait "
+                                     f"{max(1, round(wait / 60))} min before asking again.")
+        log.info("Connecteam: %s", self.reports_pause_reason)
+        return ReportsBusy(self.reports_pause_reason)
+
+    def _lane_spend(self, hr: bool, reports: bool) -> None:
+        if hr:
+            self.hr_spend()
+        elif reports:
+            self.reports_spend()
+        else:
+            self._spend()
+
+    def _lane_too_many(self, resp, hr: bool, reports: bool) -> ConnecteamError:
+        if hr:
+            return self.hr_too_many(resp)
+        return self.reports_too_many(resp) if reports else self._too_many(resp)
+
     def _pause(self, until: float, reason: str) -> None:
         if until > self.paused_until:
             self.paused_until = until
@@ -305,21 +413,21 @@ class Connecteam:
             raise ConnecteamError("Enter the Connecteam Client ID and Client Secret in Settings.")
         return client_id, secret, region
 
-    async def _access_token(self, hr: bool = False) -> str:
+    async def _access_token(self, hr: bool = False, reports: bool = False) -> str:
         # One at a time: a time clock check and the staff sync starting together must share one
         # new token, not have the second turned away by the minute's wait between token requests.
-        # hr: the HR portal needs it, so a new one is counted in its lane.
+        # hr, reports: the HR portal or a report needs it, so a new one is counted in that lane.
         async with self._token_lock:
-            return await self._new_access_token(hr)
+            return await self._new_access_token(hr, reports)
 
-    async def _new_access_token(self, hr: bool = False) -> str:
+    async def _new_access_token(self, hr: bool = False, reports: bool = False) -> str:
         creds = self._credentials()
         if self._token and self._token_for == creds and self._token[1] > time.time():
             return self._token[0]
         if time.time() - self._last_token_try < 60:
-            raise (HRBusy if hr else ConnecteamError)(
+            raise (HRBusy if hr else ReportsBusy if reports else ConnecteamError)(
                 "Waiting a minute before asking Connecteam for a new access token.")
-        self.hr_spend() if hr else self._spend()   # refused: nothing was asked, so no wait
+        self._lane_spend(hr, reports)   # refused: nothing was asked, so no wait
         self._last_token_try = time.time()
         try:
             async with self.session.post(
@@ -328,7 +436,12 @@ class Connecteam:
             ) as resp:
                 self._read_limits(resp)
                 if resp.status == 429:
-                    raise self.hr_too_many(resp) if hr else self._too_many(resp)
+                    raise self._lane_too_many(resp, hr, reports)
+                if resp.status in (400, 401, 403) and reports:
+                    said = await _reply_text(resp)
+                    raise ReportsRefused("Connecteam didn't accept the Client ID and Secret "
+                                         f"(HTTP {resp.status})" + (f': "{said}"' if said else ".")
+                                         + " Check them in Settings.", said)
                 body = await resp.json(content_type=None)
                 if resp.status in (400, 401, 403):
                     raise (HRRefused if hr else Halt)(
@@ -344,18 +457,20 @@ class Connecteam:
         self._token_for = creds
         return self._token[0]
 
-    async def _get(self, path: str, params: dict | None = None, hr: bool = False) -> dict:
-        """hr: an HR portal request (its lane; a refusal raises HRRefused, never Halt)."""
+    async def _get(self, path: str, params: dict | None = None, hr: bool = False,
+                   reports: bool = False) -> dict:
+        """hr: an HR portal request (its lane; a refusal raises HRRefused, never Halt). reports:
+        a reports or tasks request (ctdata.py; its lane, and a refusal raises ReportsRefused)."""
         for attempt in (1, 2):
-            token = await self._access_token(hr)
-            self.hr_spend() if hr else self._spend()
+            token = await self._access_token(hr, reports)
+            self._lane_spend(hr, reports)
             try:
                 async with self.session.get(f"{self._api()}{path}", params=params,
                                             headers={"Authorization": f"Bearer {token}",
                                                      "Accept": "application/json"}) as resp:
                     self._read_limits(resp)
                     if resp.status == 429:
-                        raise self.hr_too_many(resp) if hr else self._too_many(resp)
+                        raise self._lane_too_many(resp, hr, reports)
                     if resp.status == 401 and attempt == 1:
                         self._token = None   # expired or revoked: get a new one and retry once
                         self._last_token_try = 0.0
@@ -363,6 +478,10 @@ class Connecteam:
                     if resp.status in (401, 403) and hr:
                         raise HRRefused(f"Connecteam refused {path} for the HR portal (HTTP "
                                         f"{resp.status}). Check the app's permissions and your plan.")
+                    if resp.status in (401, 403) and reports:
+                        said = await _reply_text(resp)
+                        raise ReportsRefused(f"Connecteam refused {path} (HTTP {resp.status})"
+                                             + (f': "{said}"' if said else "."), said)
                     if resp.status in (401, 403):
                         raise Halt(f"Connecteam refused {path} (HTTP {resp.status}). Check that the "
                                    "OAuth app has the users.read and time_clock.read scopes, and that "
@@ -376,9 +495,14 @@ class Connecteam:
                 raise ConnecteamError("Connecteam sent an unexpected reply.")
             if hr:
                 self.hr_failures = 0
+            if reports:
+                self.reports_failures = 0
             data = body.get("data", body)
+            if isinstance(data, dict) and isinstance(body.get("paging"), dict) and reports:
+                data = {**data, "_paging": body["paging"]}   # where the next page starts
             return data if isinstance(data, dict) else {"items": data}
-        raise (HRRefused if hr else Halt)("Connecteam didn't accept the access token.")
+        raise (HRRefused if hr else ReportsRefused if reports else Halt)(
+            "Connecteam didn't accept the access token.")
 
     async def _call(self, coro_fn, *args):
         """An admin-initiated request: same caps, and a halt is recorded."""
@@ -399,16 +523,18 @@ class Connecteam:
             log.warning("Connecteam: %s Automatic checks stopped.", reason)
         self.halted = reason
 
-    async def users(self, max_age: float = USERS_TTL, hr: bool = False) -> list[dict]:
+    async def users(self, max_age: float = USERS_TTL, hr: bool = False,
+                    reports: bool = False) -> list[dict]:
         """Active Connecteam users as [{"id", "name", "kiosk_code", "groups", "mobile", "email",
         "created_at", "fields"}], sorted by name. kiosk_code is None unless it's usable as a PIN
         (4 to 8 digits); groups are the IDs (as text) of the smart groups they're in; fields are
         their profile fields {field ID: value} (kept in memory only). hr: the HR portal is asking
-        (its lane, and a refusal never stops Staff Access's own requests)."""
+        (its lane, and a refusal never stops Staff Access's own requests); reports: the same for
+        reports and tasks."""
         if self._users and time.time() - self._users[1] < max_age:
             return self._users[0]
-        if hr:
-            return await self._fetch_users(hr=True)
+        if hr or reports:
+            return await self._fetch_users(hr=hr, reports=reports)
         return await self._call(self._fetch_users)
 
     async def archived_users(self) -> list[dict]:
@@ -416,13 +542,14 @@ class Connecteam:
         Through the HR lane, never cached."""
         return await self._fetch_users(hr=True, archived=True)
 
-    async def _fetch_users(self, hr: bool = False, archived: bool = False) -> list[dict]:
+    async def _fetch_users(self, hr: bool = False, archived: bool = False,
+                           reports: bool = False) -> list[dict]:
         found, offset = [], 0
         while True:
             params = {"limit": 500, "offset": offset}
             if archived:
                 params["userStatus"] = "archived"
-            data = await self._get("/users/v1/users", params, hr=hr)
+            data = await self._get("/users/v1/users", params, hr=hr, reports=reports)
             page = _first_list(data, "users")
             for u in page:
                 if (not isinstance(u, dict) or u.get("userId") is None
@@ -499,10 +626,10 @@ class Connecteam:
                 return u["kiosk_code"]
         raise ConnecteamError("That person isn't an active Connecteam user.")
 
-    async def time_clock_ids(self, max_age: float = CLOCKS_TTL) -> list[str]:
+    async def time_clock_ids(self, max_age: float = CLOCKS_TTL, reports: bool = False) -> list[str]:
         if self._clocks and time.time() - self._clocks[1] < max_age:
             return self._clocks[0]
-        data = await self._get("/time-clock/v1/time-clocks")
+        data = await self._get("/time-clock/v1/time-clocks", reports=reports)
         ids = [str(c["id"]) for c in _first_list(data, "timeClocks")
                if isinstance(c, dict) and c.get("id") is not None and not c.get("isArchived")]
         self._clocks = (ids, time.time())
@@ -599,6 +726,8 @@ class Connecteam:
         self._last_attempt = 0.0
         self.next_due = None
         self._wake.set()
+        for forget in self.on_forget:
+            forget()
 
     async def run(self) -> None:
         """Background loop: regular checks while Connecteam is on and someone needs them."""
@@ -631,6 +760,30 @@ class Connecteam:
 def _next_utc_midnight() -> float:
     now = time.time()
     return now - now % 86400 + 86400
+
+
+async def _reply_text(resp: aiohttp.ClientResponse) -> str | None:
+    """Connecteam's own words in a refusal (its "detail", "message" or "error"), on one line and
+    short, or None."""
+    try:
+        raw = await resp.text()
+    except (aiohttp.ClientError, UnicodeDecodeError, ValueError):
+        return None
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        body = raw
+    if isinstance(body, dict):
+        for key in ("detail", "message", "error", "errorMessage"):
+            value = body.get(key)
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                value = value[0].get("msg")
+            if isinstance(value, str) and value.strip():
+                body = value
+                break
+        else:
+            return None
+    return _short_text(body, 200) if isinstance(body, str) else None
 
 
 def _first_list(data: dict, preferred: str) -> list:

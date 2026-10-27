@@ -397,6 +397,7 @@
       if (name === "layout") renderLayoutEditor();
       if (name === "backup") loadSafetyBackups();
       if (name === "hr") openHr();
+      if (name === "reports") openReports();
     } catch (err) {
       reportError(`Couldn't open the ${name} tab: ${err.message}`, err, "");
     }
@@ -6986,6 +6987,58 @@
   const hr = { data: null, timer: null };
   const HR_STATES = { off: ["Off", ""], on: ["On", "active"], locked: ["Locked: needs the recovery key", "locked"],
     lost: ["Key missing", "locked"] };
+
+  // ---------------------------------------------------------------- reports
+
+  // Each report: on or off, and which departments may view and manage it (manage includes view).
+  async function openReports() {
+    let data;
+    try {
+      data = await api("GET", "api/reports");
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    const lane = data.lane;
+    $("#reports-lane").textContent = `${lane.used_today} of its ${lane.daily_cap} requests used ` +
+      `today (at most ${lane.minute_cap} a minute).` + (lane.paused ? ` ${lane.paused}` : "");
+    const list = $("#report-list");
+    if (!data.reports.length) {
+      list.replaceChildren(h("div", { class: "empty" }, "No reports are installed."));
+      return;
+    }
+    list.replaceChildren(...data.reports.map(reportCard));
+  }
+
+  function reportCard(r) {
+    const depts = state.departments || [];
+    const picks = (kind, chosen) => depts.length ? h("div", { class: "report-depts" }, depts.map((d) =>
+      h("label", { class: "check-row" }, h("input", { type: "checkbox", "data-kind": kind, value: d.id,
+        checked: chosen.includes(d.id) }), h("span", null, d.name))))
+      : h("p", { class: "hint" }, "Add departments on the Staff tab first.");
+    const enabled = h("input", { type: "checkbox", checked: r.enabled });
+    const card = h("div", { class: "card report-card" },
+      h("div", { class: "card-head" }, h("h3", null, r.name)),
+      r.description ? h("p", { class: "hint" }, r.description) : null,
+      h("label", { class: "check-row" }, enabled, h("span", null, "Turn on")),
+      h("h4", null, "Who may view it"), picks("view", r.view),
+      h("h4", null, "Who may manage it"),
+      h("p", { class: "hint" }, "Upload its files and change its settings. They can view it too."),
+      picks("manage", r.manage),
+      r.uploads.length ? h("div", null, h("h4", null, "Uploaded files"), r.uploads.map((u) =>
+        h("p", { class: "hint" }, `${u.name}: `, u.files.length
+          ? `${u.files[0].name}, ${ago(u.files[0].uploaded_at).toLowerCase()} by ${u.files[0].by || "someone"}`
+          : "none yet"))) : null,
+      h("div", { class: "card-actions" }, h("button", { class: "btn primary", type: "button",
+        onclick: () => run(async () => {
+          const chosen = (kind) => [...card.querySelectorAll(`input[data-kind="${kind}"]:checked`)]
+            .map((i) => Number(i.value));
+          await api("PUT", `api/reports/${r.key}`, { enabled: enabled.checked, view: chosen("view"),
+            manage: chosen("manage") });
+          await openReports();
+        }, "Saved. Staff see the change within a few seconds.") }, "Save")));
+    return card;
+  }
 
   async function openHr() {
     try {

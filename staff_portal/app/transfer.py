@@ -26,6 +26,10 @@ record of wristbands and key cards made are in backups from 0.8.6 (schema 4), an
 them to the ones here.
 Staff PINs are only ever stored scrambled (scrypt), and that is what exports carry, with how
 many digits each has when that's known (files from before 0.8.3 don't say: unknown).
+Reports (0.11.0): whether each is on, which departments may view and manage it, and its own
+settings are in backups; a backup from before reports leaves them as they are. Files uploaded to
+reports (a Gusto export, say) are not: they hold staff data and change weekly, so only a migration
+file carries them.
 Archived people (0.9.1) travel as archived, in backups and migration files with when, by whom
 and the status Restore puts back; staff exports only mark them ("archived": true).
 """
@@ -102,6 +106,8 @@ STOPPED_IN_BACKUP = "Stopped: it was still running when the backup was made."
 SMART_GROUP_RE = re.compile(r"^\d{1,20}$")   # a Connecteam smart group ID
 MAX_CARD_DAYS = 3650     # how long a key card made from the Staff tab may last
 MAX_CARD_ACCESS = 256    # entries in a department's key card template (as in a card request)
+REPORT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+MAX_REPORT_SETTINGS = 64 * 1024   # a report's settings, as JSON (reports.SETTINGS_MAX)
 MAX_PLACE = {"building": 254, "floor": 255, "door": 2**53}   # the encoder's (and TT Hotel's) ranges
 # A computer's card encoder: the address of TT Hotel's SN Web Socket helper on the desk PC, and
 # the USB port it's on (Windows COM ports, or a Mac/Linux device path).
@@ -799,6 +805,7 @@ def make_backup(db, branding, version: str) -> dict:
         staff_areas=rows("SELECT staff_id, area_id, level FROM staff_areas"),
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
         wristband_doors=rows("SELECT lock_id, name, hidden, kind FROM wb_doors"),
+        reports=[{"key": key, **r} for key, r in sorted(db.reports().items())],
         **log_sections(db),
     )
 
@@ -1047,15 +1054,41 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
                 door["kind"] = door_kind(row["kind"])
             wristband_doors.append(door)
 
+    reports = _reports(data, department_ids) if data.get("reports") is not None else None
+
     return {"settings": settings, "layout": layout, "logo": logo, "areas": areas,
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
             "roles": roles, "role_entities": role_entities, "role_areas": role_areas,
             "staff": staff, "devices": devices, "staff_devices": sorted(staff_devices),
             "staff_entities": staff_entities, "staff_areas": staff_areas,
             "phone_orders": phone_orders, "wristband_doors": wristband_doors,
-            "departments": departments, "needs_setup": needs_setup,
+            "departments": departments, "needs_setup": needs_setup, "reports": reports,
             "logs": clean_logs(data),
             "exported_at": _time(data.get("exported_at"), time.time())}
+
+
+def _reports(data: dict, department_ids: set[int]) -> list[dict]:
+    """Report access and settings from a backup: departments that aren't in it are dropped, and
+    settings must be a JSON object of at most MAX_REPORT_SETTINGS."""
+    found, keys = [], set()
+    for row in _rows(data, "reports"):
+        key = row.get("key")
+        if not isinstance(key, str) or not REPORT_KEY_RE.match(key) or key in keys:
+            continue
+        keys.add(key)
+        ids = lambda raw: sorted({i for i in raw if i in department_ids and not isinstance(i, bool)}
+                                 if isinstance(raw, list) else set())
+        settings = row.get("settings") if isinstance(row.get("settings"), dict) else {}
+        try:
+            if len(json.dumps(settings)) > MAX_REPORT_SETTINGS:
+                settings = {}
+        except (TypeError, ValueError, RecursionError):
+            settings = {}
+        found.append({"key": key, "enabled": 1 if row.get("enabled") in (1, True) else 0,
+                      "view": ids(row.get("view")), "manage": ids(row.get("manage")),
+                      "settings": settings, "updated_at": _time(row.get("updated_at")),
+                      "updated_by": _name(row.get("updated_by"), 120) or None})
+    return found
 
 
 # ---------------------------------------------------------------- logs in backups
