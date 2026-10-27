@@ -228,8 +228,9 @@ def _day_of(row, start):
     return day or (None if start is None else EPOCH + dt.timedelta(days=start // 1440))
 
 
-def timesheet_rows(rows, tz) -> list[dict]:
-    """Time clock entries: punches (work and breaks), and time off with its hours."""
+def timesheet_rows(rows, tz, day_hours=8) -> list[dict]:
+    """Time clock entries: punches (work and breaks), and time off with its hours (a policy
+    Connecteam counts in days is day_hours a day: the rules' shift length)."""
     out = []
     for r in rows or []:
         if not isinstance(r, dict):
@@ -247,9 +248,12 @@ def timesheet_rows(rows, tz) -> list[dict]:
         kind, job = _text(r.get("type"), NAME_LEN), _text(r.get("job"), NAME_LEN)
         if kind == "time_off":   # ctdata's kind; the view reads "Time off - <policy>"
             kind = f"Time off - {job}" if job and job.lower() != "time off" else "Time off"
+        hours = _hours(r.get("hours"))
+        if hours is None and _hours(r.get("days")) is not None:
+            hours = round(_hours(r.get("days")) * day_hours, 2)
         out.append(dict(uid=_uid(r), name=_name(r), day=day_number(day), **{"in": start}, out=end,
                         brk=_number(r.get("break_minutes"), 0, 1440), job=job, type=kind,
-                        hours=_hours(r.get("hours")), ss=sched_start, se=sched_end))
+                        hours=hours, ss=sched_start, se=sched_end))
     return out
 
 
@@ -487,7 +491,7 @@ async def data(ctx, params) -> dict:
         start_day=day_number(start), end_day=day_number(end),
         fetch_start=day_number(lo), fetch_end=day_number(hi),
         today=day_number(today), now=abs_minutes(now, None, tz),
-        timesheets=timesheet_rows(ts, tz), shifts=shift_rows(shifts, tz), forms=forms,
+        timesheets=timesheet_rows(ts, tz, rules["defaultShift"]), shifts=shift_rows(shifts, tz), forms=forms,
         have=dict(timesheets=have_ts, shifts=have_shifts),
         users=user_names(users), departments={uid: d["name"] for uid, d in dept_of.items()},
         gusto=gusto, settings=settings, form_choices=choices, errors=errors, own_only=False)

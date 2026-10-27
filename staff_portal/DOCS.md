@@ -1204,10 +1204,12 @@ One Connecteam app (one Client ID and Secret) serves everything. Its permissions
 | **schedule.read** | reports (scheduled shifts) |
 | **forms.read** | reports (required forms) and [tasks from forms](#tasks) |
 | **jobs.read** (optional) | job names in reports; without it, jobs show without names |
+| **time_off.read** (optional) | time off policy names in reports (Sick leave, Vacation); without it, leave shows as "Time off" |
 
 Staff Access itself needs only the first two. **Test connection** says if reports and tasks are
 missing one, and a report or a form's card names the permission Connecteam refused, in
-Connecteam's own words.
+Connecteam's own words. A permission Connecteam refused isn't asked again for 30 minutes (or
+until you save the Connecteam settings), so a missing one doesn't use up the reports' requests.
 
 ### Add everyone from Connecteam
 

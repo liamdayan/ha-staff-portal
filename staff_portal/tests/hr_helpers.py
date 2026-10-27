@@ -52,7 +52,8 @@ class FakeConnecteam:
       people are added to clock 1 as open shifts);
     - schedulers: [{"schedulerId", "name", "isArchived"}] and shifts: {scheduler ID: [shift]};
     - jobs: {instance ID (time clock or scheduler): [{"jobId", "title", "subJobs"}]};
-    - forms: [form] and submissions: {form ID: [submission]}.
+    - forms: [form] and submissions: {form ID: [submission]};
+    - policy_types: time off policy types [{"id", "name"}] (/time-off/v1/policy-types).
     Lists are paged with limit and offset as Connecteam does (paging.offset when more follow),
     shifts are filtered by startTime and endTime, and submissions by submittingStartTimestamp and
     submittingEndTime."""
@@ -68,6 +69,7 @@ class FakeConnecteam:
         self.jobs: dict[int, list[dict]] = {}
         self.forms: list[dict] = []
         self.submissions: dict[int, list[dict]] = {}
+        self.policy_types: list[dict] = []
         self.asked: list[tuple[str, dict]] = []
         self.refuse: set[str] = set()
         self.too_many: set[str] = set()
@@ -125,6 +127,8 @@ class FakeConnecteam:
                 for job in self.jobs.get(int(instance), []):
                     found.setdefault(job["jobId"], job)
             return self.page(request, "jobs", list(found.values()))
+        if path == "/time-off/v1/policy-types":
+            return web.json_response({"data": {"policyTypes": self.policy_types}})
         if path == "/forms/v1/forms":
             return self.page(request, "forms", self.forms)
         if path.startswith("/forms/v1/forms/") and path.endswith("/form-submissions"):

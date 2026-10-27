@@ -19,6 +19,11 @@ Endpoints and the OAuth scopes they need (Integration Center -> OAuth 2.0):
                it, jobs show without names)
 - forms:       GET /forms/v1/forms                                  forms.read
                GET /forms/v1/forms/{id}/form-submissions            forms.read
+- time off:    GET /time-off/v1/policy-types                        time_off.read (optional:
+               without it, time off shows as "Time off" with no policy name)
+
+A refused permission isn't asked again for REFUSED_TTL (or until the Connecteam settings are
+saved), so a missing scope costs one request, not one per report opened.
 
 Times are given in the property's time zone (configure's zone) as "YYYY-MM-DDTHH:MM", dates as
 "YYYY-MM-DD", and Connecteam user IDs as text.
@@ -30,7 +35,7 @@ import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from connecteam import ConnecteamError, ReportsBusy, ReportsRefused
+from connecteam import ConnecteamError, ReportsBusy, ReportsRefused, scope_for
 
 log = logging.getLogger("staff_portal")
 
@@ -44,6 +49,7 @@ MAX_WAIT = 70              # seconds a call waits for the minute's requests to h
 MAX_CACHED = 64            # answers kept
 MAX_ANSWER = 2000          # characters of one form answer
 MAX_ANSWERS = 200          # answers kept from one submission
+REFUSED_TTL = 30 * 60      # a permission Connecteam refused isn't asked again for this long
 
 
 class Unavailable(Exception):
@@ -55,6 +61,7 @@ _zone = lambda: ZoneInfo("UTC")             # noqa: E731 - the property's time z
 _cache: dict[tuple, tuple[object, float]] = {}
 _locks: dict[tuple, asyncio.Lock] = {}
 _refused: dict[str, float] = {}             # optional lists Connecteam refused, and when
+_denied: dict[str, tuple[str, float]] = {}  # permission: (Connecteam's refusal, when)
 
 
 def configure(connecteam, zone) -> None:
@@ -70,6 +77,7 @@ def forget() -> None:
     """Drop every copy kept (the Connecteam settings changed)."""
     _cache.clear()
     _refused.clear()
+    _denied.clear()
 
 
 # ---------------------------------------------------------------- asking
@@ -80,11 +88,25 @@ def _refusal(err: ReportsRefused) -> str:
     return str(err)
 
 
+def _check_denied(scope: str) -> None:
+    """A permission refused lately: the same refusal again, without asking."""
+    hit = _denied.get(scope)
+    if hit and time.time() - hit[1] < REFUSED_TTL:
+        raise Unavailable(hit[0])
+
+
+def _deny(scope: str, err: ReportsRefused) -> Unavailable:
+    _denied[scope] = (_refusal(err), time.time())
+    return Unavailable(_refusal(err))
+
+
 async def _ask(path: str, params: dict | None = None) -> dict:
     """One request in the reports lane, waiting (up to MAX_WAIT in all) when only the minute's
     requests are used up. Raises Unavailable."""
     if _ct is None:
         raise Unavailable("Connecteam isn't set up for reports.")
+    scope = scope_for(path)
+    _check_denied(scope)
     waited = 0.0
     while True:
         try:
@@ -95,7 +117,7 @@ async def _ask(path: str, params: dict | None = None) -> dict:
             waited += err.wait
             await asyncio.sleep(err.wait)
         except ReportsRefused as err:
-            raise Unavailable(_refusal(err)) from None
+            raise _deny(scope, err) from None
         except ConnecteamError as err:
             raise Unavailable(f"Connecteam can't be reached right now: {err}") from None
 
@@ -227,12 +249,13 @@ async def users() -> list[dict]:
     user list Staff Access keeps (asked again at most hourly, in the reports lane)."""
     if _ct is None:
         raise Unavailable("Connecteam isn't set up for reports.")
+    _check_denied("users.read")
     try:
         found = await _ct.users(max_age=USERS_TTL, reports=True)
     except ReportsBusy as err:
         raise Unavailable(str(err)) from None
     except ReportsRefused as err:
-        raise Unavailable(_refusal(err)) from None
+        raise _deny("users.read", err) from None
     except ConnecteamError as err:
         raise Unavailable(f"Connecteam can't be reached right now: {err}") from None
     return [{"user_id": u["id"], "name": u["name"], "groups": list(u["groups"])} for u in found]
@@ -240,12 +263,13 @@ async def users() -> list[dict]:
 
 async def _clocks() -> list[str]:
     async def fetch():
+        _check_denied("time_clock.read")
         try:
             return await _ct.time_clock_ids(max_age=LISTS_TTL, reports=True)
         except ReportsBusy as err:
             raise Unavailable(str(err)) from None
         except ReportsRefused as err:
-            raise Unavailable(_refusal(err)) from None
+            raise _deny("time_clock.read", err) from None
         except ConnecteamError as err:
             raise Unavailable(f"Connecteam can't be reached right now: {err}") from None
     if _ct is None:
@@ -279,15 +303,26 @@ async def _jobs(instances: list[str]) -> dict[str, str]:
     return await _optional("jobs", lambda: _kept(("jobs", *instances), LISTS_TTL, fetch), {})
 
 
+async def _policies() -> dict[str, str]:
+    """{time off policy type ID: its name} (optional: needs time_off.read)."""
+    async def fetch():
+        data = await _ask("/time-off/v1/policy-types")
+        return {str(p["id"]): _short(p.get("name"), 80) for p in _list(data, "policyTypes")
+                if p.get("id") is not None}
+    return await _optional("policies", lambda: _kept(("policies",), LISTS_TTL, fetch), {})
+
+
 # ---------------------------------------------------------------- timesheets
 
 async def timesheets(start, end) -> list[dict]:
     """Every time clock's punches between two dates (inclusive), as [{user_id, name, date,
     clock_in, clock_out, break_minutes, job, type, hours, sched_start, sched_end}], sorted by
     name and clock-in. type: "shift" (worked time), "break" (a manual break: clock_in to
-    clock_out, with its length in break_minutes) or "time_off" (hours of leave). clock_out is
-    None while someone is still on the clock; hours is None then too. sched_start and sched_end
-    are the scheduled shift the punch was for, when Connecteam links one."""
+    clock_out, with its length in break_minutes) or "time_off" (leave: one row a day, job its
+    policy's name, policy_id, and hours, or days when Connecteam counts that policy in days;
+    clock_in and clock_out only for part of a day). clock_out is None while someone is still on
+    the clock; hours is None then too. sched_start and sched_end are the scheduled shift the
+    punch was for, when Connecteam links one. A punch on a sub-job is named "Job: Sub-job"."""
     start, end = _range(start, end)
     return await _kept(("timesheets", start, end), MIN_REFRESH,
                        lambda: _fetch_timesheets(start, end))
@@ -308,6 +343,9 @@ async def _fetch_timesheets(start: date, end: date) -> list[dict]:
             day = last + timedelta(days=1)
     linked = any(s.get("schedulerShiftId") for entry, _ in raw
                  for s in entry.get("shifts") or [] if isinstance(s, dict))
+    policies = {}
+    if any(entry.get("timeOffs") for entry, _ in raw):
+        policies = await _policies()
     planned = {}
     if linked:
         try:
@@ -329,9 +367,10 @@ async def _fetch_timesheets(start: date, end: date) -> list[dict]:
                     if (kind, str(item["id"])) in seen:
                         continue
                     seen.add((kind, str(item["id"])))
-                row = _punch(kind, item, uid, name, jobs, planned)
-                if row and start.isoformat() <= row["date"] <= end.isoformat():
-                    rows.append(row)
+                found = (_time_off(item, uid, name, policies) if kind == "time_off"
+                         else [_punch(kind, item, uid, name, jobs, planned)])
+                rows.extend(row for row in found
+                            if row and start.isoformat() <= row["date"] <= end.isoformat())
     rows.sort(key=lambda r: (r["name"].lower(), r["clock_in"] or r["date"]))
     return rows
 
@@ -344,23 +383,49 @@ def _punch(kind: str, item: dict, uid: str, name: str, jobs: dict, planned: dict
         ended = None
     minutes = round((ended - began) / 60) if ended is not None else None
     plan = planned.get(str(item.get("schedulerShiftId") or "")) if kind == "shift" else None
-    job = ""
-    if kind == "shift" and item.get("jobId") is not None:
-        job = jobs.get(str(item["jobId"]), "")
-    elif kind == "break":
-        job = "Break"
-    elif kind == "time_off":
-        job = _short(item.get("policyName") or item.get("name"), 80) or "Time off"
-    hours = item.get("duration") if kind == "time_off" else None
-    if isinstance(hours, (int, float)) and not isinstance(hours, bool) and hours > 0:
-        hours = round(hours / 3600 if hours > 24 else hours, 2)   # seconds or hours
-    else:
-        hours = round(minutes / 60, 2) if minutes is not None and kind != "break" else None
+    job = _job(item, jobs) if kind == "shift" else "Break"
+    hours = round(minutes / 60, 2) if minutes is not None and kind != "break" else None
     return {"user_id": uid, "name": name, "date": _local(began).date().isoformat(),
             "clock_in": _text(_local(began)), "clock_out": _text(_local(ended)),
             "break_minutes": (minutes or 0) if kind == "break" else 0,
             "job": job, "type": kind, "hours": hours,
             "sched_start": plan["start"] if plan else None, "sched_end": plan["end"] if plan else None}
+
+
+def _job(item: dict, jobs: dict) -> str:
+    """A punch's or shift's job: its sub-job when it has one ("Parent: Sub")."""
+    for key in ("subJobId", "jobId"):
+        if item.get(key) not in (None, "") and str(item[key]) in jobs:
+            return jobs[str(item[key])]
+    return ""
+
+
+def _time_off(item: dict, uid: str, name: str, policies: dict) -> list[dict]:
+    """Connecteam's time off (policyTypeId, duration {value, units: hours or days}, isAllDay),
+    as one row a day: an item over several days is split evenly across them. hours is set for
+    hours; days (a day's share) for days, which the report turns into hours by its shift length.
+    A part of a day keeps its clock times."""
+    began, ended = _local((item.get("start") or {}).get("timestamp")), _local((item.get("end") or {}).get("timestamp"))
+    if began is None:
+        return []
+    last = (ended - timedelta(seconds=1)).date() if ended and ended > began else began.date()
+    days = [began.date() + timedelta(days=i) for i in range(min((last - began.date()).days + 1, 366))]
+    size = item.get("duration") if isinstance(item.get("duration"), dict) else {}
+    value = size.get("value")
+    value = value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else None
+    units = size.get("units") if size.get("units") in ("hours", "days") else "hours"
+    if value is None and ended and not item.get("isAllDay"):
+        value, units = (ended - began).total_seconds() / 3600, "hours"
+    policy_id = _short(item.get("policyTypeId"), 80) or None
+    whole = item.get("isAllDay") or len(days) > 1
+    share = round(value / len(days), 2) if value is not None else None
+    return [{"user_id": uid, "name": name, "date": day.isoformat(),
+             "clock_in": None if whole else _text(began), "clock_out": None if whole else _text(ended),
+             "break_minutes": 0, "job": policies.get(policy_id or "", "") or "Time off",
+             "type": "time_off", "policy_id": policy_id,
+             "hours": share if units == "hours" else None,
+             "days": share if units == "days" else None,
+             "sched_start": None, "sched_end": None} for day in days]
 
 
 # ---------------------------------------------------------------- scheduled shifts
@@ -392,7 +457,7 @@ async def _fetch_shifts(start: date, end: date) -> list[dict]:
                 continue
             base = {"id": _short(s.get("id"), 80), "date": began.date().isoformat(),
                     "start": _text(began), "end": _text(ended),
-                    "job": jobs.get(str(s.get("jobId")), "") if s.get("jobId") else "",
+                    "job": _job(s, jobs),
                     "title": _short(s.get("title"), 120),
                     "draft": s.get("isPublished") is False, "open": bool(s.get("isOpenShift"))}
             people = [_uid(u) for u in s.get("assignedUserIds") or [] if _uid(u)]
@@ -412,9 +477,8 @@ async def forms() -> list[dict]:
         for f in await _pages("/forms/v1/forms", {}, "forms", 300):
             if f.get("formId") is None:
                 continue
-            questions = [{"id": _short(q.get("questionId"), 80), "title": _short(q.get("title"), 200),
-                          "type": _short(q.get("questionType"), 40)}
-                         for q in f.get("questions") or [] if isinstance(q, dict)]
+            questions = []
+            _questions(f.get("questions"), questions)
             found.append({"id": str(f["formId"])[:40], "name": _short(f.get("formName"), 120)
                           or f"Form {f['formId']}", "questions": questions})
         found.sort(key=lambda f: f["name"].lower())
@@ -461,6 +525,17 @@ async def _fetch_submissions(form_id: str, begin: int, finish: int) -> list[dict
                      "answers": answers[:MAX_ANSWERS]})
     rows.sort(key=lambda r: r["submitted_at"] or "")
     return rows
+
+
+def _questions(raw, into: list, depth: int = 0) -> None:
+    """A form's questions, those inside groups too (their answers come inside the group's)."""
+    for q in raw if isinstance(raw, list) and depth < 5 else []:
+        if not isinstance(q, dict) or len(into) >= MAX_ANSWERS:
+            continue
+        if q.get("questionId") is not None:
+            into.append({"id": _short(q.get("questionId"), 80), "title": _short(q.get("title"), 200),
+                         "type": _short(q.get("questionType"), 40)})
+        _questions(q.get("questions"), into, depth + 1)
 
 
 def _answers(raw, titles: dict, into: list) -> None:

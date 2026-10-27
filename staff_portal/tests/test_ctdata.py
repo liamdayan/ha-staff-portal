@@ -431,3 +431,95 @@ def test_the_lane_maths_leaves_the_clock_checks_room(tmp_path):
             with pytest.raises(connecteam.ConnecteamError):
                 c._spend()
     go(scenario())
+
+
+def test_time_off_as_connecteam_documents_it(tmp_path):
+    """TimeOffActivityResponse: policyTypeId (its name from /time-off/v1/policy-types), duration
+    {value, units: hours or days} and isAllDay. One row a day, the hours split across them."""
+    p = setup(tmp_path)
+    ct = fake()
+    ct.policy_types = [{"id": "pt-sick", "name": "Sick leave"}, {"id": "pt-pto", "name": "Vacation"}]
+    off = lambda i, a, b, value, units, policy, all_day=True: {  # noqa: E731
+        "id": i, "policyTypeId": policy, "isAllDay": all_day, "duration": {"value": value, "units": units},
+        "start": {"timestamp": a, "timezone": "America/Los_Angeles"},
+        "end": {"timestamp": b, "timezone": "America/Los_Angeles"}}
+    ct.activities = {1: [ct_activity(8, time_offs=[
+        off("t1", at("2026-10-20", "00:00"), at("2026-10-21", "00:00"), 8, "hours", "pt-sick"),
+        off("t2", at("2026-10-21", "00:00"), at("2026-10-24", "00:00"), 3, "days", "pt-pto"),
+        off("t3", at("2026-10-24", "13:00"), at("2026-10-24", "15:00"), 2, "hours", "pt-x", False)])]}
+
+    async def scenario():
+        async with p, ct:
+            return await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+    rows = go(scenario())
+    got = [(r["date"], r["job"], r["hours"], r["days"], r["clock_in"]) for r in rows if r["type"] == "time_off"]
+    assert got == [("2026-10-20", "Sick leave", 8, None, None),
+                   ("2026-10-21", "Vacation", None, 1, None), ("2026-10-22", "Vacation", None, 1, None),
+                   ("2026-10-23", "Vacation", None, 1, None),
+                   ("2026-10-24", "Time off", 2, None, "2026-10-24T13:00")]
+    assert [r["policy_id"] for r in rows if r["type"] == "time_off"][-1] == "pt-x"
+    # The report reads a day as the rules' shift length.
+    from attendance_fake import load_report
+    rep = load_report()
+    hours = [t["hours"] for t in rep.timesheet_rows(rows, ZONE, 7.5) if t["type"].startswith("Time off")]
+    assert hours == [8, 7.5, 7.5, 7.5, 2]
+
+
+def test_time_off_without_time_off_read_has_no_policy_names(tmp_path):
+    p = setup(tmp_path)
+    ct = fake()
+    ct.refuse.add("/time-off/v1/policy-types")
+    ct.activities = {1: [ct_activity(8, time_offs=[{
+        "id": "t1", "policyTypeId": "pt", "isAllDay": True, "duration": {"value": 8, "units": "hours"},
+        "start": {"timestamp": at("2026-10-20", "00:00")}, "end": {"timestamp": at("2026-10-21", "00:00")}}])]}
+
+    async def scenario():
+        async with p, ct:
+            return await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+    rows = go(scenario())
+    assert [(r["job"], r["hours"]) for r in rows if r["type"] == "time_off"] == [("Time off", 8)]
+
+
+def test_a_sub_job_and_questions_inside_groups(tmp_path):
+    p = setup(tmp_path)
+    ct = fake()
+    ct.activities = {1: [ct_activity(7, shifts=[(at("2026-10-19", "09:00"), at("2026-10-19", "12:00"), "j1", None)])]}
+    ct.activities[1][0]["shifts"][0]["subJobId"] = "j1a"
+    form = ct_form(5, "Room check", [("g1", "Room", "group")])
+    form["questions"][0]["questions"] = [{"questionId": "q9", "title": "Towels?", "questionType": "yesNo"}]
+    ct.forms = [form]
+    ct.submissions = {5: [ct_submission("s1", 5, 7, at("2026-10-20", "10:15"), [
+        {"questionId": "g1", "questionType": "group", "answers": [
+            {"questionId": "q9", "questionType": "yesNo", "selectedIndex": 1}]}])]}
+
+    async def scenario():
+        async with p, ct:
+            rows = await ctdata.timesheets(date(2026, 10, 19), date(2026, 10, 25))
+            subs = await ctdata.form_submissions(5, date(2026, 10, 19), date(2026, 10, 25))
+            return rows, subs, await ctdata.forms()
+    rows, subs, forms = go(scenario())
+    assert rows[0]["job"] == "Front desk: Nights"
+    assert subs[0]["answers"] == [{"question": "Towels?", "answer": "No"}]
+    assert [q["title"] for q in forms[0]["questions"]] == ["Room", "Towels?"]
+
+
+def test_a_refused_permission_is_asked_once_and_keeps_the_clocks_token(tmp_path):
+    """A missing scope (the token lists its permissions) costs one request, without a fresh
+    token, and isn't asked again for a while: every report open used to cost three."""
+    p = setup(tmp_path)
+    ct = fake()
+    ct.refuse.add("/scheduler/v1/schedulers")
+
+    async def scenario():
+        async with p, ct:
+            await ctdata.users()
+            tokens = len(ct.tokens)
+            for week in (19, 12, 5):
+                with pytest.raises(ctdata.Unavailable, match="schedule.read"):
+                    await ctdata.shifts(date(2026, 10, week), date(2026, 10, week + 6))
+            assert ct.count("/scheduler/v1/schedulers") == 1 and len(ct.tokens) == tokens
+            main.connecteam.forget()   # the Connecteam settings were saved: ask again
+            with pytest.raises(ctdata.Unavailable):
+                await ctdata.shifts(date(2026, 10, 19), date(2026, 10, 25))
+            assert ct.count("/scheduler/v1/schedulers") == 2
+    go(scenario())

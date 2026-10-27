@@ -111,12 +111,13 @@ HALT_RETRIES = 3             # ...at most this many times a day (UTC), then wait
 MAX_SAID = 300               # characters of Connecteam's own words kept from a refusal
 
 # The permission each part of Connecteam's API needs. Staff Access needs users.read and
-# time_clock.read; reports and tasks also need schedule.read and forms.read (jobs.read is
-# optional: job names).
+# time_clock.read; reports and tasks also need schedule.read and forms.read (jobs.read and
+# time_off.read are optional: job names, and the names of time off policies).
 SCOPES = {"/users/": "users.read", "/time-clock/": "time_clock.read", "/scheduler/": "schedule.read",
-          "/jobs/": "jobs.read", "/forms/": "forms.read"}
+          "/jobs/": "jobs.read", "/forms/": "forms.read", "/time-off/": "time_off.read"}
 REPORT_SCOPES = ("schedule.read", "forms.read")
-APP_SCOPES = "users.read, time_clock.read, schedule.read and forms.read (and jobs.read for job names)"
+APP_SCOPES = ("users.read, time_clock.read, schedule.read and forms.read (and jobs.read and "
+              "time_off.read for job and time off names)")
 
 
 class ConnecteamError(Exception):
@@ -529,8 +530,11 @@ class Connecteam:
                         raise self._lane_too_many(resp, hr, reports)
                     if resp.status in (401, 403):
                         said = await _said(resp)
-                        if attempt == 1:
-                            self._token = None   # a fresh token, once
+                        # A fresh token, once; not for reports when the token says the
+                        # permission is missing (it would only throw away the clock's token).
+                        if attempt == 1 and not (reports and self.scopes is not None
+                                                 and scope_for(path) not in self.scopes):
+                            self._token = None
                             self._last_token_try = 0.0
                             continue
                         raise _refused(hr, reports, said,
