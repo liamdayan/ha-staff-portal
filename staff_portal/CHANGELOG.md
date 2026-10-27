@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.8
+
+- **Attendance report: Gusto balances older than 2 weeks get a warning,** on the report and the
+  Leave balances tab (which gets a dot), saying how old they are and to upload a new Time Off
+  Balances CSV.
+
 ## 0.12.7
 
 - **A followed form's note says who changed its status in Staff Access:** "Marked Done by Isaiah

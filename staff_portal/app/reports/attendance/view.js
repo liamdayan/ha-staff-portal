@@ -744,8 +744,22 @@
     // The app shows the report's name above it, so only the tabs here.
     return h("div", { class: "att-head" },
       h("div", { class: "att-tabs att-noprint", role: "group", "aria-label": "Sections" },
-        tab("report", "Report"), tab("gusto", "Leave balances", !ctx.data.gusto || !model.gustoOk),
+        tab("report", "Report"), tab("gusto", "Leave balances", !ctx.data.gusto || !model.gustoOk || (gustoAge() ?? 0) >= GUSTO_OLD_DAYS),
         tab("rules", "Rules", ui.dirty && "changes not saved")));
+  }
+
+  // Gusto balances older than this get a warning (they're a download, so they don't update).
+  const GUSTO_OLD_DAYS = 14;
+  function gustoAge() {
+    const g = ctx.data.gusto;
+    return g && g.uploaded_at ? Math.floor((Date.now() / 1000 - g.uploaded_at) / 86400) : null;
+  }
+  function gustoOldNote() {
+    const days = gustoAge();
+    if (days == null || days < GUSTO_OLD_DAYS) return null;
+    return h("p", { class: "att-banner att-noprint", role: "status" }, h("b", null, `The Gusto balances are ${days} days old`),
+      ` (uploaded ${when(ctx.data.gusto.uploaded_at)}), so leave balances may be out of date. `,
+      canManage() ? "Upload a new Time Off Balances CSV on the Leave balances tab." : "Ask someone who manages this report to upload a new one.");
   }
 
   function banner() {
@@ -813,11 +827,11 @@
       model.hasTimesheet ? "Timesheets from every Connecteam time clock" : "Timesheets didn't load",
       d.have && d.have.shifts ? (model.hasSchedule ? "Schedules from Connecteam (drafts skipped)" : "No Connecteam schedules in this period, so no late, early or no-show checks") : "Schedules didn't load",
       d.gusto ? `Gusto balances uploaded ${when(d.gusto.uploaded_at)}${d.gusto.by ? ` by ${d.gusto.by}` : ""}` : "Gusto balances not uploaded",
-      "Connecteam data is kept for 10 minutes",
+      "Connecteam data is read a month at a time: this month again after 10 minutes",
     ];
     const noPunch = model.noPunches.filter(n => W.rows.some(r => r.p.name === n && r.missed.length));
     const noPunchNote = noPunch.length ? h("p", { class: "att-warn-text att-noprint" }, `On the schedule but with no punches at all: ${noPunch.join(", ")}. If they aren’t on a Connecteam time clock yet, their shifts count as no-shows.`) : null;
-    return h("section", { class: "att-report" }, bar, actions, printHead(W), kpis, noPunchNote,
+    return h("section", { class: "att-report" }, bar, actions, printHead(W), kpis, gustoOldNote(), noPunchNote,
       h("div", { class: "att-panel" }, h("div", { class: "att-panel-head" }, h("h2", null, ui.period === "week" ? "Staff this week" : "Staff this period"), h("p", { class: "att-noprint" }, "Tap a name to see each day's punches.")), roster(W, P)),
       h("div", { class: "att-panel att-forms-panel" }, h("div", { class: "att-panel-head" }, h("h2", null, "Required forms"), h("p", { class: "att-noprint" }, "Tap a form to see every day, hour by hour.")), formsTable(W)),
       h("div", { class: "att-foot-note" }, notes.map(n => h("span", null, n))),
@@ -1039,6 +1053,8 @@
       kids.push(h("div", { class: "att-file" + (model.gustoOk ? "" : " err") }, h("b", null, g.name || "Gusto file"),
         h("span", null, model.gustoOk ? `Uploaded ${when(g.uploaded_at)}${g.by ? ` by ${g.by}` : ""} · ${plural(model.balPeople, "person", "people")}` : "The columns weren't recognised. Upload Gusto’s Time Off Balances report as CSV.")));
       if (model.gustoOk) {
+        const old = gustoOldNote();
+        if (old) kids.push(old);
         if (model.fuzzy.length) kids.push(h("p", { class: "att-muted" }, `Matched by similar first name: ${model.fuzzy.map(([a, b]) => `${a} = ${b}`).join(", ")}. If one is wrong, add the right pair under Rules.`));
         if (model.balUnmatched.length) kids.push(h("p", { class: "att-warn-text" }, `In Gusto but not seen in Connecteam this period: ${model.balUnmatched.join(", ")}.`));
         if (model.noBal.length) kids.push(h("p", { class: "att-warn-text" }, `In Connecteam but no Gusto balance: ${model.noBal.join(", ")}. Add name matches under Rules if they’re in Gusto under another name.`));
