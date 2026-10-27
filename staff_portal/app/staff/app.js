@@ -4504,6 +4504,8 @@
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
     chevron: '<path d="M9 6l6 6-6 6"/>',
     link: '<path d="M14 4.5h5.5V10M19.5 4.5L11 13M17 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1H10"/>',
+    sync: '<path d="M19 9a7.5 7.5 0 0 0-13.5-2.5M5 15a7.5 7.5 0 0 0 13.5 2.5"/><path d="M5 3.5v3.5h3.5M19 20.5V17h-3.5"/>',
+    photo: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><circle cx="9" cy="10.5" r="1.8"/><path d="M20.5 16l-5-5-8 7.5"/>',
   };
 
   function tkIcon(name, cls = "tk-icon") {
@@ -4737,6 +4739,8 @@
         h("span", { class: "tk-avatar", "aria-hidden": "true" }, tkInitial(t.assigned_name)),
         t.mine ? "You" : t.assigned_name) : null,
       t.source === "form" ? h("span", { class: "tk-tag" }, tkIcon("form"), t.form_name || "Form") : null,
+      t.photos?.length ? h("span", { class: "tk-tag" }, tkIcon("photo"), String(t.photos.length)) : null,
+      t.connecteam ? h("span", { class: "tk-tag tk-ct", title: "In Connecteam" }, tkIcon("sync"), "Connecteam") : null,
     ];
     const card = h("article", { class: `tk-card ${t.status}${t.priority === "urgent" ? " is-urgent" : ""}${overdue ? " is-overdue" : ""}`,
       "data-id": String(t.id) },
@@ -4902,12 +4906,18 @@
       row("person", "Given to", t.assigned_name ? (t.mine ? `${t.assigned_name} (you)` : t.assigned_name) : "Anyone"),
       t.due_date ? row("clock", "Due", overdue ? `${tkDueText(t)} · overdue` : tkDueText(t), overdue ? "overdue" : "") : null,
       t.priority === "urgent" ? row("flag", "Priority", "Urgent", "urgent") : null,
-      row(t.source === "form" ? "form" : "plus", "Made", t.source === "form"
+      row(t.source === "form" ? "form" : t.source === "connecteam" ? "sync" : "plus", "Made", t.source === "form"
         ? `From the ${t.form_name || "Connecteam"} form · ${tkWhen(t.created_at)}`
-        : `By ${t.made_by_me ? "you" : t.created_by || "someone"} · ${tkWhen(t.created_at)}`));
+        : t.source === "connecteam" ? `In Connecteam · ${tkWhen(t.created_at)}`
+          : `By ${t.made_by_me ? "you" : t.created_by || "someone"} · ${tkWhen(t.created_at)}`),
+      t.connecteam ? row("sync", "Connecteam", "Changes go both ways") : null,
+      t.ct_note ? h("p", { class: "tk-ct-note" }, t.ct_note) : null);
     const link = t.source_url ? h("a", { class: "tk-source-link", href: t.source_url, target: "_blank", rel: "noopener noreferrer" },
       tkIcon("link"), "Open in Connecteam") : null;
     const notes = t.notes ? h("div", { class: "tk-notes" }, t.notes) : null;
+    const managerNote = t.manager_note ? h("div", { class: "tk-notes tk-manager-note" },
+      h("span", { class: "tk-fact-label" }, "Note in Connecteam"), t.manager_note) : null;
+    const photos = t.photos?.length ? h("div", { class: "tk-photos" }, t.photos.map((name, i) => tkPhoto(t.id, i, name))) : null;
     const trail = (history || []).slice().reverse().map((e) => h("li", null,
       h("span", { class: `tk-dot ${e.to_status || "todo"}`, "aria-hidden": "true" }),
       h("span", { class: "tk-trail-text" }, tkHistoryText(e)),
@@ -4915,7 +4925,7 @@
     const actions = t.can_edit ? h("div", { class: "tk-sheet-actions" },
       h("button", { class: "btn tk-danger", type: "button", onclick: () => tkDelete(t) }, "Delete"),
       h("button", { class: "btn primary", type: "button", onclick: () => tkOpenForm(t) }, "Edit")) : null;
-    const body = [statusRow, facts, link, notes,
+    const body = [statusRow, facts, link, notes, managerNote, photos,
       trail.length ? h("details", { class: "tk-trail", open: again ? tk.sheet?.panel.querySelector(".tk-trail")?.open : null },
         h("summary", null, `History (${trail.length})`), h("ol", null, trail)) : null,
       actions];
@@ -4927,7 +4937,60 @@
     tk.sheet.history = history;
   }
 
+  // A photo on a task: fetched with the sign-in like any request (so not as a plain <img src>),
+  // shown from a data: address (the page's CSP allows only those and its own); a tap opens it big.
+  function tkPhoto(taskId, index, name) {
+    const label = name || `Photo ${index + 1}`;
+    const box = h("button", { class: "tk-photo", type: "button", "aria-label": label, disabled: true },
+      tkIcon("photo"));
+    tkPhotoData(taskId, index).then((data) => {
+      if (!data) return void box.replaceChildren(h("span", { class: "tk-photo-none" }, "Photo unavailable"));
+      box.replaceChildren(h("img", { src: data, alt: label }));
+      box.disabled = false;
+      box.addEventListener("click", () => tkPhotoBig(data, label));
+    });
+    return box;
+  }
+
+  async function tkPhotoData(taskId, index) {
+    const headers = {};
+    const token = local.get(TOKEN_KEY);
+    if (token) headers.Authorization = "Bearer " + token;
+    const pinSession = session.get(SESSION_KEY);
+    if (pinSession) headers["X-Session"] = pinSession;
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/photos/${index}`, { headers });
+      const blob = res.ok ? await res.blob() : null;
+      if (!blob || blob.type !== "image/jpeg") return null;
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).startsWith("data:image/jpeg") ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  function tkPhotoBig(data, label) {
+    const close = () => { view.remove(); window.removeEventListener("keydown", onKey, true); };
+    const onKey = (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); close(); } };
+    const view = h("div", { class: "tk-photo-big", role: "dialog", "aria-label": label, onclick: close },
+      h("img", { src: data, alt: label }),
+      h("button", { class: "tk-photo-close", type: "button", "aria-label": "Close" }, tkIcon("close")));
+    window.addEventListener("keydown", onKey, true);
+    document.body.append(view);
+    view.querySelector("button").focus();
+  }
+
   function tkHistoryText(e) {
+    if (e.note?.startsWith("kept")) return `Staff Access kept its change (${e.note.slice(6)})`;
+    const why = e.note && e.note !== "in Connecteam" ? ` (${e.note.replace(/^in Connecteam, /, "")})` : "";
+    return tkHistoryWhat(e) + why;
+  }
+
+  function tkHistoryWhat(e) {
     const who = e.by_name || "Someone";
     if (e.action === "created") return `${who} added it`;
     if (e.action === "edited") return `${who} changed it`;

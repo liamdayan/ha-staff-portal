@@ -21,6 +21,8 @@ Endpoints and the OAuth scopes they need (Integration Center -> OAuth 2.0):
 - job names:   GET /jobs/v1/jobs?instanceIds=...                    jobs.read (optional: without
                it, jobs show without names)
 - forms:       GET /forms/v1/forms                                  forms.read
+               GET /forms/v1/forms/{id}                             forms.read (a form's manager
+               fields, when the list doesn't carry them)
                GET /forms/v1/forms/{id}/form-submissions            forms.read
 - time off:    GET /time-off/v1/policy-types                        time_off.read (optional:
                without it, time off shows as "Time off" with no policy name)
@@ -54,6 +56,9 @@ MAX_WAIT = 70              # seconds a call waits for the minute's requests to h
 MAX_CACHED = 128           # answers kept
 MAX_ANSWER = 2000          # characters of one form answer
 MAX_ANSWERS = 200          # answers kept from one submission
+MAX_PHOTOS = 20            # photo links kept from one submission
+MAX_URL = 2000             # characters of one photo link (signed links are long)
+IMAGE_NAMES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")
 REFUSED_TTL = 30 * 60      # a permission Connecteam refused isn't asked again for this long
 
 
@@ -538,7 +543,8 @@ async def _fetch_shifts(start: date, end: date) -> list[dict]:
 # ---------------------------------------------------------------- forms
 
 async def forms() -> list[dict]:
-    """Connecteam's forms as [{id, name, questions: [{id, title, type}]}], sorted by name."""
+    """Connecteam's forms as [{id, name, questions: [{id, title, type}], manager_fields}],
+    sorted by name. manager_fields: _manager_fields', or None when the list doesn't say."""
     async def fetch():
         found = []
         for f in await _pages("/forms/v1/forms", {}, "forms", 300):
@@ -547,16 +553,55 @@ async def forms() -> list[dict]:
             questions = []
             _questions(f.get("questions"), questions)
             found.append({"id": str(f["formId"])[:40], "name": _short(f.get("formName"), 120)
-                          or f"Form {f['formId']}", "questions": questions})
+                          or f"Form {f['formId']}", "questions": questions,
+                          "manager_fields": _manager_fields(f.get("settings"))})
         found.sort(key=lambda f: f["name"].lower())
         return found
     return await _kept(("forms",), LISTS_TTL, fetch)
 
 
+async def form_fields(form_id) -> list[dict]:
+    """A form's manager fields (_manager_fields): from the list of forms, or the form itself
+    when the list doesn't carry them (one request, kept for LISTS_TTL)."""
+    form_id = str(form_id).strip()
+    if not form_id.isdigit() or len(form_id) > 20:
+        raise ValueError("That isn't a Connecteam form.")
+    listed = next((f for f in await forms() if f["id"] == form_id), None)
+    if listed is None:
+        raise Unavailable("That form isn't in Connecteam any more.")
+    if listed["manager_fields"] is not None:
+        return listed["manager_fields"]
+
+    async def fetch():
+        data = await _ask(f"/forms/v1/forms/{form_id}")
+        return _manager_fields(data.get("settings")) or []
+    return await _kept(("form", form_id), LISTS_TTL, fetch)
+
+
+def _manager_fields(settings) -> list[dict] | None:
+    """A form's status and note manager fields (Connecteam's StatusManagerField and
+    NoteManagerField): [{id, name, type, statuses: [{id, name, color}]}]. None: not given."""
+    if not isinstance(settings, dict) or not isinstance(settings.get("managerFields"), list):
+        return None
+    found = []
+    for m in settings["managerFields"][:50]:
+        kind = m.get("managerFieldType") if isinstance(m, dict) else None
+        if kind not in ("status", "note") or not _short(m.get("managerFieldId"), 80):
+            continue
+        statuses = [{"id": _short(o.get("managerFieldStatusId"), 80), "name": _short(o.get("name"), 80),
+                     "color": _short(o.get("color"), 20)}
+                    for o in (m.get("statuses") or [])[:30] if isinstance(o, dict)
+                    and _short(o.get("managerFieldStatusId"), 80)] if kind == "status" else []
+        found.append({"id": _short(m.get("managerFieldId"), 80), "name": _short(m.get("name"), 80),
+                      "type": kind, "statuses": statuses})
+    return found
+
+
 async def form_submissions(form_id, start, end) -> list[dict]:
     """A form's submissions between two dates (inclusive), as [{id, user_id, name, submitted_at,
-    answers: [{question, answer}]}], oldest first. start may also be a datetime: only
-    submissions from that moment on. Answers are plain text (files and photos as a count)."""
+    answers: [{question, answer}], manager, photos}], oldest first. start may also be a
+    datetime: only submissions from that moment on. Answers are plain text (files and photos as
+    a count); photos: [{url, name}] (_photos); manager: _manager's."""
     form_id = str(form_id).strip()
     if not form_id.isdigit() or len(form_id) > 20:
         raise ValueError("That isn't a Connecteam form.")
@@ -594,10 +639,13 @@ async def _fetch_submissions(form_id: str, begin: int, finish: int) -> list[dict
         uid = None if s.get("isAnonymous") else _uid(s.get("submittingUserId"))
         answers = []
         _answers(s.get("answers"), titles, answers)
+        photos = []
+        _photos(s.get("answers"), photos)
         rows.append({"id": str(s["formSubmissionId"])[:80], "user_id": uid,
                      "name": names.get(uid, f"User {uid}") if uid else "Anonymous",
                      "submitted_at": _text(_local(s.get("submissionTimestamp"))),
-                     "answers": answers[:MAX_ANSWERS]})
+                     "answers": answers[:MAX_ANSWERS], "photos": photos,
+                     "manager": _manager(s.get("managerFields"))})
     await _archived_names(rows)
     rows.sort(key=lambda r: r["submitted_at"] or "")
     return rows
@@ -632,6 +680,48 @@ def _answers(raw, titles: dict, into: list) -> None:
         text = "" if a.get("wasSubmittedEmpty") else _answer_text(kind, a)
         question = titles.get(_short(a.get("questionId"), 80)) or "Question"
         into.append({"question": question, "answer": text[:MAX_ANSWER]})
+
+
+def _manager(raw) -> dict:
+    """A submission's manager fields as {"status": {field ID: {id, name, at}}, "notes": {field
+    ID: text}}: the status option chosen (id "" when none is) and when it last changed, and
+    each note."""
+    found = {"status": {}, "notes": {}}
+    for m in raw if isinstance(raw, list) else []:
+        fid = _short(m.get("managerFieldId"), 80) if isinstance(m, dict) else None
+        if not fid:
+            continue
+        if m.get("managerFieldType") == "status":
+            option = m.get("status")
+            option = option[0] if isinstance(option, list) and option else option
+            option = option if isinstance(option, dict) else {}
+            at = m.get("lastUpdatedTimestamp")
+            found["status"][fid] = {"id": _short(option.get("statusOptionId"), 80) or "",
+                                    "name": _short(option.get("name"), 80) or "",
+                                    "at": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None}
+        elif m.get("managerFieldType") == "note":
+            found["notes"][fid] = str(m.get("note") or "")[:MAX_ANSWER]
+    return found
+
+
+def _photos(raw, into: list, depth: int = 0) -> None:
+    """Photo links in a submission's answers: image answers' images, and files whose name says
+    they're pictures (Connecteam's FormImageModel and FormFileModel), groups included."""
+    for a in raw if isinstance(raw, list) and depth < 5 else []:
+        if not isinstance(a, dict) or a.get("wasHidden") or len(into) >= MAX_PHOTOS:
+            continue
+        _photos(a.get("answers"), into, depth + 1)
+        for item in a.get("groupAnswers") or []:
+            if isinstance(item, dict):
+                _photos(item.get("answers"), into, depth + 1)
+        pics = [(i.get("url"), "") for i in a.get("images") or [] if isinstance(i, dict)] \
+            if a.get("questionType") == "image" else []
+        pics += [(f.get("url"), _short(f.get("fileName"), 120) or "") for f in a.get("files") or []
+                 if isinstance(f, dict) and str(f.get("fileName") or "").lower().endswith(IMAGE_NAMES)]
+        for url, name in pics:
+            if isinstance(url, str) and url.startswith("https://") and len(url) <= MAX_URL \
+                    and len(into) < MAX_PHOTOS:
+                into.append({"url": url, "name": name})
 
 
 def _answer_text(kind, a: dict) -> str:

@@ -307,10 +307,47 @@ CREATE TABLE IF NOT EXISTS task_form_seen (
     seen_at REAL NOT NULL,
     PRIMARY KEY (form_id, submission_id)
 );
+-- The Connecteam task sync (ctsync.py): the Quick Tasks boards it follows, each with the
+-- department its tasks belong to, and every Connecteam task ever linked or passed over (so none
+-- comes back as a new task after its task here was emptied from the bin).
+CREATE TABLE IF NOT EXISTS task_ct_boards (
+    board_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    department_id INTEGER,               -- NULL = Everyone
+    picked_at REAL NOT NULL,
+    last_poll REAL,
+    last_ok REAL,                        -- NULL: never read (the first read takes only open tasks)
+    last_error TEXT,
+    pages INTEGER NOT NULL DEFAULT 1     -- pages the last read took (the poll plan counts them)
+);
+CREATE TABLE IF NOT EXISTS task_ct_seen (
+    ct_task_id TEXT PRIMARY KEY,
+    board_id TEXT NOT NULL,
+    seen_at REAL NOT NULL
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
 MIGRATIONS = {
+    # The Connecteam task sync (ctsync.py) and form tasks that follow a manager field.
+    "tasks": {
+        "ct_task_id": "TEXT",            # its Connecteam Quick Task (unique)
+        "ct_board_id": "TEXT",           # the board it's on
+        "ct_sync": "TEXT",               # JSON: what both sides held when they last agreed
+        "ct_pending": "REAL",            # changed here at, not yet sent to Connecteam
+        "ct_note": "TEXT",               # why it isn't in Connecteam, or what went wrong
+        "ct_status": "TEXT",             # a followed form: its manager field's status option
+        "photos": "TEXT",                # JSON [{url, name}]: a form submission's photos
+        "manager_note": "TEXT",          # a form submission's manager notes (read only)
+    },
+    "task_history": {
+        "note": "TEXT",                  # where a change came from ("in Connecteam")
+    },
+    "task_forms": {
+        # JSON: the manager field its tasks follow {field, name, options: [{id, name, color,
+        # status}], unset}, or NULL.
+        "follow": "TEXT",
+    },
     "devices": {
         "ha_user": "TEXT",
         "ha_refresh_token": "TEXT",
@@ -547,6 +584,11 @@ DEFAULT_SETTINGS = {
     "hr_connecteam_usage": "{}",
     # Reports' and tasks' Connecteam requests today, in their own lane (internal: ctdata.py).
     "reports_connecteam_usage": "{}",
+    # The Connecteam task sync (ctsync.py): off until the owner turns it on (and off again after
+    # a restore, with why in ct_tasks_note), and its requests today (internal).
+    "ct_tasks_on": "0",
+    "ct_tasks_note": "",
+    "ct_tasks_usage": "{}",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -556,7 +598,8 @@ PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_cli
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
                     "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_usage",
                     "hr_google_url", "hr_google_secret", "hr_google_drive",
-                    "hr_google_restricted_drive", "hr_google_status", "reports_connecteam_usage")
+                    "hr_google_restricted_drive", "hr_google_status", "reports_connecteam_usage",
+                    "ct_tasks_usage")
 
 # Settings of older versions, removed when the add-on starts: the HR portal's own Connecteam app,
 # chat and certificate copies (0.10.0 to 0.10.3; it only reads, through the one connection, now).
@@ -582,6 +625,9 @@ WB_JOB_FIELDS = {"status", "message", "finished_at"}
 
 # Indexes on columns MIGRATIONS may have added, so they're made after it.
 INDEXES = f"""
+-- One task per Connecteam task, and the changes waiting to be sent.
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_ct ON tasks (ct_task_id) WHERE ct_task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tasks_ct_pending ON tasks (ct_pending) WHERE ct_pending IS NOT NULL;
 -- Each encoder's unfinished job: looked for whenever a job starts.
 CREATE INDEX IF NOT EXISTS wb_jobs_unfinished ON wb_jobs (encoder_url) WHERE {UNFINISHED};
 -- One person's card log.
@@ -1227,32 +1273,41 @@ class Database:
 
     def task_history(self, task_id: int) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
-            "SELECT at, by_name, action, from_status, to_status FROM task_history "
+            "SELECT at, by_name, action, from_status, to_status, note FROM task_history "
             "WHERE task_id = ? ORDER BY at, id", (task_id,))]
 
     def _task_event(self, task_id: int, at: float, by: dict | None, action: str,
-                    from_status: str | None = None, to_status: str | None = None) -> None:
+                    from_status: str | None = None, to_status: str | None = None,
+                    note: str | None = None) -> None:
         self.conn.execute(
-            """INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status, to_status)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status, to_status,
+               note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (task_id, at, by and by.get("id"), (by or {}).get("name", "")[:60], action,
-             from_status, to_status))
+             from_status, to_status, note))
 
-    def add_task(self, fields: dict, by: dict | None, at: float, commit: bool = True) -> int:
+    # Columns a new task may also be given (a form's or Connecteam's): its own status, and the
+    # Connecteam sync's.
+    TASK_EXTRAS = ("ct_task_id", "ct_board_id", "ct_sync", "ct_status", "photos", "manager_note")
+
+    def add_task(self, fields: dict, by: dict | None, at: float, commit: bool = True,
+                 note: str | None = None) -> int:
         """A new task (fields from tasks.clean_task or tasks.task_from_submission). by: the
         person who made it ({"id", "name"}), or {"name": "Connecteam form"} for a form."""
         row = {"source": "quick", "form_id": None, "form_name": None, "submission_id": None,
-               "source_url": None, **fields}
+               "source_url": None, "status": "todo", **fields}
+        extras = [k for k in self.TASK_EXTRAS if row.get(k) is not None]
         cur = self.conn.execute(
-            """INSERT INTO tasks (title, notes, department_id, assigned_id, assigned_name, due_date,
+            f"""INSERT INTO tasks (title, notes, department_id, assigned_id, assigned_name, due_date,
                due_time, priority, status, status_at, created_at, created_by_id, created_by_name,
-               source, form_id, form_name, submission_id, source_url, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               source, form_id, form_name, submission_id, source_url, updated_at
+               {''.join(', ' + k for k in extras)})
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{', ?' * len(extras)})""",
             (row["title"], row["notes"], row["department_id"], row["assigned_id"],
-             row["assigned_name"], row["due_date"], row["due_time"], row["priority"], at, at,
-             by and by.get("id"), (by or {}).get("name", "")[:60], row["source"], row["form_id"],
-             row["form_name"], row["submission_id"], row["source_url"], at))
-        self._task_event(cur.lastrowid, at, by, "created", None, "todo")
+             row["assigned_name"], row["due_date"], row["due_time"], row["priority"], row["status"],
+             at, at, by and by.get("id"), (by or {}).get("name", "")[:60], row["source"],
+             row["form_id"], row["form_name"], row["submission_id"], row["source_url"], at,
+             *(row[k] for k in extras)))
+        self._task_event(cur.lastrowid, at, by, "created", None, row["status"], note)
         if commit:
             self.conn.commit()
         return cur.lastrowid
@@ -1312,12 +1367,12 @@ class Database:
         submissions sent from now on; changing its settings doesn't move that."""
         self.conn.execute(
             """INSERT INTO task_forms (form_id, name, department_id, title_question,
-               assign_submitter, picked_at) VALUES (?, ?, ?, ?, ?, ?)
+               assign_submitter, picked_at, follow) VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (form_id) DO UPDATE SET name = excluded.name,
                department_id = excluded.department_id, title_question = excluded.title_question,
-               assign_submitter = excluded.assign_submitter""",
+               assign_submitter = excluded.assign_submitter, follow = excluded.follow""",
             (form_id, fields["name"], fields["department_id"], fields["title_question"],
-             fields["assign_submitter"], now))
+             fields["assign_submitter"], now, fields.get("follow")))
         self.conn.commit()
 
     def delete_task_form(self, form_id: str) -> None:
@@ -1628,25 +1683,50 @@ class Database:
             for column, name in (("assigned_id", "assigned_name"), ("created_by_id", "created_by_name")):
                 c.execute(f"""UPDATE tasks SET {column} = NULL WHERE {column} IS NOT NULL AND NOT EXISTS
                               (SELECT 1 FROM staff s WHERE s.id = tasks.{column} AND s.name = tasks.{name})""")
+            self._pause_task_sync()
             return
-        for table in ("tasks", "task_history", "task_forms", "task_form_seen"):
+        for table in ("tasks", "task_history", "task_forms", "task_form_seen", "task_ct_boards",
+                      "task_ct_seen"):
             c.execute(f"DELETE FROM {table}")
+        # Connecteam IDs are kept, but not what the two sides last agreed on, nor changes waiting
+        # to be sent: when the owner turns the sync on again, Connecteam's copy is read first.
         columns = ("id", "title", "notes", "department_id", "assigned_id", "assigned_name", "due_date",
                    "due_time", "priority", "status", "status_at", "status_by", "created_at",
                    "created_by_id", "created_by_name", "source", "form_id", "form_name",
-                   "submission_id", "source_url", "updated_at", "deleted_at", "deleted_by")
+                   "submission_id", "source_url", "updated_at", "deleted_at", "deleted_by",
+                   "ct_task_id", "ct_board_id", "ct_status", "photos", "manager_note")
         c.executemany(f"INSERT INTO tasks ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
-                      [tuple(t[k] for k in columns) for t in section["tasks"]])
+                      [tuple(t.get(k) for k in columns) for t in section["tasks"]])
         c.executemany("""INSERT INTO task_history (task_id, at, by_id, by_name, action, from_status,
-                         to_status) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                         to_status, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                       [(h["task_id"], h["at"], h["by_id"], h["by_name"], h["action"],
-                        h["from_status"], h["to_status"]) for h in section["history"]])
+                        h["from_status"], h["to_status"], h.get("note")) for h in section["history"]])
         c.executemany("""INSERT INTO task_forms (form_id, name, department_id, title_question,
-                         assign_submitter, picked_at, last_ok) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                         assign_submitter, picked_at, last_ok, follow) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                       [(f["form_id"], f["name"], f["department_id"], f["title_question"],
-                        f["assign_submitter"], f["picked_at"], f["last_ok"]) for f in section["forms"]])
+                        f["assign_submitter"], f["picked_at"], f["last_ok"], f.get("follow"))
+                       for f in section["forms"]])
         c.executemany("INSERT INTO task_form_seen (form_id, submission_id, seen_at) VALUES (?, ?, ?)",
                       [(form_id, sid, time.time()) for form_id, sid in section["seen"]])
+        sync = section.get("sync") or {}
+        c.executemany("""INSERT INTO task_ct_boards (board_id, name, department_id, picked_at)
+                         VALUES (?, ?, ?, ?)""",
+                      [(b["board_id"], b["name"], b["department_id"], b["picked_at"])
+                       for b in sync.get("boards", [])])
+        c.executemany("INSERT INTO task_ct_seen (ct_task_id, board_id, seen_at) VALUES (?, ?, ?)",
+                      [(cid, board, time.time()) for cid, board in sync.get("seen", [])])
+        self._pause_task_sync(bool(sync.get("enabled")))
+
+    def _pause_task_sync(self, was_on: bool = False) -> None:
+        """After a restore the Connecteam task sync waits for the owner to turn it on again, so a
+        restored copy never sends anything to Connecteam on its own."""
+        row = self.conn.execute("SELECT value FROM settings WHERE key = 'ct_tasks_on'").fetchone()
+        if was_on or (row and row[0] == "1"):
+            self.conn.executemany("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [
+                ("ct_tasks_on", "0"),
+                ("ct_tasks_note", "Turned off by a restore. Check the boards, then turn it on again.")])
+        self.conn.execute("UPDATE tasks SET ct_sync = NULL, ct_pending = NULL")
+        self._settings = None
 
     def replace_everything(self, snap: dict) -> tuple[list[str], dict[str, int]]:
         """Swap in a validated backup (from transfer.clean_backup) in one transaction: either all
