@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.22
+
+- **HR sign-in in two steps:** mobile number and PIN first, then the authenticator code on a page
+  of its own (only for those who use one). Password managers now fill the right boxes: the
+  number and PIN on the first page, the one-time code on the second.
+
 ## 0.12.21
 
 - **Tasks in Connecteam can't be deleted from Staff Access** (Quick Tasks, and requests from

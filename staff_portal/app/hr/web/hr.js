@@ -333,10 +333,53 @@
     me = H.me = null;
     drawNav();
     const error = h("p", { class: "error", role: "alert", hidden: true });
-    // Password managers read the standard names: the mobile number is the username, the PIN the
-    // password and the authenticator code a one-time code.
+    const button = h("button", { class: "primary", type: "submit" }, "Sign in");
+    // Two steps, as password managers expect: the mobile number (username) and PIN (password)
+    // here; the authenticator code (one-time code) on a page of its own when they use one.
+    const form = h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      error.hidden = true;
+      button.disabled = true;
+      try {
+        const f = form.elements;
+        const r = await api("POST", "/api/signin", { mobile: f.username.value, pin: f.password.value });
+        if (r && r.need_code) return showCodeStep(f.username.value, f.password.value);
+        await signedIn();
+      } catch (err) {
+        if (!(err instanceof SignedOut)) {
+          error.textContent = err.message;
+          error.hidden = false;
+          form.elements.password.value = "";
+        }
+      } finally {
+        button.disabled = false;
+      }
+    } },
+    h("label", null, "Mobile number", h("small", null, "As it is in Connecteam"),
+      h("input", { name: "username", id: "username", type: "tel", autocomplete: "username", required: true,
+        maxlength: "60", autocapitalize: "off", spellcheck: "false" })),
+    h("label", null, "PIN", h("small", null, "Your Connecteam kiosk code"),
+      h("input", { name: "password", id: "password", type: "password", inputmode: "numeric",
+        autocomplete: "current-password", required: true, maxlength: "8" })),
+    error, h("div", { class: "actions full" }, button));
+    show(authPage("Sign in to HR", "With your Connecteam mobile number and kiosk code.",
+      note ? h("p", { class: "warn" }, note) : null, h("section", { class: "card" }, form),
+      h("p", { class: "muted small" }, "Managers, directors and HR also type a code from their authenticator app. If yours isn't set up yet, ask HR for a setup code."),
+      h("p", { class: "muted small" }, "After 5 wrong tries, sign-in pauses for 15 minutes.")));
+    form.elements.username.focus();
+  }
+
+  // (the form isn't cleared: a password manager offers to save what was typed as the page moves on)
+  async function signedIn() {
+    await refreshMe();
+    if (!location.hash || location.hash === "#/signout") location.hash = "#/";
+    await route();
+  }
+
+  function showCodeStep(mobile, pin) {
+    const error = h("p", { class: "error", role: "alert", hidden: true });
     const code = h("input", { name: "otp", id: "otp", inputmode: "numeric", autocomplete: "one-time-code",
-      maxlength: "11", autocapitalize: "off", spellcheck: "false" });
+      required: true, maxlength: "11", autocapitalize: "off", spellcheck: "false" });
     const useRecovery = h("button", { type: "button", class: "linkish", onclick: () => {
       code.setAttribute("inputmode", "text");
       code.setAttribute("autocapitalize", "characters");
@@ -350,36 +393,27 @@
       error.hidden = true;
       button.disabled = true;
       try {
-        const f = form.elements;
-        await api("POST", "/api/signin", { mobile: f.username.value, pin: f.password.value, code: f.otp.value });
-        // (not cleared here: a password manager offers to save what was typed as the page moves on)
-        await refreshMe();
-        if (!location.hash || location.hash === "#/signout") location.hash = "#/";
-        await route();
+        await api("POST", "/api/signin", { mobile, pin, code: code.value });
+        await signedIn();
       } catch (err) {
         if (!(err instanceof SignedOut)) {
           error.textContent = err.message;
           error.hidden = false;
-          form.elements.password.value = "";
-          form.elements.otp.value = "";
+          code.value = "";
         }
       } finally {
         button.disabled = false;
       }
     } },
-    h("label", null, "Mobile number", h("small", null, "As it is in Connecteam"),
-      h("input", { name: "username", id: "username", type: "tel", autocomplete: "username", required: true,
-        maxlength: "60", autocapitalize: "off", spellcheck: "false" })),
-    h("label", null, "PIN", h("small", null, "Your Connecteam kiosk code"),
-      h("input", { name: "password", id: "password", type: "password", inputmode: "numeric",
-        autocomplete: "current-password", required: true, maxlength: "8" })),
-    h("label", null, "Authenticator code", h("small", null, "The 6-digit code from your authenticator app, if you use one"), code),
+    // Which account this code is for, for the password manager (not shown).
+    h("input", { type: "text", name: "username", autocomplete: "username", value: mobile, class: "sr-only",
+      tabindex: "-1", "aria-hidden": "true", readonly: true }),
+    h("label", null, "Authenticator code", h("small", null, "The 6-digit code from your authenticator app"), code),
     useRecovery, error, h("div", { class: "actions full" }, button));
-    show(authPage("Sign in to HR", "With your Connecteam mobile number and kiosk code.",
-      note ? h("p", { class: "warn" }, note) : null, h("section", { class: "card" }, form),
-      h("p", { class: "muted small" }, "Managers, directors and HR need an authenticator code. If yours isn't set up yet, ask HR for a setup code."),
-      h("p", { class: "muted small" }, "After 5 wrong tries, sign-in pauses for 15 minutes.")));
-    form.elements.username.focus();
+    show(authPage("Authenticator code", "Type the code your authenticator app shows for the HR portal.",
+      h("section", { class: "card" }, form),
+      h("p", { class: "muted small" }, h("a", { href: "#/", onclick: (e) => { e.preventDefault(); showSignIn(); } }, "Start again"))));
+    code.focus();
   }
 
   async function signOut() {

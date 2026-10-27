@@ -417,6 +417,28 @@ def test_a_wrong_authenticator_code_takes_as_long_as_a_pin_check(tmp_path, monke
     run(scenario())
 
 
+def test_the_authenticator_code_is_a_second_step_after_the_right_pin(tmp_path):
+    async def scenario():
+        async with HR(tmp_path) as hr:
+            await hr.add_people(MAX)
+            hr.give("103", "manager", {"501": True})
+            secret = hr.enrol("103")
+            pin = hr.pins["103"]
+            # The right PIN alone: asked for the code, no session, not a wrong try.
+            status, data, resp = await hr.call("POST", "/api/signin", {"mobile": "5415550103", "pin": pin})
+            assert status == 200 and data == {"need_code": True}
+            assert signin.COOKIE not in resp.cookies and hr.hdb.person("103")["failed"] == 0
+            # A wrong PIN alone: refused as always, and counted.
+            status, data, _ = await hr.call("POST", "/api/signin", {"mobile": "5415550103", "pin": "0000"})
+            assert status == 401 and "need_code" not in str(data)
+            assert hr.hdb.person("103")["failed"] == 1
+            # Then with the code: signed in.
+            status, _, resp = await hr.call("POST", "/api/signin", {
+                "mobile": "5415550103", "pin": pin, "code": next_code(hr, "103", secret)})
+            assert status == 200 and resp.cookies[signin.COOKIE].value
+    run(scenario())
+
+
 def test_hrs_reasons_for_changing_points_and_end_dates_stay_with_hr(tmp_path, monkeypatch):
     import point_system
     from test_hr_discipline import day, issued, setup

@@ -358,6 +358,17 @@ async def api_signin(request: web.Request):
                    else "No PIN typed")
             return failed(svc, ip, person, why)
         recovery = False
+        if person["totp_on"] and not code:
+            # Two steps (what password managers expect): the right PIN alone asks for the code
+            # on a page of its own. A wrong PIN is a wrong try as always.
+            ok = await signin.pin_matches(pin, person["kiosk_hash"])
+            person = db.person(person["id"])
+            if not person or signin.locked(person) or not may_sign_in(person):
+                return failed(svc, ip, person, "Locked")
+            if not ok:
+                wrong(svc, person, ip)
+                return failed(svc, ip, person, "Wrong PIN")
+            return web.json_response({"need_code": True})
         if person["totp_on"]:
             # The code first. A wrong one still waits as long as a PIN check, so timing doesn't
             # tell who has an authenticator (staff roles, under the usual setting).

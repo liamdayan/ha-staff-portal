@@ -2170,7 +2170,9 @@ Everyone signs in on one page with:
    changes, they're signed out of the HR portal. Someone without a kiosk code can't sign in, and
    HR sees "No kiosk code in Connecteam" on their file.
 3. **Authenticator code**: the 6-digit code from an authenticator app (Google Authenticator,
-   Microsoft Authenticator or similar), for those who use one. Each code works once.
+   Microsoft Authenticator or similar), for those who use one. Each code works once. It's
+   asked for on a page of its own after the mobile number and PIN are right, the way password
+   managers expect (they fill the number and PIN on the first page, the code on the second).
 
 A failed sign-in always says the same thing, "That didn't work. Check your number, PIN and
 code.", whichever part was wrong, and the page never lists names.
