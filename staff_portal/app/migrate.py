@@ -14,6 +14,8 @@ carries, so nothing has to be set up or typed again on the new install:
   in Google keeps working), its database (private fields already encrypted with its key), and its
   key. When "Keep the HR key out of backups" is on, only the key locked with the HR recovery key
   travels, so the new install asks for the recovery key before HR opens.
+- the files uploaded to reports (main.py adds them under "report_uploads", and checks them on the
+  new install as an upload is checked).
 
 All of it is encrypted with AES-256-GCM under a key made (scrypt) from a one-time code: 20
 characters from a 32-character alphabet (100 bits), made with `secrets`, shown to the admin once
@@ -316,7 +318,7 @@ def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_log
     checked = clean_settings({k: v for k, v in typed.items() if v}, current_settings)
     secret_values = {k: checked.get(k, "") for k in typed}
     for key in ("connecteam_usage", "tthotel_token", "tthotel_usage", "hr_connecteam_usage",
-                "hr_google_status"):
+                "hr_google_status", "reports_connecteam_usage"):
         secret_values[key] = _saved_object(raw.get(key))
     tested = raw.get("wb_remote_lockout_tested")
     secret_values["wb_remote_lockout_tested"] = (

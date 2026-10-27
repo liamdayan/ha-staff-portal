@@ -901,3 +901,8 @@ tr.da-alert td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
 .archive-kiosk-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
 .archive-kiosk-row small { color: var(--muted); }
 .badge.archived { color: var(--muted); }
+
+/* Reports tab */
+.report-card h3 { margin: 0 0 4px; }
+.report-card h4 { margin: 14px 0 6px; font-size: 14px; }
+.report-depts { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px 14px; }

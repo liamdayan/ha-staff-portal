@@ -334,7 +334,8 @@ def test_test_connection_shows_each_step(monkeypatch):
                 ("Getting an access token", True), ("Reading users", True),
                 ("Reading the time clock", True), ("Reading smart groups", True)]
             assert checks[0]["detail"] == ("Connecteam issued an access token with: time_clock.read, "
-                                           "users.read.")
+                                           "users.read. Reports and tasks also need schedule.read "
+                                           "and forms.read.")
             # An app without users.read: the token says so, and each step shows Connecteam's words.
             env.fake.scopes["staff-access-app"] = "time_clock.read"
             checks = await env.ct.diagnose()

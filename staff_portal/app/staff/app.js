@@ -232,6 +232,7 @@
     activeDrag = false;
     stopPolling();
     wbReset();
+    rpReset();
     session.del(WB_JOB_KEY);
   }
 
@@ -617,9 +618,9 @@
   // view: which layout page is open, and which group card's detail screen (if any).
   // The open page is remembered by its ID, so changing which pages a phone has doesn't
   // silently switch staff to a different page. tool: a tool open instead of a page
-  // ("wristbands"), or null.
+  // ("wristbands", "reports"), or null.
   const view = { pageId: session.get("page"), detail: null,
-    tool: session.get("tool") === "wristbands" ? "wristbands" : null };
+    tool: ["wristbands", "reports"].includes(session.get("tool")) ? session.get("tool") : null };
   let lastData = null;
 
   // Changes sent but not reported back yet. Some devices (minisplits, for one) only report a
@@ -708,8 +709,9 @@
     // tool that's all this person has opens by itself.
     const tools = toolsFor(data);
     if (view.tool && !tools.includes(view.tool)) {
-      if (wb) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
+      if (wb || rp) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
       wbReset();
+      rpReset();
       view.tool = null;
       session.del("tool");
     }
@@ -1152,18 +1154,20 @@
   // Screens beside the pages that don't come from the layout. Wristbands is offered only on a
   // front-desk computer with a card encoder, to someone allowed to make at least one kind of
   // card. The server says so with every poll, and checks again on every Wristbands request.
-  const TOOL_NAMES = { wristbands: "Wristbands" };
+  const TOOL_NAMES = { wristbands: "Wristbands", reports: "Reports" };
   const TOOL_PAUSE_MS = 60000;   // after the server turns a tool down, how long before offering it again
   let toolsPaused = 0;
 
   function toolsFor(data) {
-    return !PREVIEW && data?.wristbands && Date.now() >= toolsPaused ? ["wristbands"] : [];
+    if (PREVIEW || !data || Date.now() < toolsPaused) return [];
+    return ["wristbands", "reports"].filter((name) => data[name]);
   }
 
   function openTool(name) {
     if (view.tool === name) {
       // Already open: back to its first screen, the way a tab bar's current tab does.
-      if (wb && wb.screen !== "home") wbBack();
+      if (name === "wristbands" && wb && wb.screen !== "home") wbBack();
+      if (name === "reports" && rp?.open) rpBack();
       return;
     }
     view.tool = name;
@@ -1220,8 +1224,9 @@
   function buildTool(data, into) {
     // A stand-in tile, so polls don't rebuild the screen (render rebuilds whenever there are no
     // tiles, which would wipe a form being typed in). Each poll lets the tool update itself.
-    into.set(`tool:${view.tool}`, { refresh: () => wbPoll() });
-    const content = wbState().root;   // kept across redraws, so what's typed survives them
+    into.set(`tool:${view.tool}`, { refresh: () => (view.tool === "wristbands" ? wbPoll() : null) });
+    // Kept across redraws, so what's typed survives them.
+    const content = view.tool === "reports" ? rpState().root : wbState().root;
     if (isDesk()) {
       const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" },
         toolNav(), data.layout ? pageNav(data.layout.pages, -1) : areaNav(data.entities));
@@ -1229,6 +1234,240 @@
     }
     const tabs = tabBar(data, -1);
     return h("div", { class: tabs ? "layout has-tabs" : "layout" }, content, tabs);
+  }
+
+  // ---------------------------------------------------------------- reports
+
+  // Reports (app/reports/<key>/ in the add-on, see REPORTS.md): the ones this person may see, and
+  // one open at a time. A report's view.js registers itself with StaffReports and draws into the
+  // box it's given; the server checks access on every request. What's on screen is forgotten at
+  // sign-out (rpReset), so the next person never sees it.
+  const reportViews = new Map();     // key -> { render } from its view.js
+  const reportWaiting = new Map();   // key -> resolve, while its view.js loads
+  let rp = null;
+
+  window.StaffReports = Object.freeze({
+    register(key, def) {
+      if (typeof key !== "string" || typeof def?.render !== "function" || reportViews.has(key)) return;
+      reportViews.set(key, def);
+      reportWaiting.get(key)?.(true);
+    },
+  });
+
+  function rpState() {
+    if (!rp) {
+      rp = { root: h("div", { class: "rp" }), list: null, open: null, params: {}, seq: 0 };
+      rpHome();
+    }
+    return rp;
+  }
+
+  function rpReset() {
+    rp = null;
+  }
+
+  // The server says this person may not see reports here (any more): back to the pages.
+  function rpNoAccess(text) {
+    toast(text || "You don't have access to reports here.", true);
+    rpReset();
+    toolsPaused = Date.now() + TOOL_PAUSE_MS;
+    view.tool = null;
+    session.del("tool");
+    rerender();
+  }
+
+  // Sign-in problems go to their own screens; anything else is the caller's to show.
+  function rpAuthError(res) {
+    if (res.status !== 0 && handleAuthError(res)) return true;
+    if (res.status === 403 && /Sign in with your own PIN/.test(res.data.error || "")) {
+      rpNoAccess(res.data.error);
+      return true;
+    }
+    return false;
+  }
+
+  function rpMessage(title, text, retry) {
+    return h("div", { class: "rp-msg" }, h("h2", null, title), h("p", null, text),
+      retry ? h("button", { class: "btn", type: "button", onclick: retry }, "Try again") : null);
+  }
+
+  async function rpHome() {
+    const state = rp;
+    state.open = null;
+    const seq = ++state.seq;
+    fill(state.root, h("h1", { class: "page-title" }, "Reports"),
+      h("div", { class: "center" }, h("div", { class: "spinner", "aria-label": "Loading" })));
+    const res = await api("GET", "/api/reports");
+    if (rp !== state || seq !== state.seq || rpAuthError(res)) return;
+    if (res.status !== 200) {
+      fill(state.root, h("h1", { class: "page-title" }, "Reports"),
+        rpMessage("Reports couldn't be loaded", res.data.error || "Check the connection.", () => rpHome()));
+      return;
+    }
+    state.list = res.data.reports;
+    fill(state.root, h("h1", { class: "page-title" }, "Reports"),
+      state.list.length ? h("div", { class: "rp-list" }, state.list.map((r) =>
+        h("button", { class: "rp-item", type: "button", onclick: () => rpOpen(r) },
+          h("span", { class: "rp-item-name" }, r.name),
+          r.description ? h("span", { class: "rp-item-sub" }, r.description) : null,
+          h("span", { class: "rp-item-go", "aria-hidden": "true" }, "›"))))
+        : rpMessage("No reports yet", "Your manager hasn't shared any reports with you."));
+  }
+
+  // Load a report's view.css and view.js once (same address as the app, so the page's strict
+  // rules still hold). Resolves true once its view has registered.
+  function rpLoad(report) {
+    if (reportViews.has(report.key)) return Promise.resolve(true);
+    if (report.view_css && !document.querySelector(`link[data-report="${report.key}"]`)) {
+      document.head.append(h("link", { rel: "stylesheet", href: report.view_css, "data-report": report.key }));
+    }
+    return new Promise((resolve) => {
+      const done = (ok) => { reportWaiting.delete(report.key); clearTimeout(timer); resolve(ok); };
+      const timer = setTimeout(() => done(false), 20000);
+      reportWaiting.set(report.key, done);
+      document.querySelector(`script[data-report="${report.key}"]`)?.remove();   // a failed try
+      document.head.append(h("script", { src: report.view_js, "data-report": report.key,
+        onerror: () => done(false) }));
+    });
+  }
+
+  async function rpOpen(report, params = {}) {
+    const state = rp;
+    state.open = report;
+    state.params = params;
+    state.body = h("div", { class: "rp-body" });
+    history.pushState({ rp: report.key }, "", "/");
+    window.scrollTo(0, 0);
+    fill(state.root, h("div", { class: "rp-head" },
+      h("button", { class: "back-btn", type: "button", onclick: () => rpBack() }, "‹ Reports"),
+      h("h1", { class: "page-title rp-title" }, report.name)), state.body);
+    const seq = ++state.seq;
+    fill(state.body, h("div", { class: "center" }, h("div", { class: "spinner", "aria-label": "Loading" })));
+    if (!await rpLoad(report)) {
+      if (rp === state && seq === state.seq) {
+        fill(state.body, rpMessage("This report couldn't be loaded", "Check the connection.",
+          () => rpOpen(report, params)));
+      }
+      return;
+    }
+    if (rp === state && seq === state.seq) rpRun(params);
+  }
+
+  function rpBack() {
+    if (history.state?.rp) history.back();
+    else rpHome();
+  }
+
+  // Run the open report's data() on the server and draw it.
+  async function rpRun(params) {
+    const state = rp;
+    const report = state.open;
+    state.params = params;
+    const seq = ++state.seq;
+    state.body.classList.add("rp-loading");
+    // Reports may ask Connecteam only a few things a minute, so a first look can take a while.
+    const slow = setTimeout(() => {
+      if (rp === state && seq === state.seq) {
+        state.body.prepend(h("p", { class: "rp-muted rp-slow", role: "status" },
+          "Still asking Connecteam. The first look at a week can take a minute or two."));
+      }
+    }, 5000);
+    const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
+    const res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
+    clearTimeout(slow);
+    if (rp !== state || seq !== state.seq || state.open !== report || rpAuthError(res)) return;
+    state.body.classList.remove("rp-loading");
+    if (res.status === 403) {
+      toast(res.data.error || "You don't have access to that report.", true);
+      rpHome();
+      return;
+    }
+    if (res.status !== 200) {
+      fill(state.body, rpMessage(res.status === 503 ? "Connecteam can't answer right now"
+        : "This report couldn't be made", res.data.error || "Check the connection.", () => rpRun(params)));
+      return;
+    }
+    const box = h("div", { class: "rp-view" });
+    fill(state.body, box);
+    try {
+      reportViews.get(report.key).render(box, res.data.data, rpApi(report, res.data));
+    } catch (err) {
+      console.error(`Report ${report.key} couldn't be drawn`, err);
+      fill(state.body, rpMessage("This report couldn't be shown", "Try again, or tell your manager.",
+        () => rpRun(params)));
+    }
+  }
+
+  // What a report's render(el, data, api) can use.
+  function rpApi(report, answer) {
+    const state = rp;
+    const current = () => rp === state && state.open === report;
+    return Object.freeze({
+      h, toast,
+      manage: !!answer.manage,
+      settings: answer.settings || {},
+      params: answer.params || {},
+      report,
+      refresh: (params = {}) => { if (current()) rpRun({ ...state.params, ...params }); },
+      async upload(key, file) {
+        if (!current() || !(file instanceof Blob)) return { ok: false };
+        const res = await rpSend("POST", `/api/reports/${report.key}/uploads/${encodeURIComponent(key)}`, file);
+        if (!current() || rpAuthError(res)) return { ok: false };
+        if (res.status !== 200) {
+          toast(res.data.error || "The file couldn't be uploaded.", true);
+          return { ok: false, error: res.data.error };
+        }
+        toast("Uploaded.");
+        rpRun(state.params);
+        return { ok: true };
+      },
+      async saveSettings(obj) {
+        if (!current()) return { ok: false };
+        const res = await api("PUT", `/api/reports/${report.key}/settings`, obj);
+        if (!current() || rpAuthError(res)) return { ok: false };
+        if (res.status !== 200) {
+          toast(res.data.error || "The settings couldn't be saved.", true);
+          return { ok: false, error: res.data.error };
+        }
+        toast("Saved.");
+        rpRun(state.params);
+        return { ok: true, settings: res.data.settings };
+      },
+      download: rpDownload,
+      csvCell: (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? "")),
+    });
+  }
+
+  // A file upload, with the app's sign-in (api() only sends JSON).
+  async function rpSend(method, path, file) {
+    const headers = { "X-Active": "1" };
+    const token = local.get(TOKEN_KEY);
+    if (token) headers.Authorization = "Bearer " + token;
+    const pinSession = session.get(SESSION_KEY);
+    if (pinSession) headers["X-Session"] = pinSession;
+    const form = new FormData();
+    form.append("file", file, file.name || "upload");
+    let res;
+    try {
+      res = await fetch(path, { method, headers, body: form });
+    } catch {
+      return { status: 0, data: {} };
+    }
+    let data = {};
+    try { data = await res.json(); } catch { /* empty body */ }
+    return { status: res.status, data };
+  }
+
+  // Save text as a file on this device (a CSV, say).
+  function rpDownload(name, text, type = "text/csv") {
+    const link = h("a", {
+      href: URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` })),
+      download: String(name || "report.csv").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-").slice(0, 120),
+    });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 30000);
   }
 
   // ---------------------------------------------------------------- rearrange (this phone only)
@@ -1411,6 +1650,10 @@
   window.addEventListener("popstate", (ev) => {
     if (view.tool === "wristbands" && wb && wb.screen !== "home" && !ev.state?.wb) {
       wbPopped();
+      return;
+    }
+    if (view.tool === "reports" && rp?.open && !ev.state?.rp) {
+      rpHome();
       return;
     }
     view.detail = ev.state?.detail || null;

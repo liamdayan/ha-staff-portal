@@ -42,14 +42,33 @@ def ct_user(user_id, first, last="", code=None, groups=(), mobile=None, email=No
 
 
 class FakeConnecteam:
-    """Connecteam as Staff Access and the HR portal read it. refuse: paths answered with 403;
-    too_many: paths answered with 429. tokens: the client IDs that asked for a token."""
+    """Connecteam as Staff Access and the HR portal read it, and as reports and tasks read it
+    (ctdata.py). refuse: paths answered with 403 (an entry ending in '*' is a prefix); too_many:
+    paths answered with 429. tokens: the client IDs that asked for a token; asked: each
+    request's query, as (path, {name: value}).
+
+    For reports and tasks (build them with ct_activity, ct_shift, ct_form, ct_submission):
+    - activities: {time clock ID: [time activities by user]} (clock 1 by default; clocked_in
+      people are added to clock 1 as open shifts);
+    - schedulers: [{"schedulerId", "name", "isArchived"}] and shifts: {scheduler ID: [shift]};
+    - jobs: {instance ID (time clock or scheduler): [{"jobId", "title", "subJobs"}]};
+    - forms: [form] and submissions: {form ID: [submission]}.
+    Lists are paged with limit and offset as Connecteam does (paging.offset when more follow),
+    shifts are filtered by startTime and endTime, and submissions by submittingStartTimestamp and
+    submittingEndTime."""
 
     def __init__(self, users=(), archived=(), fields=(), clocked_in=()):
         self.users = list(users)
         self.archived = list(archived)
         self.fields = list(fields)
         self.clocked_in = list(clocked_in)
+        self.activities: dict[int, list[dict]] = {}
+        self.schedulers: list[dict] = []
+        self.shifts: dict[int, list[dict]] = {}
+        self.jobs: dict[int, list[dict]] = {}
+        self.forms: list[dict] = []
+        self.submissions: dict[int, list[dict]] = {}
+        self.asked: list[tuple[str, dict]] = []
         self.refuse: set[str] = set()
         self.too_many: set[str] = set()
         self.calls: list[str] = []
@@ -62,7 +81,8 @@ class FakeConnecteam:
     async def handle(self, request):
         path = request.path
         self.calls.append(path + ("?archived" if request.query.get("userStatus") == "archived" else ""))
-        if path in self.refuse:
+        self.asked.append((path, dict(request.query)))
+        if path in self.refuse or any(p.endswith("*") and path.startswith(p[:-1]) for p in self.refuse):
             return web.json_response({"detail": "Missing scope"}, status=403)
         if path in self.too_many:
             return web.json_response({"detail": "Too many requests"}, status=429,
@@ -81,13 +101,49 @@ class FakeConnecteam:
         if path == "/users/v1/smart-groups":
             return web.json_response({"data": {"groups": []}})
         if path == "/time-clock/v1/time-clocks":
-            return web.json_response({"data": {"timeClocks": [{"id": 1}]}})
+            ids = sorted({1, *self.activities})
+            return web.json_response({"data": {"timeClocks": [{"id": i} for i in ids]}})
         if path.startswith("/time-clock/v1/time-clocks/"):
             now = time.time()
+            clock = int(path.split("/")[4])
+            open_shifts = [{"userId": uid, "shifts": [{"id": f"open-{uid}",
+                                                       "start": {"timestamp": now - 600}}]}
+                           for uid in self.clocked_in] if clock == 1 else []
             return web.json_response({"data": {"timeActivitiesByUsers": [
-                {"userId": uid, "shifts": [{"start": {"timestamp": now - 600}}]}
-                for uid in self.clocked_in]}})
+                *open_shifts, *self.activities.get(clock, [])]}})
+        if path == "/scheduler/v1/schedulers":
+            return web.json_response({"data": {"schedulers": self.schedulers}})
+        if path.startswith("/scheduler/v1/schedulers/") and path.endswith("/shifts"):
+            q = request.query
+            low, high = int(q.get("startTime", 0)), int(q.get("endTime", 2**40))
+            found = [s for s in self.shifts.get(int(path.split("/")[4]), [])
+                     if low <= s["startTime"] <= high]
+            return self.page(request, "shifts", found)
+        if path == "/jobs/v1/jobs":
+            found = {}
+            for instance in request.query.getall("instanceIds", []):
+                for job in self.jobs.get(int(instance), []):
+                    found.setdefault(job["jobId"], job)
+            return self.page(request, "jobs", list(found.values()))
+        if path == "/forms/v1/forms":
+            return self.page(request, "forms", self.forms)
+        if path.startswith("/forms/v1/forms/") and path.endswith("/form-submissions"):
+            q = request.query
+            low = int(q.get("submittingStartTimestamp", 0))
+            high = int(q.get("submittingEndTime", 2**40))
+            found = [s for s in self.submissions.get(int(path.split("/")[4]), [])
+                     if low <= s["submissionTimestamp"] <= high]
+            return self.page(request, "formSubmissions", found)
         return web.json_response({"error": "not here"}, status=404)
+
+    @staticmethod
+    def page(request, key: str, items: list):
+        """One page of a list, as Connecteam pages it."""
+        limit, offset = int(request.query.get("limit", 10)), int(request.query.get("offset", 0))
+        body = {"data": {key: items[offset:offset + limit]}, "paging": {}}
+        if offset + limit < len(items):
+            body["paging"]["offset"] = offset + limit
+        return web.json_response(body)
 
     async def __aenter__(self):
         self.runner = web.AppRunner(self.app)
@@ -107,6 +163,45 @@ class FakeConnecteam:
         return sum(1 for c in self.calls if c == path)
 
 
+def ct_activity(user_id, shifts=(), breaks=(), time_offs=()) -> dict:
+    """One person's time activities on a time clock. shifts: (start, end or None, job ID or None,
+    scheduler shift ID or None) with times as Unix seconds; breaks: (start, end)."""
+    return {"userId": user_id,
+            "shifts": [{"id": f"s{user_id}-{start}", "start": {"timestamp": start, "timezone": "UTC"},
+                        "end": {"timestamp": end} if end else None, "jobId": job,
+                        "schedulerShiftId": planned} for start, end, job, planned in shifts],
+            "manualBreaks": [{"id": f"b{user_id}-{start}", "manualBreakId": 9,
+                              "start": {"timestamp": start}, "end": {"timestamp": end}}
+                             for start, end in breaks],
+            "timeOffs": list(time_offs)}
+
+
+def ct_shift(shift_id, start, end, users=(), title="", job=None, published=True,
+             open_shift=False) -> dict:
+    """A scheduled shift (times as Unix seconds)."""
+    return {"id": shift_id, "title": title, "startTime": start, "endTime": end,
+            "timezone": "UTC", "assignedUserIds": list(users), "jobId": job,
+            "isOpenShift": open_shift, "isPublished": published, "breaks": [], "statuses": []}
+
+
+def ct_form(form_id, name, questions=()) -> dict:
+    """A form; questions: (question ID, title, type)."""
+    return {"formId": form_id, "formName": name, "createdAt": 1_700_000_000,
+            "lastUpdatedAt": 1_700_000_000, "settings": {},
+            "questions": [{"questionId": q, "title": t, "questionType": k, "description": ""}
+                          for q, t, k in questions]}
+
+
+def ct_submission(submission_id, form_id, user_id, at, answers=()) -> dict:
+    """A form submission at Unix time `at`. answers: Connecteam answer objects, such as
+    {"questionId": "q1", "questionType": "openEnded", "value": "Leaking tap",
+    "wasSubmittedEmpty": False}."""
+    return {"formSubmissionId": submission_id, "formId": form_id, "submissionTimestamp": at,
+            "submissionTimezone": "UTC", "entryNum": 1, "submittingUserId": user_id,
+            "isAnonymous": user_id is None, "managerFields": [], "answers": list(answers),
+            "submissionStartTimestamp": at - 60}
+
+
 def fresh_connecteam() -> None:
     c = main.connecteam
     c.forget()
@@ -114,6 +209,10 @@ def fresh_connecteam() -> None:
     c.pause_reason = None
     c._recent.clear()
     c._hr_recent.clear()
+    c._reports_recent.clear()
+    c.reports_paused_until = 0.0
+    c.reports_pause_reason = None
+    c.reports_failures = 0
     c.hr_paused_until = 0.0
     c.hr_pause_reason = None
     c.hr_failures = 0

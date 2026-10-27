@@ -19,6 +19,7 @@ import collections
 import dataclasses
 import functools
 import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -42,8 +43,11 @@ from layout import (apply_auto_order, apply_phone_order, clean_layout, clean_pho
                     clean_phone_pages, expand_page_choice, keep_removed_groups, layout_overrides,
                     visible_layout)
 from ha import HomeAssistant, HomeAssistantError, LinkError
+import ctdata
 import migrate
+import reports as reports_kit
 import transfer
+import connecteam as connecteam_module
 from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
@@ -143,13 +147,25 @@ def load_hr_connecteam_usage() -> dict:
     return usage if isinstance(usage, dict) and isinstance(usage.get("count"), int) else {}
 
 
+def load_reports_connecteam_usage() -> dict:
+    try:
+        usage = json.loads(db.settings().get("reports_connecteam_usage") or "{}")
+    except ValueError:
+        return {}
+    return usage if isinstance(usage, dict) and isinstance(usage.get("count"), int) else {}
+
+
 USER_AGENT = f"HomeAssistant-StaffPortal/{VERSION} (+https://github.com/liamdayan/ha-staff-portal)"
 connecteam = Connecteam(
     connecteam_settings, connecteam_wanted,
     (load_connecteam_usage, lambda u: db.update_settings({"connecteam_usage": json.dumps(u)})),
     USER_AGENT,
     hr_usage_store=(load_hr_connecteam_usage,
-                    lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})))
+                    lambda u: db.update_settings({"hr_connecteam_usage": json.dumps(u)})),
+    reports_usage_store=(load_reports_connecteam_usage,
+                         lambda u: db.update_settings({"reports_connecteam_usage": json.dumps(u)})))
+# Reports and tasks read Connecteam through ctdata, in their own lane of the same budget.
+ctdata.configure(connecteam, lambda: report_zone())
 
 
 def tthotel_settings() -> tuple[bool, str, str, str, str, str, int]:
@@ -1244,6 +1260,9 @@ async def api_entities(request: web.Request):
         # whether this computer's encoder is This computer (USB), reached through this app.
         "wristbands": offer_wristbands,
         "encoder_local": offer_wristbands and encoder_mode(device) == "local",
+        # Whether to offer Reports: someone signed in may see at least one (each report checks
+        # again on every request).
+        "reports": bool(visible_reports(member)),
     })
 
 
@@ -2249,6 +2268,246 @@ def recover_wristband_jobs() -> None:
                ok=False)
 
 
+# ---------------------------------------------------------------- reports (staff app)
+# Reports (app/reports/<key>/, see REPORTS.md): each one's on/off, and which departments may view
+# and manage it, are set in the dashboard's Reports tab and checked here on every request. Only
+# someone signed in with their own PIN (on a shared or role-based device) has a department, so a
+# kiosk device nobody signs in to shows none. Their Connecteam data comes through ctdata (its own
+# lane of the budget, asked only when a report is opened), and files a manager uploads are kept
+# under DATA_DIR/reports/<key>/uploads/.
+
+REPORTS = reports_kit.discover()
+REPORT_REQUESTS_PER_MINUTE = 30      # per device: opening reports, changing weeks, uploads
+REPORT_TICKET_SECONDS = 3600         # how long a report's view.js address works
+REPORT_TICKET_KEY = secrets.token_bytes(32)   # new at each start: older addresses stop working
+NO_REPORT = "You don't have access to that report."
+NO_PERSON = "Sign in with your own PIN to see reports."
+recent_report_requests: dict[int, list[float]] = {}
+
+
+def report_zone() -> ZoneInfo:
+    """The property's time zone for reports and tasks: the one in Wristbands settings, else Home
+    Assistant's as last read, else UTC. Never waits for Home Assistant."""
+    for name in (db.settings().get("wb_time_zone"), ha_zone["name"]):
+        try:
+            if name:
+                return ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+    return ZoneInfo("UTC")
+
+
+def report_rights(member: dict | None, key: str, access: dict | None = None) -> tuple[bool, bool]:
+    """(may view, may manage) a report: it exists, it's on, and the person's department is one
+    the owner chose (manage includes view)."""
+    report = REPORTS.get(key)
+    if not member or not report or report.hidden or staff_off(member):
+        return False, False
+    access = access or db.report(key)
+    dept = member.get("department_id")
+    if not access["enabled"] or dept is None:
+        return False, False
+    manage = dept in access["manage"]
+    return manage or dept in access["view"], manage
+
+
+def visible_reports(member: dict | None) -> list[str]:
+    """The reports this person may see, in the order they're listed."""
+    if not member:
+        return []
+    access = db.reports()
+    return sorted((k for k in REPORTS if k in access and report_rights(member, k, access[k])[0]),
+                  key=lambda k: REPORTS[k].name.lower())
+
+
+def reports_too_busy(device_id: int) -> bool:
+    now = time.time()
+    times = [t for t in recent_report_requests.get(device_id, []) if now - t < 60]
+    busy = len(times) >= REPORT_REQUESTS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_report_requests[device_id] = times
+    return busy
+
+
+def report_caller(request: web.Request, manage: bool = False,
+                  limit: bool = True) -> tuple[dict, dict, bool]:
+    """(device, signed-in person, whether they may manage it) for a request about the report in
+    the address, or raise the error the app should show. manage: uploading or changing settings,
+    which only people allowed to manage the report may do."""
+    device, member = authenticate(request, active=manage)
+    if not member:
+        raise json_error(web.HTTPForbidden, NO_PERSON)
+    if limit and reports_too_busy(device["id"]):
+        raise json_error(web.HTTPTooManyRequests, "Too many requests at once. Wait a moment and "
+                                                  "try again.")
+    view, can_manage = report_rights(member, request.match_info["key"])
+    if not view or (manage and not can_manage):
+        if manage:
+            db.log(actor_name(device, member), "Blocked: report",
+                   role=role_label(device, member), detail=request.match_info["key"][:40],
+                   ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden, NO_REPORT)
+    return device, member, can_manage
+
+
+def report_ticket(key: str, device_id: int, staff_id: int, now: float | None = None) -> str:
+    """A view.js or view.css address's proof that this person on this device may see the report
+    (a script tag can't send the app's sign-in): signed here, and checked again when used."""
+    expires = int((time.time() if now is None else now) + REPORT_TICKET_SECONDS)
+    body = f"{device_id}.{staff_id}.{expires}"
+    sig = hmac.new(REPORT_TICKET_KEY, f"{key}|{body}".encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{body}.{sig}"
+
+
+def ticket_allows(key: str, ticket: str) -> bool:
+    parts = ticket.split(".")
+    if len(parts) != 4 or not all(p.isdigit() for p in parts[:3]) or len(parts[0] + parts[1]) > 24:
+        return False
+    device_id, staff_id, expires = (int(p) for p in parts[:3])
+    good = report_ticket(key, device_id, staff_id, expires - REPORT_TICKET_SECONDS)
+    if not hmac.compare_digest(good, ticket) or expires < time.time():
+        return False
+    device, member = db.device(device_id), db.staff(staff_id)
+    return bool(device and device["status"] == "active" and is_shared(device) and member
+                and member["status"] == "active" and db.staff_allowed_on(staff_id, device)
+                and report_rights(member, key)[0])
+
+
+def report_view(report, device: dict, member: dict, manage: bool) -> dict:
+    """A report as the staff app lists it: where its view is, and its uploads' newest files."""
+    ticket = report_ticket(report.key, device["id"], member["id"])
+    uploads = []
+    for u in report.uploads:
+        latest = reports_kit.uploads(DATA_DIR, report.key, u["key"], text=False)[:1]
+        uploads.append({k: u[k] for k in ("key", "name", "help", "accept")} | {
+            "max_bytes": u["max_bytes"], "latest": latest[0] if latest else None})
+    return {**report.public(), "manage": manage, "uploads": uploads,
+            "view_js": f"/reports/{report.key}/view.js?a={ticket}",
+            "view_css": f"/reports/{report.key}/view.css?a={ticket}" if report.has_css else None}
+
+
+async def api_reports(request: web.Request):
+    device, member = authenticate(request)
+    if not member:
+        raise json_error(web.HTTPForbidden, NO_PERSON)
+    access = db.reports()
+    return web.json_response({"reports": [
+        report_view(REPORTS[key], device, member, report_rights(member, key, access[key])[1])
+        for key in visible_reports(member)]})
+
+
+def report_context(report, member: dict, manage: bool) -> "reports_kit.Context":
+    dept = db.department(member["department_id"]) if member.get("department_id") else None
+    return reports_kit.Context(
+        ct=ctdata, report=report, data_dir=DATA_DIR,
+        settings=reports_kit.stored_settings(report, db.report(report.key)["settings"]),
+        person={"id": member["id"], "name": member["name"],
+                "connecteam_user_id": member.get("connecteam_user_id"),
+                "departments": [{"id": dept["id"], "name": dept["name"]}] if dept else []},
+        departments=[{"id": d["id"], "name": d["name"], "smart_group_id": d["smart_group_id"]}
+                     for d in db.departments()],
+        tz=report_zone(), manage=manage)
+
+
+async def api_report_data(request: web.Request):
+    """Run a report's data(ctx, params) for the person signed in."""
+    device, member, manage = report_caller(request)
+    report = REPORTS[request.match_info["key"]]
+    if not db.settings().get("wb_time_zone"):
+        await ha_time_zone()   # so report_zone() knows Home Assistant's zone
+    ctx = report_context(report, member, manage)
+    params = reports_kit.clean_params(report, request.query)
+    try:
+        data = await report.data(ctx, params)
+        if not isinstance(data, dict):
+            raise TypeError("data() must return a dict")
+        body = json.dumps({"data": data, "settings": ctx.settings, "manage": manage,
+                           "params": params})
+    except ctdata.Unavailable as err:
+        return bad_request(str(err), 503, unavailable=True)
+    except ValueError as err:
+        return bad_request(str(err)[:300])
+    except Exception:  # noqa: BLE001 - a report's own bug mustn't take the app down
+        log.exception("Report %s failed", report.key)
+        return bad_request("This report couldn't be made. Try again later.", 500)
+    return web.Response(text=body, content_type="application/json")
+
+
+async def read_upload_file(request: web.Request, limit: int) -> tuple[str, bytes]:
+    """The "file" field of a multipart upload: (its file name, its bytes, read up to limit).
+    Raises ValueError, and HTTPRequestTimeout like read_json."""
+    try:
+        async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
+            try:
+                reader = await request.multipart()
+            except (AssertionError, KeyError, ValueError):
+                raise ValueError("Choose a file to upload.") from None
+            while (part := await reader.next()) is not None:
+                if getattr(part, "name", None) != "file":
+                    await part.release()
+                    continue
+                data = bytearray()
+                while chunk := await part.read_chunk(64 * 1024):
+                    data.extend(chunk)
+                    if len(data) > limit:
+                        raise ValueError(f"That file is too big (at most "
+                                         f"{reports_kit._size(limit)}).")
+                return part.filename or "", bytes(data)
+    except TimeoutError:
+        raise web.HTTPRequestTimeout(text="The upload took too long to arrive.") from None
+    raise ValueError("Choose a file to upload.")
+
+
+async def api_report_upload(request: web.Request):
+    """A file for a report (a Gusto export, say), from someone who may manage it."""
+    device, member, _ = report_caller(request, manage=True)
+    report = REPORTS[request.match_info["key"]]
+    upload = next((u for u in report.uploads if u["key"] == request.match_info["upload"]), None)
+    if not upload:
+        return bad_request("This report has no such upload.", 404)
+    try:
+        filename, raw = await read_upload_file(request, upload["max_bytes"])
+        name, _ = reports_kit.check_file(upload, filename, raw)
+        meta = await asyncio.to_thread(reports_kit.save_upload, DATA_DIR, report.key, upload,
+                                       name, raw, member["name"])
+    except ValueError as err:
+        return bad_request(str(err))
+    except OSError as err:
+        log.warning("Couldn't save an upload for report %s: %s", report.key, err)
+        return bad_request("The file couldn't be saved. Try again.", 500)
+    db.log(actor_name(device, member), f"Uploaded a file to {report.name}",
+           role=role_label(device, member), detail=f"{upload['name']}: {name}",
+           ip=client_ip(request))
+    return web.json_response({"ok": True, "latest": meta})
+
+
+async def api_report_settings(request: web.Request):
+    """A report's own settings, from someone who may manage it."""
+    device, member, _ = report_caller(request, manage=True)
+    report = REPORTS[request.match_info["key"]]
+    try:
+        settings = reports_kit.clean_settings(report, await read_json(request))
+    except ValueError as err:
+        return bad_request(str(err)[:300])
+    db.set_report(report.key, actor_name(device, member), settings=settings)
+    db.log(actor_name(device, member), f"Changed the settings of {report.name}",
+           role=role_label(device, member), ip=client_ip(request))
+    return web.json_response({"settings": reports_kit.stored_settings(report, settings)})
+
+
+async def report_file(request: web.Request):
+    """A report's view.js or view.css, for an address api_reports gave this person."""
+    key, name = request.match_info["key"], request.match_info["file"]
+    report = REPORTS.get(key)
+    if (not report or (name == "view.css" and not report.has_css)
+            or not ticket_allows(key, request.query.get("a", ""))):
+        raise web.HTTPNotFound()
+    return web.FileResponse(os.path.join(report.folder, name), headers={
+        "Content-Type": "text/javascript" if name == "view.js" else "text/css",
+        "Cache-Control": "no-store"})
+
+
 # ---------------------------------------------------------------- encoder links (staff app)
 # A computer whose card encoder is This computer (USB) is never connected to by the add-on.
 # The staff app open on it (someone signed in who may make wristbands, Wristbands open) keeps a
@@ -2744,6 +3003,12 @@ def staff_app() -> web.Application:
     app.router.add_post("/api/wristbands/lookup/revoke", api_lookup_revoke)
     app.router.add_post("/api/encoder/ticket", api_encoder_ticket)
     app.router.add_get("/api/encoder/link", api_encoder_link)
+    app.router.add_get("/api/reports", api_reports)
+    app.router.add_get(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}", api_report_data)
+    app.router.add_post(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}/uploads/{upload:[a-z][a-z0-9_]{0,39}}",
+                        api_report_upload)
+    app.router.add_put(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}/settings", api_report_settings)
+    app.router.add_get(r"/reports/{key:[a-z][a-z0-9_]{0,39}}/{file:view\.js|view\.css}", report_file)
     # TT Hotel's lock records (door activity): the secret address is the only way in.
     app.router.add_post(r"/tthotel/records/{token:[A-Za-z0-9_-]{1,100}}", tthotel_records)
     app.on_shutdown.append(close_all_links)
@@ -6007,6 +6272,71 @@ async def admin_hr_sync(request: web.Request):
     return web.json_response(result)
 
 
+# ---------------------------------------------------------------- reports (dashboard)
+
+def reports_lane_state() -> dict:
+    """The reports lane of the Connecteam budget, for the Reports tab."""
+    now = time.time()
+    return {"used_today": connecteam.reports_usage()["count"],
+            "daily_cap": connecteam_module.REPORTS_DAILY_CAP,
+            "minute_cap": connecteam_module.REPORTS_MINUTE_CAP,
+            "paused": (connecteam.reports_pause_reason
+                       if connecteam.reports_paused_until > now else None)}
+
+
+async def admin_reports(request: web.Request):
+    access = db.reports()
+    departments = {d["id"] for d in db.departments()}
+    listed = []
+    for key, report in sorted(REPORTS.items(), key=lambda kv: kv[1].name.lower()):
+        if report.hidden:
+            continue
+        a = access.get(key) or db.report(key)
+        listed.append({**report.public(), "enabled": a["enabled"],
+                       "view": [i for i in a["view"] if i in departments],
+                       "manage": [i for i in a["manage"] if i in departments],
+                       "uploads": [{"key": u["key"], "name": u["name"],
+                                    "files": reports_kit.uploads(DATA_DIR, key, u["key"], text=False)}
+                                   for u in report.uploads]})
+    return web.json_response({"reports": listed, "lane": reports_lane_state()})
+
+
+def department_ids(raw, known: set[int]) -> list[int]:
+    if not isinstance(raw, list) or len(raw) > 1000:
+        raise ValueError("Pick departments from the list.")
+    ids = sorted({i for i in raw if isinstance(i, int) and not isinstance(i, bool)})
+    if any(i not in known for i in ids):
+        raise ValueError("One of those departments doesn't exist any more. Reload the page.")
+    return ids
+
+
+async def admin_update_report(request: web.Request):
+    report = REPORTS.get(request.match_info["key"])
+    if not report or report.hidden:
+        raise web.HTTPNotFound()
+    data = await read_json(request)
+    known = {d["id"] for d in db.departments()}
+    fields = {}
+    try:
+        if "enabled" in data:
+            fields["enabled"] = data["enabled"] is True
+        for name in ("view", "manage"):
+            if name in data:
+                fields[name] = department_ids(data[name], known)
+    except ValueError as err:
+        return bad_request(str(err))
+    before = db.report(report.key)
+    db.set_report(report.key, admin_name(request), **fields)
+    after = db.report(report.key)
+    names = {d["id"]: d["name"] for d in db.departments()}
+    said = lambda ids: ", ".join(names[i] for i in ids) or "nobody"
+    detail = (f"{'On' if after['enabled'] else 'Off'}. View: {said(after['view'])}. "
+              f"Manage: {said(after['manage'])}.")
+    db.log(admin_name(request), f"Changed report {report.name}",
+           detail=detail if after != before else None)
+    return web.json_response({"ok": True})
+
+
 # ---------------------------------------------------------------- export, import, backup
 
 def download(data: dict, kind: str) -> web.Response:
@@ -6253,6 +6583,9 @@ async def admin_migrate_create(request: web.Request):
     def build(database):
         snap = migrate.make_snapshot(database, branding, VERSION)
         snap["migrate"]["hr"] = hr_service.export()   # encrypted already; None if HR was never on
+        # Files uploaded to reports: never in backups (staff data that changes weekly), but a
+        # migration moves everything.
+        snap["migrate"]["report_uploads"] = reports_kit.all_uploads(DATA_DIR, REPORTS)
         return snap
     db.log(admin_name(request), "Created a migration file",
            detail="It opens for 24 hours, only with the code shown when it was made.")
@@ -6303,6 +6636,7 @@ async def admin_migrate_restore(request: web.Request):
         del file
         snap = await asyncio.to_thread(migrate.clean_snapshot, data, clean_settings, db.settings(),
                                        branding.clean_logo)
+        report_uploads = reports_kit.clean_uploads(data["migrate"].get("report_uploads"), REPORTS)
     except ValueError as err:
         return bad_request(str(err))
     summary = transfer.backup_summary(data)
@@ -6326,6 +6660,10 @@ async def admin_migrate_restore(request: web.Request):
             hr_problem = HR_NOT_RESTORED
     if hr_service.enabled():
         hr_service.start()   # locked until the recovery key is typed, if it was kept out
+    try:
+        await asyncio.to_thread(reports_kit.restore_uploads, DATA_DIR, report_uploads, REPORTS)
+    except OSError as err:
+        log.warning("Couldn't restore the reports' uploaded files: %s", err)
     for device in snap["devices"]:
         if device["status"] == "pending" and device["id"] not in snap["migrate"]["setup_codes"]:
             db.new_enroll_code(device["id"])
@@ -6506,6 +6844,8 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/hr/sign-out-everyone", admin_hr_sign_out_everyone)
     app.router.add_post("/api/hr/unlock-key", admin_hr_unlock_key)
     app.router.add_post("/api/hr/sync", admin_hr_sync)
+    app.router.add_get("/api/reports", admin_reports)
+    app.router.add_put(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}", admin_update_report)
     return app
 
 

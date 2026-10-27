@@ -1,0 +1,174 @@
+# Adding a report
+
+A guide for Claude or a developer. A report is one folder of code; dropping it in is all it
+takes. Nothing else in the add-on changes: the folder is found at startup, the owner turns it on
+and picks departments in the dashboard's **Reports** tab, and staff open it under **Reports** in
+the staff app.
+
+## 1. Copy the template
+
+```
+cp -r app/reports/_template app/reports/<key>
+```
+
+`<key>` is the report's name in code: lower-case letters, digits and `_`, starting with a letter
+(`attendance`, `pool_checks`). Folders starting with `_` are hidden, which is why the template
+never shows.
+
+In the copy, change `key="template"` in `report.py` and `StaffReports.register("template", ...)`
+in `view.js` to the new key. The folder holds:
+
+| File | What it is |
+|---|---|
+| `report.py` | `REPORT = dict(...)` and an async `data(ctx, params)` that returns a dict |
+| `view.js` | `StaffReports.register("<key>", {render(el, data, api)})`: draws the dict |
+| `view.css` | optional styles, for this report only |
+
+## 2. report.py
+
+```python
+async def data(ctx, params):
+    rows = await ctx.ct.timesheets(start, end)
+    return {"people": [...]}          # anything JSON can hold
+
+REPORT = dict(
+    key="<key>",                       # the folder's name
+    name="Hours this week",            # shown in the list
+    description="One line under the name.",
+    data=data,                         # must be async
+    params={"week": ""},               # query params data() gets, with defaults (others ignored)
+    uploads=[{"key": "gusto", "name": "Gusto time off", "accept": ".csv",
+              "help": "Reports > Time Off Balances, as CSV."}],
+    settings=[{"key": "rules", "default": {}}],   # keys managers may save, with defaults
+    # check_settings=fn,               # optional: fn(settings) -> settings, raise ValueError
+)
+```
+
+- Import only the standard library (`datetime`, `csv`, `io`, `json`...). Everything from the
+  add-on comes in through `ctx`.
+- `params` values arrive as text (at most 200 characters each): check them. Raise `ValueError`
+  with a short, plain sentence for bad input; the app shows it as it is.
+- Return plain data (dicts, lists, text, numbers). Do the presentation in `view.js`.
+- A report's own bug never takes the app down: it shows "This report couldn't be made", and the
+  error goes to the add-on's log.
+
+### What ctx has
+
+| | |
+|---|---|
+| `ctx.ct` | Connecteam data (`app/ctdata.py`), below |
+| `ctx.uploads(key)` | that upload's files, newest first: `[{name, text, uploaded_at, by}]` (at most 5) |
+| `ctx.settings` | the report's settings: the declared defaults, with what managers saved over them |
+| `ctx.person` | `{id, name, connecteam_user_id, departments: [{id, name}]}` |
+| `ctx.departments` | every department: `[{id, name, smart_group_id}]` (Connecteam smart groups) |
+| `ctx.tz` | the property's time zone (a `ZoneInfo`) |
+| `ctx.today` | today's date there |
+| `ctx.manage` | whether this person may manage the report |
+
+### ctx.ct: Connecteam
+
+All async, all cached (the same range is asked again at most every 10 minutes), all in the
+property's time zone. Times are `"YYYY-MM-DDTHH:MM"`, dates `"YYYY-MM-DD"`, user IDs text.
+`start` and `end` are dates (or `"YYYY-MM-DD"`), both included, at most 400 days apart.
+
+```python
+await ctx.ct.timesheets(start, end)
+# [{user_id, name, date, clock_in, clock_out, break_minutes, job, type, hours,
+#   sched_start, sched_end}]  type: "shift", "break" (a manual break; its length in
+#   break_minutes) or "time_off". clock_out and hours are None while still on the clock.
+await ctx.ct.shifts(start, end)
+# [{user_id, name, date, start, end, job, title, draft, open}]  one row per person; an open
+#   shift nobody took has user_id None
+await ctx.ct.forms()                       # [{id, name, questions: [{id, title, type}]}]
+await ctx.ct.form_submissions(form_id, start, end)
+# [{id, user_id, name, submitted_at, answers: [{question, answer}]}]  answers as plain text;
+#   start may be a datetime (only submissions from then on)
+await ctx.ct.users()                       # [{user_id, name, groups}]
+```
+
+Each raises `ctx.ct.Unavailable(message)` when Connecteam can't answer: a missing scope (the
+message names it and quotes Connecteam), the reports budget, or no connection. Let it pass: the
+app shows the message with **Try again**. Catch it only to carry on without optional data.
+
+### Uploads
+
+Declare each kind in `uploads`. `accept` lists text types only (`.csv`, `.tsv`, `.txt`, `.json`);
+files are at most 2 MB unless you set `max_bytes` (up to 5 MB). Only people who may manage the
+report can upload. The newest 5 of each kind are kept under `DATA_DIR/reports/<key>/uploads/`;
+use `ctx.uploads(key)[0]` for the latest. Uploads go in migration files, not in backups.
+
+### Settings
+
+Declare the keys in `settings`. Managers save them from the view with `api.saveSettings({...})`;
+only declared keys are kept, at most 48 KB as JSON. Add `check_settings` to clean or refuse them.
+Everyone else sees them read-only (`api.manage` is false).
+
+## 3. view.js
+
+```js
+StaffReports.register("<key>", {
+  render(el, data, api) {
+    // el: the box to draw in. data: what data() returned. Redrawn from scratch each time.
+    el.replaceChildren(api.h("p", null, `${data.people.length} people`));
+  },
+});
+```
+
+`el.replaceChildren(a, null)` prints the word "null": leave out empty parts first
+(`...[a, b].filter(Boolean)`). `api.h` skips null and false children itself.
+
+`api` has:
+
+| | |
+|---|---|
+| `h(tag, attrs, ...children)` | builds elements; children are always text, never HTML |
+| `refresh(params)` | runs data() again with these params (merged with the current ones) and redraws |
+| `upload(key, file)` | uploads a `File` (from an `<input type="file">`); redraws when done |
+| `saveSettings(obj)` | saves settings; redraws when done |
+| `toast(text, isError)` | a short message |
+| `download(name, text)` | saves text as a file (CSV) |
+| `csvCell(value)` | one CSV cell, quoted when needed |
+| `manage`, `settings`, `params`, `report` | who's looking, the settings, the params used, the report's details |
+
+Shared classes in the app's styles, light and dark: `rp-card`, `rp-toolbar`, `rp-btn` (and
+`rp-btn primary`), `rp-table-wrap` with `rp-table` (and `num` cells), `rp-kpis` with `rp-kpi`
+(`<b>` value, `<span>` label), `rp-field`, `rp-muted`, `rp-noprint`. Use the app's colours:
+`var(--accent)`, `var(--text)`, `var(--muted)`, `var(--card)`, `var(--card-2)`, `var(--line)`,
+`var(--alert)`. Printing (the browser's Print, or Save as PDF) shows only the report; add an
+`@media print` block to `view.css` for more.
+
+## 4. The rules
+
+- **Budget.** Connecteam is only asked through `ctx.ct`, which has its own lane: at most 4 requests
+  a minute and 300 a day, and none once Staff Access has used half its daily share, so the clock
+  checks always have room. Ask for the range the person is looking at, not more. Never ask
+  Connecteam (or anything else) directly, and don't fetch anything in the background.
+- **CSP.** The staff app's strict rules apply: no inline scripts, `onclick=` attributes,
+  `style=` attributes, `eval`, or scripts and fonts from other sites. Use `api.h` with `on...`
+  handlers in attrs, classes in `view.css`, and the app's own fonts. (`el.style.x = ...` from
+  script is fine.)
+- **Text is text.** Never use `innerHTML` with anything from data: names and form answers are
+  typed by people.
+- **Access.** The server checks who may view and manage on every request; the view only hides
+  controls (`api.manage`). Don't send data a viewer shouldn't see: data() decides what goes out.
+- **Phone first.** It must work at 390 px wide with no sideways scrolling (wide tables scroll
+  inside `rp-table-wrap`), in light and dark mode.
+- **Wording.** Short, plain English.
+
+## 5. Test it
+
+Copy `tests/test_report_template.py` to `tests/test_report_<key>.py`. It loads the folder as the
+add-on does and calls `data()` with a `FakeCtx` whose `ct` is a `StubCt` (both in
+`tests/report_helpers.py`): give it timesheet, shift and form rows, uploads and settings, and
+check what comes back. `StubCt(unavailable="...")` makes every call raise `Unavailable`. To test
+against a fake Connecteam instead, `tests/hr_helpers.py` has `FakeConnecteam` with time
+activities, schedules, jobs, forms and submissions (`ct_activity`, `ct_shift`, `ct_form`,
+`ct_submission`).
+
+```
+cd staff_portal && /path/to/venv/bin/python -B -m pytest -q -p no:cacheprovider tests/test_report_<key>.py
+node --check app/reports/<key>/view.js
+```
+
+Then restart the add-on, turn the report on in the **Reports** tab, pick departments, and open it
+in the staff app on a phone-sized window, in light and dark mode.

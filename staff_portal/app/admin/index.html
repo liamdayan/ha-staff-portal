@@ -21,6 +21,7 @@
   <button role="tab" data-tab="roles">Roles</button>
   <button role="tab" data-tab="wristbands">Wristbands</button>
   <button role="tab" data-tab="layout">Layout</button>
+  <button role="tab" data-tab="reports">Reports</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
   <button role="tab" data-tab="backup">Backup</button>
@@ -490,6 +491,15 @@
       </fieldset>
     </div>
     <input type="file" id="import-file" accept=".json,.gz,application/json,application/gzip" hidden>
+  </section>
+
+  <section id="tab-reports" class="tab" hidden>
+    <div class="section-head"><h2>Reports</h2></div>
+    <p class="hint">Reports appear in the staff app, under <b>Reports</b>, for people signed in with their
+      own PIN. Choose who gets each one by department. People in a department that may <b>manage</b> a
+      report can also upload its files (such as a Gusto export) and change its settings. Connecteam
+      is asked only when someone opens a report: <span id="reports-lane"></span></p>
+    <div id="report-list" class="cards"></div>
   </section>
 
   <section id="tab-hr" class="tab" hidden>

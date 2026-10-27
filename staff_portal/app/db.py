@@ -232,6 +232,19 @@ CREATE TABLE IF NOT EXISTS departments (
     card_lockout INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
+
+-- Reports (app/reports/): whether each is on, which departments may view it and which may
+-- manage it (upload files, change its settings), and its own settings. One row per report
+-- key, made when the owner first changes it; no row = off. In backups.
+CREATE TABLE IF NOT EXISTS reports (
+    key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    view_departments TEXT NOT NULL DEFAULT '[]',    -- JSON list of department IDs
+    manage_departments TEXT NOT NULL DEFAULT '[]',
+    settings TEXT NOT NULL DEFAULT '{}',            -- JSON object: the report's own settings
+    updated_at REAL,
+    updated_by TEXT
+);
 """
 
 # Columns added after the first release, applied to existing databases on startup.
@@ -451,6 +464,8 @@ DEFAULT_SETTINGS = {
     # The HR portal's Connecteam reads today, in its own lane (internal: connecteam.hr_spend).
     # All the hr_ settings are private: never in Staff Access's own backups or /api/state.
     "hr_connecteam_usage": "{}",
+    # Reports' and tasks' Connecteam requests today, in their own lane (internal: ctdata.py).
+    "reports_connecteam_usage": "{}",
 }
 
 # Settings that never leave the add-on: not shown in the dashboard (only whether they're set),
@@ -460,7 +475,7 @@ PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_cli
                     "tthotel_password_md5", "tthotel_token", "tthotel_usage",
                     "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_usage",
                     "hr_google_url", "hr_google_secret", "hr_google_drive",
-                    "hr_google_restricted_drive", "hr_google_status")
+                    "hr_google_restricted_drive", "hr_google_status", "reports_connecteam_usage")
 
 # Settings of older versions, removed when the add-on starts: the HR portal's own Connecteam app,
 # chat and certificate copies (0.10.0 to 0.10.3; it only reads, through the one connection, now).
@@ -582,6 +597,24 @@ def card_access_choice(raw) -> list[dict] | None:
     except (TypeError, ValueError, RecursionError):
         return []
     return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
+
+
+def _report_row(row) -> dict:
+    def ids(raw):
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return [i for i in value if isinstance(i, int) and not isinstance(i, bool)] if isinstance(
+            value, list) else []
+    try:
+        settings = json.loads(row["settings"])
+    except (TypeError, ValueError):
+        settings = {}
+    return {"enabled": bool(row["enabled"]), "view": ids(row["view_departments"]),
+            "manage": ids(row["manage_departments"]),
+            "settings": settings if isinstance(settings, dict) else {},
+            "updated_at": row["updated_at"], "updated_by": row["updated_by"]}
 
 
 def page_choice(raw) -> list[str] | None:
@@ -939,6 +972,30 @@ class Database:
         self.conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
         self.conn.commit()
 
+    # Reports
+
+    def reports(self) -> dict[str, dict]:
+        """Every report's access and settings, by key: {enabled, view, manage, settings}."""
+        return {r["key"]: _report_row(r) for r in self.conn.execute("SELECT * FROM reports")}
+
+    def report(self, key: str) -> dict:
+        row = self.conn.execute("SELECT * FROM reports WHERE key = ?", (key,)).fetchone()
+        return _report_row(row) if row else {"enabled": False, "view": [], "manage": [],
+                                             "settings": {}, "updated_at": None,
+                                             "updated_by": None}
+
+    def set_report(self, key: str, by: str, **fields) -> None:
+        """Change a report's enabled, view, manage (lists of department IDs) or settings."""
+        current = self.report(key)
+        current.update(fields)
+        self.conn.execute(
+            """INSERT OR REPLACE INTO reports (key, enabled, view_departments, manage_departments,
+               settings, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (key, int(bool(current["enabled"])), json.dumps(current["view"]),
+             json.dumps(current["manage"]), json.dumps(current["settings"]), time.time(),
+             str(by)[:120]))
+        self.conn.commit()
+
     # Devices (staff phones)
 
     def devices(self) -> list[dict]:
@@ -1285,6 +1342,16 @@ class Database:
                         c.execute(f"""UPDATE {table} SET ha_user = ?, ha_refresh_token = ?,
                                       ha_link_error = ? WHERE id = ?""",
                                   (old["ha_user"], old["ha_refresh_token"], old["ha_link_error"], row["id"]))
+            # Report access and settings (backups from before reports have none: None leaves
+            # the ones here as they are).
+            if snap.get("reports") is not None:
+                c.execute("DELETE FROM reports")
+                c.executemany(
+                    """INSERT INTO reports (key, enabled, view_departments, manage_departments,
+                       settings, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    [(r["key"], r["enabled"], json.dumps(r["view"]), json.dumps(r["manage"]),
+                      json.dumps(r["settings"]), r["updated_at"], r["updated_by"])
+                     for r in snap["reports"]])
             if migrate:
                 self._apply_migration(migrate, kept)
             # Card jobs stay with the people who made them, by the same rule: a job whose maker

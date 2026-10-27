@@ -1,0 +1,2 @@
+/* Template report: only what the shared rp- classes (app.css) don't cover. */
+.tpl-short { color: var(--alert); font-weight: 700; }
