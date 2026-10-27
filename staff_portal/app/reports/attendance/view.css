@@ -54,7 +54,14 @@
 .att-btn.primary { background: var(--accent); color: #fff; }
 .att-btn.ghost { background: none; color: var(--muted); }
 .att-btn[disabled] { opacity: 0.45; cursor: default; }
-.att-select { -webkit-appearance: none; appearance: none; max-width: 100%; min-width: 0; padding-right: 14px; }
+.att-select { -webkit-appearance: none; appearance: none; max-width: 100%; min-width: 0; }
+/* Drop-downs show a chevron, as in the staff app (appearance: none hides the browser's own). */
+.att-select, select.att-input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 18px;
+  padding-right: 40px; cursor: pointer;
+}
+select.att-input[disabled] { cursor: default; }
 .att-file-btn { position: relative; overflow: hidden; justify-self: start; }
 .att-file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .att-round {
