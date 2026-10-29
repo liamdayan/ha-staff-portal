@@ -753,12 +753,18 @@ def _incident_fields(db, person: dict, data: dict, today: date) -> dict:
     changed = manager_points is not None and manager_points != o["points"]   # the offence's own
     if changed and not reason and not s["ctx"]["protected"]:
         raise ValueError("Say why you chose different points.")
+    # On probation its policy can give the offence other points: a choice that isn't those is
+    # kept too, or HR's approval would score it from them instead.
+    special = (policy.probation_policy(body, s["ctx"]["on_probation"]) or {}).get(
+        "overrides", {}).get(o["key"])
+    kept = changed or (manager_points is not None and special is not None
+                       and manager_points != special["points"])
     return {"offence_key": o["key"], "offence_name": o["name"][:120],
             "category": str(o["category"] or "")[:60], "track": track_of(body, o),
             "happened": happened.isoformat(), "what": seal(what, "incident.what"),
             "protected": leave, "default_points": s["default"],
-            "manager_points": manager_points if changed else None,
-            "manager_reason": seal(reason, "incident.manager_reason") if changed else None,
+            "manager_points": manager_points if kept else None,
+            "manager_reason": seal(reason, "incident.manager_reason") if kept else None,
             "final_points": s["final"], "version_id": version_id,
             "probation_key": s["ctx"]["on_probation"], "_body": body, "_offence": o,
             "_repeat": s["repeat"]}
@@ -931,6 +937,13 @@ def approve_incident(db, inc: dict, actor_id, actor: str, *, hr_points=None, hr_
     if scored != recorded:
         what += f" (the rules give {fmt(scored)} now, {fmt(recorded)} when it was recorded)"
     event(db, inc["person_id"], what, actor_id, actor, incident_id=inc["id"])
+    # From a probation already passed that clears its points: they never count (as its
+    # incidents approved before the pass stopped counting then).
+    prob = probation.current(db, inc["person_id"], happened)
+    if prob and prob["status"] == "passed" and probation.policy_for(
+            db, prob["policy_key"], prob["kind"]).get("on_pass") == "clear":
+        points.set_ends(db, inc["person_id"], today, actor_id,
+                        "Passed probation: its points are cleared.", incident_id=inc["id"], starts=today)
     db.conn.commit()
     return evaluate_step(db, person, get_incident(db, inc["id"]), actor_id, actor, today,
                          repeat=s["repeat"])
@@ -1016,7 +1029,7 @@ def return_incident(db, inc: dict, note: str, actor_id, actor: str) -> None:
 
 def void_incident(db, inc: dict, reason: str, actor_id, actor: str, today: date) -> None:
     """HR voids an incident (a fresh code first): its points stop counting (a void line), any
-    draft write-up with it goes, its open tasks close, and later write-ups are checked."""
+    write-up with it not delivered yet goes, its open tasks close, and later write-ups are checked."""
     if inc["status"] == "voided":
         raise ValueError("It's already voided.")
     if not reason:
@@ -1031,9 +1044,9 @@ def void_incident(db, inc: dict, reason: str, actor_id, actor: str, today: date)
     event(db, inc["person_id"], "Voided", actor_id, actor, incident_id=inc["id"], note=reason,
           visibility="hr")
     db.conn.commit()
-    w = attached_writeup(db, inc["id"])
-    if w:
-        void_draft(db, w, "Its incident was voided.", actor_id, actor)
+    for w in db.conn.execute("SELECT * FROM writeups WHERE incident_id = ? AND status IN "
+                             "('draft', 'with_hr', 'approved')", (inc["id"],)).fetchall():
+        void_draft(db, dict(w), "Its incident was voided.", actor_id, actor)
     close_tasks(db, actor_id, incident_id=inc["id"], outcome="Incident voided")
     if inc["status"] == "approved":
         recheck_later(db, inc["person_id"], inc["happened"], actor_id, actor, today,
@@ -1279,7 +1292,8 @@ def void_draft(db, w: dict, reason: str, actor_id, actor: str) -> None:
     db.conn.execute("UPDATE writeups SET status = 'voided', voided_by = ?, voided_at = ?, "
                     "void_reason = ? WHERE id = ?", (actor_id and str(actor_id), time.time(),
                                                      seal(reason, "writeup.void_reason"), w["id"]))
-    event(db, w["person_id"], "Draft dropped", actor_id, actor, writeup_id=w["id"], note=reason,
+    what = "Draft dropped" if w["status"] in ("draft", "with_hr") else "Write-up dropped"
+    event(db, w["person_id"], what, actor_id, actor, writeup_id=w["id"], note=reason,
           visibility="hr")
     db.conn.commit()
     close_tasks(db, actor_id, writeup_id=w["id"], outcome="Write-up not needed")
@@ -1301,10 +1315,18 @@ def _set(db, w: dict, **fields) -> None:
     db.conn.execute(f"UPDATE writeups SET {sets} WHERE id = ?", (*fields.values(), w["id"]))
 
 
+def _incident_not_voided(db, w: dict) -> None:
+    """A write-up isn't delivered for an incident HR voided. Raises ValueError."""
+    inc = get_incident(db, w["incident_id"]) if w["incident_id"] else None
+    if inc and inc["status"] == "voided":
+        raise ValueError("Its incident was voided.")
+
+
 def send_to_sign(db, w: dict, viewer, person: dict, today: date) -> None:
     """Delivered through the portal: the employee reads and signs it there."""
     if w["status"] != "approved":
         raise ValueError("It isn't ready to deliver.")
+    _incident_not_voided(db, w)
     _set(db, w, status="delivered", **_deliver_fields(db, w, viewer, "portal", today))
     event(db, w["person_id"], "Delivered: sent to the employee to sign in the HR portal", viewer.id,
           viewer.name, writeup_id=w["id"], visibility="employee")
@@ -1321,6 +1343,8 @@ def made_active(db, w: dict, viewer, method: str, today: date, what: str, **fiel
     if w["status"] not in ("approved", "delivered"):
         raise ValueError("It isn't waiting for a signature.")
     first_time = not w["delivered_at"]
+    if first_time:
+        _incident_not_voided(db, w)
     _set(db, w, status="active", **_deliver_fields(db, w, viewer, method, today), **fields)
     event(db, w["person_id"], what, viewer.id, viewer.name, writeup_id=w["id"],
           visibility="employee")
@@ -1434,6 +1458,14 @@ def decide_appeal(db, appeal: dict, w: dict, outcome: str, note: str, viewer, to
                             (new_step, step_name(body, new_step), w["id"]))
             event(db, w["person_id"], f"Step changed on appeal to {step_name(body, new_step)}",
                   viewer.id, viewer.name, writeup_id=w["id"], visibility="employee")
+    if outcome == "voided":
+        # Before the decision is saved, so a void that fails leaves the appeal open. HR may have
+        # voided the write-up alone already: then only its incident is left to void.
+        if w["status"] != "voided":
+            void_writeup(db, get_writeup(db, w["id"]), f"Appeal: {note}", viewer.id, viewer.name,
+                         today, with_incident=True)
+        elif inc and inc["status"] != "voided":
+            void_incident(db, inc, f"Appeal: {note}", viewer.id, viewer.name, today)
     db.conn.execute("UPDATE appeals SET status = ?, decided_by = ?, decided_by_name = ?, "
                     "decided_at = ?, note = ? WHERE id = ?",
                     (outcome, viewer.id, viewer.name, time.time(), seal(note, "appeal.note"),
@@ -1441,10 +1473,7 @@ def decide_appeal(db, appeal: dict, w: dict, outcome: str, note: str, viewer, to
     event(db, w["person_id"], f"Appeal decided: {APPEAL_OUTCOMES[outcome]}", viewer.id, viewer.name,
           writeup_id=w["id"], note=note, visibility="employee")
     db.conn.commit()
-    if outcome == "voided":
-        void_writeup(db, get_writeup(db, w["id"]), f"Appeal: {note}", viewer.id, viewer.name, today,
-                     with_incident=True)
-    elif outcome == "amended" and new_step:
+    if outcome == "amended" and new_step:
         recheck_later(db, w["person_id"], w["issued_on"], viewer.id, viewer.name, today,
                       cause=f"The write-up from {w['issued_on']} was lowered on appeal.", was=w)
     link, once = f"#/writeup/{w['id']}", f"appeal-{appeal['id']}-decided"
@@ -2253,10 +2282,10 @@ async def api_incident(request):
 
 @guarded("staff")
 async def api_edit_incident(request):
+    data = await read_json(request)
     svc, v, inc, person, rel = _record(request, get_incident, "iid", staff=True)
     if inc["recorded_by"] != v.id:
         return error("Only the person who recorded it changes it.", 403)
-    data = await read_json(request)
     edit_incident(svc.db, inc, person, v, data, today_of(svc.db))
     _done(svc, request, v, person, "Changed an incident and sent it to HR again")
     return web.json_response({"ok": True, "message": "Sent to HR again."})
@@ -2264,9 +2293,9 @@ async def api_edit_incident(request):
 
 @guarded("hr")
 async def api_approve_incident(request):
+    data = await read_json(request)
     svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     access.not_own_work(v, inc["recorded_by"])
-    data = await read_json(request)
     hr_points = clean_points(data.get("points"))
     if hr_points is not None and not signin.confirmed(v.session):
         # Other points than the rules give is a change of points: a fresh code, as for /adjust.
@@ -2287,8 +2316,8 @@ async def api_approve_incident(request):
 
 @guarded("hr")
 async def api_return_incident(request):
-    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     data = await read_json(request)
+    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     return_incident(svc.db, inc, clean_text(data.get("note"), 1000), v.id, v.name)
     _done(svc, request, v, person, "Returned an incident to the manager")
     return web.json_response({"ok": True, "message": "Returned to the manager."})
@@ -2296,8 +2325,8 @@ async def api_return_incident(request):
 
 @guarded("hr", sensitive=True)
 async def api_void_incident(request):
-    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     data = await read_json(request)
+    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     void_incident(svc.db, inc, clean_text(data.get("reason"), 1000), v.id, v.name, today_of(svc.db))
     _done(svc, request, v, person, "Voided an incident")
     return web.json_response({"ok": True, "message": "Voided. Its points no longer count."})
@@ -2305,8 +2334,8 @@ async def api_void_incident(request):
 
 @guarded("hr", sensitive=True)
 async def api_adjust_incident(request):
-    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     data = await read_json(request)
+    svc, v, inc, person, rel = _record(request, get_incident, "iid", hr=True)
     new_points = clean_points(data.get("points"))
     if new_points is None:
         return error("Type the points it should have.")
@@ -2325,8 +2354,8 @@ async def api_writeup(request):
 
 @guarded("staff")
 async def api_edit_writeup(request):
-    svc, v, w, person, rel = _writeup(request, staff=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, staff=True)
     edit_writeup(svc.db, w, data, v, rel)
     _done(svc, request, v, person, "Changed a write-up")
     return _writeup_reply(svc, w["id"], rel, v, person, "Saved.")
@@ -2350,8 +2379,8 @@ async def api_approve_writeup(request):
 
 @guarded("hr")
 async def api_return_writeup(request):
-    svc, v, w, person, rel = _writeup(request, hr=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, hr=True)
     return_writeup(svc.db, w, clean_text(data.get("note"), 1000), v, person)
     _done(svc, request, v, person, "Returned a write-up to the manager")
     return _writeup_reply(svc, w["id"], rel, v, person, "Returned to the manager.")
@@ -2418,8 +2447,8 @@ def _signature(data: dict) -> tuple[str, str]:
 
 @guarded("staff")
 async def api_sign_in_person(request):
-    svc, v, w, person, rel = _writeup(request, staff=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, staff=True)
     name, comment = _signature(data)
     if w["status"] not in ("approved", "delivered"):
         return error("It isn't waiting for a signature.", 409)
@@ -2435,10 +2464,10 @@ async def api_sign_in_person(request):
 
 @guarded("signed_in")
 async def api_sign(request):
+    data = await read_json(request)
     svc, v, w, person, rel = _writeup(request)
     if rel != "self":
         return error("Only they can sign it.", 403)
-    data = await read_json(request)
     name, comment = _signature(data)
     if w["status"] != "delivered":
         return error("It isn't waiting for your signature.", 409)
@@ -2456,8 +2485,8 @@ async def api_sign(request):
 async def api_refused(request):
     """Refused to sign: another portal user witnesses it with their PIN (and code), or the
     manager types a witness's name."""
-    svc, v, w, person, rel = _writeup(request, staff=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, staff=True)
     if w["status"] not in ("approved", "delivered"):
         return error("It isn't waiting for a signature.", 409)
     typed = " ".join(clean_text(data.get("witness_name"), 120).split())
@@ -2510,8 +2539,8 @@ async def api_paper(request):
 
 @guarded("hr", sensitive=True)
 async def api_void_writeup(request):
-    svc, v, w, person, rel = _writeup(request, hr=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, hr=True)
     void_writeup(svc.db, w, clean_text(data.get("reason"), 1000), v.id, v.name, today_of(svc.db),
                  with_incident=data.get("with_incident") is True)
     _done(svc, request, v, person, "Voided a write-up")
@@ -2520,8 +2549,8 @@ async def api_void_writeup(request):
 
 @guarded("hr", sensitive=True)
 async def api_writeup_ends(request):
-    svc, v, w, person, rel = _writeup(request, hr=True)
     data = await read_json(request)
+    svc, v, w, person, rel = _writeup(request, hr=True)
     ends = as_date(data.get("ends_on"))
     if ends is None:
         return error("Choose the day it stops counting.")
@@ -2532,10 +2561,10 @@ async def api_writeup_ends(request):
 
 @guarded("signed_in")
 async def api_appeal(request):
+    data = await read_json(request)
     svc, v, w, person, rel = _writeup(request)
     if rel != "self":
         return error("Only they can appeal it.", 403)
-    data = await read_json(request)
     file_appeal(svc.db, w, person, clean_text(data.get("text"), TEXT_LIMIT), today_of(svc.db))
     _done(svc, request, v, person, "Appealed a write-up")
     return _writeup_reply(svc, w["id"], rel, v, person, "Your appeal was sent to HR.")
@@ -2554,9 +2583,9 @@ async def api_pdf_retry(request):
 
 @guarded("hr", sensitive=True)
 async def api_decide_appeal(request):
+    data = await read_json(request)
     svc, v, appeal, person, rel = _record(request, lambda db, x: get_appeal(db, x), "aid", hr=True)
     w = get_writeup(svc.db, appeal["writeup_id"])
-    data = await read_json(request)
     outcome = str(data.get("outcome") or "")
     decide_appeal(svc.db, appeal, w, outcome, clean_text(data.get("note"), TEXT_LIMIT), v,
                   today_of(svc.db), new_points=clean_points(data.get("points")),
@@ -2567,8 +2596,8 @@ async def api_decide_appeal(request):
 
 @guarded("hr", sensitive=True)
 async def api_decide_task(request):
-    svc, v, task, person, rel = _record(request, get_task, "tid", hr=True)
     data = await read_json(request)
+    svc, v, task, person, rel = _record(request, get_task, "tid", hr=True)
     outcome = str(data.get("outcome") or "")
     decide_termination(svc.db, task, outcome, clean_text(data.get("reason"), 1000), v)
     _done(svc, request, v, person, "Decided a termination review", TERMINATION_OUTCOMES.get(outcome))

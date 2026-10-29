@@ -49,6 +49,9 @@ class LinkError(HomeAssistantError):
 
 class HomeAssistant:
     def __init__(self):
+        # Core URLs whose certificate isn't checked: only the add-on network's own https fallback
+        # (its certificate is for Home Assistant's public name). HA_URL and HA_CORE_URL always are.
+        self._insecure_core: set[str] = set()
         if os.environ.get("SUPERVISOR_TOKEN"):
             self.base = "http://supervisor/core/api"
             self.ws_url = "ws://supervisor/core/websocket"
@@ -57,6 +60,7 @@ class HomeAssistant:
             self.core_urls = [os.environ.get("HA_CORE_URL", "http://homeassistant:8123")]
             if not os.environ.get("HA_CORE_URL"):
                 self.core_urls.append("https://homeassistant:8123")
+                self._insecure_core.add("https://homeassistant:8123")
         else:
             root = os.environ.get("HA_URL", "http://localhost:8123").rstrip("/")
             self.base = root + "/api"
@@ -258,7 +262,7 @@ class HomeAssistant:
         for url in urls:
             try:
                 async with self.session.request(
-                    method, url + path, ssl=False if url.startswith("https") else True, **kwargs
+                    method, url + path, ssl=False if url in self._insecure_core else True, **kwargs
                 ) as resp:
                     self._core = url
                     body = await resp.json() if resp.content_type == "application/json" \

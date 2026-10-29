@@ -375,6 +375,7 @@ async def api_signin(request: web.Request):
             if not signin.check_totp(db, person, code):
                 if not signin.clean_recovery_code(code):
                     await signin.pin_matches(pin, None)
+                    person = db.person(person["id"]) or person   # fresh: parallel tries all count
                     wrong(svc, person, ip)
                     return failed(svc, ip, person, "Wrong authenticator code")
                 recovery = True
@@ -436,6 +437,8 @@ async def api_reconfirm(request: web.Request):
     ip = svc.client_ip(request)
     data = await read_json(request)
     person = db.person(v.id)
+    if refusal := svc.throttle.refusal(ip):
+        return error(refusal, 429)
     if signin.locked(person):
         return error("Too many wrong tries. Wait 15 minutes, or ask another HR admin.", 403)
     if person["totp_on"]:
@@ -448,6 +451,7 @@ async def api_reconfirm(request: web.Request):
             return error(str(err), 503)
         message = PIN_WRONG
     if not ok:
+        svc.throttle.failed(ip)
         wrong(svc, db.person(v.id), ip)
         audit.record(db, "Confirmation failed", actor_id=v.id, actor=v.name, ip=ip, security=True)
         return error(message, 403)
@@ -692,13 +696,19 @@ async def api_totp_start(request: web.Request):
         if signin.totp_required(db, me, set(v.roles)):
             return error("Your role needs an authenticator set up with a setup code from HR. Ask "
                          "an HR admin.", 403)
+        # A session outlives a lock, so the lock and the address throttle are checked here too.
+        if refusal := svc.throttle.refusal(ip):
+            return error(refusal, 429)
+        if signin.locked(me):
+            return error("Too many wrong tries. Wait 15 minutes, or ask HR to unlock you.", 403)
         pin = signin.clean_pin(data.get("pin"))
         try:
             ok = bool(pin) and await signin.pin_matches(pin, me["kiosk_hash"])
         except signin.Busy as err:
             return error(str(err), 503)
         if not ok:
-            wrong(svc, me, ip)
+            svc.throttle.failed(ip)
+            wrong(svc, db.person(v.id), ip)
             return error(PIN_WRONG, 403)
     token, expires = signin.new_setup_token(db, v.id, "qr", v.id)
     secret = totp.new_secret()

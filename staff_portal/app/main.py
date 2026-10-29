@@ -927,10 +927,8 @@ def repeated(device_id: int, entity_id: str, service: str, call: dict, state: di
     prev = last_command.get((device_id, entity_id))
     if prev and prev[0] == service and prev[1] == signature and now - prev[2] < REPEAT_WINDOW:
         return True
-    if ALREADY.get(service) and len(call) == 1 and (state or {}).get("state") == ALREADY[service]:
-        return True
-    last_command[(device_id, entity_id)] = (service, signature, now)
-    return False
+    return bool(ALREADY.get(service) and len(call) == 1
+                and (state or {}).get("state") == ALREADY[service])
 
 
 def phone_too_busy(device_id: int) -> bool:
@@ -958,13 +956,15 @@ def actor_name(device: dict, member: dict | None) -> str:
 
 async def api_enroll(request: web.Request):
     ip = client_ip(request)
-    # Per address, and across all addresses (an address can be faked from Home Assistant's
-    # own network, so the per-address limit alone isn't enough).
-    if too_many_failures(ip) or too_many_failures(ANY_ADDRESS, ENROLL_FAILURES_ANYWHERE):
-        return bad_request("Too many attempts. Try again later.", 429)
     data = await read_json(request)
+    # A right code always works: codes can't be guessed, so the limits only slow down wrong
+    # ones, and nobody sending wrong codes can stop a real phone being set up.
     claimed = db.claim_enroll_code(str(data.get("code", "")))
     if not claimed:
+        # Per address, and across all addresses (an address can be faked from Home Assistant's
+        # own network, so the per-address limit alone isn't enough).
+        if too_many_failures(ip) or too_many_failures(ANY_ADDRESS, ENROLL_FAILURES_ANYWHERE):
+            return bad_request("Too many attempts. Try again later.", 429)
         record_failure(ip)
         record_failure(ANY_ADDRESS)
         return bad_request("This setup code is invalid, already used, or expired.", 404)
@@ -1353,7 +1353,10 @@ async def api_action(request: web.Request):
         # Only commands that would really reach the device count towards the per-device pause.
         if entity_too_soon(device["id"], entity_id):
             return bad_request("That was changed a moment ago. Wait a second and try again.", 429)
+        # Only now is it remembered as sent: one refused as too soon must go through when retried.
         last_entity_action[(device["id"], entity_id)] = time.time()
+        last_command[(device["id"], entity_id)] = (
+            service, json.dumps(call, sort_keys=True, default=str), time.time())
         await send_command(device, member, domain, service, call)
     except ActionRejected as err:
         return bad_request(str(err))
@@ -2476,15 +2479,20 @@ async def api_report_data(request: web.Request):
     device, member, manage = report_caller(request)
     report = REPORTS[request.match_info["key"]]
     params = reports_kit.clean_params(report, request.query)
-    if request.query.get("fresh") == "1" and time.time() - report_fresh[0] > REPORT_FRESH_GAP:
+    key = (report.key, member["id"], manage, json.dumps(params, sort_keys=True))
+    # A Refresh now still being made isn't started again when the app asks after it, and
+    # reports still being made (anyone's) carry on: only finished ones are dropped.
+    if (request.query.get("fresh") == "1" and key not in report_jobs
+            and time.time() - report_fresh[0] > REPORT_FRESH_GAP):
         report_fresh[0] = time.time()
         ctdata.forget_months()   # Refresh now: read Connecteam afresh
-        report_jobs.clear()
+        for k, job in list(report_jobs.items()):
+            if job["done"]:
+                del report_jobs[k]
     now = time.monotonic()
     for k, job in list(report_jobs.items()):
         if job["done"] and now - job["done"] > REPORT_KEEP:
             del report_jobs[k]
-    key = (report.key, member["id"], manage, json.dumps(params, sort_keys=True))
     job = report_jobs.get(key)
     if job is None:
         if len(report_jobs) >= 50:
@@ -6258,6 +6266,8 @@ CALLBACK_PER_MINUTE = 300     # deliveries to the right address (TT Hotel sends 
 RECORDS_PER_MINUTE = 1000     # ...and records stored from them, so even a leaked address can't
                               # push the door history out (LOCK_RECORDS_MAX_ROWS) in minutes
 WRONG_ADDRESS_PER_MINUTE = 30  # requests with a wrong address, per caller
+RECORDS_BODY = 160 * 1024     # bytes read from one delivery: doorlog.MAX_RECORDS of them fit, which
+                              # the staff app's own 64 KB limit doesn't
 CARD_ALERT_GAP = 600          # one alert per card this often at most, however often it's tried
 ALERTS_PER_MINUTE = 20        # and this many alerts in all, so even a leaked address can't flood
                               # the activity log or Home Assistant (Door activity lists them all)
@@ -6336,12 +6346,19 @@ async def tthotel_records(request: web.Request):
         raise web.HTTPNotFound()
     if deliveries_too_busy(time.time()):
         return web.Response(status=429, text="Too many requests.")
+    body = b""
     try:
         async with asyncio.timeout(request.app.get(BODY_SECONDS, 10)):
-            body = await request.read()   # at most the staff app's client_max_size
+            # Read here, not with request.read(): a backlog of records is past client_max_size.
+            if (request.content_length or 0) <= RECORDS_BODY:
+                while len(body) <= RECORDS_BODY:
+                    chunk = await request.content.read(RECORDS_BODY + 1 - len(body))
+                    if not chunk:
+                        break
+                    body += chunk
     except TimeoutError:
         raise web.HTTPRequestTimeout(text="The request took too long to arrive.") from None
-    except web.HTTPRequestEntityTooLarge:
+    if len(body) > RECORDS_BODY or (request.content_length or 0) > RECORDS_BODY:
         log.warning("TT Hotel sent more lock records at once than Staff Access reads; dropped")
         body = b""
     now = time.time()
@@ -6905,7 +6922,9 @@ async def lock_out_try(card_id: int, card_number: str, lock_id: int, api: str, a
     if may_wait and result.get("wait") and result.get("status") == "retry":
         db.set_lockout(card_id, lock_id, "remote", "pending",
                        "Waiting a minute: Staff Access has made enough TT Hotel requests for "
-                       "this minute.", tries=attempt if door["enrolled"] else attempt - 1)
+                       "this minute.",
+                       # Not a try, unless the card may be on the door: then a restart looks first.
+                       tries=attempt if door["enrolled"] or door["unsure"] else attempt - 1)
         return "wait"
     if result.get("status") == "done":
         db.set_lockout(card_id, lock_id, "remote", "done",
@@ -7591,6 +7610,15 @@ async def admin_restore(request: web.Request):
     # Nothing is awaited from here until it's replaced: people archived here (since the backup
     # was made) stay archived, as a staff import keeps them.
     kept_archived = transfer.keep_archived(snap, archived_here())
+    # A phone revoked or given a new setup code while the backup was checked and the copy saved
+    # stays that way: its sign-in is checked against this system's again.
+    known = db.known_tokens()
+    for device in snap["devices"]:
+        if device["token_hash"] and (device["id"], device["token_hash"]) not in known:
+            device["token_hash"] = None
+            if device["status"] in ("active", "locked"):
+                device["status"] = "pending"   # set it up again (a setup code is made below)
+                snap["needs_setup"].append(device["name"])
     dropped_links, added = db.replace_everything(snap)
     if db.settings().get("wb_remote_lockout_api", "reversed") != api:
         # Remote lock-out was tested with the other number format, not this one.

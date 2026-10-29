@@ -22,7 +22,7 @@ import re
 import time
 from datetime import date, datetime, timezone
 
-from . import audit, crypto, signin
+from . import audit, crypto, notify, signin
 
 SAFETY_SHARE = 0.75      # a list with fewer than this share of the people active now trips the catch
 SAFETY_MIN = 4           # ...once there are at least this many
@@ -86,11 +86,11 @@ def find_field(fields: list[dict], chosen: str, names, users=()) -> str | None:
     return next((named[n] for n in names if n in named), None)
 
 
-def date_order(values, chosen: str) -> str:
+def date_order(values, chosen: str, fallback: str = "dmy") -> str:
     """How the dates in values are written: what HR chose (mdy or dmy), else (auto) worked out
     from the dates themselves: a first number over 12 means day first, a second one over 12
     month first. Connecteam's users list writes them day first (30/03/2024), so that's the
-    answer when nothing tells."""
+    answer when nothing tells (or fallback, what an earlier sync worked out)."""
     if chosen in ("mdy", "dmy"):
         return chosen
     for v in values:
@@ -99,7 +99,7 @@ def date_order(values, chosen: str) -> str:
                 return "dmy"
             if int(m[2]) > 12 >= int(m[1]):
                 return "mdy"
-    return "dmy"
+    return fallback
 
 
 def _fingerprint(stored: str, code: str) -> str:
@@ -149,8 +149,15 @@ async def apply_users(db, users: list[dict], *, group_name=lambda g: g,
     start_field = find_field(fields_list, db.setting("start_field"), START_FIELD_NAMES, users)
     manager_field = find_field(fields_list, db.setting("manager_field"), MANAGER_FIELD_NAMES,
                                users)
-    order = date_order([(u.get("fields") or {}).get(start_field) for u in users],
-                       db.setting("date_order"))
+    # Worked out from the dates, the answer is kept for the field: a sync where no date tells
+    # mustn't read them all the other way round (and look like changes in Connecteam).
+    seen = db.setting_json("date_order_seen", {}) or {}
+    found = date_order([(u.get("fields") or {}).get(start_field) for u in users],
+                       db.setting("date_order"), "")
+    if found and start_field and db.setting("date_order") == "auto":
+        seen = {start_field: found}
+    order = found or seen.get(start_field) or "dmy"
+    zone = notify._zone(db)
     counts = {"added": 0, "updated": 0, "archived": 0, "returned": 0, "no_code": 0}
     signed_out = set()
     for u in users:
@@ -159,7 +166,7 @@ async def apply_users(db, users: list[dict], *, group_name=lambda g: g,
         start = ct_start = parse_date(fields.get(start_field), order) if start_field else None
         estimated = 0
         if not start and u.get("created_at"):
-            start = datetime.fromtimestamp(u["created_at"], timezone.utc).date().isoformat()
+            start = datetime.fromtimestamp(u["created_at"], zone).date().isoformat()   # HR's day
             estimated = 1
         mobile = (u.get("mobile") or "").strip() or None
         email = (u.get("email") or "").strip() or None
@@ -235,7 +242,7 @@ async def apply_users(db, users: list[dict], *, group_name=lambda g: g,
         audit.record(db, "Safety catch: Connecteam listed far fewer people", detail=warning,
                      security=True)
     db.set_settings({"last_sync": now, "sync_warning": warning or "",
-                     "last_sync_result": json.dumps(counts)})
+                     "last_sync_result": json.dumps(counts), "date_order_seen": json.dumps(seen)})
     return {**counts, "warning": warning}
 
 

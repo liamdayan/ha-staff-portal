@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.12.23
+
+A security and bug audit of the whole add-on. Nothing changes in how it's used, apart from the
+notes below.
+
+**Security**
+- **HR sign-in:** wrong authenticator codes sent at the same moment are all counted, so the
+  15-minute and daily locks work against them too.
+- **HR My account and confirming again:** turning on an authenticator, or confirming before a
+  sensitive change, now respects a locked sign-in and the per-address limit on wrong tries.
+- **Phone setup:** a flood of wrong setup codes from the internet can no longer block a real
+  phone's setup: a right code always works.
+- **Home Assistant user sign-ins** check the HTTPS certificate when Home Assistant's address is
+  set to an https one (only the add-on network's own address skips it).
+- **A phone revoked while a restore runs** stays revoked (and gets a new setup code).
+- **CSV downloads:** a name like `-1+...` or one starting with a tab is quoted, so a spreadsheet
+  can't run it as a formula.
+- **HR files:** a crafted card photo or PDF can't freeze the add-on or use up its memory, and two
+  PDF previews at once no longer crash it.
+
+**HR portal**
+- Phone photos with HDR (Ultra HDR, MPO) are accepted as card and document photos.
+- Two HR admins deciding the same card, document or incident at once: the second is told it was
+  already decided, rather than both counting (an incident's points were counted twice).
+- Voiding an incident also drops its write-up that HR approved but nobody delivered yet.
+- A credit HR voids isn't given again by the nightly run.
+- Points from probation incidents HR approves after the probation was passed (with "clear on
+  passing") never count.
+- An appeal decided "voided" on a write-up HR already voided voids its incident too.
+- A manager's points on probation are kept as chosen when the probation's own points differ.
+- An introductory period limited to some departments isn't given to people outside them.
+- Extending a probation needs an end date after the current one, and not one already past.
+- A start date moved back so the introductory period was already over waives it.
+- A point system with Infinity in it, or too big, is refused with a message instead of an error.
+- Start dates: the date order worked out from your Connecteam dates is kept, so it can't flip and
+  rewrite confirmed dates when people come and go. Estimated start dates use your time zone.
+
+**Tasks and Connecteam**
+- A followed form's status, without forms.write, no longer pauses the whole task sync.
+- A change made here while a board is being read is still sent to Connecteam.
+- A task whose create had no answer is looked for in the board's open and draft tasks (not its
+  whole past, which could cost 20 requests a minute on a long board).
+- A due date moved earlier than a Connecteam task's start brings the start back with it.
+- A Connecteam task whose board or form isn't followed any more can be deleted.
+- **Refresh now** on a report runs once, rather than starting again with every check while it
+  loads (which could also drop other people's reports).
+
+**Doors, staff app and backups**
+- A remote lock-out that lost a reply looks for its earlier try before enrolling the card again.
+- A door's late upload of up to 300 records is kept (it was dropped above about 180).
+- A door record from before a card was written isn't credited to that card.
+- On a shared phone, the next person doesn't see the last person's report tab, unsaved rules or
+  an open task photo.
+- A command refused as "too soon" is sent when tried again.
+- A staff import listing someone twice is refused with a message instead of an error.
+- A damaged layout or backup gets a message instead of an error.
+
 ## 0.12.22
 
 - **HR sign-in in two steps:** mobile number and PIN first, then the authenticator code on a page

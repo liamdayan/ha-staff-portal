@@ -179,9 +179,9 @@ def test_the_address_its_secret_and_its_limits(tmp_path, monkeypatch):
             # Nonsense with the right address is still "success", so TT Hotel doesn't resend it.
             resp = await p.staff.post(f"/tthotel/records/{token}", data=b"\x00garbage")
             assert (resp.status, await resp.text()) == (200, "success")
-            # More than the staff app reads at once (64 KB): answered, dropped.
-            huge = [record(49, str(10**9 + i), username="x" * 90) for i in range(400)]
-            assert len(form(POOL, huge)) > 64 * 1024
+            # More than Staff Access reads from one delivery (160 KB): answered, dropped.
+            huge = [record(49, str(10**9 + i), username="x" * 90) for i in range(600)]
+            assert len(form(POOL, huge)) > main.RECORDS_BODY
             assert await deliver(p, POOL, huge) == (200, "success")
             assert len(stored(p)) == 1
             # Wrong addresses: so many a minute from one caller, and they never use up what the

@@ -312,13 +312,22 @@ def test_a_task_in_connecteam_is_edited_but_never_deleted_here(tmp_path):
             tid = (await p.add(ana, title="Fix the ice machine", department_id=None))["id"]
             status, body = await p.call("PUT", f"/api/tasks/{tid}", ana, {"notes": "Room 12"})
             assert body["task"]["can_delete"] and not body["task"]["connecteam"]
-            p.db.conn.execute("UPDATE tasks SET ct_task_id = 'ct-9' WHERE id = ?", (tid,))
+            p.db.conn.execute("INSERT INTO task_ct_boards (board_id, picked_at) VALUES ('501', ?)",
+                              (time.time(),))
+            p.db.conn.execute("UPDATE tasks SET ct_task_id = 'ct-9', ct_board_id = '501' WHERE id = ?",
+                              (tid,))
             p.db.conn.commit()
             status, body = await p.call("PUT", f"/api/tasks/{tid}", ana, {"notes": "Room 14"})
             assert status == 200 and body["task"]["can_edit"] and not body["task"]["can_delete"]
             status, body = await p.call("DELETE", f"/api/tasks/{tid}", ana)
             assert status == 409 and "Connecteam" in body["error"]
             assert p.db.task(tid)["deleted_at"] is None
+            # Its board isn't followed any more: a task like any other again.
+            p.db.conn.execute("DELETE FROM task_ct_boards")
+            p.db.conn.commit()
+            status, body = await p.call("PUT", f"/api/tasks/{tid}", ana, {"notes": "Room 15"})
+            assert body["task"]["can_delete"]
+            assert (await p.call("DELETE", f"/api/tasks/{tid}", ana))[0] == 200
     run(scenario())
 
 

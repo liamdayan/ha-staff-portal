@@ -1309,8 +1309,12 @@
     return rp;
   }
 
+  // Each report's view.js keeps what it was showing (a tab, an unsaved draft) in its own code, so
+  // forget the loaded views too: the next person gets them fresh from the server.
   function rpReset() {
     rp = null;
+    reportViews.clear();
+    document.querySelectorAll("script[data-report]").forEach((s) => s.remove());
   }
 
   // The server says this person may not see reports here (any more): back to the pages.
@@ -1369,7 +1373,12 @@
       document.head.append(h("link", { rel: "stylesheet", href: report.view_css, "data-report": report.key }));
     }
     return new Promise((resolve) => {
-      const done = (ok) => { reportWaiting.delete(report.key); clearTimeout(timer); resolve(ok); };
+      // A try from before a sign-out may finish late: it mustn't drop the next person's wait.
+      const done = (ok) => {
+        if (reportWaiting.get(report.key) === done) reportWaiting.delete(report.key);
+        clearTimeout(timer);
+        resolve(ok);
+      };
       const timer = setTimeout(() => done(false), 20000);
       reportWaiting.set(report.key, done);
       document.querySelector(`script[data-report="${report.key}"]`)?.remove();   // a failed try
@@ -1419,10 +1428,11 @@
           "Still asking Connecteam. The first look at a month can take a few minutes."));
       }
     }, 5000);
-    const query = new URLSearchParams(Object.entries({ ...params, ...(fresh ? { fresh: 1 } : {}) })
-      .filter(([, v]) => v != null)).toString();
+    const query = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
+    // Refresh now is asked for once: asking again after it is waiting for it, not another one.
+    const first = fresh ? `${query ? `${query}&` : ""}fresh=1` : query;
     // A long first look carries on on the add-on (202): ask again until it's ready.
-    let res = await api("GET", `/api/reports/${report.key}${query ? `?${query}` : ""}`);
+    let res = await api("GET", `/api/reports/${report.key}${first ? `?${first}` : ""}`);
     for (let tries = 0; res.status === 202 && res.data.pending && tries < 60; tries++) {
       await new Promise((ok) => setTimeout(ok, 3000));
       if (rp !== state || seq !== state.seq || state.open !== report) { clearTimeout(slow); return; }
@@ -1488,8 +1498,16 @@
         return { ok: true, settings: res.data.settings };
       },
       download: rpDownload,
-      csvCell: (v) => (/[",\n\r]/.test(String(v ?? "")) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? "")),
+      csvCell: rpCsvCell,
     });
+  }
+
+  // One CSV cell. A leading = + - @ (or a tab or CR) would make a spreadsheet run it as a
+  // formula, so it's quoted as text; a plain number like -1.5 is left alone.
+  function rpCsvCell(v) {
+    v = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v = "'" + v;
+    return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
   }
 
   // A file upload, with the app's sign-in (api() only sends JSON).
@@ -4526,6 +4544,7 @@
 
   // The Tasks screen's state, from when it's first opened. Forgotten at sign-out (leaveDashboard).
   let tk = null;
+  let tkPhotoClose = null;   // closes the full-screen photo, while one is open
 
   function tkState() {
     if (!tk) {
@@ -4544,6 +4563,7 @@
   }
 
   function tkReset() {
+    tkPhotoClose?.();   // it's on document.body, over everything: not the next person's to see
     if (!tk) return;
     tkCloseSheet(true);
     tk = null;
@@ -4894,6 +4914,7 @@
 
   // fromBack: Back was pressed (its history entry is gone already), or the screen is going.
   function tkCloseSheet(fromBack) {
+    tkPhotoClose?.();
     const sheet = tk?.sheet;
     if (!sheet) return;
     tk.sheet = null;
@@ -5020,13 +5041,19 @@
   }
 
   function tkPhotoBig(data, label) {
-    const close = () => { view.remove(); window.removeEventListener("keydown", onKey, true); };
+    tkPhotoClose?.();
+    const close = () => {
+      view.remove();
+      window.removeEventListener("keydown", onKey, true);
+      if (tkPhotoClose === close) tkPhotoClose = null;
+    };
     const onKey = (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); close(); } };
     const view = h("div", { class: "tk-photo-big", role: "dialog", "aria-label": label, onclick: close },
       h("img", { src: data, alt: label }),
       h("button", { class: "tk-photo-close", type: "button", "aria-label": "Close" }, tkIcon("close")));
     window.addEventListener("keydown", onKey, true);
     document.body.append(view);
+    tkPhotoClose = close;
     view.querySelector("button").focus();
   }
 

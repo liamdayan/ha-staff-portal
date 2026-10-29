@@ -1057,9 +1057,9 @@ def test_drafts_are_read_while_the_board_has_open_ones_and_hourly_otherwise(tmp_
     run(scenario())
 
 
-def test_a_draft_create_that_timed_out_is_found_by_reading_the_whole_board(tmp_path):
-    """A create that may have arrived could be a draft (or anything): the next read takes the whole
-    board (status=all) to find it, then reads go back to open tasks only."""
+def test_a_draft_create_that_timed_out_is_found_by_reading_open_and_draft_tasks(tmp_path):
+    """A create that may have arrived is open or a draft: the next read takes those lists (not the
+    board's whole past, which can be too long to read), then reads go back to open tasks only."""
     async def scenario():
         p, ct = synced(tmp_path)
         async with p, ct:
@@ -1073,7 +1073,7 @@ def test_a_draft_create_that_timed_out_is_found_by_reading_the_whole_board(tmp_p
             assert made["status"] == "draft"
             mark = len(ct.task_reads)
             await poll(p)
-            assert board_reads(ct, mark) == [("all", None)]
+            assert board_reads(ct, mark) == [("published", None), ("draft", None)]
             assert p.db.task(t["id"])["ct_task_id"] == made["id"] and len(writes(ct, "POST")) == 1
             mark = len(ct.task_reads)
             await poll(p)
@@ -1081,7 +1081,9 @@ def test_a_draft_create_that_timed_out_is_found_by_reading_the_whole_board(tmp_p
     run(scenario())
 
 
-def test_a_create_that_timed_out_isnt_made_again_after_a_partial_read(tmp_path):
+def test_a_create_that_timed_out_isnt_made_again_after_a_partial_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctsync, "CREATING_RECHECK", 0)   # each push looks again (not every 5 min)
+
     async def scenario():
         p, ct = synced(tmp_path)
         async with p, ct:

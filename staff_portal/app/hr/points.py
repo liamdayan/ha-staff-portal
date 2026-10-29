@@ -766,8 +766,9 @@ def _next_credit_day(c: Calc, track: str, cfg: dict) -> date | None:
     incidents = c.incident_days(track, c.known)
     if not incidents:
         return None
-    credits = sorted(m["counts_from"] for m in c.minus if m["kind"] == "credit"
-                     and m["track"] == track and not c.voided(m, c.known))
+    # Voided ones too: HR took that credit back, so it isn't given again (and it used its turn).
+    credits = sorted(ln["counts_from"] for ln in c.lines if ln["kind"] == "credit"
+                     and ln["track"] == track)
     day = add_span(incidents[-1], cfg["clean"])
     if credits:
         day = max(day, add_span(credits[-1], cfg["clean"]))

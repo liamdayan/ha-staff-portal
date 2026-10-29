@@ -631,11 +631,15 @@ def _import_staff(db, rows: list, mode: str) -> dict:
               "kept_off": [], "kept_archived": [], "signed_out": [], "missing_roles": set(),
               "missing_pages": set(),
               "missing_areas": set(), "missing_departments": set()}
+    seen = set()
     for raw in rows:
         name = _name(raw.get("name"), 40)
         pin_hash = str(raw.get("pin_hash") or "")
         if not name:
             continue
+        if name.lower() in seen:   # names here never differ only by case
+            raise ValueError(f"The file lists {name} twice.")
+        seen.add(name.lower())
         if not PIN_HASH_RE.match(pin_hash):
             result["bad_pin"] += 1
             continue

@@ -223,15 +223,15 @@ def policies(db, on: date | None = None) -> list[dict]:
     return found
 
 
-def policy_for(db, key: str, kind: str | None = None, groups=None) -> dict:
+def policy_for(db, key: str, kind: str | None = None, groups=None) -> dict | None:
     """A probation policy by key, else the first of its kind. groups (a new hire's departments):
-    the introductory policy that covers them (its departments; none listed covers everyone)."""
+    the introductory policy that covers them (its departments; none listed covers everyone), or
+    None when none does."""
     listed = policies(db)
     if groups is not None:
         covers = [p for p in listed if p["kind"] == INTRODUCTORY and (
             not p["departments"] or set(map(str, groups)) & set(map(str, p["departments"])))]
-        if covers:
-            return covers[0]
+        return covers[0] if covers else None
     return next((p for p in listed if p["key"] == key), None) or next(
         p for p in listed if p["kind"] == (kind or INTRODUCTORY))
 
@@ -328,8 +328,11 @@ def ensure_introductory(db, person: dict, today: date | None = None) -> dict | N
     if person.get("archived") or start is None or start > today + timedelta(days=366):
         return None
     pol = policy_for(db, INTRODUCTORY, groups=access.groups_of(person))
-    ends = start + timedelta(days=days_for(pol, person) - 1)    # its last day: 90 days in all
     mine = [r for r in of_person(db, person["id"]) if r["kind"] == INTRODUCTORY]
+    if pol is None:
+        # No introductory policy covers their departments: none is started (one already there stays).
+        return next((r for r in mine if r["starts"] == start.isoformat()), None)
+    ends = start + timedelta(days=days_for(pol, person) - 1)    # its last day: 90 days in all
     if any(r["starts"] == start.isoformat() for r in mine):
         return next(r for r in mine if r["starts"] == start.isoformat())
     untouched = [r for r in mine if r["status"] == "open" and not r["extensions"]
@@ -337,6 +340,17 @@ def ensure_introductory(db, person: dict, today: date | None = None) -> dict | N
     if untouched:
         # The start date moved (HR confirmed it, or Connecteam's changed): it follows.
         row = untouched[0]
+        if ends < today <= date.fromisoformat(row["ends"]):
+            # Moved back so far that the period was already over: it's waived, not left open.
+            # (One already past its end stays for HR's decision, or the policy's pass.)
+            db.conn.execute("UPDATE probations SET starts = ?, first_ends = ?, ends = ?, "
+                            "status = 'waived', decided_on = ? WHERE id = ?",
+                            (start.isoformat(), ends.isoformat(), ends.isoformat(),
+                             today.isoformat(), row["id"]))
+            _event(db, row, "Start date changed: the period was already over", None, "HR portal",
+                   old=row["ends"], new=ends.isoformat())
+            db.conn.commit()
+            return None
         db.conn.execute("UPDATE probations SET starts = ?, first_ends = ?, ends = ? WHERE id = ?",
                         (start.isoformat(), ends.isoformat(), ends.isoformat(), row["id"]))
         _event(db, row, "Start date changed", None, "HR portal", old=row["ends"],
@@ -423,7 +437,7 @@ def change_end(db, row: dict, new_end: date, reason: str, actor_id, actor: str, 
             raise ValueError(f"An extension is at most {_int(ext.get('days'), 30)} days.")
         if (new_end - starts).days + 1 > _int(ext.get("max_days"), 120):     # both days count
             raise ValueError(f"It can't run longer than {_int(ext.get('max_days'), 120)} days in all.")
-    if not longer and new_end < today:
+    if new_end < today:
         raise ValueError("Choose today or a later day. To end it now, decide it instead.")
     # Extending is HR's answer to any recommendation waiting: it leaves HR's queue (the
     # recommendation stays in the probation's history).
@@ -488,8 +502,8 @@ def decide(db, probation_id, outcome: str, extend_to=None, *, actor_id, actor: s
         raise ValueError("Say why.")
     if outcome == "extend":
         to = as_date(extend_to)
-        if to is None:
-            raise ValueError("Choose the new end date.")
+        if to is None or to <= date.fromisoformat(row["ends"]):
+            raise ValueError("Choose the new end date, after the current one.")
         return change_end(db, row, to, reason, actor_id, actor, today=today)
     status = {"pass": "passed", "end": "ended", "waive": "waived"}[outcome]
     db.conn.execute("UPDATE probations SET status = ?, decided_on = ?, decided_by = ?, "

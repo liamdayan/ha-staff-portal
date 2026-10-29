@@ -48,12 +48,18 @@ def _id(value, fallback: str) -> str:
     return value if ID_RE.match(value) else fallback
 
 
+def _list(value) -> list:
+    """A list sent in JSON, or [] for anything else (a number, an object), so a damaged layout
+    or backup is cleaned rather than crashing the request."""
+    return value if isinstance(value, list) else []
+
+
 def clean_layout(data) -> dict:
     """Validate a layout sent from the admin dashboard. Unknown fields are dropped."""
     if not isinstance(data, dict):
         raise ValueError("layout must be an object")
     groups, group_ids = [], set()
-    raw_groups = [g for g in (data.get("page_groups") or [])[:MAX_PAGE_GROUPS] if isinstance(g, dict)]
+    raw_groups = [g for g in _list(data.get("page_groups"))[:MAX_PAGE_GROUPS] if isinstance(g, dict)]
     # As with pages below: a replacement ID never takes one another group was sent with.
     explicit_groups = {str(g.get("id")) for g in raw_groups if ID_RE.match(str(g.get("id") or ""))}
     for g_index, group in enumerate(raw_groups):
@@ -62,7 +68,7 @@ def clean_layout(data) -> dict:
             group_id = _free_id(f"g{g_index}", group_ids | explicit_groups)
         group_ids.add(group_id)
         groups.append({"id": group_id, "name": _text(group.get("name"), 30) or f"Group {g_index + 1}"})
-    raw_pages = [p for p in (data.get("pages") or [])[:MAX_PAGES] if isinstance(p, dict)]
+    raw_pages = [p for p in _list(data.get("pages"))[:MAX_PAGES] if isinstance(p, dict)]
     # IDs the admin sent explicitly. A page whose ID is missing, "more" or a repeat gets a new
     # one that clashes with none of these, so no other page's ID (or a phone's choice) moves.
     explicit = {str(p.get("id")) for p in raw_pages if ID_RE.match(str(p.get("id") or ""))}
@@ -70,7 +76,7 @@ def clean_layout(data) -> dict:
     pages = []
     for p_index, page in enumerate(raw_pages):
         items = []
-        for i_index, item in enumerate((page.get("items") or [])[:MAX_ITEMS]):
+        for i_index, item in enumerate(_list(page.get("items"))[:MAX_ITEMS]):
             if not isinstance(item, dict) or item.get("type") not in ITEM_TYPES:
                 continue
             kind = item["type"]
@@ -87,13 +93,13 @@ def clean_layout(data) -> dict:
             elif kind == "area":
                 try:
                     area_id = int(item.get("area_id"))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
                 items.append({**base, "area_id": area_id, "title": _text(item.get("title"), 60),
                               **_access(item), **_collapsed(item)})
             elif kind == "group":
                 members, summary_count, devices, dividers = [], 0, 0, 0
-                for member in (item.get("entities") or [])[:MAX_GROUP_ENTITIES + MAX_GROUP_DIVIDERS]:
+                for member in _list(item.get("entities"))[:MAX_GROUP_ENTITIES + MAX_GROUP_DIVIDERS]:
                     if not isinstance(member, dict):
                         continue
                     if member.get("type") == "divider":
@@ -331,7 +337,7 @@ def clean_phone_order(data) -> dict:
     """Validate an arrangement sent by a phone: page IDs and, per page, item IDs."""
     if not isinstance(data, dict):
         raise ValueError("order must be an object")
-    pages = [k for k in (data.get("pages") or [])[:MAX_ORDER_ENTRIES] if _order_key(k)]
+    pages = [k for k in _list(data.get("pages"))[:MAX_ORDER_ENTRIES] if _order_key(k)]
     items = {}
     raw_items = data.get("items") or {}
     if not isinstance(raw_items, dict):

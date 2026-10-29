@@ -306,6 +306,7 @@ def test_sync_staff_now_and_its_budget(tmp_path):
             assert main.staff_sync_due()
             # Never while Connecteam is stopped (rejected keys) or paused (rate limits).
             main.connecteam.halted = "Connecteam didn't accept the Client ID and Secret."
+            main.connecteam.halted_at = time.time()   # just now (else it's tried again at once)
             assert not main.staff_sync_due()
             main.connecteam.halted = None
             main.connecteam.paused_until = time.time() + 60

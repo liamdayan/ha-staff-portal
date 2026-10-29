@@ -676,8 +676,9 @@
     return lines.join("\n");
   }
   function csvText(W) {
-    // A leading = + - @ would make a spreadsheet run the cell as a formula: quote it as text.
-    const q = v => { v = String(v ?? ""); if (/^[=+\-@]/.test(v) && !/^-?\d/.test(v)) v = "'" + v; return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+    // A leading = + - @ (or a tab or CR) would make a spreadsheet run the cell as a formula:
+    // quote it as text. Only a plain number like -1.5 is left alone.
+    const q = v => { v = String(v ?? ""); if (/^[=+\-@\t\r]/.test(v) && !/^-?\d+(\.\d+)?$/.test(v)) v = "'" + v; return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
     const head = ["Period start", "Period end", "Employee", "Department", "Status", "Hours worked", "Late count", "Late minutes", "Early clock-outs", "Early minutes", "Missed lunches", "Missed shifts", "Missed shift hours", "Forms expected", "Forms missed", "Sick balance hrs", "PTO balance hrs", "Shortfall hrs", "Coverage", "Detail"];
     const rows = W.rows.map(r => [fmtDate(W.P.start), fmtDate(W.P.end), r.p.name, deptOf(r.p), r.status, fmtHrs(r.workedMin / 60), r.late.length, Math.round(r.lateMin), r.early.length, Math.round(r.earlyMin), r.lunch.length, r.missed.length, fmtHrs(r.missedHrs), r.formsExpected, r.formsMissed, r.sick ?? "", r.pto ?? "", fmtHrs(r.shortfall), r.cover.main,
       r.days.flatMap(d => d.blocks.filter(b => b.flags.some(f => f[0] !== "info")).map(b => `${fmtDay(d.d)}: ${b.flags.filter(f => f[0] !== "info").map(f => f[1]).join("; ")}`)).join(" | ")]);

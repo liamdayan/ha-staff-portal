@@ -905,7 +905,7 @@ What to know:
 - The address takes up to 300 deliveries and stores up to 1,000 records a minute, from wherever
   they come; past that, TT Hotel is asked to send them again later, so nothing real is lost and a
   leaked address can't wipe the door history in minutes. Staff Access reads at most 300 records
-  (64 KB) from one delivery, and otherwise always answers TT Hotel "success", so TT Hotel never
+  (160 KB) from one delivery, and otherwise always answers TT Hotel "success", so TT Hotel never
   sends the same ones again. Requests to a wrong address are limited separately (30 a minute from
   one place) and never hold up TT Hotel's.
 - The Home Assistant notification only names cards made here and shows a card number only when
@@ -1571,9 +1571,10 @@ tasks marked. Tap **+ Quick task**, type a title and tap **Add task**: it goes t
 department (the first of yours) unless you pick another (or Everyone), a person, or a due date. Tap a task's status
 chip to move it on (To do → In progress → Done); press and hold it (or right-click on a
 computer) to pick any status, or **Reopen** a done one. Tap a task to see its notes and history, and to edit
-or delete it. A task that's in Connecteam (a Quick Task, or a followed form's request) can't be
-deleted here, since Staff Access has no permission to delete things there: mark it **Done**, or
-delete it in Connecteam. The filters show only **Mine**, one department, or one status. Done tasks fold
+or delete it. A task that's in Connecteam (a Quick Task on a board that's followed, or a followed
+form's request) can't be deleted here, since Staff Access has no permission to delete things
+there: mark it **Done**, or delete it in Connecteam. Once its board or form isn't followed any
+more, it can be deleted like any other. The filters show only **Mine**, one department, or one status. Done tasks fold
 away after a day (**Show older**). On a tablet or computer the list becomes a board with a column
 for each status. The list updates by itself every few seconds.
 
@@ -1770,8 +1771,9 @@ Always on:
   stream of sign-ins can't slow everything else down.
 - Connections that sit idle for 15 seconds, or that send a request too slowly, are closed, so
   nobody can tie the add-on up by opening lots of connections and doing nothing with them.
-- A setup code can't be guessed (and each works once). Repeated wrong setup codes slow down that
-  address, and 200 in 10 minutes from anywhere pause setup for everyone for a while.
+- A setup code can't be guessed (and each works once). Repeated wrong setup codes from one
+  address, or 200 in 10 minutes from anywhere, are answered "try again later" for a while; a
+  right code always works, so nobody can block a new phone's setup.
 - Double taps are ignored: the same command from the same phone within 3 seconds isn't sent
   again or logged again, and switching something on or off that already is does nothing. The
   app also ignores taps on a control while its last command is still being sent.
@@ -2699,8 +2701,10 @@ probation, and what needs doing (steps due, drafts, write-ups to deliver or not 
   days, or the length the published point system sets for their department (the longest, if they're
   in several). Its end date is its last day: 90 days from January 1 ends on March 31. It's made by
   itself for new hires only: people whose period was already over when the HR portal met them never
-  get one. If HR confirms a different start date, it moves with it. A rehire gets a new one; a
-  transfer doesn't.
+  get one. If HR confirms a different start date, it moves with it; if the new date means the
+  period was already over, it's waived (and the history says so). A rehire gets a new one; a
+  transfer doesn't. When the published point system's introductory periods are only for some
+  departments, people in none of them get none.
 - **Disciplinary probation.** HR places someone on it from their page, with an end date and a
   reason, for example as part of a last-chance agreement.
 - **Extending** is HR's, with a reason and a new end date: one extension of up to 30 days, and 120

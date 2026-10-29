@@ -563,13 +563,15 @@ def activate(db, doc: dict, actor_id=None, *, now: float | None = None) -> None:
     queue(db, doc["person_id"], "drive", doc["id"], now)
 
 
-def reject(db, doc: dict, reason: str, actor_id, now: float | None = None) -> None:
+def reject(db, doc: dict, reason: str, actor_id, now: float | None = None) -> bool:
+    """False when it isn't waiting for HR any more (someone else decided first)."""
     now = time.time() if now is None else now
-    db.conn.execute("UPDATE documents SET status = 'rejected', decided_by = ?, decided_at = ?, "
-                    "reason = ?, keep_until = ? WHERE id = ?",
-                    (actor_id, now, crypto.seal_text(reason, "documents.reason"),
-                     now + REJECTED_DAYS * DAY, doc["id"]))
+    cur = db.conn.execute("UPDATE documents SET status = 'rejected', decided_by = ?, decided_at = ?, "
+                          "reason = ?, keep_until = ? WHERE id = ? AND status = 'waiting'",
+                          (actor_id, now, crypto.seal_text(reason, "documents.reason"),
+                           now + REJECTED_DAYS * DAY, doc["id"]))
     db.conn.commit()
+    return cur.rowcount == 1
 
 
 def delete(db, doc: dict, actor_id, now: float | None = None) -> None:

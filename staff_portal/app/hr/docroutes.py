@@ -326,8 +326,8 @@ async def api_accept(request: web.Request):
 @rule("hr")
 async def api_reject(request: web.Request):
     svc, v = svc_of(request), viewer_of(request)
+    data = await read_json(request)   # first: the document is looked up after the wait
     doc, k, person = hr_doc(request)
-    data = await read_json(request)
     reason = " ".join(str(data.get("reason") or "").split())[:MAX_REASON]
     if documents.owned_by(k):
         return error("Check this in its own section.", 409)
@@ -336,7 +336,8 @@ async def api_reject(request: web.Request):
     if not reason:
         return error("Say why, so whoever added it knows what to do.")
     access.not_own_work(v, doc["added_by"])
-    documents.reject(svc.db, doc, reason, v.id)
+    if not documents.reject(svc.db, doc, reason, v.id):
+        return error("It isn't waiting for HR any more.", 409)
     audit.record(svc.db, "Didn't accept a document", actor_id=v.id, actor=v.name,
                  target_id=person["id"], target=person["name"], detail=k["name"],
                  ip=svc.client_ip(request))

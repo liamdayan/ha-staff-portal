@@ -138,15 +138,22 @@ shows.
 ## 3. view.js
 
 ```js
-StaffReports.register("<key>", {
-  render(el, data, api) {
-    // el: the box to draw in. data: what data() returned. Called again, with a new box, after
-    // refresh(), an upload or saved settings: keep what the person picked (a tab, say) in a
-    // variable outside render().
-    el.replaceChildren(api.h("p", null, `${data.people.length} people`));
-  },
-});
+(function () {
+  let tab = "week";   // what the person picked: kept between renders
+  StaffReports.register("<key>", {
+    render(el, data, api) {
+      // el: the box to draw in. data: what data() returned. Called again, with a new box, after
+      // refresh(), an upload or saved settings: keep what the person picked (a tab, say) in a
+      // variable outside render(), inside the function around it.
+      el.replaceChildren(api.h("p", null, `${data.people.length} people`));
+    },
+  });
+})();
 ```
+
+Wrap the whole file in `(function () { ... })();` as above. The staff app runs `view.js` again for
+each person who signs in on a shared device (so nobody sees the last person's tab or draft), and
+a `let`, `const` or `class` outside such a function would stop it loading the second time.
 
 `el.replaceChildren(a, null)` prints the word "null": leave out empty parts first
 (`...[a, b].filter(Boolean)`). `api.h` skips null and false children itself.
@@ -161,7 +168,7 @@ StaffReports.register("<key>", {
 | `saveSettings(obj)` | saves settings; resolves to `{ok, settings?, error?}`, shows a message itself, and calls `render()` again when it worked |
 | `toast(text, isError)` | a short message |
 | `download(name, text)` | saves text as a file (CSV) |
-| `csvCell(value)` | one CSV cell, quoted when needed |
+| `csvCell(value)` | one CSV cell, quoted when needed (text a spreadsheet would run as a formula gets a `'` first) |
 | `manage`, `settings`, `params`, `report` | who's looking, the settings, the params used, the report's details |
 
 Shared classes in the app's styles, light and dark: `rp-card`, `rp-toolbar`, `rp-btn` (and

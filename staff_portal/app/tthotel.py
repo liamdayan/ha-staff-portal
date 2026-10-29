@@ -626,8 +626,9 @@ class TTHotel:
         True when Staff Access's own per-minute cap held this try back, so TT Hotel wasn't
         asked}. "retry" means trying again later may work (gateway or door busy or offline, no
         answer, the minute's requests used up); retries are the caller's to space out and cap."""
+        # An earlier enrolment that may have happened stays unsure until the look for it is done.
         result = {"status": "failed", "card_id": card_id, "code": None, "message": None,
-                  "unsure": False, "wait": False}
+                  "unsure": bool(find_first and card_id is None), "wait": False}
         lock = _as_int(lock_id)
         number = str(card_number or "").strip()
         if (lock is None or not 1 <= lock <= 2 ** 53 or api not in LOCKOUT_APIS
@@ -641,7 +642,7 @@ class TTHotel:
             self._room(calls + (1 if find_first and card_id is None else 0))
             if card_id is None and find_first:
                 card_id = await self._find_lockout(lock, number)
-                result["card_id"] = card_id
+                result.update(card_id=card_id, unsure=False)
             if card_id is None:
                 start = _date_ms() + LOCKOUT_AHEAD * 1000
                 sent = self._api_sent

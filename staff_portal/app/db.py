@@ -2587,7 +2587,8 @@ class Database:
         """The card made here that a lock record's card number is, or None: compared without
         leading zeros, as written, then with its bytes reversed (doorlog.card_keys). A number
         written again after its card was cleared is the card it was at the time: the last one
-        written by then (a few minutes either way, for the lock's clock). A card cleared before
+        written by then (a few minutes either way, for the lock's clock); a card written only after
+        the record (a door's late upload from before) is never it. A card cleared before
         the record (cleared_at) is never it: a cleared card goes back in the stack and may have
         been given out again in TT Hotel's own program, so the record is left unmatched."""
         slack = doorlog.CLOCK_SLACK
@@ -2600,8 +2601,9 @@ class Database:
                    LEFT JOIN staff s ON s.id = j.holder_staff_id
                    WHERE ltrim(c.card_number, '0') = ? AND c.status = 'written' AND j.kind = 'write'
                    AND (c.cleared_at IS NULL OR ? <= c.cleared_at + ?)
-                   ORDER BY COALESCE(c.written_at, j.ts) <= ? DESC, COALESCE(c.written_at, j.ts) DESC,
-                   c.id DESC LIMIT 1""", (key, at, slack, at + slack)).fetchone()
+                   AND COALESCE(c.written_at, j.ts) <= ?
+                   ORDER BY COALESCE(c.written_at, j.ts) DESC, c.id DESC LIMIT 1""",
+                (key, at, slack, at + slack)).fetchone()
             if row:
                 return dict(row)
         return None

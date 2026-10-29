@@ -81,6 +81,9 @@ SCOPE_DELETE = "quick_tasks.delete"   # optional: only for closing a task nobody
 LEFT_OPEN = ("Still on the Connecteam board: Connecteam can't close a task nobody is assigned "
              "to without the quick_tasks.delete permission.")
 SCOPES_FOLLOW = ("forms.write",)
+CREATING_RECHECK = 5 * 60   # a create with no answer: its board read again at most this often
+NO_FORMS_WRITE = ("The Connecteam app has no forms.write, so this status is only read from "
+                  "Connecteam, not written to it.")
 
 _db = lambda: None   # noqa: E731 - the Database (main.db; tests swap it)
 _ct = None           # connecteam.Connecteam
@@ -160,10 +163,11 @@ def _count(kind: str) -> None:
     _db().update_settings({"ct_tasks_usage": json.dumps(u)})
 
 
-async def _ask(method: str, path: str, params=None, body=None) -> dict:
+async def _ask(method: str, path: str, params=None, body=None, alone: bool = False) -> dict:
     """One request in the reports lane that pauses only this sync when refused or told to slow
     down. Raises Paused or Busy (nothing asked), Rejected, or ConnecteamError (no answer: it
-    may have arrived)."""
+    may have arrived). alone: a refusal (a permission the app may not have, such as deleting or
+    writing a form) concerns only this request: Rejected with status 403, nothing paused."""
     global failures
     if _ct is None or _db().settings().get("connecteam_enabled") != "1":
         # Turned off in Settings: nothing is asked (a followed form's status waits too).
@@ -184,8 +188,11 @@ async def _ask(method: str, path: str, params=None, body=None) -> dict:
         _count("writes" if write else "reads")
         raise Paused(pause_reason) from None
     except ReportsRefused as err:
-        _pause(REFUSED_WAIT, str(err))
         _count("writes" if write else "reads")
+        if alone and getattr(_ct, "_token", None):
+            # Refused with a token that works (not the keys themselves, which pause everything).
+            raise Rejected(str(err), 403) from None
+        _pause(REFUSED_WAIT, str(err))
         raise Paused(str(err)) from None
     except ReportsBusy as err:
         raise Busy(str(err)) from None
@@ -298,9 +305,13 @@ _logged_recurring: set[tuple] = set()
 
 
 def in_connecteam(t: dict) -> bool:
-    """In Connecteam: a Quick Task, or a followed form's submission. The app has no delete
-    permission there, so it's never deleted here (where it would only come back)."""
-    return bool(t.get("ct_task_id")) or (t.get("source") == "form" and t.get("ct_status") is not None)
+    """In Connecteam, and still read from it: a Quick Task on a board that's followed, or a
+    submission of a form that's followed. The app has no delete permission there, so it's never
+    deleted here (where it would only come back). Once its board or form isn't read any more,
+    it's a task like any other. (A sync turned off or restored is still read when it's back on.)"""
+    if t.get("source") == "form":
+        return t.get("ct_status") is not None and follows(t) is not None
+    return bool(t.get("ct_task_id")) and t.get("ct_board_id") in {b["board_id"] for b in boards()}
 
 
 def recurring(t: dict) -> bool:
@@ -365,6 +376,9 @@ def _with_start(body: dict) -> dict:
     """Connecteam takes a due date only with a start time (it compares them), and refuses one
     in the past: the task's own when it's still ahead, otherwise a minute from now."""
     if "dueDate" in body and "startTime" not in body:
+        body["startTime"] = min(int(time.time()) + 60, body["dueDate"])
+    elif "dueDate" in body and isinstance(body.get("startTime"), int) and body["startTime"] > body["dueDate"]:
+        # A kept start (still ahead) after a due date moved earlier here: brought back to it.
         body["startTime"] = min(int(time.time()) + 60, body["dueDate"])
     return body
 
@@ -502,7 +516,11 @@ async def _push(t: dict) -> bool:
     if sync.get("creating"):
         board = mapped.get(sync.get("board"))
         if board:
-            await _poll(board)   # finds it if it arrived, or lets it be made again
+            # Finds it if it arrived, or lets it be made again: straight away, then at most every
+            # CREATING_RECHECK (this is tried every minute).
+            if time.time() - (sync.get("checked") or 0) >= CREATING_RECHECK:
+                _save(t["id"], ct_sync={**sync, "checked": time.time()})
+                await _poll(board)
             return False
         _save(t["id"], ct_sync={}, clear_pending=True, pending_was=t["ct_pending"])
         return False
@@ -535,7 +553,7 @@ async def _push(t: dict) -> bool:
                 _left_open(t, seen, sa)
                 return False
             try:
-                await _ask("DELETE", path)
+                await _ask("DELETE", path, alone=True)
             except Rejected as err:
                 if err.status != 403:
                     raise
@@ -652,6 +670,10 @@ async def _push_form(t: dict) -> bool:
             "isn't one of its values, and the API can't clear it.")
         _save(t["id"], ct_note=note, clear_pending=True, pending_was=t["ct_pending"])
         return False
+    if _ct is not None and _ct.scopes is not None and not all(s in _ct.scopes for s in SCOPES_FOLLOW):
+        # Without forms.write the status is only read: say so, rather than ask and be refused.
+        _save(t["id"], ct_note=NO_FORMS_WRITE, clear_pending=True, pending_was=t["ct_pending"])
+        return False
     body = {"managerFields": [{"managerFieldId": follow["field"], "managerFieldType": "status",
                                "status": {"statusOptionId": option["id"], "name": option["name"],
                                           "color": option["color"]}}]}
@@ -661,7 +683,7 @@ async def _push_form(t: dict) -> bool:
         body["managerFields"].append({"managerFieldId": note_field, "managerFieldType": "note", "note": note})
     try:
         await _ask("PUT", f"/forms/v1/forms/{t['form_id']}/form-submissions/{t['submission_id']}",
-                   body=body)
+                   body=body, alone=True)
     except Rejected as err:
         if err.status >= 500:
             raise
@@ -761,11 +783,12 @@ def _was_open(t: dict) -> bool:
     return seen is None or not (seen.get("done") or seen.get("archived"))
 
 
-async def _read(b: dict, linked: list[dict], creating: bool) -> dict:
+async def _read(b: dict, linked: list[dict], creating: list[dict]) -> dict:
     """One check's read of a board: {tasks, complete, pages (what a check usually takes, for the
     plan), checked (linked tasks that are gone when they aren't among the tasks), drafts (listed)}.
-    A create that may have arrived, in any status, needs the whole board (status=all); so does a
-    lookup Connecteam won't take. Otherwise its open tasks, then the linked ones that were open
+    A create that may have arrived is open or a draft (or completed, when it was done here):
+    those lists, not the board's whole past, which can be too long to read in one go. A lookup
+    Connecteam won't take needs the whole board (status=all). Otherwise its open tasks, then the linked ones that were open
     and aren't there, by ID. A partial read stops there and checks nothing."""
     board_id = b["board_id"]
 
@@ -774,7 +797,18 @@ async def _read(b: dict, linked: list[dict], creating: bool) -> dict:
         return {"tasks": found, "complete": complete, "pages": pages, "drafts": False,
                 "checked": {t["ct_task_id"] for t in linked}}
     if creating:
-        return await whole()
+        done = any(t["status"] == "done" or (_sync(t).get("base") or {}).get("done") for t in creating)
+        statuses = ["published", "draft"] + (["completed"] if done else [])
+        found, pages = [], 0
+        for status in statuses:
+            more, complete, n = await _list(board_id, status)
+            found += more
+            pages += n
+            if not complete:
+                break
+        # (complete here only answers the creates: linked tasks missing from these are checked
+        # by the next ordinary read, so none is taken as gone)
+        return {"tasks": found, "complete": complete, "pages": pages, "drafts": False, "checked": set()}
     found, complete, pages = await _list(board_id, "published")
     result = {"tasks": found, "complete": False, "pages": pages, "drafts": False, "checked": set()}
     if not complete:
@@ -815,7 +849,7 @@ async def _poll(b: dict) -> None:
         "SELECT * FROM tasks WHERE ct_task_id IS NULL AND ct_sync LIKE '%\"creating\"%'")]
     creating = [t for t in creating if _sync(t).get("board") == board_id and _sync(t).get("creating")]
     try:
-        read = await _read(b, linked, bool(creating))
+        read = await _read(b, linked, creating)
         remote, complete, pages = read["tasks"], read["complete"], read["pages"]
     except Rejected as err:
         db.conn.execute("UPDATE task_ct_boards SET last_poll = ?, last_error = ? WHERE board_id = ?",
@@ -837,6 +871,9 @@ async def _poll(b: dict) -> None:
     seen_ids = {r[0] for r in db.conn.execute("SELECT ct_task_id FROM task_ct_seen")}
     # Creates that may have arrived: found by title and assignees, never made twice.
     for t in creating:
+        t = dict(db.task(t["id"]) or {})   # fresh: it may have changed while the board was read
+        if not t or t["ct_task_id"] or not _sync(t).get("creating"):
+            continue
         sync = _sync(t)
         base = sync.get("base") or sa_view(t, to_ct)
         match = next((cid for cid, r in by_id.items() if cid not in seen_ids
@@ -861,6 +898,12 @@ async def _poll(b: dict) -> None:
         db.conn.commit()
         return
     for t in linked:
+        # Fresh: a change made here while the board was read must count as one made here (else
+        # it would be taken as agreed and never sent).
+        fresh = db.task(t["id"])
+        if fresh is None or fresh["ct_task_id"] != t["ct_task_id"]:
+            continue
+        t = dict(fresh)
         r = by_id.get(t["ct_task_id"])
         if r is not None:
             sync = _sync(t)

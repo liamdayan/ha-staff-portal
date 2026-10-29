@@ -16,6 +16,7 @@ or shows them.
 import asyncio
 import io
 import re
+import threading
 
 from aiohttp import web
 
@@ -78,9 +79,10 @@ def clean_image(data: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     try:
         with Image.open(io.BytesIO(data)) as img:
-            if img.format not in ("JPEG", "PNG", "WEBP"):
+            # MPO is a JPEG with a second picture inside (many newer phones' HDR photos)
+            if img.format not in ("JPEG", "MPO", "PNG", "WEBP"):
                 raise FileRefused(NOT_ALLOWED)
-            limit = MAX_PIXELS if img.format == "JPEG" else MAX_FULL_PIXELS
+            limit = MAX_PIXELS if img.format in ("JPEG", "MPO") else MAX_FULL_PIXELS
             if img.width * img.height > limit:
                 raise FileRefused(TOO_LARGE)
             # Shrink first (a JPEG is decoded at a fraction of its size), then turn it upright,
@@ -106,6 +108,10 @@ def clean_image(data: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
 
 _slots: dict = {}
 
+# PDFium can't be used by two threads at once (it crashes the whole add-on), so PDF previews
+# take turns. Only this module uses it.
+_PDFIUM = threading.Lock()
+
 
 PREVIEW_PAGES = 8          # pages a PDF's preview shows (the rest: download it)
 PREVIEW_WIDTH = 1200       # pixels across each page
@@ -123,22 +129,23 @@ def pdf_preview(data: bytes) -> bytes:
         raise FileRefused(NO_PREVIEW) from err
     pages = []
     try:
-        pdf = pdfium.PdfDocument(data)
-        try:
-            count = len(pdf)
-            for n in range(min(count, PREVIEW_PAGES)):
-                page = pdf[n]
-                try:
-                    width, height = page.get_size()
-                    if width <= 0 or height <= 0:
-                        continue
-                    scale = min(PREVIEW_WIDTH / width, PREVIEW_PAGE_HEIGHT / height, 4)
-                    pages.append(page.render(scale=scale, fill_color=(255, 255, 255, 255),
-                                             may_draw_forms=True).to_pil().convert("RGB"))
-                finally:
-                    page.close()
-        finally:
-            pdf.close()
+        with _PDFIUM:
+            pdf = pdfium.PdfDocument(data)
+            try:
+                count = len(pdf)
+                for n in range(min(count, PREVIEW_PAGES)):
+                    page = pdf[n]
+                    try:
+                        width, height = page.get_size()
+                        if width <= 0 or height <= 0:
+                            continue
+                        scale = min(PREVIEW_WIDTH / width, PREVIEW_PAGE_HEIGHT / height, 4)
+                        pages.append(page.render(scale=scale, fill_color=(255, 255, 255, 255),
+                                                 may_draw_forms=True).to_pil().convert("RGB"))
+                    finally:
+                        page.close()
+            finally:
+                pdf.close()
     except FileRefused:
         raise
     except Exception as err:  # noqa: BLE001 - a damaged or locked PDF: download it instead

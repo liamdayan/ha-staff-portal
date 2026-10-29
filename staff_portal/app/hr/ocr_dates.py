@@ -19,6 +19,7 @@ from datetime import date
 LASTS_YEARS = {"food_handler": 3, "olcc": 5}
 GENERIC_YEARS = 10        # nothing lasts longer than this ahead ("generic" kinds)
 SLACK_DAYS = 31           # dates this close to a whole number of years apart still pair up
+MAX_PAIRED = 200          # unlabelled dates tried in pairs (the latest; a card has a few)
 
 _LABELS = {
     "expires": r"expiration\s+date|expiration|expiry\s+date|expiry|expires?\s+on|expires?|exp"
@@ -85,7 +86,7 @@ def pick_dates(text: str, kind: str, today: date, name: str | None = None) -> di
         issued = max(d for d in issue)
         if years and not course:
             expires, how = _add_years(issued, years), "calculated"
-    elif pair := _pair(unlabelled, years):
+    elif pair := _pair(unlabelled[-MAX_PAIRED:], years):
         issued, expires = pair
         how = "read"
     elif unlabelled:
@@ -146,11 +147,13 @@ def _labelled_dates(text: str, today: date) -> list[tuple[date, str | None]]:
         if not dates:
             continue
         loose = []
+        j, last = 0, None
         for pos, end, d, month_only in dates:
-            # The closest label before it on the line, unless another date sits between them.
-            before = [(lend, kind) for lstart, lend, kind in labels if lend <= pos
-                      and not any(lend <= other < pos for other, _, _, _ in dates)]
-            label = max(before)[1] if before else None
+            # The closest label before it on the line, unless another date sits between them
+            # (one pass along the line: a page of dates mustn't take minutes).
+            while j < len(labels) and labels[j][1] <= pos:
+                last, j = labels[j][2], j + 1
+            label, last = last, None
             if label is None and not labels:
                 loose.append((d, month_only))
             elif not (month_only and label != "expires"):

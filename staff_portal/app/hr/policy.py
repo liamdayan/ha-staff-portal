@@ -44,6 +44,7 @@ import copy
 import csv
 import io
 import json
+import math
 import re
 import time
 from datetime import date, datetime, timedelta
@@ -316,7 +317,8 @@ def clean_span(value):
     if not isinstance(value, dict) or len(value) != 1:
         raise ValueError(value)
     unit, n = next(iter(value.items()))
-    if unit not in ("days", "months") or isinstance(n, bool):
+    if unit not in ("days", "months") or isinstance(n, bool) or (
+            isinstance(n, float) and not math.isfinite(n)):
         raise ValueError(value)
     n = int(n) if isinstance(n, (int, float)) and n == int(n) else int(str(n))
     if not 1 <= n <= (3650 if unit == "days" else 120):
@@ -459,8 +461,10 @@ def _num(value):
     """A number from a number or numeric text; anything else is left for validate() to name."""
     if isinstance(value, bool) or value is None:
         return value
-    if isinstance(value, (int, float)):
-        return int(value) if float(value).is_integer() else value
+    if isinstance(value, int):
+        return value      # as it is: float() can't take a huge one
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
     text = str(value).strip()
     try:
         number = float(text)
@@ -483,7 +487,7 @@ def _bool(value):
 def _span(value):
     try:
         return clean_span(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return value      # validate() names it
 
 
@@ -607,7 +611,7 @@ def _span_ok(v) -> bool:
     """A real span ({"days": n} or {"months": n} in range); None isn't one."""
     try:
         return v is not None and clean_span(v) == v
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return False
 
 
@@ -905,7 +909,10 @@ def save_draft(db, body: dict, actor_id, version_id=None, *, source: str = "blan
     allowed in a draft: validate() names them, and publish() refuses until they're fixed.
     Raises ValueError."""
     clean = normalize(body)
-    text = json.dumps(clean, separators=(",", ":"), ensure_ascii=False)
+    try:   # Infinity or NaN would be saved but never open again in a browser
+        text = json.dumps(clean, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        raise ValueError("A number in it isn't a real number.") from None
     if len(text) > MAX_BODY:
         raise ValueError("This point system is too big to save.")
     now = time.time()
@@ -1798,7 +1805,10 @@ async def api_import(request):
         return server.error(str(err))
     if isinstance(data.get("name"), str) and data["name"].strip():
         body["name"] = _text(data["name"])
-    vid = save_draft(db, body, v.id, source="import")
+    try:
+        vid = save_draft(db, body, v.id, source="import")
+    except ValueError as err:
+        return server.error(str(err))
     audit.record(db, "Imported a point system", actor_id=v.id, actor=v.name, detail=body["name"], ip=ip)
     return web.json_response({"ok": True, "id": vid, "questions": questions,
                               "problems": validate(body)})

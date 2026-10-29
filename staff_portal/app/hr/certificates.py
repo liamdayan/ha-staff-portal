@@ -83,6 +83,7 @@ TOO_BIG = "That file is too big for Google to read. Type the date from it."
 LOST = "The photo isn't on this computer any more. Ask them to add the card again."
 PDF_BACK = "A PDF can't have a back photo. Put both sides in one PDF instead."
 BUSY = "Someone is already deciding on this card."
+DECIDED = "That card was already decided."
 
 # The types a new HR portal starts with: key, name, how its dates are read (ocr_dates), years it
 # lasts (0: as printed), days a new hire has, heads-up days, the message while it's lapsed,
@@ -639,16 +640,24 @@ async def prepare(front: bytes, back: bytes | None = None) -> tuple[bytes, str]:
 
 def _stack(front: bytes, back: bytes) -> tuple[bytes, str]:
     from PIL import Image
-    with Image.open(io.BytesIO(front)) as a, Image.open(io.BytesIO(back)) as b:
-        width = min(max(a.width, b.width), STACK_WIDTH)
-        parts = [im.convert("RGB").resize((width, max(1, round(im.height * width / im.width))))
-                 for im in (a, b)]
-    gap = 24
-    sheet = Image.new("RGB", (width, parts[0].height + gap + parts[1].height), "white")
-    sheet.paste(parts[0], (0, 0))
-    sheet.paste(parts[1], (0, parts[0].height + gap))
-    out = io.BytesIO()
-    sheet.save(out, "JPEG", quality=90)
+    try:
+        with Image.open(io.BytesIO(front)) as a, Image.open(io.BytesIO(back)) as b:
+            width = min(max(a.width, b.width), STACK_WIDTH)
+            # As wide as the sheet, but never taller than MAX_SIDE: a very narrow photo stretched
+            # to the sheet's width would need gigabytes. A part narrower than the sheet is centred.
+            parts = []
+            for im in (a, b):
+                scale = min(width / im.width, files.MAX_SIDE / im.height)
+                parts.append(im.convert("RGB").resize((max(1, round(im.width * scale)),
+                                                       max(1, round(im.height * scale)))))
+        gap = 24
+        sheet = Image.new("RGB", (width, parts[0].height + gap + parts[1].height), "white")
+        sheet.paste(parts[0], ((width - parts[0].width) // 2, 0))
+        sheet.paste(parts[1], ((width - parts[1].width) // 2, parts[0].height + gap))
+        out = io.BytesIO()
+        sheet.save(out, "JPEG", quality=90)
+    except Exception:  # noqa: BLE001 - photos that can't be put together are just refused
+        raise files.FileRefused(files.UNREADABLE) from None
     return files.clean_image(out.getvalue())
 
 
@@ -802,8 +811,11 @@ async def read_card(svc, card: dict, now: float | None = None) -> str:
         return "pending"
     t = type_by_key(db, card["type_key"]) or {"reader": "generic", "lasts_years": 0}
     person = db.person(card["person_id"])
-    found = pick(text, t, today(db, now), person["name"] if person else None)
-    return finish("done", None, read_text=crypto.seal_text(text[:MAX_TEXT], "certificates.read"),
+    # Only what's kept is looked at, and in a worker thread: a page full of dates mustn't stall
+    # doors or wristbands.
+    text = text[:MAX_TEXT]
+    found = await asyncio.to_thread(pick, text, t, today(db, now), person["name"] if person else None)
+    return finish("done", None, read_text=crypto.seal_text(text, "certificates.read"),
                   read_expires=found["expires"] and found["expires"].isoformat(),
                   read_issued=found["issued"] and found["issued"].isoformat(),
                   read_how=found["how"], read_warnings=json.dumps(found["warnings"][:10]))
@@ -896,6 +908,11 @@ async def confirm(svc, card: dict, values: dict, viewer: access.Viewer) -> dict:
         raise ValueError(BUSY)
     busy.add(card["id"])
     try:
+        # Looked at again: another HR admin may have decided while this request was arriving.
+        fresh = get(db, card["id"])
+        if not fresh or fresh["status"] != "waiting":
+            raise ValueError(DECIDED)
+        card = fresh
         person = db.person(card["person_id"])
         t = type_by_key(db, card["type_key"])
         kind = documents.kind_by_key(db, documents.CERTIFICATES)
@@ -949,11 +966,13 @@ def reject(svc, card: dict, reason: str, viewer: access.Viewer) -> dict:
     if card["id"] in _busy.get(svc, set()):
         raise ValueError(BUSY)
     now = time.time()
-    db.conn.execute("UPDATE certificates SET status = 'rejected', reason = ?, decided_by = ?, "
-                    "decided_by_name = ?, decided_at = ?, read_text = NULL WHERE id = ? AND "
-                    "status = 'waiting'", (crypto.seal_text(reason, "certificates.reason"), viewer.id,
-                                           viewer.name, now, card["id"]))
+    cur = db.conn.execute("UPDATE certificates SET status = 'rejected', reason = ?, decided_by = ?, "
+                          "decided_by_name = ?, decided_at = ?, read_text = NULL WHERE id = ? AND "
+                          "status = 'waiting'", (crypto.seal_text(reason, "certificates.reason"),
+                                                 viewer.id, viewer.name, now, card["id"]))
     db.conn.commit()
+    if not cur.rowcount:   # decided already: nobody is told it wasn't accepted
+        raise ValueError(DECIDED)
     person = db.person(card["person_id"])
     t = type_by_key(db, card["type_key"])
     name = t["name"] if t else "card"
