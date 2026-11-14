@@ -1720,15 +1720,26 @@ def staff_named(name: str) -> dict | None:
     return found[0] if len(found) == 1 else None
 
 
+def may_revoke_made(card: dict | None, perms: dict) -> bool:
+    """Who may revoke a card from the card log: a staff card, people who may see every card; a
+    wristband or contractor badge, anyone who may make that kind."""
+    if card is None:
+        return bool(perms["see_all_cards"])   # so a missing card is a 404, not a 403
+    if card["card_type"] == "staff":
+        return bool(perms["see_all_cards"])
+    return card["card_type"] in perms["types"]
+
+
 async def api_revoke_card(request: web.Request):
-    """Revoke a staff card (card in hand) on this computer's encoder: only for people who may
-    see every card. Reporting a card lost is done in the dashboard."""
+    """Revoke a card (card in hand) on this computer's encoder: a staff card for people who may
+    see every card, a wristband or contractor badge for anyone who may make that kind. Reporting
+    a card lost is done in the dashboard."""
     device, member, perms = await wristband_caller(request, change=True)
     try:
-        card = db.key_card(int(request.match_info["id"]))
+        card = db.made_card(int(request.match_info["id"]))
     except (ValueError, OverflowError):
         card = None
-    if not perms["see_all_cards"]:
+    if not may_revoke_made(card, perms):
         db.log(actor_name(device, member), "Blocked: revoke a key card",
                role=role_label(device, member), ok=False, ip=client_ip(request))
         raise json_error(web.HTTPForbidden, "You don't have access to revoke cards. Ask a "
@@ -1741,8 +1752,9 @@ async def api_revoke_card(request: web.Request):
         return bad_request(ENCODER_BUSY, 409)
     actor, role, ip = actor_name(device, member), role_label(device, member), client_ip(request)
     job_id = start_revoke_job(card, device, actor=actor, staff_id=member["id"], role=role, ip=ip,
-                              source="staff_app")
-    db.log(actor, f"Started revoking key {card_label(card)}", role=role, ip=ip)
+                              source="staff_app", card_type=card["card_type"])
+    noun = "key " if card["card_type"] == "staff" else ""
+    db.log(actor, f"Started revoking {noun}{card_label(card)}", role=role, ip=ip)
     return web.json_response({"job": job_view(db.wb_job(job_id), await wristband_zone())})
 
 
@@ -2416,6 +2428,28 @@ async def api_reports(request: web.Request):
         for key in visible_reports(member)]})
 
 
+class ReportDoors:
+    """Door activity for reports (ctx.doors): read from what TT Hotel sent here, never from TT
+    Hotel itself."""
+
+    LIMIT = 400   # records one report shows at most (one more is read, to tell there are more)
+
+    def list(self) -> list[dict]:
+        """The doors TT Hotel lists now, by name: [{id, name}]."""
+        doors = [{"id": d["lock_id"], "name": door_name(d)} for d in db.wb_doors() if d["active"]]
+        return sorted(doors, key=lambda d: d["name"].lower())
+
+    def records(self, since: float, until: float, *, door: int | None = None, kind: str = "",
+                result: str = "", q: str = "", limit: int = LIMIT) -> "list[dict]":
+        """What happened at the doors from since to until (seconds), newest first, as the
+        dashboard's Door activity lists it (see lock_record_view)."""
+        problems = result == "problems"
+        rows = db.lock_records(max(1, min(limit, self.LIMIT + 1)), None, door, problems,
+                               since=since, until=until, kind=kind,
+                               result="" if problems else result, q=q)
+        return [lock_record_view(r) for r in rows]
+
+
 def report_context(report, member: dict, manage: bool) -> "reports_kit.Context":
     """Departments here are the shown ones, in the Staff tab's order: hidden ones give nothing."""
     shown = db.shown_departments()
@@ -2436,7 +2470,7 @@ def report_context(report, member: dict, manage: bool) -> "reports_kit.Context":
                                 for i in db.member_department_ids(member, shown)]},
         departments=[{"id": d["id"], "name": d["name"], "smart_group_id": d["smart_group_id"]}
                      for d in shown],
-        staff=staff, tz=report_zone(), manage=manage)
+        staff=staff, tz=report_zone(), manage=manage, doors=ReportDoors())
 
 
 REPORT_WAIT = 20         # seconds a request waits for a report before saying "still working on it"

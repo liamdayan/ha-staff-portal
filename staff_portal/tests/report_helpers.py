@@ -78,8 +78,9 @@ class FakeCtx:
     staff, tz, today and manage."""
 
     def __init__(self, ct=None, uploads=None, settings=None, person=None, departments=(),
-                 tz="America/Los_Angeles", today=None, manage=False, staff=()):
+                 tz="America/Los_Angeles", today=None, manage=False, staff=(), doors=None):
         self.ct = ct or StubCt()
+        self.doors = doors
         self._uploads = dict(uploads or {})
         self.settings = dict(settings or {})
         self.person = person or {"id": 1, "name": "Ana", "connecteam_user_id": None,

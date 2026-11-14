@@ -66,6 +66,25 @@ REPORT = dict(
 | `ctx.today` | today's date there |
 | `ctx.manage` | whether this person may manage the report |
 | `ctx.report` | the report's own details (key, name, uploads, settings declared) |
+| `ctx.doors` | door activity stored here (below) |
+
+### ctx.doors: door activity
+
+What TT Hotel's locks sent Staff Access (the dashboard's Door activity), read from the add-on's
+own records: nothing is asked of TT Hotel, so it costs no requests. Not async.
+
+```python
+ctx.doors.list()             # [{id, name}]  the doors TT Hotel lists now (id: lock ID), by name
+ctx.doors.records(since, until, door=None, kind="", result="", q="", limit=ctx.doors.LIMIT)
+# newest first, from since up to until (seconds since 1970, until not included):
+# [{id, at, lock_id, door, who, card_id, card_number, card_type, how, ok, alarm, alert,
+#   problem, battery}]  kind: "guest", "staff", "contractor" or "other" (no card made here);
+#   result: "opened", "refused" or "problems"; q: part of a name, or how a card number starts.
+#   At most ctx.doors.LIMIT + 1 rows (ask for one more to tell there are more).
+```
+
+Card numbers and names are people's details: `app/reports/door_activity/` sends card numbers only
+to people who manage it (`ctx.manage`).
 
 A Connecteam user's departments here: first `ctx.staff`, the departments of the staff member
 linked to that Connecteam user (chosen by hand or by sync). For people not linked, `await

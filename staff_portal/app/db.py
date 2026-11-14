@@ -2419,17 +2419,19 @@ class Database:
 
     # Staff key cards: every staff card made, its state, and locking out lost ones
 
-    def _key_card_rows(self, where: list[str], params: list, limit: int) -> list[dict]:
+    def _key_card_rows(self, where: list[str], params: list, limit: int,
+                       staff_only: bool = True) -> list[dict]:
         rows = [dict(r) for r in self.conn.execute(
             f"""SELECT c.id, c.job_id, c.seq, c.card_number, c.written_at, c.state, c.state_at,
                 c.state_by, c.cancelled_card, j.name, j.summary, j.records, j.expires_at,
                 j.allow_lockout, j.actor, j.ts AS made_at, j.source, j.holder_staff_id,
-                j.department_id, j.staff_id, j.encoder_url, s.name AS holder_name,
+                j.department_id, j.staff_id, j.encoder_url, j.card_type, s.name AS holder_name,
                 s.status AS holder_status, dp.name AS department_name
                 FROM wb_cards c JOIN wb_jobs j ON j.id = c.job_id
                 LEFT JOIN staff s ON s.id = j.holder_staff_id
                 LEFT JOIN departments dp ON dp.id = j.department_id
-                WHERE j.card_type = 'staff' AND j.kind = 'write' AND c.status = 'written'
+                WHERE {"j.card_type = 'staff' AND" if staff_only else ""}
+                j.kind = 'write' AND c.status = 'written'
                 AND c.card_number IS NOT NULL AND {' AND '.join(where or ['1'])}
                 ORDER BY j.ts DESC, c.id DESC LIMIT ?""", (*params, limit))]
         for row in rows:
@@ -2482,6 +2484,11 @@ class Database:
     def key_card(self, card_id: int) -> dict | None:
         """One staff card made (by its wb_cards ID), in any state."""
         return next(iter(self._key_card_rows(["c.id = ?"], [card_id], 1)), None)
+
+    def made_card(self, card_id: int) -> dict | None:
+        """One card made of any kind (a staff card, wristband or contractor badge), by its
+        wb_cards ID, in any state: as key_card, with its card_type."""
+        return next(iter(self._key_card_rows(["c.id = ?"], [card_id], 1, staff_only=False)), None)
 
     def wb_card(self, card_id: int) -> dict | None:
         """One card written by any job (a wristband or a staff card), by its wb_cards ID, with
@@ -2649,18 +2656,48 @@ class Database:
         return added
 
     def lock_records(self, limit: int = 50, before: int | None = None, lock_id: int | None = None,
-                     problems: bool = False) -> list[dict]:
+                     problems: bool = False, *, since: float | None = None,
+                     until: float | None = None, kind: str = "", result: str = "",
+                     q: str = "") -> list[dict]:
         """Door activity, newest first (by when it happened): every door's or one door's, all of
         it or only problems. Each row has the matched card's name, number and type ("card_name",
         "card_card_number", "card_type") and the door's names ("door_name", "door_alias",
         "door_tt_name").
-        before: a record ID, for the next page (the records listed after it)."""
+        before: a record ID, for the next page (the records listed after it).
+        since/until: when it happened (until not included). kind: the card it matched, "guest"
+        (day pass or overnight), "staff", "contractor" or "other" (none made here). result:
+        "opened" or "refused". q: part of the name, or how the card number starts."""
+        assert kind in ("", "guest", "staff", "contractor", "other")
+        assert result in ("", "opened", "refused")
         where, params = [], []
         if lock_id is not None:
             where.append("r.lock_id = ?")
             params.append(lock_id)
         if problems:
             where.append("r.problem = 1")
+        if since is not None:
+            where.append("r.at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("r.at < ?")
+            params.append(until)
+        if kind == "guest":
+            where.append("j.card_type IN ('day_pass', 'overnight')")
+        elif kind == "other":
+            where.append("j.card_type IS NULL")
+        elif kind:
+            where.append("j.card_type = ?")
+            params.append(kind)
+        if result:
+            where.append("r.success = ?")
+            params.append(1 if result == "opened" else 0)
+        q = str(q or "").strip()[:60]
+        if q:
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(j.name LIKE ? ESCAPE '\\' OR r.username LIKE ? ESCAPE '\\' "
+                         "OR (COALESCE(c.card_number, r.card_number) >= ? "
+                         "AND COALESCE(c.card_number, r.card_number) < ?))")
+            params += [like, like, q, q + "\x7f"]
         if before is not None:
             row = self.conn.execute("SELECT at FROM wb_lock_records WHERE id = ?",
                                     (before,)).fetchone()

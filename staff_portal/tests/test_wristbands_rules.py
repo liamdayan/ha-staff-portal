@@ -412,6 +412,22 @@ def test_overnight_night_limit():
                       message="You can make overnight wristbands for up to 1 night.")
 
 
+def test_overnight_room_number_goes_in_front_of_the_name():
+    assert overnight(DESK, room_number="12").name == "Room 12 · Smith"
+    # "Room", "rm" and "#" aren't doubled; spaces are tidied; blank means no prefix.
+    for typed in ("Room 12", "rm 12", "RM. 12", "#12", "  12  "):
+        assert overnight(DESK, room_number=typed).name == "Room 12 · Smith", typed
+    assert overnight(DESK, room_number="4B").name == "Room 4B · Smith"
+    assert overnight(DESK, room_number="Suite 4B").name == "Suite 4B · Smith"
+    assert overnight(DESK, room_number="  ").name == "Smith"
+    assert overnight(DESK).name == "Smith"
+    overnight_refused(DESK, field="room_number", room_number="1234567890123")
+    overnight_refused(DESK, field="room_number", room_number=12)
+    overnight_refused(DESK, field="name", room_number="12", name="x" * 75)
+    # Other card types ignore it.
+    assert make(DESK, type="day_pass", name="A", room_number="12").name == "A"
+
+
 def test_overnight_rooms():
     # Rooms are optional (most rooms take keys): then it opens only the shared doors, and it
     # needs at least one of either.

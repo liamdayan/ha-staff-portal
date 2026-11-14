@@ -39,6 +39,7 @@ MAX_BUILDING = 254             # the encoder's range for building numbers...
 MAX_FLOOR = 255                # ...and floor numbers
 MAX_LOCK_ID = 2 ** 53          # TT Hotel lock IDs are positive whole numbers
 MAX_NAME = 80                  # a guest's or staff member's name on a card job
+MAX_ROOM_NUMBER = 12           # an overnight guest's room number, put in front of their name
 MAX_LIST = 256                 # doors, rooms or access choices in one request
 MAX_SCOPE = 5000               # buildings, floors or doors in one permission
 MAX_LIMIT = 3650               # max_nights and max_staff_days (ten years)
@@ -85,6 +86,7 @@ CONTRACTOR_TOO_LONG = f"Contractor badges can last at most {CONTRACTOR_DAYS} day
 NO_CONTRACTOR_DOORS = "There are no doors you can put on a badge. Ask a manager."
 
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+ROOM_WORD_RE = re.compile(r"^(room|rm\.?|#)\s*", re.IGNORECASE)
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAC_RE = re.compile(r"^[0-9A-F]{12}$")
 
@@ -481,6 +483,7 @@ class _Request:
     expires_on: date | None
     end_time: str | None = None   # a day pass's or contractor badge's end time ("21:30")
     company: str = ""             # a contractor's company (optional)
+    room_number: str = ""         # an overnight guest's room number (optional)
 
 
 def _id_tuple(raw, field: str) -> tuple[int, ...]:
@@ -561,6 +564,11 @@ def _read_request(data) -> _Request:
         company = ""
     if not isinstance(company, str):
         raise PlanError("Enter the company's name, or leave it blank.", "company")
+    room_number = data.get("room_number") if card_type == "overnight" else None
+    if room_number is None:
+        room_number = ""
+    if not isinstance(room_number, str):
+        raise PlanError("Enter the room number, or leave it blank.", "room_number")
     door_ids, room_ids = data.get("door_ids"), data.get("room_ids")
     access = data.get("access")
     if access is None:
@@ -577,7 +585,7 @@ def _read_request(data) -> _Request:
         expires_on=_date(data.get("expires_on"), "expires_on", "Pick a valid expiry date."),
         end_time=(_end_time(data.get("end_time")) if card_type in ("day_pass", "contractor")
                   else None),
-        company=company)
+        company=company, room_number=room_number)
 
 
 # ---------------------------------------------------------------- shared checks
@@ -742,8 +750,29 @@ def _plan_day_pass(request, perm, doors, settings, now, tz) -> Plan:
                    doors_field="door_ids", date_field=None)
 
 
-def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
+def _overnight_name(request: _Request) -> str:
+    """'Room 12 · Pat Kim': the guest's name, with their room number in front when one is given,
+    so the card log, Look up and Door activity show which room they're in (handy for rooms that
+    take keys, where the wristband itself doesn't say)."""
     name = _clean_name(request)
+    typed = " ".join(request.room_number.split())
+    room = ROOM_WORD_RE.sub("", typed).strip()   # "Room 12", "rm 12" and "#12" are all "12"
+    if not room:
+        return name
+    if len(typed) > MAX_ROOM_NUMBER:
+        raise PlanError(f"Room numbers can be at most {MAX_ROOM_NUMBER} characters.",
+                        "room_number")
+    # "12" or "4B" reads "Room 12"; a name like "Suite 4" or "Cabin 2" stays as typed.
+    label = typed if room == typed and " " in room else f"Room {room}"
+    full = f"{label} · {name}"
+    if len(full) > MAX_NAME:
+        raise PlanError(f"The room number and name together can be at most {MAX_NAME} "
+                        "characters.", "name")
+    return full
+
+
+def _plan_overnight(request, perm, doors, settings, now, tz) -> Plan:
+    name = _overnight_name(request)
     count = _check_count(request, setting_number(settings, "wb_overnight_max"))
     checkout = request.checkout
     if checkout is None:

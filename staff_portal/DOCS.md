@@ -567,6 +567,12 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   doors marked as guest rooms (see **Public doors, guest rooms and staff doors** below). The room
   is optional: for rooms that open with a key, leave it empty and the wristband opens only the
   shared doors.
+  - **Nights** and **Checkout date** follow each other: change the date and the nights update,
+    or use **−** and **+** (or type a number) and the checkout date moves.
+  - **Room number** (optional) goes in front of the guest's name, such as **Room 12 · Smith**,
+    in the card log, Look up and door activity. Use it for rooms that open with a key, so you
+    can still tell which room a guest is in. Type `12`, `Room 12` or `#12`; a name like
+    `Suite 4` is kept as typed.
 - **Contractor badges:** a contractor's name (and their company, if you like), how many badges,
   the doors they need and when the badges stop working, at most 7 days ahead (see **Contractor
   badges** below).
@@ -580,6 +586,9 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   where each card was last used (with [Door activity](#door-activity) set up).
   Search finds names holding what's typed, and card numbers starting with it (six digits or
   more search card numbers only).
+  - **Revoke** (with the card in hand) clears a card so it opens nothing and can be given out
+    again. Day passes, overnight wristbands and contractor badges can be revoked by anyone who
+    may make that kind. Staff cards need **See everyone's cards**.
 
 Every card has a named maker: it's recorded under the person signed in, so wristbands are only
 offered on shared or role-based computers where each person signs in with their own PIN.
@@ -620,11 +629,13 @@ offered on shared or role-based computers where each person signs in with their 
    - **This computer (USB)** (recommended): Staff Access reaches the encoder through the staff
      app open on that same computer, so nothing is set up on the network: no IP address, no
      search, and Staff Access never connects to the computer over your network.
-     - **Wristbands must be open on that computer**, with someone signed in who may make
-       wristbands. The encoder connects then, and the Wristbands header says **Encoder ready**.
-       A card started for that encoder from elsewhere (such as **Make key card** on the Staff
-       tab) waits until it's open (for **Wait for each card**), then needs attention. **Test
-       encoder** goes through it too, so open Wristbands there first.
+     - **Someone who may make wristbands must be signed in on that computer.** The encoder
+       stays connected while they are, on any screen of the staff app and with the window in
+       the background, so the dashboard keeps showing the encoder's status and problems. The
+       Wristbands header says **Encoder ready**. Signing out, or being signed out after sitting
+       idle, disconnects it. A card started for that encoder from elsewhere (such as **Make key
+       card** on the Staff tab) waits until someone is signed in there (for **Wait for each
+       card**), then needs attention. **Test encoder** goes through it too.
      - To make staff key cards from the dashboard on the computer you're using, none of this is
        needed: choose **This computer (the one you're using)** in **Make key card** (see
        [Make key card](#make-key-card)). The dashboard then does what Wristbands does here, for
@@ -639,7 +650,7 @@ offered on shared or role-based computers where each person signs in with their 
      - If it was blocked, the header says **Encoder blocked**: click the icon at the left of the
        address bar and allow **Apps on device** for the site (**Local network access** in Chrome
        or Edge before version 145). The page connects by itself once it's allowed.
-     - Keep Wristbands open in one window or tab at a time. A newer one takes the encoder over;
+     - Keep the staff app open in one window or tab at a time. A newer one takes the encoder over;
        the older one says **Encoder in another window**, with **Use it here** to take it back.
      - **The trade-off:** while a card is made or looked up, the encoder's key from TT Hotel
        (it's valid for 10 minutes) passes through that signed-in browser on its way to SN Web
@@ -1474,6 +1485,15 @@ Connecteam app needs **users.read**, **time_clock.read**, **schedule.read**, **f
 optionally **jobs.read** (see [Connecteam permissions](#connecteam-permissions)). If one is
 missing, the report says which, with Connecteam's own words. Scopes can't be added to an existing
 Connecteam app: make a new app with all of them, and paste its keys in Settings.
+
+**Door activity report.** Shows what happened at the doors, from what TT Hotel sends Staff
+Access (see [Door activity](#door-activity)); it never asks TT Hotel or Connecteam anything.
+**Filters** pick the dates (the last 7 days at first, or **Today**, **7 days** and **30 days**;
+up to 180 days, as long as door activity is kept), a door, the kind of card (guest wristbands,
+staff cards, contractor badges, or cards not made here), the result (opened, refused, or problems
+only) and a name, then **Apply**. It counts what's shown, lists the newest 400, and has a **CSV**
+download. Card numbers show only to people who manage the report (they can search by card number
+too). Like every report it starts turned off: turn it on and pick departments in the Reports tab.
 
 **Uploaded files.** Files uploaded to a report are kept on the add-on (the newest 5 of each kind),
 so everyone who opens the report sees the latest. Only text files are taken (CSV and the like),

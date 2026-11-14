@@ -11,6 +11,7 @@ Connecteam is the fake in tests/hr_helpers.py, speaking the documented Quick Tas
 come from a small local image server standing in for Connecteam's.
 """
 
+import datetime
 import io
 import json
 import time
@@ -29,7 +30,11 @@ import ctsync  # noqa: E402
 import main  # noqa: E402
 import tasks  # noqa: E402
 
-ALL_SCOPES = "users.read time_clock.read forms.read forms.write quick_tasks.read quick_tasks.write quick_tasks.delete"
+# Due dates still ahead, since Connecteam is never sent one in the past.
+DUE = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+DUE_LATER = (datetime.date.today() + datetime.timedelta(days=33)).isoformat()
+
+ALL_SCOPES ="users.read time_clock.read forms.read forms.write quick_tasks.read quick_tasks.write quick_tasks.delete"
 
 
 def synced(tmp_path, on=True):
@@ -78,11 +83,11 @@ def test_new_tasks_go_to_their_departments_board_and_changes_follow(tmp_path):
         async with p, ct:
             ana = await p.sign_in(p.ana)
             t = await p.add(ana, title="Fix gate", notes="Hinge\nloose", assigned_id=p.ana,
-                            due_date="2026-11-02", due_time="09:30")
+                            due_date=DUE, due_time="09:30")
             await ctsync.settle()
             [made] = ct.board_tasks["501"]
             assert (made["title"], made["userIds"], made["status"]) == ("Fix gate", [7], "published")
-            assert made["dueDate"] == ctsync.due_stamp("2026-11-02", "09:30", main.report_zone())
+            assert made["dueDate"] == ctsync.due_stamp(DUE, "09:30", main.report_zone())
             assert writes(ct, "POST")[0][2]["description"] == {"content": "Hinge\nloose\n\nAdded by Ana in Staff Access"}
             row = p.db.task(t["id"])
             assert (row["ct_task_id"], row["ct_board_id"], row["ct_pending"]) == (made["id"], "501", None)
@@ -96,9 +101,9 @@ def test_new_tasks_go_to_their_departments_board_and_changes_follow(tmp_path):
                 "Fix the gate", [], "draft", {"content": "Now\n\nAdded by Ana in Staff Access"})
             assert (await p.listed(ana))["Fix the gate"]["connecteam"] is True
             # A date with no time is the end of that day there.
-            await p.call("PUT", f"/api/tasks/{t['id']}", ana, {"due_date": "2026-11-05", "due_time": ""})
+            await p.call("PUT", f"/api/tasks/{t['id']}", ana, {"due_date": DUE_LATER, "due_time": ""})
             await ctsync.settle()
-            assert writes(ct)[-1][2]["dueDate"] == ctsync.due_stamp("2026-11-05", "23:59", main.report_zone())
+            assert writes(ct)[-1][2]["dueDate"] == ctsync.due_stamp(DUE_LATER, "23:59", main.report_zone())
             # Housekeeping has no board: its tasks stay here, and say so.
             cy = await p.sign_in(p.cy)
             mop = await p.add(cy, title="Mop the lobby")

@@ -234,6 +234,9 @@
     wbReset();
     rpReset();
     tkReset();
+    // A tool turned down for the last person is offered again to the next one.
+    toolsPaused = 0;
+    tkPaused = 0;
     session.del(WB_JOB_KEY);
   }
 
@@ -746,7 +749,13 @@
     }
     const nothingElse = !data.entities.length || (data.layout && !data.layout.pages.length);
     if (!view.tool && nothingElse && tools.length) view.tool = tools[0];
-    wbLinkSync();   // this computer's encoder link is open only while Wristbands is
+    // Someone who may use Wristbands here: its status is kept up to date on any screen, so this
+    // computer's encoder link (This computer (USB)) stays open while they're signed in.
+    if (tools.includes("wristbands")) {
+      wbState();
+      if (view.tool !== "wristbands") wbPoll();
+    }
+    wbLinkSync();
     const shape = JSON.stringify([isDesk(), view.tool, tools, data.layout
       ? [data.layout, view.pageId, view.detail]
       : data.entities.map((e) => [e.entity_id, e.area])]);
@@ -2206,11 +2215,13 @@
   // The server says this person can't use Wristbands here any more (their role changed, or the
   // encoder was taken off this computer): back to the pages, saying why.
   function wbNoAccess(text) {
-    toast(text || `You can't make wristbands on this ${word()}.`, true);
+    if (view.tool === "wristbands") toast(text || `You can't make wristbands on this ${word()}.`, true);
     wbReset();
     toolsPaused = Date.now() + TOOL_PAUSE_MS;
-    view.tool = null;
-    session.del("tool");
+    if (view.tool === "wristbands" || view.tool === "reports") {   // both are paused
+      view.tool = null;
+      session.del("tool");
+    }
     rerender();
   }
 
@@ -2504,10 +2515,12 @@
   let wbLink = null;
   let wbPermission = null;   // the browser's local network permission, once asked (a promise)
 
-  // Whether this page should hold the link now: Wristbands open, on a computer whose card
-  // encoder is This computer (USB). The Wristbands screen only exists while someone is signed in.
+  // Whether this page should hold the link now: someone who may use Wristbands is signed in
+  // (on any screen, in the background too), on a computer whose card encoder is This computer
+  // (USB). Wristbands' state only exists while they're signed in: signing out, or being signed
+  // out after sitting idle, closes the link.
   function wbLinkWanted() {
-    return !PREVIEW && view.tool === "wristbands" && wbLocalEncoder(wb?.options);
+    return !PREVIEW && !!wb && wbLocalEncoder(wb.options);
   }
 
   // Whether the Wristbands status says this computer's encoder is This computer (USB): its own
@@ -3129,7 +3142,7 @@
     const t = o?.types?.[type];
     if (!t?.allowed) return toast(t?.reason || "That can't be made right now.");
     const f = {
-      type, t, name: "", company: "", count: 1, touched: new Set(), submitted: false, busy: false,
+      type, t, name: "", company: "", roomNumber: "", count: 1, touched: new Set(), submitted: false, busy: false,
       doors: new Set(t.door_ids || []), rooms: new Set(),
       checkout: t.default_checkout || "", expiresOn: t.default_expires_on || "",
       // A day pass's end time for people who may change it; none to start with once the usual
@@ -3186,17 +3199,42 @@
       const checkout = h("input", { class: "field", type: "date", value: f.checkout, min: o.today,
         max: t.max_nights ? wbAddDays(o.today, t.max_nights) : null });
       f.els.checkoutHint = h("p", { class: "wb-hint", "aria-live": "polite" });
+      // Nights and the checkout date follow each other: change either one.
+      const nightsOf = () => {
+        const n = f.checkout ? wbDaysBetween(o.today, f.checkout) : NaN;
+        return n >= 0 ? n : NaN;
+      };
+      const nights = wbNumberStepper({ label: "Nights", unit: "night", min: 0, max: t.max_nights || null,
+        get: nightsOf,
+        put: (n) => {
+          f.checkout = wbAddDays(o.today, n);
+          checkout.value = f.checkout;
+          wbDrawDates(f);
+          wbChanged(f, "checkout");
+        } });
       checkout.addEventListener("input", () => {
         f.checkout = checkout.value;
+        nights.show();
         wbDrawDates(f);
         wbChanged(f, "checkout");
       });
+      const room = h("input", { class: "field", type: "text", maxlength: "12", autocomplete: "off",
+        spellcheck: "false", enterkeyhint: "go", placeholder: "Such as 12" });
+      room.addEventListener("input", () => {
+        f.roomNumber = room.value;
+        wbChanged(f, "room_number", false);
+      });
       sections.push(
-        h("section", { class: "wb-card" }, wbField(f, "room_ids", "Rooms",
-          wbDoorPicker(f.rooms, "rooms", rooms, () => wbChanged(f, "room_ids")),
-          h("p", { class: "wb-hint" }, "Pick every room in the booking that opens with a wristband. " +
-            "Leave it empty for rooms with keys."))),
         h("section", { class: "wb-card" },
+          wbField(f, "room_number", "Room number (optional)", room,
+            h("p", { class: "wb-hint" }, "Goes in front of the name in the card log and door activity, " +
+              "so you can tell which room they're in.")),
+          wbField(f, "room_ids", "Rooms",
+            wbDoorPicker(f.rooms, "rooms", rooms, () => wbChanged(f, "room_ids")),
+            h("p", { class: "wb-hint" }, "Pick every room in the booking that opens with a wristband. " +
+              "Leave it empty for rooms with keys."))),
+        h("section", { class: "wb-card" },
+          wbField(f, "nights", "Nights", nights.el),
           wbField(f, "checkout", "Checkout date", checkout, f.els.checkoutHint),
           shared.size || t.can_edit_doors
             ? wbDoorsField(f, "Shared doors", "Every overnight wristband opens these too.") : null));
@@ -3288,30 +3326,42 @@
 
   // Party size or number of cards: big - and + buttons, and the number can be typed as well.
   function wbStepper(f, label, max, unit) {
+    return wbNumberStepper({ label, unit, min: 1, max, get: () => f.count,
+      put: (n) => { f.count = n; wbChanged(f, "count"); } }).el;
+  }
+
+  // A number with - and + buttons, kept between min and max (max null: no top). get() reads the
+  // number; put(n) is called when it changes here. show() redraws it after a change elsewhere.
+  function wbNumberStepper({ label, unit, min, max, get, put }) {
+    const top = max ?? Infinity;
     const input = h("input", { class: "target wb-count", type: "number", inputmode: "numeric",
-      min: "1", max: String(max), value: String(f.count), "aria-label": label });
+      min: String(min), max: max == null ? null : String(max), value: String(get() ?? ""), "aria-label": label });
     const less = h("button", { type: "button", class: "round", "aria-label": `One fewer ${unit}` }, "−");
     const more = h("button", { type: "button", class: "round", "aria-label": `One more ${unit}` }, "+");
-    const set = (n, typed = false) => {
-      n = Math.min(max, Math.max(1, n));
-      if (!typed) input.value = String(n);
+    const show = (n = get(), typed = false) => {
+      if (!typed) input.value = Number.isFinite(n) ? String(n) : "";
       // aria-disabled rather than disabled, so the button keeps keyboard focus at the limit.
-      less.setAttribute("aria-disabled", String(n <= 1));
-      more.setAttribute("aria-disabled", String(n >= max));
-      if (n !== f.count) {
-        f.count = n;
-        wbChanged(f, "count");
-      }
+      less.setAttribute("aria-disabled", String(!(n > min)));
+      more.setAttribute("aria-disabled", String(n >= top));
     };
-    less.addEventListener("click", () => set(f.count - 1));
-    more.addEventListener("click", () => set(f.count + 1));
+    const set = (n, typed = false) => {
+      n = Math.min(top, Math.max(min, n));
+      show(n, typed);
+      if (n !== get()) put(n);
+    };
+    const step = (by) => {
+      const n = get();
+      set(Number.isFinite(n) ? n + by : min);
+    };
+    less.addEventListener("click", () => step(-1));
+    more.addEventListener("click", () => step(1));
     input.addEventListener("input", () => {
       const n = parseInt(input.value, 10);
       if (Number.isFinite(n)) set(n, true);
     });
-    input.addEventListener("change", () => { input.value = String(f.count); });
-    set(f.count);
-    return h("div", { class: "stepper wb-stepper" }, less, input, more);
+    input.addEventListener("change", () => show());
+    show();
+    return { el: h("div", { class: "stepper wb-stepper" }, less, input, more), show };
   }
 
   // The doors every card of this kind opens, chosen by a manager. Someone allowed to change
@@ -3630,7 +3680,9 @@
     if (f.doors.size !== new Set(defaults).size || defaults.some((id) => !f.doors.has(id))) {
       body.door_ids = [...f.doors];
     }
-    if (f.type === "overnight") Object.assign(body, { room_ids: [...f.rooms], checkout: f.checkout });
+    if (f.type === "overnight") {
+      Object.assign(body, { room_ids: [...f.rooms], checkout: f.checkout, room_number: f.roomNumber.trim() });
+    }
     if (f.type === "day_pass" && f.endTime) body.end_time = f.endTime;
     if (f.type === "staff") {
       Object.assign(body, { access: wbAccessEntries(f.access, f.doorById), expires_on: f.expiresOn });
@@ -4172,11 +4224,13 @@
     const cardValue = (c) => {
       if (c.status !== "written") return WB_CARD_WORDS[c.status] || cap(c.status);
       const number = c.card_number || "Made";
-      return key ? `${number} · ${WB_STATE_WORDS[wbCardState(job, c)] || "Unknown"}` : number;
+      // Staff cards always say their state; wristbands and badges once revoked or lost.
+      const shown = key || (c.state && c.state !== "active");
+      return shown ? `${number} · ${WB_STATE_WORDS[wbCardState(job, c)] || "Unknown"}` : number;
     };
-    const cardAlert = (c) => c.status === "failed" || (key && c.status === "written"
+    const cardAlert = (c) => c.status === "failed" || (c.status === "written"
       && !["active", "expired"].includes(wbCardState(job, c)));
-    // People who may see every card can revoke an active staff card here, with it in hand.
+    // An active card can be revoked here, with it in hand (see wbCanRevoke for who may).
     const revocable = WB_ACTIVE.has(job.status) ? [] : job.cards.filter((c) => wbCanRevoke(job, c));
     return h("div", { class: "wb-log-item open" }, row, h("div", { class: "wb-log-detail" },
       wbRows([
@@ -4259,10 +4313,13 @@
     return state === "active" ? "ok" : state === "expired" ? "" : "alert";
   }
 
-  // Only people who may see every card, only an active card (an expired one too: it's still
-  // cleared for reuse), and only one this app can name. The server checks all of it again.
+  // A staff card: only people who may see every card. A wristband or contractor badge: anyone
+  // who may make that kind. Only an active card (an expired one too: it's still cleared for
+  // reuse), and only one this app can name. The server checks all of it again.
   function wbCanRevoke(job, card) {
-    if (!wb.options?.see_all_cards || !wbKeyCard(job) || card.status !== "written") return false;
+    if ((job.kind || "write") !== "write" || card.status !== "written") return false;
+    const may = job.type === "staff" ? wb.options?.see_all_cards : wb.options?.types?.[job.type]?.permitted;
+    if (!may) return false;
     const state = wbCardState(job, card);
     return (state === "active" || state === "expired") && Number.isInteger(card.id) && !!card.card_number;
   }

@@ -1,0 +1,11 @@
+/* Door activity report: the filters, and the records' result badges. */
+.da-filters summary { font-weight: 700; font-size: 17px; cursor: pointer; }
+.da-quick, .da-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.da-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+.da-grid input, .da-grid select { width: 100%; min-width: 0; color: var(--text); }
+.da-when { white-space: nowrap; }
+.da-alert { color: var(--alert); font-weight: 600; }
+.da-result { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.da-result.opened { background: var(--card-2); color: var(--text); }
+.da-result.refused, .da-result.alarm { background: var(--alert); color: #fff; }
+.da-problem td:first-child { box-shadow: inset 3px 0 0 var(--alert); }

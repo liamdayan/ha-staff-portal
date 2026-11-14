@@ -244,7 +244,12 @@ def save_upload(data_dir: str, key: str, upload: dict, name: str, raw: bytes, by
     folder = upload_folder(data_dir, key)
     os.makedirs(folder, exist_ok=True)
     now = time.time() if now is None else now
-    file_id = f"{upload['key']}-{int(now * 1000):013d}-{secrets.token_hex(4)}"
+    # Newest first is by this number: two files in the same millisecond still keep their order.
+    ms = int(now * 1000)
+    newest = _file_ids(folder, upload["key"])[:1]
+    if newest:
+        ms = max(ms, int(FILE_ID_RE.match(newest[0])[2]) + 1)
+    file_id = f"{upload['key']}-{ms:013d}-{secrets.token_hex(4)}"
     meta = {"name": name, "uploaded_at": now, "by": str(by or "")[:120], "size": len(raw)}
     _write(os.path.join(folder, file_id + ".dat"), raw)
     _write(os.path.join(folder, file_id + ".json"), json.dumps(meta).encode())
@@ -355,11 +360,13 @@ class Context:
     departments [{id, name, smart_group_id}] (in the Staff tab's order; hidden ones left out),
     staff [{connecteam_user_id, department_ids, department_id}] (the departments each linked
     person is in here, and the first of them), tz (a ZoneInfo), today (a date there) and manage
-    (whether this person may manage the report)."""
+    (whether this person may manage the report). doors: door activity (see REPORTS.md), or
+    None when there's none to read."""
 
     def __init__(self, *, ct, report: Report, data_dir: str, settings: dict, person: dict,
-                 departments: list[dict], tz, manage: bool = False, staff=()):
+                 departments: list[dict], tz, manage: bool = False, staff=(), doors=None):
         self.ct = ct
+        self.doors = doors
         self.report = report
         self.settings = settings
         self.person = person

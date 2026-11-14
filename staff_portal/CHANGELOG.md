@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.12.24
+
+**Wristbands**
+- **Overnight nights:** the overnight form has **Nights** with − and + next to the checkout date.
+  Change either one and the other follows.
+- **Room number:** an optional box on the overnight form. It goes in front of the guest's name
+  (such as "Room 12 · Smith") in the card log, Look up and door activity, so guests in rooms that
+  open with a key can still be traced to their room.
+- **Revoke for wristbands and badges:** day passes, overnight wristbands and contractor badges can
+  be revoked from the card log by anyone who may make that kind. Staff cards still need "See
+  everyone's cards".
+- **Encoder stays connected:** on a computer with its encoder plugged in (This computer (USB)),
+  the encoder stays connected whenever someone who may make wristbands is signed in, on any screen
+  and in the background, so the dashboard keeps showing its status and problems. It no longer
+  disconnects when Wristbands is closed.
+- **Switching people on a shared computer:** when someone without access to Wristbands or Reports
+  signs out and someone with access signs in, those tools (and Revoke) show straight away,
+  without reloading the page.
+
+**Reports**
+- **Door activity report:** who opened which doors and when, with filters for dates, door, kind
+  of card, result and a name. It counts what's shown and has a CSV download. Card numbers show
+  only to people who manage it. Turn it on in the Reports tab.
+- Two files uploaded to a report in the same instant keep their order (the newer one could be
+  listed, or trimmed, as the older).
+
 ## 0.12.23
 
 A security and bug audit of the whole add-on. Nothing changes in how it's used, apart from the

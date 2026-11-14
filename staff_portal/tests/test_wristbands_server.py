@@ -888,6 +888,17 @@ def test_card_job_from_start_to_finish(tmp_path):
     run(scenario())
 
 
+def test_who_may_revoke_from_the_card_log():
+    # A staff card: people who may see every card. A wristband or badge: anyone who may make it.
+    staff, day, badge = ({"card_type": t} for t in ("staff", "day_pass", "contractor"))
+    assert not main.may_revoke_made(staff, FRONT_DESK) and main.may_revoke_made(staff, MANAGER)
+    assert main.may_revoke_made(day, FRONT_DESK) and main.may_revoke_made({"card_type": "overnight"},
+                                                                          FRONT_DESK)
+    assert not main.may_revoke_made(badge, FRONT_DESK) and not main.may_revoke_made(badge, MANAGER)
+    assert main.may_revoke_made(badge, {**FRONT_DESK, "types": ["contractor"]})
+    assert not main.may_revoke_made(None, FRONT_DESK) and main.may_revoke_made(None, MANAGER)
+
+
 def test_card_that_fails_needs_a_decision(tmp_path):
     async def scenario():
         async with Simulator() as sim, FakeTTHotel([tt_lock(d) for d in DOORS]):
