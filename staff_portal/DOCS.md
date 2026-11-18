@@ -438,7 +438,8 @@ Good to know:
 
 - A person's role and own settings only count on role-based devices. On a kiosk device the
   device's role decides, whoever signs in.
-- Someone with no role sees only what their own settings give them. Deleting a role leaves its
+- Someone with no role sees only what their own settings give them, and no pages unless you pick
+  their own under **Pages**. Deleting a role leaves its
   people with no role.
 - The header shows who's signed in and their role ("Bob · Maintenance"), and the activity log
   records their role.

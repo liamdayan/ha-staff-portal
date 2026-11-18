@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.25
+
+**Staff**
+- **No role, no pages:** someone with no role used to see every layout page on a role-based
+  device, along with anything those pages give access to. Now they see no pages unless you pick
+  their own under **Pages** (Staff tab, their settings). Giving them a role works as before.
+
 ## 0.12.24
 
 **Wristbands**

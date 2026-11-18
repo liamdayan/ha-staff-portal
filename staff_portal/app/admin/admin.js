@@ -2340,7 +2340,9 @@
       markEditing();
       renderPersonEditor();
     });
-    const rolePages = role?.layout_pages == null ? "all pages" : choiceNames(role.layout_pages) || "no pages";
+    // No role: no pages unless some are picked here (never every page).
+    const rolePages = !role ? "no pages, as they have no role"
+      : role.layout_pages == null ? "all pages" : choiceNames(role.layout_pages) || "no pages";
 
     box.replaceChildren(
       h("div", { class: "editor-head" },

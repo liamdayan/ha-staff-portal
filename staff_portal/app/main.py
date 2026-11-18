@@ -625,12 +625,13 @@ def device_pin_length(device: dict) -> int | None:
 
 def person_page_choice(member: dict) -> list[str] | None:
     """A person's pages on role-based devices: their own choice, else their role's (None:
-    every page)."""
+    every page). Someone with no role and no pages of their own sees no pages, never every
+    page, so they get only what's set for them personally."""
     own = page_choice(member.get("layout_pages"))
     if own is not None:
         return own
     role = db.role(member["role_id"]) if member.get("role_id") else None
-    return role["layout_pages"] if role else None
+    return role["layout_pages"] if role else []
 
 
 def person_pages(member: dict, layout_data: dict | None = None) -> list[str] | None:
