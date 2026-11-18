@@ -899,6 +899,48 @@ def test_who_may_revoke_from_the_card_log():
     assert not main.may_revoke_made(None, FRONT_DESK) and main.may_revoke_made(None, MANAGER)
 
 
+def test_revoke_from_the_card_log_is_for_cards_the_person_can_see(tmp_path):
+    """A day pass: its maker may revoke it from the card log, and so may someone who sees every
+    card. Someone else who only sees their own gets the same answer as for a card that doesn't
+    exist, so card IDs can't be tried to learn names."""
+    async def scenario():
+        async with Simulator() as sim, FakeTTHotel([tt_lock(d) for d in DOORS]):
+            p = Portal(tmp_path, encoder_url=f"ws://127.0.0.1:{sim._runner.addresses[0][1]}")
+            tthotel_account(p)
+            async with p:
+                ana, dee, bob = (await p.sign_in(p.ana), await p.sign_in(p.dee),
+                                 await p.sign_in(p.bob))
+                status, reply = await p.call("POST", "/api/wristbands/jobs", ana, day_pass(count=1))
+                job_id = reply["job"]["id"]
+                await job_until(p, ana, job_id, waiting_for(1))
+                number = sim.place_card()
+                await job_until(p, ana, job_id, lambda j: j["status"] == "done")
+                sim.remove_card()
+                card_id = p.db.wb_job(job_id)["cards"][0]["id"]
+
+                # Dee makes day passes too, but didn't make this one and doesn't see every card.
+                theirs = await p.call("POST", f"/api/wristbands/cards/{card_id}/revoke", dee)
+                missing = await p.call("POST", "/api/wristbands/cards/999999/revoke", dee)
+                assert theirs[0] == missing[0] == 403 and theirs[1] == missing[1]
+                assert "Smith" not in str(theirs[1]) and number not in str(theirs[1])
+                assert p.db.wb_job(job_id)["cards"][0]["state"] == "active"
+
+                # Ana made it: the encoder waits for that card, clears it, and it's revoked.
+                for who in (ana, bob):
+                    status, reply = await p.call("POST", f"/api/wristbands/cards/{card_id}/revoke", who)
+                    assert status == 200 and reply["job"]["kind"] == "revoke", reply
+                    assert reply["job"]["type"] == "day_pass"
+                    if who is ana:   # stopped before the card is put down, so Bob can do it
+                        await p.call("POST", f"/api/wristbands/jobs/{reply['job']['id']}/cancel", ana)
+                        await job_until(p, ana, reply["job"]["id"], lambda j: j["status"] == "cancelled")
+                revoke_id = reply["job"]["id"]
+                await job_until(p, bob, revoke_id, lambda j: j["phase"] == "waiting_for_card")
+                sim.place_card(number)
+                await job_until(p, bob, revoke_id, lambda j: j["status"] == "done")
+                assert p.db.wb_job(job_id)["cards"][0]["state"] == "revoked"
+    run(scenario())
+
+
 def test_card_that_fails_needs_a_decision(tmp_path):
     async def scenario():
         async with Simulator() as sim, FakeTTHotel([tt_lock(d) for d in DOORS]):

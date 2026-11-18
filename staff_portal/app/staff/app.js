@@ -1507,6 +1507,7 @@
         return { ok: true, settings: res.data.settings };
       },
       download: rpDownload,
+      saveFile: rpSaveFile,
       csvCell: rpCsvCell,
     });
   }
@@ -1541,14 +1542,41 @@
 
   // Save text as a file on this device (a CSV, say).
   function rpDownload(name, text, type = "text/csv") {
-    const link = h("a", {
-      href: URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` })),
-      download: String(name || "report.csv").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-").slice(0, 120),
-    });
+    rpSaveBlob(rpFileName(name), new Blob([text], { type: `${type};charset=utf-8` }));
+  }
+
+  function rpFileName(name) {
+    return String(name || "report.csv").replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-").slice(0, 120);
+  }
+
+  function rpSaveBlob(name, blob) {
+    const link = h("a", { href: URL.createObjectURL(blob), download: name });
     document.body.append(link);
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 30000);
+  }
+
+  // Hand a file a report made (a PDF, say) to this device. On a phone or tablet it goes to the
+  // share sheet (Save to Files, Print, Mail...): an app opened from its home-screen icon can't
+  // print, and may not be able to download either. Anywhere else, and when sharing isn't
+  // possible, it's downloaded. Must be called straight from a tap or click.
+  async function rpSaveFile(name, blob) {
+    if (!(blob instanceof Blob)) return false;
+    name = rpFileName(name);
+    let file = null;
+    try { file = new File([blob], name, { type: blob.type }); } catch { /* no File here */ }
+    const touch = window.matchMedia("(pointer: coarse)").matches;
+    if (file && touch && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: name });
+        return true;
+      } catch (err) {
+        if (err?.name === "AbortError") return false;   // closed without choosing: that's their answer
+      }
+    }
+    rpSaveBlob(name, blob);
+    return true;
   }
 
   // ---------------------------------------------------------------- rearrange (this phone only)

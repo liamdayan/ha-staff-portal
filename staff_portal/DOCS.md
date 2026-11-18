@@ -438,9 +438,10 @@ Good to know:
 
 - A person's role and own settings only count on role-based devices. On a kiosk device the
   device's role decides, whoever signs in.
-- Someone with no role sees only what their own settings give them, and no pages unless you pick
-  their own under **Pages**. Deleting a role leaves its
-  people with no role.
+- Someone with no role sees only what their own settings give them: the devices and areas you
+  set for them show on the pages they're on, and nothing else does. Access set on the layout's
+  own items doesn't reach them unless you pick their own pages under **Pages**. Deleting a role
+  leaves its people with no role.
 - The header shows who's signed in and their role ("Bob · Maintenance"), and the activity log
   records their role.
 - Everything else about signing in works as on shared kiosk devices: hiding names, who may sign
@@ -588,8 +589,9 @@ RFID wristbands and key cards from the staff app, on the card encoder plugged in
   Search finds names holding what's typed, and card numbers starting with it (six digits or
   more search card numbers only).
   - **Revoke** (with the card in hand) clears a card so it opens nothing and can be given out
-    again. Day passes, overnight wristbands and contractor badges can be revoked by anyone who
-    may make that kind. Staff cards need **See everyone's cards**.
+    again. Day passes, overnight wristbands and contractor badges in someone's card log (their
+    own, or everyone's with **See everyone's cards**) can be revoked if they may make that kind.
+    Staff cards need **See everyone's cards**.
 
 Every card has a named maker: it's recorded under the person signed in, so wristbands are only
 offered on shared or role-based computers where each person signs in with their own PIN.
@@ -1561,8 +1563,11 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
   (**Action**, **Watch**, **Clear**). Tap a name for their day-by-day punches. Tap a form for its
   grid, hour by hour for timed checks; tap a square to see who was on and who submitted.
 - **Sharing it.** **Copy summary** copies a short text version. **Download CSV** saves the staff
-  table. **Print or PDF** opens the browser's print window (choose **Save as PDF** there) with
-  everyone's days, only the rows you opened, or just the summary.
+  table. **PDF file** makes a PDF with everyone's days, only the rows you opened, or just the
+  summary. On a phone or tablet it opens the share sheet (Save to Files, Print, Mail); on a
+  computer it downloads. It works on a phone opened from its home-screen icon, where printing
+  doesn't. **Print** opens the browser's print window with the same three choices. In the PDF,
+  letters outside Western European alphabets show as "?".
 
 Report settings (rules and required forms) are in backups and migration files. The Gusto file is
 in migration files but not in backups, like other report uploads.

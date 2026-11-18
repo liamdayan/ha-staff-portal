@@ -23,9 +23,12 @@ def _day(raw: str, what: str) -> date | None:
     if not raw:
         return None
     try:
-        return date.fromisoformat(raw)
+        day = date.fromisoformat(raw)
     except ValueError:
         raise ValueError(f"Pick a valid {what} date.") from None
+    if not 2000 <= day.year <= 2100:   # far-off years can't be worked with (or have records)
+        raise ValueError(f"Pick a valid {what} date.")
+    return day
 
 
 def _label(at: float, tz, today: date) -> str:
@@ -48,7 +51,7 @@ async def data(ctx, params):
     if (end - start).days >= MAX_DAYS:
         raise ValueError(f"Pick at most {MAX_DAYS} days. Older door activity isn't kept.")
     door = params["door"]
-    if not re.fullmatch(r"\d{0,16}", door):
+    if not re.fullmatch(r"[0-9]{0,16}", door):
         raise ValueError("Pick a door from the list.")
     kind, result = params["kind"], params["result"]
     if kind not in KINDS:
@@ -61,7 +64,7 @@ async def data(ctx, params):
     until = datetime.combine(end + timedelta(days=1), time(), ctx.tz).timestamp()
     limit = ctx.doors.LIMIT
     found = ctx.doors.records(since, until, door=int(door) if door else None, kind=kind,
-                              result=result, q=q, limit=limit + 1)
+                              result=result, q=q, numbers=ctx.manage, limit=limit + 1)
     capped = len(found) > limit
     found = found[:limit]
     records = []

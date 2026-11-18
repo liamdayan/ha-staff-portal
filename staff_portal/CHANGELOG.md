@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.26
+
+**Attendance report: a real PDF file**
+- **PDF file** (next to Print) makes the PDF itself, with the same three choices: everyone's days,
+  only the rows you opened, or just the summary. On a phone or tablet it opens the share sheet, so
+  you can save it to Files, print it or mail it; on a computer it downloads.
+- This is for phones opened from the home-screen icon. An iPhone ignores printing there, so
+  **Print or PDF** did nothing. **Print** is still there for computers.
+- In the PDF, letters outside Western European alphabets show as "?".
+
+**A safety review of 0.12.24 and 0.12.25, with what it found fixed**
+
+- **No role, own devices:** 0.12.25 also hid the devices and areas set for someone personally when
+  they have no role. Those show again, on the pages they're on. They still get nothing from access
+  set on the layout's own items.
+- **Door activity report:** people who can only view it (and so aren't shown card numbers) could
+  still search by card number, which told them whether a number was in use. Search by card number
+  is now only for people who manage the report.
+- **Revoke in the card log:** a wristband or badge can be revoked from the card log by whoever made
+  it, or by someone who may see every card. Asking for someone else's card by its ID is now
+  answered the same as a card that doesn't exist. Look up, then Revoke, with the card in hand works
+  as before.
+- **Door activity report dates:** a date far outside real years (year 1, year 9999) says "Pick a
+  valid date" rather than failing.
+
 ## 0.12.25
 
 **Staff**

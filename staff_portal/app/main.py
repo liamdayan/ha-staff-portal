@@ -625,13 +625,14 @@ def device_pin_length(device: dict) -> int | None:
 
 def person_page_choice(member: dict) -> list[str] | None:
     """A person's pages on role-based devices: their own choice, else their role's (None:
-    every page). Someone with no role and no pages of their own sees no pages, never every
-    page, so they get only what's set for them personally."""
+    every page). Someone with no role and no pages of their own is shown every page too, but
+    gets nothing from them (see person_override_pages), so only what's set for them personally
+    is on show."""
     own = page_choice(member.get("layout_pages"))
     if own is not None:
         return own
     role = db.role(member["role_id"]) if member.get("role_id") else None
-    return role["layout_pages"] if role else []
+    return role["layout_pages"] if role else None
 
 
 def person_pages(member: dict, layout_data: dict | None = None) -> list[str] | None:
@@ -639,12 +640,22 @@ def person_pages(member: dict, layout_data: dict | None = None) -> list[str] | N
                               person_page_choice(member))
 
 
+def person_override_pages(member: dict, layout_data: dict) -> list[str] | None:
+    """The pages whose own access settings count for a person: the pages they're shown, except
+    that someone with no role and no pages picked for them gets nothing from any page (it used
+    to be every page's). They keep only what's set for them personally."""
+    if page_choice(member.get("layout_pages")) is None and not (
+            member.get("role_id") and db.role(member["role_id"])):
+        return []
+    return person_pages(member, layout_data)
+
+
 def person_access(member: dict, layout: AreaLayout, layout_data: dict | None = None) -> dict[str, str]:
     """What one person may see and control on a role-based device. `member` may also be a
     stand-in with just a role_id (previewing a role), which has no changes of its own."""
     access = role_access(member.get("role_id"), layout)
     data = db.layout() if layout_data is None else layout_data
-    for eid, level in layout_overrides(data, layout, person_pages(member, data)).items():
+    for eid, level in layout_overrides(data, layout, person_override_pages(member, data)).items():
         set_level(access, eid, level)
     entities, areas = db.staff_overrides(member["id"]) if member.get("id") else ({}, {})
     if areas:
@@ -1740,6 +1751,10 @@ async def api_revoke_card(request: web.Request):
         card = db.made_card(int(request.match_info["id"]))
     except (ValueError, OverflowError):
         card = None
+    # Someone else's card, for a person who sees only their own in the card log, is treated as
+    # one that isn't there, so card numbers can't be tried to learn names (as visible_job).
+    if card and card["staff_id"] != member["id"] and not perms["see_all_cards"]:
+        card = None
     if not may_revoke_made(card, perms):
         db.log(actor_name(device, member), "Blocked: revoke a key card",
                role=role_label(device, member), ok=False, ip=client_ip(request))
@@ -2441,13 +2456,15 @@ class ReportDoors:
         return sorted(doors, key=lambda d: d["name"].lower())
 
     def records(self, since: float, until: float, *, door: int | None = None, kind: str = "",
-                result: str = "", q: str = "", limit: int = LIMIT) -> "list[dict]":
+                result: str = "", q: str = "", numbers: bool = False,
+                limit: int = LIMIT) -> "list[dict]":
         """What happened at the doors from since to until (seconds), newest first, as the
-        dashboard's Door activity lists it (see lock_record_view)."""
+        dashboard's Door activity lists it (see lock_record_view). q searches names, and card
+        numbers too only with numbers=True: pass it only for people who are shown them."""
         problems = result == "problems"
         rows = db.lock_records(max(1, min(limit, self.LIMIT + 1)), None, door, problems,
                                since=since, until=until, kind=kind,
-                               result="" if problems else result, q=q)
+                               result="" if problems else result, q=q, q_numbers=numbers)
         return [lock_record_view(r) for r in rows]
 
 

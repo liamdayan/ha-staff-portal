@@ -652,3 +652,60 @@ def test_view_a_timed_form_checks_only_its_own_hours(tmp_path):
     # 3p to 8p only: five squares, the 4pm check still missed
     assert len(wed) == 5 and wed == ["done", "missed", "done", "done", "done"]
     assert (got["expected"], got["missed"]) == (5, 1)
+
+
+# ---------------------------------------------------------------- the PDF file (made in view.js)
+
+def pdf_pages(path) -> list[str]:
+    """Each page's text, read back with the PDF reader the add-on already has (PDFium)."""
+    import pypdfium2
+    pdf = pypdfium2.PdfDocument(str(path))
+    try:
+        return [pdf[i].get_textpage().get_text_bounded() for i in range(len(pdf))]
+    finally:
+        pdf.close()
+
+
+@need_node
+def test_the_pdf_file_is_a_real_pdf_with_the_report_in_it(tmp_path):
+    """0.12.26: PDF file makes the file itself (an iPhone opened from its home-screen icon
+    ignores printing), in three versions like Print."""
+    pytest.importorskip("pypdfium2")
+    _, ctx = sample()
+    job = tmp_path / "job.json"
+    job.write_text(json.dumps(dict(data=run(ctx))))
+    done = subprocess.run(["node", os.path.join(HERE, "attendance_pdf_test.js"), VIEW, str(job), str(tmp_path)],
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["widths"] == [95, 95]                      # a width for each letter, both fonts
+    assert out["codes"] == [ord("é"), ord("t"), ord("o"), ord("?")]
+    for mode in ("all", "open", "summary", "long", "letters"):
+        raw = (tmp_path / f"{mode}.pdf").read_bytes()
+        assert raw.startswith(b"%PDF-1.4") and raw.rstrip().endswith(b"%%EOF")
+
+    summary = "\n".join(pdf_pages(tmp_path / "summary.pdf"))
+    for text in ("Attendance & Leave", "Week of", "All departments", "Made Oct 19, 2026 9:05 AM", "Late arrivals",
+                 "Staff this week", "Missed time vs. leave", "Required forms", "Tub temperature check",
+                 "Shift handoff log", "Lena Brooks", "Short 2h 30m", "Page 1 of"):
+        assert text in summary, text
+    assert all(name in summary for name in out["people"])
+    assert "Sched " not in summary and "missed check" not in summary   # no days in the summary
+
+    everyone = "\n".join(pdf_pages(tmp_path / "all.pdf"))
+    assert everyone.count("Sched ") >= len(out["people"])
+    for text in ("No-show", "Short lunch 15 min", "Sick leave 7h 30m", "Gusto balance:", "1 missed check:", "on shift:"):
+        assert text in everyone, text
+
+    # Only the opened person's days (the first on the list), the hourly form's grid still there.
+    opened = "\n".join(pdf_pages(tmp_path / "open.pdf"))
+    assert 0 < opened.count("Sched ") < everyone.count("Sched ") and "1 missed check:" in opened
+
+    # Many pages: each numbered, the table's header at the top of the later ones.
+    pages = pdf_pages(tmp_path / "long.pdf")
+    assert len(pages) > 3
+    assert all(f"Page {i + 1} of {len(pages)}" in text for i, text in enumerate(pages))
+    assert sum("Missed time vs. leave" in text for text in pages) > 3
+
+    # Letters it can't show: accents stay, an arrow and a minus are spelt, the rest are "?".
+    assert pdf_pages(tmp_path / "letters.pdf")[0].strip() == "Zoë (Núñez) \\ ?? to 5 - 2 “ok” ?"

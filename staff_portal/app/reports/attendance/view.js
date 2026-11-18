@@ -805,12 +805,15 @@
 
     const deptSel = depts.length < 2 ? null : h("select", { class: "att-btn att-select", "aria-label": "Department", onchange: e => { ui.dept = e.target.value; ui.open.clear(); remember(); draw(); } },
       h("option", { value: "" }, "All departments"), depts.map(x => h("option", { value: x, selected: x === ui.dept }, x)));
-    const menu = h("details", { class: "att-menu" },
-      h("summary", { class: "att-btn primary" }, "Print or PDF ▾"),
+    // A PDF file is made here (it works on a phone opened from its home-screen icon, which
+    // can't print); Print uses the browser's own print screen.
+    const choices = (label, primary, act) => h("details", { class: "att-menu" },
+      h("summary", { class: "att-btn" + (primary ? " primary" : "") }, `${label} ▾`),
       h("div", { class: "att-menu-pop", role: "menu" },
-        menuItem("all", "Everyone, with daily detail", "Every row opened, one section per person"),
-        menuItem("open", "Only the rows I’ve opened", "Summary plus the people you expanded"),
-        menuItem("summary", "Summary only", "Totals, staff table and forms")));
+        menuItem("all", "Everyone, with daily detail", "Every row opened, one section per person", act),
+        menuItem("open", "Only the rows I’ve opened", "Summary plus the people you expanded", act),
+        menuItem("summary", "Summary only", "Totals, staff table and forms", act)));
+    const pdfMenu = choices("PDF file", true, savePdf), menu = choices("Print", false, printReport);
     // Connecteam data is kept for a day: say how old it is, and offer to read it again.
     const readAt = d.read_at ? new Date(d.read_at * 1000) : null;
     const age = readAt ? ` · Connecteam data from ${readAt.toDateString() === new Date().toDateString() ? "" : readAt.toLocaleDateString([], { month: "short", day: "numeric" }) + ", "}${readAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
@@ -818,7 +821,7 @@
       h("button", { type: "button", class: "att-btn", title: `Read Connecteam again${age}`, onclick: () => load({}, true) }, "Refresh now"),
       age ? h("span", { class: "att-muted att-age" }, age.slice(3)) : null,
       h("button", { type: "button", class: "att-btn", onclick: () => copyText(summaryText(current, ui.period, ui.dept)) }, "Copy summary"),
-      h("button", { type: "button", class: "att-btn", onclick: downloadCSV }, "Download CSV"), menu);
+      h("button", { type: "button", class: "att-btn", onclick: downloadCSV }, "Download CSV"), menu, pdfMenu);
 
     const kpi = (label, val, s, cls) => h("div", { class: "att-kpi " + (cls || "") }, h("span", { class: "att-k-label" }, label), h("span", { class: "att-k-val" }, String(val)), h("span", { class: "att-k-sub" }, s));
     const kpis = h("div", { class: "att-kpis" },
@@ -844,8 +847,8 @@
       printFoot(R));
   }
 
-  function menuItem(mode, title, small) {
-    return h("button", { type: "button", class: "att-menu-item", role: "menuitem", onclick: e => { e.target.closest("details").open = false; printReport(mode); } }, title, h("small", null, small));
+  function menuItem(mode, title, small, act) {
+    return h("button", { type: "button", class: "att-menu-item", role: "menuitem", onclick: e => { e.target.closest("details").open = false; act(mode); } }, title, h("small", null, small));
   }
 
   function roster(W, P) {
@@ -1014,6 +1017,343 @@
     const done = () => { window.removeEventListener("afterprint", done); document.body.classList.remove("att-printing"); ui.printing = null; draw(); };
     window.addEventListener("afterprint", done);
     window.print();
+  }
+
+  // ---------------------------------------------------------------- PDF file (made here)
+  // A phone opened from its home-screen icon can't print (an iPhone ignores window.print()
+  // there), so the report is also written straight to a PDF file: pages of text, rules and
+  // boxes in Helvetica, which every PDF reader has, so no font is put in the file. Letters
+  // outside Western European ones print as "?".
+  const HELV = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015,
+    667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611,
+    278, 278, 278, 469, 556, 333,
+    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500,
+    334, 260, 334, 584];
+  const HELV_BOLD = [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
+    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975,
+    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611,
+    333, 278, 333, 584, 556, 333,
+    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500,
+    389, 280, 389, 584];
+  // Characters the PDF's encoding (WinAnsi) keeps outside Latin-1, and the widths of the ones used.
+  const PDF_EXTRA = { "€": 128, "‚": 130, "„": 132, "…": 133, "‘": 145, "’": 146, "“": 147, "”": 148, "•": 149, "–": 150, "—": 151 };
+  // An arrow, a minus sign, a non-breaking hyphen and a non-breaking space, in plain letters.
+  const PDF_SWAP = { "→": "to", "−": "-", "‑": "-", " ": " " };
+  const PDF_WIDE = { 128: 556, 130: 222, 132: 333, 133: 1000, 145: 222, 146: 222, 147: 333, 148: 333, 149: 350, 150: 556, 151: 1000, 160: 278, 176: 400, 183: 278, 215: 584 };
+
+  // Text as the PDF's character codes: what it can't show becomes its plain letter, or "?".
+  function pdfCodes(text) {
+    const out = [];
+    for (const ch of String(text ?? "").replace(/[→−‑ ]/g, c => PDF_SWAP[c])) {
+      const code = ch.codePointAt(0);
+      if ((code >= 32 && code < 127) || (code >= 161 && code <= 255)) out.push(code);
+      else if (PDF_EXTRA[ch]) out.push(PDF_EXTRA[ch]);
+      else if (code === 9 || code === 10 || code === 13) out.push(32);
+      else { const base = ch.normalize("NFD").codePointAt(0); out.push(base >= 32 && base < 127 ? base : 63); }
+    }
+    return out;
+  }
+  function pdfCodeWidth(code, bold) {
+    const table = bold ? HELV_BOLD : HELV;
+    if (code < 127) return table[code - 32];
+    if (PDF_WIDE[code]) return PDF_WIDE[code];
+    const base = String.fromCharCode(code).normalize("NFD").charCodeAt(0);   // é is as wide as e
+    return base >= 32 && base < 127 ? table[base - 32] : 556;
+  }
+
+  // A PDF being written: page() starts a page, and text, line, rect and mark draw on it. x and
+  // y are points (72 to the inch) from the top left; a text's y is its baseline. bytes() is
+  // the finished file.
+  function pdfDoc(W, H) {
+    const pages = []; let ops = null;
+    const n = v => String(Math.round(v * 100) / 100);
+    const rgb = c => c.map(n).join(" ");
+    const widthOf = (text, size, bold) => pdfCodes(text).reduce((a, c) => a + pdfCodeWidth(c, bold), 0) * size / 1000;
+    const str = text => "(" + pdfCodes(text).map(c => (c === 40 || c === 41 || c === 92 ? "\\" : "") + String.fromCharCode(c)).join("") + ")";
+    return {
+      W, H, widthOf,
+      count: () => pages.length,
+      page() { ops = []; pages.push(ops); },
+      select(i) { ops = pages[i]; },
+      text(text, x, y, o = {}) {
+        const size = o.size || 9;
+        if (o.align === "r") x -= widthOf(text, size, o.bold); else if (o.align === "c") x -= widthOf(text, size, o.bold) / 2;
+        ops.push(`BT /${o.bold ? "F2" : "F1"} ${n(size)} Tf ${rgb(o.color || PDF_INK)} rg ${n(x)} ${n(H - y)} Td ${str(text)} Tj ET`);
+      },
+      // A tick or a cross (the symbol font every reader has), centred on x.
+      mark(kind, x, y, size, color) {
+        ops.push(`BT /F3 ${n(size)} Tf ${rgb(color)} rg ${n(x - size * 0.38)} ${n(H - y)} Td (${kind === "tick" ? "4" : "8"}) Tj ET`);
+      },
+      rect(x, y, w, h, fill, stroke) {
+        ops.push(`${fill ? rgb(fill) + " rg " : ""}${stroke ? rgb(stroke) + " RG 0.5 w " : ""}${n(x)} ${n(H - y - h)} ${n(w)} ${n(h)} re ${fill && stroke ? "B" : fill ? "f" : "S"}`);
+      },
+      line(x1, y1, x2, y2, color) { ops.push(`${rgb(color || PDF_RULE)} RG 0.5 w ${n(x1)} ${n(H - y1)} m ${n(x2)} ${n(H - y2)} l S`); },
+      // The text as lines no wider than max; a word too long for a line is cut.
+      wrap(text, max, size, bold) {
+        const lines = []; let line = "";
+        for (let word of String(text ?? "").split(/\s+/).filter(Boolean)) {
+          while (widthOf(word, size, bold) > max && word.length > 1) {
+            let k = word.length - 1;
+            while (k > 1 && widthOf(word.slice(0, k), size, bold) > max) k--;
+            if (line) { lines.push(line); line = ""; }
+            lines.push(word.slice(0, k)); word = word.slice(k);
+          }
+          const next = line ? `${line} ${word}` : word;
+          if (line && widthOf(next, size, bold) > max) { lines.push(line); line = word; } else line = next;
+        }
+        if (line) lines.push(line);
+        return lines;
+      },
+      bytes() {
+        const font = name => `<< /Type /Font /Subtype /Type1 /BaseFont /${name} /Encoding /WinAnsiEncoding >>`;
+        const objs = ["<< /Type /Catalog /Pages 2 0 R >>", null, font("Helvetica"), font("Helvetica-Bold"),
+          "<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>"];
+        const kids = [];
+        for (const p of pages) {
+          const s = p.join("\n"), id = objs.length + 1;
+          kids.push(`${id} 0 R`);
+          objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${n(W)} ${n(H)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents ${id + 1} 0 R >>`);
+          objs.push(`<< /Length ${s.length} >>\nstream\n${s}\nendstream`);
+        }
+        objs[1] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${pages.length} >>`;
+        // Every character here is one byte, so a string's length is its size in the file.
+        let out = "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"; const at = [];
+        objs.forEach((o, i) => { at.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+        const xref = out.length;
+        out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${at.map(a => String(a).padStart(10, "0") + " 00000 n \n").join("")}trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+        const bytes = new Uint8Array(out.length);
+        for (let i = 0; i < out.length; i++) bytes[i] = out.charCodeAt(i);
+        return bytes;
+      },
+    };
+  }
+
+  const PDF_INK = [0.1, 0.1, 0.12], PDF_MUTED = [0.42, 0.45, 0.5], PDF_RULE = [0.82, 0.84, 0.87], PDF_SHADE = [0.95, 0.96, 0.97];
+  const PDF_TONE = { bad: [0.75, 0.16, 0.1], warn: [0.68, 0.4, 0], good: [0.08, 0.48, 0.25], info: [0.15, 0.35, 0.7] };
+  Object.assign(PDF_TONE, { action: PDF_TONE.bad, watch: PDF_TONE.warn, clear: PDF_TONE.good });
+  const PDF_SQUARE = { done: [0.82, 0.93, 0.85], missed: [0.97, 0.82, 0.8], light: [0.93, 0.94, 0.95], open: [1, 0.95, 0.8] };
+
+  // The report for one period as a PDF file's bytes (US Letter, on its side). o: period
+  // ("week", "pay" or "month"), dept, mode ("all": everyone's days, "open": the people in
+  // o.open, "summary": none), R (the rules), noPunches (names), hasSchedule, made (when, in words).
+  function reportPdf(W, o) {
+    const R = o.R, T = W.totals, P = W.P;
+    const doc = pdfDoc(792, 612), M = 36, RIGHT = 792 - M, FULL = RIGHT - M, BOTTOM = 612 - M - 14;
+    let y = 0;
+    const newPage = () => { doc.page(); y = M; };
+    const need = hgt => { if (y + hgt > BOTTOM) { newPage(); return true; } return false; };
+    const para = (text, x, max, opt = {}) => {
+      const size = opt.size || 9;
+      for (const ln of doc.wrap(text, max, size, opt.bold)) { need(size * 1.3); doc.text(ln, x, y + size, opt); y += size * 1.3; }
+    };
+    const heading = text => { need(60); doc.text(text, M, y + 11, { size: 12, bold: true }); y += 18; };
+    // A cell is its text, or {t: text, s: smaller text under it, c: colour, b: bold}.
+    const cellLines = (cell, w) => {
+      const c = typeof cell === "string" ? { t: cell } : cell || {};
+      return [...doc.wrap(c.t, w - 8, 8.5, c.b).map(t => ({ t, size: 8.5, bold: !!c.b, color: c.c || PDF_INK })),
+        ...doc.wrap(c.s, w - 8, 7, false).map(t => ({ t, size: 7, bold: false, color: PDF_MUTED }))];
+    };
+    // A table: its header again at the top of each new page. after(i) draws under row i.
+    const table = (cols, rows, after) => {
+      const head = () => {
+        doc.rect(M, y, FULL, 16, PDF_SHADE);
+        let x = M;
+        for (const c of cols) { doc.text(c.label, c.a === "r" ? x + c.w - 4 : x + 4, y + 11, { size: 7.5, bold: true, color: PDF_MUTED, align: c.a }); x += c.w; }
+        y += 16;
+      };
+      need(56); head();
+      rows.forEach((cells, i) => {
+        const lines = cells.map((c, j) => cellLines(c, cols[j].w));
+        const hgt = Math.max(10, ...lines.map(ls => ls.reduce((a, l) => a + l.size * 1.3, 0))) + 8;
+        if (need(hgt)) head();
+        let x = M;
+        lines.forEach((ls, j) => {
+          let ty = y + 4;
+          for (const l of ls) { doc.text(l.t, cols[j].a === "r" ? x + cols[j].w - 4 : x + 4, ty + l.size, { size: l.size, bold: l.bold, color: l.color, align: cols[j].a }); ty += l.size * 1.3; }
+          x += cols[j].w;
+        });
+        y += hgt; doc.line(M, y, RIGHT, y);
+        if (after) after(i);
+      });
+    };
+
+    // ---- the top of the first page
+    newPage();
+    doc.text("Connecteam × Gusto", M, y + 8, { size: 7.5, bold: true, color: PDF_MUTED }); y += 13;
+    const title = `Attendance & Leave · ${o.period === "week" ? "Week of " : o.period === "pay" ? "Pay period " : ""}${periodLabel(P, o.period)}`;
+    para(title, M, FULL, { size: 16, bold: true }); y += 2;
+    para([o.dept || "All departments", fmtRange(P.start, P.end), `Made ${o.made}`].join("  ·  "), M, FULL, { color: PDF_MUTED });
+    const notes = [];
+    if (W.inProgress) notes.push("Period in progress: shifts that had not ended are not counted.");
+    if (T.unchecked) notes.push(`${plural(T.unchecked, "shift")} had no timesheets and were not checked.`);
+    if (notes.length) para(notes.join("  "), M, FULL, { color: PDF_MUTED });
+    y += 8;
+
+    const kpis = [
+      ["Late arrivals", T.late, T.late ? `${fmtDur(T.lateMin)} total · ${plural(T.latePeople, "person", "people")}` : `over ${R.lateGrace} min grace`, T.late ? "warn" : ""],
+      ["Early clock-outs", T.early, T.early ? `${fmtDur(T.earlyMin)} short of schedule` : `over ${R.earlyGrace} min early`, T.early ? "warn" : ""],
+      ["Missed lunches", T.lunch, `shifts of ${fmtH(R.lunchAfter)} or more, lunch under ${fmtDur(R.lunchMin)}`, T.lunch ? "warn" : ""],
+      ["Missed shifts", T.missed, T.missed ? `${fmtH(T.missedHrs)} not covered by leave` : (o.hasSchedule ? "scheduled, no punch" : "needs Connecteam schedules"), T.missed ? "bad" : ""],
+      ["Forms missed", T.formsMissed, T.formsExpected ? `of ${T.formsExpected} expected` : "no required forms set", T.formsMissed ? "warn" : ""],
+      ["Need action", T.action, `${T.watch} more to watch`, T.action ? "bad" : ""]];
+    const kw = (FULL - 5 * 8) / 6, subs = kpis.map(k => doc.wrap(k[2], kw - 12, 7));
+    const kh = 38 + Math.max(...subs.map(s => s.length)) * 9;
+    kpis.forEach((k, i) => {
+      const x = M + i * (kw + 8);
+      doc.rect(x, y, kw, kh, null, PDF_RULE);
+      doc.text(k[0], x + 6, y + 12, { size: 7.5, bold: true, color: PDF_MUTED });
+      doc.text(String(k[1]), x + 6, y + 31, { size: 16, bold: true, color: k[3] ? PDF_TONE[k[3]] : PDF_INK });
+      subs[i].forEach((t, j) => doc.text(t, x + 6, y + 42 + j * 9, { size: 7, color: PDF_MUTED }));
+    });
+    y += kh + 14;
+
+    // ---- staff, with each person's days under their row when asked for
+    const DX = M + 14, DW = FULL - 28, LABEL = 62;
+    const detail = r => {
+      y += 4;
+      for (const day of r.days) {
+        const empty = !day.blocks.length && !day.off;
+        if (empty && r.days.length > 7) continue;   // a month of "Off" lines says nothing
+        const bits = [], flags = [];
+        for (const b of day.blocks) {
+          const p = [];
+          if (b.shift) p.push(`Sched ${fmtClock(b.shift.start)}${b.shift.noEnd ? "" : "–" + fmtClock(b.shift.end)}`);
+          if (b.job) p.push(b.job);
+          if (b.firstIn != null) p.push(`${fmtClock(b.firstIn)} to ${b.lastOut != null ? fmtClock(b.lastOut) : "?"}`, `${b.brk ? `Break ${fmtDur(b.brk)}` : "No break"}${b.segments > 1 ? `, ${b.segments} punches` : ""}`);
+          else if (b.upcoming) p.push("Upcoming");
+          else if (b.unchecked) p.push("No timesheet for this date");
+          if (p.length) bits.push(p.join(" · "));
+          flags.push(...b.flags);
+        }
+        if (day.off && !day.blocks.some(b => b.shift && !b.punches.length)) flags.push(["info", `${day.off.type} ${fmtH(day.off.hrs)}`]);
+        if (r.slotMisses) for (const [k, hrs] of r.slotMisses) {
+          const [fname, dd] = k.split("|");
+          if (+dd === day.d) flags.push(["warn", `${fname}: ${hrs.length} missed (${hrs.join(", ")})`]);
+        }
+        for (const name of (r.dayFormMisses && r.dayFormMisses.get(day.d)) || []) flags.push(["warn", `${name} not done`]);
+        const lines = doc.wrap(empty ? "Off" : bits.join("   |   "), DW - LABEL, 8);
+        need(Math.max(1, lines.length) * 10.5 + (flags.length ? 10.5 : 0));
+        doc.text(`${DOW[dow(day.d)]} ${fmtShort(day.d)}`, DX, y + 8, { size: 8, bold: true });
+        for (const ln of lines) { doc.text(ln, DX + LABEL, y + 8, { size: 8, color: empty ? PDF_MUTED : PDF_INK }); y += 10.5; }
+        if (!lines.length && !flags.length) y += 10.5;
+        let fx = DX + LABEL, any = false;
+        for (const [tone, text] of flags) {
+          const w = doc.widthOf(text, 7.5, true);
+          if (any && fx + w > DX + DW) { y += 10.5; need(10.5); fx = DX + LABEL; }
+          doc.text(text, fx, y + 7.5, { size: 7.5, bold: true, color: PDF_TONE[tone] || PDF_INK }); fx += w + 12; any = true;
+        }
+        if (any) y += 10.5;
+        y += 1.5;
+      }
+      const foot = [];
+      if (o.noPunches.includes(r.p.name)) foot.push("No punches at all in these dates. If they aren’t on a Connecteam time clock yet, their shifts show as no-shows.");
+      if (r.formMisses.length) foot.push(`Forms missed: ${r.formMisses.join(", ")}`);
+      if (r.offHrs) foot.push(`Leave recorded: ${fmtH(r.offHrs)}`);
+      if (r.noOut) foot.push(`${plural(r.noOut, "shift")} without a clock-out`);
+      const b = r.p.bal, hrs = v => v != null ? fmtH(v) : "—";
+      if (r.sick != null || r.pto != null) foot.push(`Gusto balance: ${hrs(r.sick)} sick, ${hrs(r.pto)} PTO`);
+      if (b && (b.sickUsed != null || b.ptoUsed != null)) foot.push(`Used this year: ${hrs(b.sickUsed)} sick, ${hrs(b.ptoUsed)} PTO`);
+      if (b && (b.sickAccrued != null || b.ptoAccrued != null)) foot.push(`Accrued this year: ${hrs(b.sickAccrued)} sick, ${hrs(b.ptoAccrued)} PTO`);
+      const early = [r.sickEarly ? "sick" : null, r.ptoEarly ? "PTO" : null].filter(Boolean);
+      if (early.length) foot.push(`Low ${early.join(" and ")} not flagged: not enough accrued yet to reach the threshold`);
+      if (foot.length) para(foot.join("   ·   "), DX, DW, { size: 7.5, color: PDF_MUTED });
+      y += 5; doc.line(M, y, RIGHT, y);
+    };
+
+    heading(o.period === "week" ? "Staff this week" : "Staff this period");
+    if (W.rows.length && T.unchecked && W.rows.every(r => !r.worked.size)) {
+      para(`Schedules cover these dates but the timesheets didn't load, so attendance can’t be checked for ${fmtRange(P.start, P.end)} yet.`, M, FULL, { color: PDF_MUTED });
+    } else if (!W.rows.length) {
+      para(`No shifts or punches fall in this period${o.dept ? ` for ${o.dept}` : ""}.`, M, FULL, { color: PDF_MUTED });
+    } else {
+      const nil = "—", count = (k, s, tone) => k ? { t: `${k}×`, s, c: PDF_TONE[tone], b: true } : nil;
+      const shown = o.mode === "all" ? () => true : o.mode === "open" ? r => o.open.has(r.p.key) : () => false;
+      table([{ label: "Employee", w: 128 }, { label: "Status", w: 44 }, { label: "Worked", w: 52, a: "r" }, { label: "Late", w: 60 },
+        { label: "Left early", w: 60 }, { label: "Missed lunch", w: 66 }, { label: "Missed shifts", w: 64 }, { label: "Forms missed", w: 58 },
+        { label: "Leave balance", w: 88 }, { label: "Missed time vs. leave", w: 100 }],
+      W.rows.map(r => [
+        { t: r.p.name, s: deptOf(r.p), b: true },
+        { t: r.status === "action" ? "Action" : r.status === "watch" ? "Watch" : "Clear", c: PDF_TONE[r.status], b: true },
+        r.workedMin ? fmtDur(r.workedMin) : nil,
+        count(r.late.length, fmtDur(r.lateMin), "warn"),
+        count(r.early.length, fmtDur(r.earlyMin), "warn"),
+        count(r.lunch.length, `of ${plural(r.worked.size, "shift")}`, "warn"),
+        count(r.missed.length, fmtH(r.missedHrs), "bad"),
+        r.formsExpected ? (r.formsMissed ? { t: String(r.formsMissed), s: `of ${r.formsExpected}`, c: PDF_TONE.warn, b: true } : { t: `0 of ${r.formsExpected}`, c: PDF_MUTED }) : nil,
+        r.sick == null && r.pto == null ? nil : { t: `Sick ${r.sick != null ? fmtH(r.sick) : nil}`, s: `PTO ${r.pto != null ? fmtH(r.pto) : nil}${r.ptoLow ? " (low)" : ""}`, c: r.sickLow ? PDF_TONE.bad : PDF_INK },
+        { t: r.cover.main, s: r.cover.sub, c: PDF_TONE[r.cover.cls] || PDF_INK, b: true }]),
+      i => { if (shown(W.rows[i])) detail(W.rows[i]); });
+    }
+    y += 16;
+
+    // ---- required forms; an hourly form's grid when days are asked for
+    heading("Required forms");
+    if (!W.forms.length) para("No required forms yet.", M, FULL, { color: PDF_MUTED });
+    else table([{ label: "Form", w: 150 }, { label: "Required", w: 140 }, { label: "Expected", w: 54, a: "r" }, { label: "Submitted", w: 58, a: "r" },
+      { label: "Missed", w: 48, a: "r" }, { label: "Completion", w: 64, a: "r" }, { label: "Who missed", w: 206 }],
+    W.forms.map(f => [
+      { t: f.name, s: f.hasFile ? "" : "Submissions didn't load", b: true },
+      { t: f.frequency === "hour" ? freqText(f) : f.frequency === "week" ? "Once a week" : "Every shift",
+        s: f.frequency === "hour" ? `whoever is on ${f.who.length ? f.appliesTo : "shift"}` : f.applies.length ? plural(f.applies.length, "person", "people") : "Everyone who worked" },
+      String(f.expected), String(f.done),
+      f.missed ? { t: String(f.missed), c: PDF_TONE.bad, b: true } : "0",
+      f.expected ? `${Math.round(f.done / f.expected * 100)}%` : "—",
+      f.misses.length ? f.misses.map(m => `${m.name}${m.n > 1 ? ` ×${m.n}` : ""}`).join(", ") : (f.expected ? "Nobody" : "")]),
+    i => {
+      const f = W.forms[i];
+      if (o.mode === "summary" || f.frequency !== "hour" || !f.grid || !f.slots.length) return;
+      const cw = Math.min(24, (DW - LABEL - 44) / f.slots.length), gx = DX + LABEL, end = gx + f.slots.length * cw;
+      const top = () => {
+        y += 4;
+        f.slots.forEach(([s0, s1], k) => doc.text(slotLabel(s0, s1), gx + k * cw + cw / 2, y + 6, { size: 5.5, color: PDF_MUTED, align: "c" }));
+        doc.text("Missed", end + 40, y + 6, { size: 6, color: PDF_MUTED, align: "r" });
+        y += 9;
+      };
+      need(40); top();
+      for (const g of f.grid) {
+        if (need(13)) top();
+        doc.text(fmtDay(g.d), DX, y + 9, { size: 7.5, bold: true });
+        g.cells.forEach((c, k) => {
+          doc.rect(gx + k * cw + 1, y + 1, cw - 2, 10, PDF_SQUARE[c.st] || null, PDF_RULE);
+          if (c.st === "done") doc.mark("tick", gx + k * cw + cw / 2, y + 9, 7.5, PDF_TONE.good);
+          if (c.st === "missed") doc.mark("cross", gx + k * cw + cw / 2, y + 9, 7.5, PDF_TONE.bad);
+        });
+        const miss = g.cells.filter(c => c.st === "missed").length;
+        doc.text(String(miss), end + 40, y + 9, { size: 7.5, bold: !!miss, color: miss ? PDF_TONE.bad : PDF_MUTED, align: "r" });
+        y += 12;
+      }
+      y += 2;
+      para("Tick: done.  Cross: missed.  Grey: on shift under 30 minutes.  Yellow: not over yet.  Empty: nobody on shift.", DX, DW, { size: 7, color: PDF_MUTED });
+      const missed = f.grid.flatMap(g => g.cells.filter(c => c.st === "missed").map(c => `${fmtDay(g.d)} ${fmtClock(c.ss)} (on shift: ${(c.blamed && c.blamed.length ? c.blamed : c.on).join(", ") || "—"})`));
+      if (missed.length) para(`${plural(missed.length, "missed check")}: ${missed.join("; ")}`, DX, DW, { size: 7.5 });
+      y += 5; doc.line(M, y, RIGHT, y);
+    });
+
+    // ---- the bottom of every page
+    const foot = `Attendance & Leave · ${periodLabel(P, o.period)} · Grace ${R.lateGrace} min late / ${R.earlyGrace} min early · lunch ${fmtDur(R.lunchMin)} for shifts of ${fmtH(R.lunchAfter)}+`;
+    for (let i = 0; i < doc.count(); i++) {
+      doc.select(i);
+      doc.text(foot, M, 612 - M + 2, { size: 7, color: PDF_MUTED });
+      doc.text(`Page ${i + 1} of ${doc.count()}`, RIGHT, 612 - M + 2, { size: 7, color: PDF_MUTED, align: "r" });
+    }
+    return doc.bytes();
+  }
+
+  // Make the PDF and hand it to this device: the share sheet on a phone (Save to Files, Print,
+  // Mail), a download on a computer.
+  function savePdf(mode) {
+    if (!current) return;
+    if (mode === "open" && !ui.open.size) { toast("Open at least one person’s row first, or choose “Everyone, with daily detail”.", true); return; }
+    const now = new Date();
+    let bytes;
+    try {
+      bytes = reportPdf(current, { period: ui.period, dept: ui.dept, mode, open: ui.open, R: rules(), noPunches: model.noPunches, hasSchedule: model.hasSchedule,
+        made: `${MONTHS[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} ${now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` });
+    } catch { toast("The PDF couldn’t be made. Try Download CSV instead.", true); return; }
+    const name = fileName(current, ui.period, ui.dept, "pdf");
+    if (ctx.api.saveFile) ctx.api.saveFile(name, new Blob([bytes], { type: "application/pdf" }));
+    else toast("This version of the app can’t save PDF files. Reload the page and try again.", true);
   }
 
   // ---------------------------------------------------------------- copy and CSV
@@ -1188,7 +1528,7 @@
 
   // ---------------------------------------------------------------- hook up
   const core = { parseCSV, parseHours, normKey, niceName, firstNamesAlike, NICKNAMES, gustoTable, buildModel, computePeriod, periodOf, periodLabel, blocksFor, daySlots, hoursSetting, freqText,
-    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, switchAnchor, DEFAULT_RULES };
+    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, switchAnchor, DEFAULT_RULES, pdfDoc, pdfCodes, reportPdf, HELV, HELV_BOLD };
   if (typeof module === "object" && module.exports) module.exports = core;
   if (typeof StaffReports !== "undefined") StaffReports.register("attendance", { render });
 })();

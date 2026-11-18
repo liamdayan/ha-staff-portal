@@ -75,16 +75,19 @@ own records: nothing is asked of TT Hotel, so it costs no requests. Not async.
 
 ```python
 ctx.doors.list()             # [{id, name}]  the doors TT Hotel lists now (id: lock ID), by name
-ctx.doors.records(since, until, door=None, kind="", result="", q="", limit=ctx.doors.LIMIT)
+ctx.doors.records(since, until, door=None, kind="", result="", q="", numbers=False,
+                  limit=ctx.doors.LIMIT)
 # newest first, from since up to until (seconds since 1970, until not included):
 # [{id, at, lock_id, door, who, card_id, card_number, card_type, how, ok, alarm, alert,
 #   problem, battery}]  kind: "guest", "staff", "contractor" or "other" (no card made here);
-#   result: "opened", "refused" or "problems"; q: part of a name, or how a card number starts.
-#   At most ctx.doors.LIMIT + 1 rows (ask for one more to tell there are more).
+#   result: "opened", "refused" or "problems"; q: part of a name, and with numbers=True how a
+#   card number starts too. At most ctx.doors.LIMIT + 1 rows (ask for one more to tell there
+#   are more).
 ```
 
 Card numbers and names are people's details: `app/reports/door_activity/` sends card numbers only
-to people who manage it (`ctx.manage`).
+to people who manage it (`ctx.manage`), and passes `numbers=ctx.manage` so nobody else can find a
+card number by searching for it.
 
 A Connecteam user's departments here: first `ctx.staff`, the departments of the staff member
 linked to that Connecteam user (chosen by hand or by sync). For people not linked, `await
@@ -187,6 +190,7 @@ a `let`, `const` or `class` outside such a function would stop it loading the se
 | `saveSettings(obj)` | saves settings; resolves to `{ok, settings?, error?}`, shows a message itself, and calls `render()` again when it worked |
 | `toast(text, isError)` | a short message |
 | `download(name, text)` | saves text as a file (CSV) |
+| `saveFile(name, blob)` | hands a file the report made (a PDF, say) to the device: the share sheet on a phone or tablet, a download on a computer. Call it straight from a tap or click. The attendance report makes its PDF this way (`reportPdf` in its `view.js`), because a phone opened from its home-screen icon can't print |
 | `csvCell(value)` | one CSV cell, quoted when needed (text a spreadsheet would run as a formula gets a `'` first) |
 | `manage`, `settings`, `params`, `report` | who's looking, the settings, the params used, the report's details |
 

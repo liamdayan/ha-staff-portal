@@ -63,16 +63,23 @@ def test_filters_reach_the_door_reader_as_the_propertys_days():
     assert (out["start"], out["end"]) == ("2026-11-08", "2026-11-14")      # the last 7 days
     assert since == datetime(2026, 11, 8, tzinfo=TZ).timestamp()
     assert until == datetime(2026, 11, 15, tzinfo=TZ).timestamp()
-    assert filters == {"door": None, "kind": "", "result": "", "q": "", "limit": 4}
+    assert filters == {"door": None, "kind": "", "result": "", "q": "", "numbers": False,
+                       "limit": 4}
     run(report, FakeCtx(today=today, doors=doors), start="2026-11-01", end="2026-11-02",
         door=str(SPA), kind="guest", result="problems", q="  room   12 ")
     assert doors.asked[1][2] == {"door": SPA, "kind": "guest", "result": "problems", "q": "room 12",
-                                 "limit": 4}
+                                 "numbers": False, "limit": 4}
+    # Only people who manage the report (and so are shown card numbers) search by them.
+    run(report, FakeCtx(today=today, manage=True, doors=doors), q="44")
+    assert doors.asked[2][2]["numbers"] is True
     assert [d["name"] for d in out["doors"]] == ["Pool Gate", "Spa"]
 
 
 @pytest.mark.parametrize("params, message", [
     ({"start": "2026-13-01"}, "Pick a valid start date."),
+    ({"start": "0001-01-01"}, "Pick a valid start date."),
+    ({"end": "9999-12-31"}, "Pick a valid end date."),
+    ({"door": "٣٣"}, "Pick a door from the list."),
     ({"start": "2026-11-10", "end": "2026-11-01"}, "The start date is after the end date."),
     ({"start": "2026-01-01", "end": "2026-11-01"}, "Pick at most 180 days."),
     ({"door": "pool"}, "Pick a door from the list."),
@@ -132,7 +139,10 @@ def test_the_add_ons_door_reader_filters_the_stored_records(tmp_path, monkeypatc
     assert who(kind="other") == ["9999"]
     assert who(result="refused") == ["Eve"] and who(result="problems") == ["Eve"]
     assert who(result="opened") == ["Room 12 · Smith", "Sam (Acme)", "9999"]
-    assert who(q="room 12") == ["Room 12 · Smith"] and who(q="99") == ["9999"]
+    assert who(q="room 12") == ["Room 12 · Smith"]
+    # Card numbers are searched only when asked for (people who are shown them).
+    assert who(q="99") == [] and who(q="11") == []
+    assert who(q="99", numbers=True) == ["9999"] and who(q="11", numbers=True) == ["Room 12 · Smith"]
     assert who(q="%") == []                     # typed wildcards are plain text
     assert [d["id"] for d in doors.list()] and all(d["name"] for d in doors.list())
 

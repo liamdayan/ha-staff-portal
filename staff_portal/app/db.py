@@ -2658,7 +2658,7 @@ class Database:
     def lock_records(self, limit: int = 50, before: int | None = None, lock_id: int | None = None,
                      problems: bool = False, *, since: float | None = None,
                      until: float | None = None, kind: str = "", result: str = "",
-                     q: str = "") -> list[dict]:
+                     q: str = "", q_numbers: bool = True) -> list[dict]:
         """Door activity, newest first (by when it happened): every door's or one door's, all of
         it or only problems. Each row has the matched card's name, number and type ("card_name",
         "card_card_number", "card_type") and the door's names ("door_name", "door_alias",
@@ -2666,7 +2666,9 @@ class Database:
         before: a record ID, for the next page (the records listed after it).
         since/until: when it happened (until not included). kind: the card it matched, "guest"
         (day pass or overnight), "staff", "contractor" or "other" (none made here). result:
-        "opened" or "refused". q: part of the name, or how the card number starts."""
+        "opened" or "refused". q: part of the name, or how the card number starts (names only
+        with q_numbers off, for people who aren't shown card numbers: a search mustn't tell
+        them what they can't see)."""
         assert kind in ("", "guest", "staff", "contractor", "other")
         assert result in ("", "opened", "refused")
         where, params = [], []
@@ -2694,10 +2696,13 @@ class Database:
         q = str(q or "").strip()[:60]
         if q:
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            where.append("(j.name LIKE ? ESCAPE '\\' OR r.username LIKE ? ESCAPE '\\' "
-                         "OR (COALESCE(c.card_number, r.card_number) >= ? "
-                         "AND COALESCE(c.card_number, r.card_number) < ?))")
-            params += [like, like, q, q + "\x7f"]
+            names = "j.name LIKE ? ESCAPE '\\' OR r.username LIKE ? ESCAPE '\\'"
+            params += [like, like]
+            if q_numbers:
+                names += (" OR (COALESCE(c.card_number, r.card_number) >= ? "
+                          "AND COALESCE(c.card_number, r.card_number) < ?)")
+                params += [q, q + "\x7f"]
+            where.append(f"({names})")
         if before is not None:
             row = self.conn.execute("SELECT at FROM wb_lock_records WHERE id = ?",
                                     (before,)).fetchone()

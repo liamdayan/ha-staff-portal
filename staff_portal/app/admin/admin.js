@@ -2340,8 +2340,8 @@
       markEditing();
       renderPersonEditor();
     });
-    // No role: no pages unless some are picked here (never every page).
-    const rolePages = !role ? "no pages, as they have no role"
+    // No role: the pages give them nothing, so only what's set for them below is on show.
+    const rolePages = !role ? "no role, so only what you give them below"
       : role.layout_pages == null ? "all pages" : choiceNames(role.layout_pages) || "no pages";
 
     box.replaceChildren(
