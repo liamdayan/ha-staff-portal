@@ -1255,6 +1255,17 @@ body.desk-shell .rp-title { display: block; font-size: 26px; margin: 8px 0 4px; 
 .rp-table tr:last-child td { border-bottom: 0; }
 .rp-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* Scans: the options are a list like Reports'; a scan in hand is one card with big buttons. */
+.sc-hint { color: var(--muted); margin: 0 0 12px; }
+.sc-card { display: grid; gap: 8px; justify-items: start; padding: 20px; }
+.sc-card h2 { font-size: 22px; margin: 0; }
+.sc-card .spinner { margin: 4px 0; }
+.sc-name { font-weight: 700; font-size: 17px; color: var(--text) !important; overflow-wrap: anywhere; }
+.sc-problem { color: var(--alert) !important; font-weight: 600; }
+.sc-small { font-size: 13px; }
+.sc-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; width: 100%; }
+.sc-actions .btn { flex: 1 1 160px; min-height: 48px; }
+
 /* Printing a report (the browser's Print, or Save as PDF): only the report itself. */
 @media print {
   .bar, .tabbar, .desk-side, .desk-head, .rp-head .back-btn, .rp-noprint, .toast { display: none !important; }

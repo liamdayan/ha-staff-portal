@@ -33,6 +33,7 @@ import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import aiohttp
 import segno
 from aiohttp import web
 
@@ -55,6 +56,8 @@ from connecteam import USERS_TTL, Connecteam, ConnecteamError
 from permissions import (ACTIONS, ENTITY_ID_RE, ActionRejected, build_service_call,
                          controllable, describe_action, domain_of, offered)
 import doorlog
+import escl
+import scans
 import tasks
 import wristbands
 from wristbands import PlanError, clean_permissions, no_access, permission_choice
@@ -1266,6 +1269,7 @@ async def api_entities(request: web.Request):
     else:
         entities = apply_auto_order(entities, order)
     offer_reports = bool(visible_reports(member))
+    offer_scans = bool(scan_options_for(member))
     return web.json_response({
         "entities": entities,
         "layout": phone_layout,
@@ -1285,10 +1289,13 @@ async def api_entities(request: web.Request):
         "reports": offer_reports,
         # Tasks: for anyone signed in with their own PIN (each request checks again).
         "tasks": bool(member),
+        # Scans: for people in a department that was given a scan option (each request checks again).
+        "scans": offer_scans,
         # Their department's start page, for the app to open at sign-in (unless something was
         # already chosen in this sign-in).
         "start": start_for(member, phone_layout, {"wristbands": offer_wristbands,
-                                                  "reports": offer_reports, "tasks": bool(member)}),
+                                                  "reports": offer_reports, "tasks": bool(member),
+                                                  "scans": offer_scans}),
     })
 
 
@@ -2312,6 +2319,244 @@ def recover_wristband_jobs() -> None:
     if stopped:
         db.log("Staff Portal", f"Stopped {len(stopped)} unfinished card job(s) after a restart",
                ok=False)
+
+
+# ---------------------------------------------------------------- scans (staff app)
+# Scans: the people in an option's departments press its button in the staff app, the add-on
+# asks the scanner for the pages (escl.py: everything in the feeder, else the page on the glass)
+# and saves them as one PDF in that option's folder in the Google shared drive for scans, through
+# the same script as the HR files (hr/gdrive.py). The file's name comes from the option's format
+# (scans.py), never from the person. Pages wait in memory, per person, until they're saved or
+# SCAN_KEEP_SECONDS pass; nothing is written to disk here.
+
+SCAN_REQUESTS_PER_MINUTE = 20        # per device: starting scans and saving
+SCAN_KEEP_SECONDS = 900              # pages not saved are forgotten after this long untouched
+SCAN_MAX_BYTES = 24 * 2 ** 20        # one PDF (the Google script takes 25 MB)
+NO_SCANS = "You don't have access to Scans. Ask a manager if you need it."
+NO_SCAN_PERSON = "Sign in with your own PIN to scan."
+SCANS_NOT_SET_UP = "Scans isn't set up yet. Ask a manager to finish it in the dashboard."
+SCANNER_IN_USE = "Someone else is scanning right now. Try again in a moment."
+recent_scan_requests: dict[int, list[float]] = {}
+scan_jobs: dict[int, dict] = {}      # staff ID -> the scan they have in hand
+scanner_user: list[int | None] = [None]   # who the scanner is working for now
+
+
+def scan_options_for(member: dict | None) -> list[dict]:
+    """The scan-to options this person may use: the ones turned on that one of their
+    departments was given (hidden departments give nothing)."""
+    if not member or staff_off(member):
+        return []
+    mine = set(db.member_department_ids(member))
+    return [o for o in db.scan_options() if o["enabled"] and mine & set(o["departments"])] if mine else []
+
+
+def scans_problem() -> str | None:
+    """Why nothing can be scanned yet, or None: no scanner address, or no Google drive to use."""
+    s = db.settings()
+    if not s.get("scan_address") or not gdrive.bridge_from_settings(s) or not gdrive.scan_drive(s):
+        return SCANS_NOT_SET_UP
+    return None
+
+
+def scans_too_busy(device_id: int) -> bool:
+    now = time.time()
+    times = [t for t in recent_scan_requests.get(device_id, []) if now - t < 60]
+    busy = len(times) >= SCAN_REQUESTS_PER_MINUTE
+    if not busy:
+        times.append(now)
+    recent_scan_requests[device_id] = times
+    return busy
+
+
+async def scan_caller(request: web.Request, change: bool = False) -> tuple[dict, dict]:
+    """(device, signed-in person) for a Scans request, or raise the error the app should show.
+    `change`: scanning or saving, which counts as using a control (a clocked-in-only person must
+    be on the clock) and towards the device's requests a minute."""
+    if change:
+        device, member = authenticate(request, active=True)
+        if member and clock_block(member):
+            await recheck_clock(member["id"])
+        device, member = authenticate(request, active=True, control=True)
+    else:
+        device, member = authenticate(request)
+    if not member:
+        raise json_error(web.HTTPForbidden, NO_SCAN_PERSON)
+    if not scan_options_for(member):
+        if change:
+            db.log(actor_name(device, member), "Blocked: scans", role=role_label(device, member),
+                   ok=False, ip=client_ip(request))
+        raise json_error(web.HTTPForbidden, NO_SCANS)
+    if change and scans_too_busy(device["id"]):
+        raise json_error(web.HTTPTooManyRequests, "Too many requests at once. Wait a moment and "
+                                                  "try again.")
+    return device, member
+
+
+def scan_job(staff_id: int) -> dict | None:
+    """The scan this person has in hand, if any. Ones left untouched too long are forgotten
+    (anyone's), unless they're in the middle of scanning or saving."""
+    now = time.time()
+    for key, job in list(scan_jobs.items()):
+        if job["state"] not in ("scanning", "saving") and now - job["touched"] > SCAN_KEEP_SECONDS:
+            del scan_jobs[key]
+    return scan_jobs.get(staff_id)
+
+
+def scan_job_view(job: dict | None) -> dict | None:
+    """A scan as the app shows it: never the pages themselves."""
+    if not job:
+        return None
+    return {"id": job["id"], "option_id": job["option_id"], "option": job["label"], "state": job["state"],
+            "pages": len(job["pages"]) or job["saved_pages"], "arriving": job["arriving"],
+            "source": job["source"], "message": job["message"], "name": job["name"]}
+
+
+async def run_scan(job: dict, option: dict, address: str) -> None:
+    """Scan into a job: everything in the feeder when it has paper, otherwise the glass."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            scanner = escl.Scanner(address, session)
+            status = await scanner.status()
+            source = "Feeder" if status["feeder"] == "loaded" else "Platen"
+            # Legal paper only fits the feeder: on the glass it's scanned as Letter.
+            paper = "letter" if source == "Platen" and option["paper"] == "legal" else option["paper"]
+            job["source"] = source
+            room = escl.MAX_PAGES - len(job["pages"])
+            pages = await scanner.scan(source, option["color"], scans.QUALITY[option["quality"]], paper,
+                                       on_page=lambda n: job.update(arriving=n), limit=room)
+        job["pages"].extend(pages)
+        job["message"] = ""
+        if sum(len(p) for p in job["pages"]) > SCAN_MAX_BYTES:
+            del job["pages"][-len(pages):]
+            job["message"] = "That's too much for one file. Save what you have, then scan the rest."
+    except escl.ScanError as err:
+        job["message"] = err.message
+    except Exception:  # noqa: BLE001 - a scan's own bug mustn't leave the scanner marked busy
+        log.exception("Scan failed")
+        job["message"] = "The scan didn't work. Try again."
+    finally:
+        if scanner_user[0] == job["staff_id"]:
+            scanner_user[0] = None
+        job.update(state="ready" if job["pages"] else "failed", arriving=0, touched=time.time())
+
+
+def start_scan(job: dict, option: dict) -> None:
+    job.update(state="scanning", message="", arriving=0, touched=time.time())
+    scanner_user[0] = job["staff_id"]
+    background(run_scan(job, option, db.settings()["scan_address"]), "scan")
+
+
+async def save_scan(job: dict, option: dict, member: dict, actor: str, role: str | None, ip: str) -> None:
+    """A job's pages, as one PDF, into the option's folder in Google Drive."""
+    file_id = None
+    try:
+        s = db.settings()
+        bridge, drive = gdrive.bridge_from_settings(s), gdrive.scan_drive(s)
+        if not bridge or not drive:
+            raise BridgeError("not_allowed", SCANS_NOT_SET_UP)
+        pdf = await asyncio.to_thread(escl.pdf_from_jpegs, list(job["pages"]), scans.QUALITY[option["quality"]])
+        if len(pdf) > SCAN_MAX_BYTES:
+            raise BridgeError("too_big", "That's too much for one file. Scan fewer pages at a time.")
+        shown = db.shown_departments()
+        mine = db.member_department_ids(member, shown)
+        department = next((d["name"] for d in shown if mine and d["id"] == mine[0]), "")
+        base = scans.base_name(option, member["name"], department, datetime.now(report_zone()))
+        file_id, earlier = db.reserve_scan_name(option["id"], base, member["id"], actor)
+        name = scans.numbered(base, earlier)
+        folder = await bridge.ensure_folder(drive, option["folder"], {})
+        # The same upload_id on a retry gives back the file already there, never a second copy.
+        result = await bridge.upload(folder, name, "application/pdf", pdf, {"upload_id": f"scan-{job['id']}"})
+        db.finish_scan_file(file_id, name, len(job["pages"]), len(pdf), _scan_link(result.get("webViewLink")))
+        file_id = None
+        db.log(actor, f"Scanned {name}"[:120], role=role, ip=ip,
+               detail=f"{option['label']}: {plural_text(len(job['pages']), 'page', 'pages')}")
+        job.update(state="done", name=name, saved_pages=len(job["pages"]), pages=[], message="")
+    except (BridgeError, ValueError) as err:
+        message = err.message if isinstance(err, BridgeError) else "The file couldn't be made. Scan it again."
+        db.log(actor, "Scan not saved", role=role, ip=ip, ok=False, detail=f"{option['label']}: {message}"[:300])
+        job.update(state="ready", message=f"It couldn't be saved to Google Drive. {message}")
+    except Exception:  # noqa: BLE001 - the pages stay in hand to try again
+        log.exception("Saving a scan failed")
+        job.update(state="ready", message="It couldn't be saved. Try again.")
+    finally:
+        if file_id is not None:
+            db.drop_scan_file(file_id)   # that name is free again
+        job["touched"] = time.time()
+
+
+def _scan_link(value) -> str | None:
+    """Google's link to a file, kept only if it's one (it's shown as a link in the dashboard)."""
+    return value if isinstance(value, str) and re.fullmatch(r"https://(drive|docs)\.google\.com/[\x21-\x7e]{1,300}", value) else None
+
+
+async def api_scans(request: web.Request):
+    """The Scans tool: this person's options, the scan they have in hand, and anything in the way."""
+    device, member = await scan_caller(request)
+    return web.json_response({
+        "options": [{"id": o["id"], "label": o["label"]} for o in scan_options_for(member)],
+        "job": scan_job_view(scan_job(member["id"])), "problem": scans_problem()})
+
+
+def scan_option_or_refuse(member: dict, option_id) -> dict:
+    option = next((o for o in scan_options_for(member) if o["id"] == option_id), None)
+    if not option:
+        raise json_error(web.HTTPNotFound, "That scan option isn't available any more.")
+    return option
+
+
+def scanner_free_or_refuse(member: dict) -> None:
+    if problem := scans_problem():
+        raise json_error(web.HTTPConflict, problem)
+    if scanner_user[0] not in (None, member["id"]):
+        raise json_error(web.HTTPConflict, SCANNER_IN_USE)
+
+
+async def api_scan_start(request: web.Request):
+    """Scan to an option: a new scan (anything this person hadn't saved is dropped)."""
+    device, member = await scan_caller(request, change=True)
+    option = scan_option_or_refuse(member, int(request.match_info["id"]))
+    current = scan_job(member["id"])
+    if current and current["state"] in ("scanning", "saving"):
+        return bad_request("Wait for this scan to finish first.", 409)
+    scanner_free_or_refuse(member)
+    job = {"id": secrets.token_hex(8), "staff_id": member["id"], "option_id": option["id"],
+           "label": option["label"], "state": "scanning", "pages": [], "saved_pages": 0, "arriving": 0,
+           "source": None, "message": "", "name": None, "touched": time.time()}
+    scan_jobs[member["id"]] = job
+    start_scan(job, option)
+    return web.json_response({"job": scan_job_view(job)})
+
+
+async def api_scan_job(request: web.Request):
+    device, member = await scan_caller(request)
+    return web.json_response({"job": scan_job_view(scan_job(member["id"]))})
+
+
+async def api_scan_job_action(request: web.Request):
+    """more: scan more pages into the same file. save: send it to Google Drive. cancel: drop it."""
+    action = request.match_info["action"]
+    device, member = await scan_caller(request, change=action != "cancel")
+    job = scan_job(member["id"])
+    if not job:
+        return bad_request("That scan isn't here any more. Start again.", 404)
+    if job["state"] in ("scanning", "saving"):
+        return bad_request("Wait for this scan to finish first.", 409)
+    if action == "cancel":
+        del scan_jobs[member["id"]]
+        return web.json_response({"job": None})
+    if job["state"] == "done":
+        return bad_request("That scan is already saved.", 409)
+    option = scan_option_or_refuse(member, job["option_id"])
+    if action == "more":
+        scanner_free_or_refuse(member)
+        start_scan(job, option)
+    else:
+        if not job["pages"]:
+            return bad_request("There are no pages to save yet.", 409)
+        job.update(state="saving", message="", touched=time.time())
+        background(save_scan(job, option, member, actor_name(device, member), role_label(device, member),
+                             client_ip(request)), "save a scan")
+    return web.json_response({"job": scan_job_view(job)})
 
 
 # ---------------------------------------------------------------- reports (staff app)
@@ -3508,6 +3753,10 @@ def staff_app() -> web.Application:
                         api_report_upload)
     app.router.add_put(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}/settings", api_report_settings)
     app.router.add_get(r"/reports/{key:[a-z][a-z0-9_]{0,39}}/{file:view\.js|view\.css}", report_file)
+    app.router.add_get("/api/scans", api_scans)
+    app.router.add_get("/api/scans/job", api_scan_job)
+    app.router.add_post(r"/api/scans/job/{action:more|save|cancel}", api_scan_job_action)
+    app.router.add_post(r"/api/scans/{id:\d{1,9}}/scan", api_scan_start)
     app.router.add_get("/api/tasks", api_tasks)
     app.router.add_post("/api/tasks", api_add_task)
     app.router.add_get("/api/tasks/people", api_task_people)
@@ -5755,6 +6004,8 @@ def clean_settings(data: dict, current: dict) -> dict:
     for key in BOOL_SETTINGS:
         if key in data:
             values[key] = "1" if data[key] in (True, "1", "true", "on") else "0"
+    if "scan_address" in data:   # from a backup (the Scans tab saves it on its own)
+        values["scan_address"] = escl.clean_address(data["scan_address"])
     if "task_checks" in data:   # from a backup (the Tasks tab saves it on its own)
         values["task_checks"] = json.dumps(tasks.check_plan(data["task_checks"]))
     if "tunnel_addresses" in data:
@@ -7431,6 +7682,164 @@ def reports_lane_state() -> dict:
                        if connecteam.reports_paused_until > now else None)}
 
 
+# ---------------------------------------------------------------- scans (dashboard)
+
+SCAN_TEST_GAP = 5            # seconds between tests of the scanner
+scan_tested = [0.0]
+SCAN_EXAMPLE = ("Ana Lopez", "Front Desk")   # who the dashboard's example names are for
+
+
+def scan_option_view(option: dict, known: set[int]) -> dict:
+    example = scans.numbered(scans.base_name(option, *SCAN_EXAMPLE, datetime.now(report_zone())), 0)
+    return {**{k: option[k] for k in ("id", "label", "prefix", "format", "folder", "color", "quality",
+                                      "paper", "enabled")},
+            "departments": [i for i in option["departments"] if i in known], "example": example}
+
+
+def scans_view() -> dict:
+    s = db.settings()
+    status = google_status()
+    known = {d["id"] for d in db.departments()}
+    version = status.get("version")
+    return {
+        "address": s.get("scan_address", ""),
+        "google": {"set_up": gdrive.bridge_from_settings(s) is not None,
+                   "script_ok": isinstance(version, int) and version >= gdrive.SCANS_VERSION,
+                   "drive": s.get("scan_google_drive", ""),
+                   "hr_drives": [d for d in (s.get("hr_google_drive"), s.get("hr_google_restricted_drive")) if d],
+                   "drives": status.get("drives") or []},
+        "options": [scan_option_view(o, known) for o in db.scan_options()],
+        "pieces": scans.PIECES, "colors": scans.COLORS, "papers": scans.PAPERS,
+        "quality": {"normal": "Normal (200 dpi)", "high": "High (300 dpi, bigger files)"},
+        "default_format": scans.DEFAULT_FORMAT, "example_for": list(SCAN_EXAMPLE),
+        "files": [{"name": f["name"], "option": f["option_label"], "pages": f["pages"], "bytes": f["bytes"],
+                   "by": f["actor"], "ts": f["ts"], "link": f["link"]} for f in db.scan_files(25)],
+    }
+
+
+async def admin_scans(request: web.Request):
+    return web.json_response(scans_view())
+
+
+async def admin_scan_settings(request: web.Request):
+    """The scanner's address, and the Google shared drive scans go to (one that isn't an HR
+    drive; the script is told it may use it)."""
+    data = await read_json(request)
+    s = db.settings()
+    values = {}
+    try:
+        if "address" in data:
+            values["scan_address"] = escl.clean_address(data["address"])
+        if "drive" in data:
+            values["scan_google_drive"] = gdrive.clean_drive_id(data["drive"])
+    except ValueError as err:
+        return bad_request(str(err))
+    drive = values.get("scan_google_drive")
+    if drive and drive != s.get("scan_google_drive"):
+        if refusal := hr_key_locked():
+            return refusal
+        version = google_status().get("version")
+        if not gdrive.bridge_from_settings(s):
+            return bad_request("Connect Google Drive first: Settings, Connections, Google Drive.")
+        if not (isinstance(version, int) and version >= gdrive.SCANS_VERSION):
+            return bad_request("The Google Drive script needs updating before it can take a drive for scans. "
+                               "In Settings, Connections, Google Drive: click Copy the script, paste it over "
+                               "the old one in Google, deploy a new version, then come back here.")
+        if drive in (s.get("hr_google_drive"), s.get("hr_google_restricted_drive")):
+            return bad_request("Pick a shared drive that isn't one of the HR drives, so scans and employee "
+                               "files stay apart.")
+    changed = {k for k, v in values.items() if s.get(k, "") != v}
+    db.update_settings(values)
+    problem = None
+    if "scan_google_drive" in changed:
+        bridge = gdrive.bridge_from_settings(db.settings())
+        if bridge:   # tell the script which drives it may use now
+            google_asked["check"] = time.time()
+            _, problem = await google_check(bridge)
+    if changed:
+        db.log(admin_name(request), "Changed the Scans settings",
+               detail=", ".join(sorted({"scan_address": "scanner address", "scan_google_drive": "Google drive"}[k]
+                                       for k in changed)))
+    return web.json_response({"ok": True, "problem": problem.message if problem else None, **scans_view()})
+
+
+async def admin_scan_test(request: web.Request):
+    """Test the scanner: what it says it is and whether it's ready. Nothing is scanned."""
+    address = db.settings().get("scan_address")
+    if not address:
+        return bad_request("Enter the scanner's address and save it first.")
+    if time.time() - scan_tested[0] < SCAN_TEST_GAP:
+        return bad_request("Wait a few seconds before testing again.", 429)
+    scan_tested[0] = time.time()
+    try:
+        async with aiohttp.ClientSession() as session:
+            scanner = escl.Scanner(address, session)
+            found = await scanner.capabilities()
+            status = await scanner.status()
+    except escl.ScanError as err:
+        return web.json_response({"ok": False, "problem": err.message})
+    if not found["sources"] or not found["jpeg"]:
+        return web.json_response({"ok": False, "problem": "That device answered, but it can't scan the way "
+                                                          "Staff Access needs (JPEG pages over eSCL)."})
+    return web.json_response({"ok": True, "model": found["model"], "feeder": "Feeder" in found["sources"],
+                              "glass": "Platen" in found["sources"], "state": status["state"],
+                              "paper_in_feeder": status["feeder"] == "loaded"})
+
+
+def clean_scan_option(data) -> dict:
+    """An option from the dashboard, checked; hidden departments chosen before they were hidden
+    aren't offered there, so they can't be picked afresh."""
+    return scans.clean_option(data, {d["id"] for d in db.departments() if not d["hidden"]})
+
+
+async def admin_scan_example(request: web.Request):
+    """The name a file would get, as the option is being filled in."""
+    data = await read_json(request)
+    try:
+        option = scans.clean_option({**data, "label": data.get("label") or "Option", "departments": []}, set())
+    except ValueError as err:
+        return bad_request(str(err))
+    base = scans.base_name(option, *SCAN_EXAMPLE, datetime.now(report_zone()))
+    return web.json_response({"names": [scans.numbered(base, n) for n in range(3)]})
+
+
+async def admin_add_scan_option(request: web.Request):
+    if len(db.scan_options()) >= scans.MAX_OPTIONS:
+        return bad_request(f"There can be at most {scans.MAX_OPTIONS} scan options.")
+    try:
+        option = clean_scan_option(await read_json(request))
+    except ValueError as err:
+        return bad_request(str(err))
+    db.save_scan_option(None, option)
+    db.log(admin_name(request), f"Added scan option {option['label']}")
+    return web.json_response({"ok": True, **scans_view()})
+
+
+async def admin_update_scan_option(request: web.Request):
+    option_id = int(request.match_info["id"])
+    before = db.scan_option(option_id)
+    if not before:
+        raise web.HTTPNotFound()
+    try:
+        option = clean_scan_option(await read_json(request))
+    except ValueError as err:
+        return bad_request(str(err))
+    hidden = {d["id"] for d in db.departments() if d["hidden"]}
+    option["departments"] = sorted({*option["departments"], *(i for i in before["departments"] if i in hidden)})
+    db.save_scan_option(option_id, option)
+    db.log(admin_name(request), f"Changed scan option {option['label']}")
+    return web.json_response({"ok": True, **scans_view()})
+
+
+async def admin_delete_scan_option(request: web.Request):
+    option = db.scan_option(int(request.match_info["id"]))
+    if not option:
+        raise web.HTTPNotFound()
+    db.delete_scan_option(option["id"])
+    db.log(admin_name(request), f"Removed scan option {option['label']}")
+    return web.json_response({"ok": True, **scans_view()})
+
+
 async def admin_reports(request: web.Request):
     access = db.reports()
     departments = {d["id"] for d in db.departments()}
@@ -8180,6 +8589,13 @@ def admin_app() -> web.Application:
     app.router.add_post("/api/hr/sync", admin_hr_sync)
     app.router.add_get("/api/reports", admin_reports)
     app.router.add_put(r"/api/reports/{key:[a-z][a-z0-9_]{0,39}}", admin_update_report)
+    app.router.add_get("/api/scans", admin_scans)
+    app.router.add_put("/api/scans/settings", admin_scan_settings)
+    app.router.add_post("/api/scans/test", admin_scan_test)
+    app.router.add_post("/api/scans/example", admin_scan_example)
+    app.router.add_post("/api/scans/options", admin_add_scan_option)
+    app.router.add_put(r"/api/scans/options/{id:\d{1,9}}", admin_update_scan_option)
+    app.router.add_delete(r"/api/scans/options/{id:\d{1,9}}", admin_delete_scan_option)
     return app
 
 
@@ -8202,6 +8618,7 @@ async def main():
     await connecteam.start()
     await tthotel.start()
     recover_wristband_jobs()
+    db.drop_unsaved_scans()   # names taken by uploads this was stopped in the middle of
     discovery.scan_soon()   # only while Wristbands is on and a computer's encoder is Automatic
     clock_task = asyncio.create_task(connecteam.run())
     sync_task = asyncio.create_task(staff_sync_loop())   # only while it has something to do

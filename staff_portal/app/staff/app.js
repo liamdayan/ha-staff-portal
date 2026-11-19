@@ -234,9 +234,11 @@
     wbReset();
     rpReset();
     tkReset();
+    scReset();
     // A tool turned down for the last person is offered again to the next one.
     toolsPaused = 0;
     tkPaused = 0;
+    scPaused = 0;
     session.del(WB_JOB_KEY);
   }
 
@@ -624,7 +626,7 @@
   // silently switch staff to a different page. tool: a tool open instead of a page
   // ("wristbands", "tasks" or "reports"), or null.
   const view = { pageId: session.get("page"), detail: null,
-    tool: ["wristbands", "tasks", "reports"].includes(session.get("tool")) ? session.get("tool") : null };
+    tool: ["wristbands", "tasks", "reports", "scans"].includes(session.get("tool")) ? session.get("tool") : null };
   // The sign-in a page or tool was last chosen in (or the start page applied in): a department's
   // start page opens once per sign-in, and never over something chosen in it.
   const START_KEY = "start_for";
@@ -740,10 +742,11 @@
     // tool that's all this person has opens by itself.
     const tools = toolsFor(data);
     if (view.tool && !tools.includes(view.tool)) {
-      if (wb || tk || rp) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
+      if (wb || tk || rp || sc) toast(`${TOOL_NAMES[view.tool]} isn't available on this ${word()} any more.`, true);
       wbReset();
       tkReset();
       rpReset();
+      scReset();
       view.tool = null;
       session.del("tool");
     }
@@ -1196,7 +1199,7 @@
   // card; Tasks to anyone signed in with their own PIN; Reports to someone signed in with a
   // department that may see at least one. The server says so with every poll, and checks again on
   // every request.
-  const TOOL_NAMES = { wristbands: "Wristbands", tasks: "Tasks", reports: "Reports" };
+  const TOOL_NAMES = { wristbands: "Wristbands", tasks: "Tasks", reports: "Reports", scans: "Scans" };
   const TOOL_PAUSE_MS = 60000;   // after the server turns a tool down, how long before offering it again
   let toolsPaused = 0;
 
@@ -1205,7 +1208,8 @@
     const paused = Date.now() < toolsPaused;
     return [data.wristbands && !paused ? "wristbands" : null,
       data.tasks && Date.now() >= tkPaused ? "tasks" : null,
-      data.reports && !paused ? "reports" : null].filter(Boolean);
+      data.reports && !paused ? "reports" : null,
+      data.scans && Date.now() >= scPaused ? "scans" : null].filter(Boolean);
   }
 
   function openTool(name) {
@@ -1214,6 +1218,7 @@
       if (name === "wristbands" && wb && wb.screen !== "home") wbBack();
       if (name === "tasks") window.scrollTo({ top: 0, behavior: "smooth" });
       if (name === "reports" && rp?.open) rpBack();
+      if (name === "scans" && sc?.loaded) scLoad();
       return;
     }
     if (wbHolding()) {
@@ -1279,9 +1284,11 @@
     // A stand-in tile, so polls don't rebuild the screen (render rebuilds whenever there are no
     // tiles, which would wipe a form being typed in). Each poll lets the tool update itself.
     const tasks = view.tool === "tasks";
-    into.set(`tool:${view.tool}`, { refresh: () => (tasks ? tkPoll() : view.tool === "wristbands" ? wbPoll() : null) });
+    into.set(`tool:${view.tool}`, { refresh: () => (tasks ? tkPoll() : view.tool === "wristbands" ? wbPoll()
+      : view.tool === "scans" ? scPoll() : null) });
     // Kept across redraws, so what's typed survives them.
-    const content = tasks ? tkState().root : view.tool === "reports" ? rpState().root : wbState().root;
+    const content = tasks ? tkState().root : view.tool === "reports" ? rpState().root
+      : view.tool === "scans" ? scState().root : wbState().root;
     if (tasks) tkDraw();   // a phone turned sideways, say: the right layout for the new width
     if (isDesk()) {
       const nav = h("nav", { class: "desk-nav", "aria-label": "Pages" },
@@ -1290,6 +1297,147 @@
     }
     const tabs = tabBar(data, -1);
     return h("div", { class: tabs ? "layout has-tabs" : "layout" }, content, tabs);
+  }
+
+  // ---------------------------------------------------------------- scans
+
+  // Scans: this person's "scan to" options (set up in the dashboard, by department). Pressing one
+  // has the add-on ask the scanner for everything in its feeder, or the page on the glass; the
+  // pages wait on the server until Save sends them to Google Drive as one PDF, named by the
+  // option's rule (nobody types a name). What's on screen is forgotten at sign-out (scReset).
+  const SC_POLL_MS = 900;      // while scanning or saving
+  let sc = null;
+  let scPaused = 0;            // after the server turns Scans down, until when it isn't offered
+
+  function scState() {
+    if (!sc) {
+      sc = { root: h("div", { class: "rp sc" }), options: [], job: null, problem: null, timer: null, seq: 0,
+        busy: false, loaded: false };
+      scLoad();
+    }
+    return sc;
+  }
+
+  function scReset() {
+    if (sc) clearTimeout(sc.timer);
+    sc = null;
+  }
+
+  // The server says this person can't use Scans here (any more): back to the pages.
+  function scNoAccess(text) {
+    toast(text || "You don't have access to Scans here.", true);
+    scReset();
+    scPaused = Date.now() + TOOL_PAUSE_MS;
+    if (view.tool === "scans") {
+      view.tool = null;
+      session.del("tool");
+    }
+    rerender();
+  }
+
+  function scAuthError(res) {
+    if (res.status !== 0 && handleAuthError(res)) return true;
+    if (res.status === 403) { scNoAccess(res.data.error); return true; }
+    return false;
+  }
+
+  // What can be scanned to, and the scan in hand (one left on the server by a reload, say).
+  async function scLoad() {
+    const state = sc;
+    const seq = ++state.seq;
+    if (!state.loaded) fill(state.root, h("h1", { class: "page-title" }, "Scans"),
+      h("div", { class: "center" }, h("div", { class: "spinner", "aria-label": "Loading" })));
+    const res = await api("GET", "/api/scans");
+    if (sc !== state || seq !== state.seq || scAuthError(res)) return;
+    if (res.status !== 200) {
+      if (!state.loaded) fill(state.root, h("h1", { class: "page-title" }, "Scans"),
+        rpMessage("Scans couldn't be loaded", res.status === 0 ? "Check the connection and try again."
+          : res.data.error || "Try again in a moment.", () => scLoad()));
+      return;
+    }
+    Object.assign(state, { options: res.data.options, job: res.data.job, problem: res.data.problem, loaded: true });
+    scDraw();
+  }
+
+  // With each dashboard poll while Scans is open, and on its own timer while the scanner or
+  // Google is at work.
+  async function scPoll() {
+    const state = sc;
+    if (!state || !state.loaded || state.busy) return;
+    if (!scWorking(state.job)) return;
+    const res = await api("GET", "/api/scans/job");
+    if (sc !== state || scAuthError(res) || res.status !== 200) return;
+    state.job = res.data.job;
+    scDraw();
+  }
+
+  const scWorking = (job) => !!job && (job.state === "scanning" || job.state === "saving");
+
+  // Start a scan, or more / save / cancel on the one in hand.
+  async function scSend(path) {
+    const state = sc;
+    if (!state || state.busy) return;
+    state.busy = true;
+    scDraw();
+    const res = await api("POST", path);
+    if (sc !== state) return;
+    state.busy = false;
+    if (scAuthError(res)) return;
+    if (res.status === 200) state.job = res.data.job;
+    else {
+      toast(res.status === 0 ? "Couldn't reach the server. Try again." : res.data.error || "That didn't work. Try again.", true);
+      if (res.status === 404) return scLoad();   // the scan or the option is gone: start from the list
+    }
+    scDraw();
+  }
+
+  function scDraw() {
+    const state = sc;
+    clearTimeout(state.timer);
+    const job = state.job;
+    const count = (n) => `${n} ${n === 1 ? "page" : "pages"}`;
+    const button = (label, path, primary) => h("button", { class: primary ? "btn primary" : "btn", type: "button",
+      disabled: state.busy, onclick: () => scSend(path) }, label);
+    const card = (...kids) => h("div", { class: "rp-msg sc-card", role: "status" }, kids);
+    let body;
+    if (!job) {
+      body = [
+        state.problem ? rpMessage("Scans isn't ready", state.problem, () => scLoad()) : null,
+        h("p", { class: "sc-hint" }, "Put the pages face up in the feeder, or one page face down on the glass. " +
+          "Then choose where the scan goes."),
+        state.options.length ? h("div", { class: "rp-list" }, state.options.map((o) =>
+          h("button", { class: "rp-item", type: "button", disabled: state.busy || !!state.problem,
+            onclick: () => scSend(`/api/scans/${o.id}/scan`) },
+          h("span", { class: "rp-item-name" }, o.label), h("span", { class: "rp-item-sub" }, "Scan to this"),
+          h("span", { class: "rp-item-go", "aria-hidden": "true" }, "›"))))
+          : rpMessage("No scan options", "A manager can add them in the dashboard, on the Scans tab."),
+      ];
+    } else if (job.state === "scanning") {
+      body = card(h("div", { class: "spinner", "aria-hidden": "true" }),
+        h("h2", null, job.arriving ? `Scanning… ${count(job.arriving)} so far` : "Scanning…"),
+        h("p", null, `To ${job.option}.${job.pages ? ` ${count(job.pages)} already scanned.` : ""}`));
+    } else if (job.state === "saving") {
+      body = card(h("div", { class: "spinner", "aria-hidden": "true" }),
+        h("h2", null, "Saving to Google Drive…"), h("p", null, `${count(job.pages)} to ${job.option}.`));
+    } else if (job.state === "done") {
+      body = card(h("h2", null, "Saved"), h("p", { class: "sc-name" }, job.name),
+        h("p", null, `${count(job.pages)} in ${job.option}.`),
+        h("div", { class: "sc-actions" }, button("Done", "/api/scans/job/cancel", true),
+          button(`Scan another to ${job.option}`, `/api/scans/${job.option_id}/scan`)));
+    } else if (job.state === "failed") {
+      body = card(h("h2", null, "Nothing was scanned"), h("p", { class: "sc-problem" }, job.message || "Try again."),
+        h("div", { class: "sc-actions" }, button("Try again", `/api/scans/${job.option_id}/scan`, true),
+          button("Back", "/api/scans/job/cancel")));
+    } else {   // ready: pages in hand
+      body = card(h("h2", null, `${count(job.pages)} scanned`), h("p", null, `Going to ${job.option}.`),
+        job.message ? h("p", { class: "sc-problem" }, job.message) : null,
+        h("div", { class: "sc-actions" }, button(`Save to ${job.option}`, "/api/scans/job/save", true),
+          button("Scan more pages", "/api/scans/job/more"), button("Start over", "/api/scans/job/cancel")),
+        h("p", { class: "sc-small" }, "Scan more pages adds what's in the feeder, or the next page on the glass, " +
+          "to the same file."));
+    }
+    fill(state.root, h("h1", { class: "page-title" }, "Scans"), body);
+    if (scWorking(job)) state.timer = setTimeout(scPoll, SC_POLL_MS);
   }
 
   // ---------------------------------------------------------------- reports

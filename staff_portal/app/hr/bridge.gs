@@ -2,7 +2,8 @@
  * Staff Access: Google Drive bridge for the HR portal (script version {{VERSION}}).
  *
  * What this is: a small web app that lets the Staff Access add-on in Home Assistant keep HR
- * files in your Google shared drive, as you, without a Google Cloud project or key file.
+ * files (and, with the Scans tool, scanned documents) in your Google shared drives, as you,
+ * without a Google Cloud project or key file.
  *
  * What it can do: only what Staff Access asks, and only inside the shared drive(s) you picked in
  * Staff Access (their IDs are saved below in Script Properties by a signed request). It makes
@@ -308,12 +309,13 @@ function ping() {
   return {version: VERSION, email: email(), drives: drives, allowed: allowedDrives()};
 }
 
-// Which shared drives this script may use from now on (the HR drive first). Each must be one
-// the account can open.
+// Which shared drives this script may use from now on (the HR drive first, the restricted one,
+// and one for the Scans tool: up to three). Each must be one the account can open.
 function setup(args) {
   var ids = args.drives;
-  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 2 || ids[0] === ids[1]) {
-    throw fail("bad_request", "Pick one or two different shared drives.");
+  var different = Array.isArray(ids) && ids.every(function (id, i) { return ids.indexOf(id) === i; });
+  if (!different || ids.length < 1 || ids.length > 3) {
+    throw fail("bad_request", "Pick one to three different shared drives.");
   }
   var drives = ids.map(function (id) {
     var drive = Drive.Drives.get(checkId(id), {fields: "id,name"});

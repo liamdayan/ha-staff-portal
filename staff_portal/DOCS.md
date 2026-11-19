@@ -1723,6 +1723,61 @@ link. A restore turns the sync off, so a restored copy never sends anything to C
 own: check the boards and turn it on again; it reads Connecteam's copy of each task first. A
 backup from before tasks leaves the tasks here as they are.
 
+## Scans
+
+**Scans** is a tool in the staff app for scanning paper straight into Google Drive. Someone puts
+the pages in the scanner, opens **Scans**, and presses where the scan goes (**Invoices**, say). The
+scanner takes every page in its feeder, or the one page on the glass, and the file is saved as a
+PDF in that option's folder. You decide how the file is named; staff never type or pick a name.
+
+It needs three things, all on the dashboard's **Scans** tab:
+
+1. **A scanner on your network** that scans over the network without a computer: "AirPrint
+   scanning", also called eSCL, which most all-in-one printers of the last ten years have (a
+   Brother MFC-J4345DW, for one). Enter its address, such as `192.168.1.50`, click **Save**, then
+   **Test scanner**: it says the model and whether it has a feeder. Give the scanner a fixed
+   address in your router, so it doesn't change. The scanner must be reachable from the Home
+   Assistant machine (the same network).
+2. **A Google shared drive for scans.** Scans uses the same Google connection as the HR portal's
+   files ([Google Drive for HR files](#google-drive-for-hr-files): **Settings → Connections →
+   Google Drive**), whether or not the HR portal is on. In Google Drive, make a shared drive (such
+   as **Scans**) and add the account that runs the script as a **Manager**. Then pick it under
+   **Shared drive for scans** and click **Save**. It can't be one of the HR drives, so scans and
+   employee files stay apart. The script must be version 5 or later: if the tab says it needs
+   updating, follow [When the script is out of date](#when-the-script-is-out-of-date).
+3. **Scan options.** Each one is a button in the staff app:
+   - **Name on the button** and **Prefix** (such as `INV`).
+   - **File name format**: text with pieces in braces that are filled in at scan time. Click a
+     piece to add it: `{prefix}`, `{name}` (the person signed in), `{first}`, `{last}`,
+     `{department}`, `{option}`, `{date}` (as 2026-11-18), `{time}`, `{year}`, `{month}`, `{day}`.
+     The line under it shows the names it would give. `{prefix}-{name}` gives `INV-Ana Lopez.pdf`.
+   - **Folder in the scans drive**: made the first time it's used. Left empty, it's the option's
+     name.
+   - **Colour**, **Quality** (Normal is 200 dots per inch, High is 300 and makes bigger files) and
+     **Paper** (Letter, Legal through the feeder, or A4).
+   - **Who may use it**: the departments whose people see this button. Someone in none of an
+     option's departments doesn't see Scans at all.
+
+**Numbering.** When a file would get the same name as one already scanned to that option, a
+number goes on the end: `INV-Ana Lopez.pdf`, then `INV-Ana Lopez-2.pdf`, `INV-Ana Lopez-3.pdf`.
+Put `{date}` in the format to start again each day. Staff Access counts from its own record of
+what it scanned, so a file renamed or deleted in Google Drive doesn't free its number.
+
+**In the staff app.** After a scan it says how many pages came through, with **Save to** (the
+option), **Scan more pages** (adds what's in the feeder, or the next page on the glass, to the same
+file) and **Start over**. Nothing is in Google Drive until **Save** is pressed. Pages not saved
+are forgotten after 15 minutes, at sign-out they stay with the person who scanned them, and they
+are never written to the Home Assistant machine's disk. One person scans at a time: anyone else
+is told the scanner is in use.
+
+- A file can be at most 60 pages or 24 MB, whichever comes first. For more, save and scan the
+  rest as a second file.
+- Only people signed in with their own PIN can scan, so every file has a named person: it's in
+  the **Activity** tab ("Scanned INV-Ana Lopez.pdf") and under **Recent scans**.
+- Someone who must be clocked in to use the app must be on the clock to scan.
+- The scan options and the scanner's address are in backups. The drive is not (like the HR
+  drives): pick it again after a restore. Removing an option leaves its files in Google Drive.
+
 ## Seeing staff actions in Home Assistant
 
 Every staff action is always recorded in **Staff Access → Activity**. You can also have them show
@@ -2152,7 +2207,9 @@ date**. (Script version 2 adds making PDFs of write-ups and reviews. Files keep 
 with version 1 meanwhile; PDFs wait until the new version is deployed. Version 3 shows Google's own
 words when Drive refuses something, and Test connection no longer fails just because Google won't
 delete its test folder. Version 4 adds the **authorize** function and a plainer message when the
-script is missing Drive access.) To update it (the Web app URL stays the same):
+script is missing Drive access. Version 5 lets the script use a third shared drive, for the
+[Scans](#scans) tool; until it's deployed, the HR files work as before and Scans can't be given a
+drive.) To update it (the Web app URL stays the same):
 
 1. Click **Copy the script**.
 2. In script.google.com, open the project, select everything in **Code.gs**, paste over it and

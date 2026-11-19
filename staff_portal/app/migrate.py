@@ -287,8 +287,13 @@ def _google_settings(raw: dict) -> dict:
     secret = raw.get("hr_google_secret")
     if not _sealed(secret) and not (isinstance(secret, str) and gdrive.SECRET_RE.fullmatch(secret)):
         return {}
+    try:   # the drive for scans: left out when it's missing or wrong, the rest still travels
+        scans = gdrive.clean_drive_id(raw.get("scan_google_drive"))
+    except ValueError:
+        scans = ""
     return {"hr_google_url": url, "hr_google_secret": secret, "hr_google_drive": drive,
-            "hr_google_restricted_drive": restricted if restricted != drive else ""}
+            "hr_google_restricted_drive": restricted if restricted != drive else "",
+            "scan_google_drive": scans if scans not in (drive, restricted) else ""}
 
 
 def clean_snapshot(data: dict, clean_settings, current_settings: dict, clean_logo,

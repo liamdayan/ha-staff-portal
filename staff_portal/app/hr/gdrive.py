@@ -38,9 +38,10 @@ import weakref
 import aiohttp
 
 PROTOCOL = 1          # the request format (bridge.gs's PROTOCOL)
-SCRIPT_VERSION = 4    # the script written by script_source(); ping says which one is deployed
+SCRIPT_VERSION = 5    # the script written by script_source(); ping says which one is deployed
 MIN_SCRIPT_VERSION = 1   # the oldest deployed script file operations still work with
 PDF_VERSION = 2       # the oldest deployed script that makes PDFs (the pdf op)
+SCANS_VERSION = 5     # the oldest deployed script that takes a third shared drive (for scans)
 # The script project's settings file (appsscript.json), pasted by the owner: it turns on the Drive
 # service and asks Google for full Drive access up front. Without it Google may guess too narrowly
 # from the code and give read-only access ("You do not have permission to call drive.files.create").
@@ -173,9 +174,24 @@ def bridge_from_settings(settings: dict) -> "Bridge | None":
 
 def drive_ids(settings: dict) -> list[str]:
     """The drives the script may use, from the settings: the HR drive, then the restricted one
-    if it's a drive of its own (otherwise restricted files go in a folder in the HR drive)."""
+    if it's a drive of its own (otherwise restricted files go in a folder in the HR drive), then
+    the drive for scans (the Scans tool). The scans drive only counts once the deployed script
+    is new enough to take a third drive: an older one would refuse all three, HR's included."""
     ids = [settings.get("hr_google_drive") or "", settings.get("hr_google_restricted_drive") or ""]
+    if scan_drive(settings):
+        ids.append(settings.get("scan_google_drive") or "")
     return [d for i, d in enumerate(ids) if d and d not in ids[:i]]
+
+
+def scan_drive(settings: dict) -> str:
+    """The shared drive scans go to, or "" while there's none to use: none picked, or the
+    deployed script (as last checked) is older than SCANS_VERSION."""
+    try:
+        version = json.loads(settings.get("hr_google_status") or "{}").get("version")
+    except (ValueError, AttributeError):
+        version = None
+    new_enough = isinstance(version, int) and not isinstance(version, bool) and version >= SCANS_VERSION
+    return (settings.get("scan_google_drive") or "") if new_enough else ""
 
 
 # ---------------------------------------------------------------- signing
@@ -283,10 +299,11 @@ class Bridge:
                             if isinstance(d, str) and ID_RE.fullmatch(d)]}
 
     async def setup(self, drive_ids: list[str]) -> list[dict]:
-        """Lets the script use these shared drives, and only these (the HR drive first)."""
+        """Lets the script use these shared drives, and only these (the HR drive first). A third
+        needs a deployed script of SCANS_VERSION or later."""
         ids = [_id(d) for d in drive_ids]
-        if not 1 <= len(ids) <= 2 or len(set(ids)) != len(ids):
-            raise ValueError("One or two different shared drives.")
+        if not 1 <= len(ids) <= 3 or len(set(ids)) != len(ids):
+            raise ValueError("One to three different shared drives.")
         result = await self._call("setup", {"drives": ids}, SHORT_TIMEOUT)
         return [{"id": d.get("id"), "name": _text(d.get("name"), 200)}
                 for d in result.get("drives") or [] if isinstance(d, dict)]

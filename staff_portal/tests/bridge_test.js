@@ -346,7 +346,7 @@ test("ping: version, account and shared drives", () => {
   const ctx = load(world);
   const reply = post(ctx, request("ping"));
   assert.ok(reply.ok);
-  assert.strictEqual(reply.version, 4);
+  assert.strictEqual(reply.version, 5);
   assert.strictEqual(reply.result.email, world.email);
   assert.deepStrictEqual(reply.result.drives.map((d) => d.name).sort(),
     ["HR Employee Files", "HR Restricted", "Marketing"]);
@@ -423,9 +423,13 @@ test("setup: only drives the account can open, then only those", () => {
   refused(ctx, "setup", { drives: ["0ANotMyDriveAAAAAAAAA"] }, "not_allowed");
   refused(ctx, "setup", { drives: [] }, "bad_request");
   refused(ctx, "setup", { drives: [HR, HR] }, "bad_request");
-  refused(ctx, "setup", { drives: [HR, RESTRICTED, OTHER] }, "bad_request");
+  refused(ctx, "setup", { drives: [HR, RESTRICTED, HR] }, "bad_request");
+  refused(ctx, "setup", { drives: [HR, RESTRICTED, OTHER, "0AFourthDriveAAAAAAAA"] }, "bad_request");
   refused(ctx, "setup", { drives: ["../../etc"] }, "bad_request");
   assert.deepStrictEqual(world.props, {});
+  // Three since version 5: the HR drive, the restricted one and one for the Scans tool.
+  assert.strictEqual(ok(ctx, "setup", { drives: [HR, RESTRICTED, OTHER] }).drives.length, 3);
+  assert.deepStrictEqual(JSON.parse(world.props.drives), [HR, RESTRICTED, OTHER]);
   const result = ok(ctx, "setup", { drives: [HR, RESTRICTED] });
   assert.deepStrictEqual(result.drives, [{ id: HR, name: "HR Employee Files" }, { id: RESTRICTED, name: "HR Restricted" }]);
   assert.deepStrictEqual(JSON.parse(world.props.drives), [HR, RESTRICTED]);

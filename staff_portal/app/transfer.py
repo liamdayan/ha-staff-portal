@@ -55,6 +55,7 @@ from db import (ACTIVITY_MAX_ROWS, CARD_STATES, LOCKOUT_METHODS, LOCKOUT_STATUSE
 from layout import (GROUP_PREFIX, MAX_PHONE_PAGES, MORE_PAGE_ID, clean_layout, clean_phone_order,
                     clean_phone_pages)
 from permissions import controllable, offered
+import scans as scan_rules
 import tasks as task_rules
 from wristbands import (MAC_RE, MAX_BUILDING, MAX_FLOOR, NO_ACCESS, TYPES, clean_permissions,
                         door_kind, permission_choice)
@@ -222,7 +223,7 @@ def clean_card_access(raw) -> list[dict] | None:
     return cleaned
 
 
-START_TOOLS = ("tasks", "reports", "wristbands")
+START_TOOLS = ("tasks", "reports", "wristbands", "scans")
 START_PAGE_RE = re.compile(r"^page:[A-Za-z0-9_-]{1,32}$")   # a layout page's ID (layout.ID_RE)
 
 
@@ -879,6 +880,8 @@ def make_backup(db, branding, version: str) -> dict:
         phone_orders=rows("SELECT owner, data FROM phone_orders"),
         wristband_doors=rows("SELECT lock_id, name, hidden, kind FROM wb_doors"),
         reports=[{"key": key, **r} for key, r in sorted(db.reports().items())],
+        scans=[{k: o[k] for k in ("id", "label", "prefix", "format", "folder", "color", "quality", "paper",
+                                  "departments", "enabled")} for o in db.scan_options()],
         tasks=tasks_section(db),
         **log_sections(db),
     )
@@ -1169,6 +1172,7 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             wristband_doors.append(door)
 
     reports = _reports(data, department_ids) if data.get("reports") is not None else None
+    scan_options = _scans(data, department_ids) if data.get("scans") is not None else None
 
     return {"settings": settings, "layout": layout, "logo": logo, "areas": areas,
             "area_entities": sorted(area_entities), "area_ha_areas": sorted(area_ha_areas),
@@ -1177,10 +1181,29 @@ def clean_backup(data, clean_settings, current_settings: dict, clean_logo,
             "staff_entities": staff_entities, "staff_areas": staff_areas,
             "phone_orders": phone_orders, "wristband_doors": wristband_doors,
             "departments": departments, "needs_setup": needs_setup, "reports": reports,
+            # Backups from before Scans have none: None leaves the options here as they are.
+            "scans": scan_options,
             # Backups from before tasks have none: None leaves the ones here as they are.
             "tasks": task_rules.clean_backup_section(data.get("tasks"), time.time()),
             "logs": clean_logs(data),
             "exported_at": _time(data.get("exported_at"), time.time())}
+
+
+def _scans(data: dict, department_ids: set[int]) -> list[dict]:
+    """Scan-to options from a backup, each checked as the dashboard checks it (an option with
+    anything wrong in it is left out) and limited to departments that are in the backup."""
+    found, ids = [], set()
+    for row in _rows(data, "scans")[:scan_rules.MAX_OPTIONS]:
+        option_id = row.get("id")
+        if not isinstance(option_id, int) or isinstance(option_id, bool) or not 0 < option_id < 2 ** 31 or option_id in ids:
+            continue
+        try:
+            option = scan_rules.clean_option(row, department_ids)
+        except ValueError:
+            continue
+        ids.add(option_id)
+        found.append({"id": option_id, **option})
+    return found
 
 
 def _reports(data: dict, department_ids: set[int]) -> list[dict]:

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.28
+
+**Scans: a new tool in the staff app**
+- **Scan straight into Google Drive.** Put the pages in the scanner, open **Scans**, press where
+  it goes. The scanner takes everything in its feeder (or the page on the glass) and the file is
+  saved as one PDF. **Scan more pages** adds to the same file before it's saved.
+- **Scan options** are set up on the dashboard's new **Scans** tab: a name, a prefix, a folder in
+  the scans drive, colour, quality and paper, and the departments that may use it.
+- **You choose how files are named**, staff don't: a format made of pieces such as `{prefix}`,
+  `{name}` (the person signed in), `{department}` and `{date}`, with the names it gives shown as
+  you type.
+- **Counted automatically:** the second file of the same name in an option gets `-2`, then `-3`
+  (`INV-Ana Lopez.pdf`, `INV-Ana Lopez-2.pdf`).
+- **The scanner** is any one that scans over the network with AirPrint scanning (eSCL), such as a
+  Brother MFC-J4345DW: enter its address and click **Test scanner**.
+- **Google Drive:** Scans uses the same connection as the HR files, with a shared drive of its own.
+  This needs the Google Drive script updated to version 5 (**Settings → Connections → Google
+  Drive → Copy the script**, paste, deploy a new version). The connection says **Script out of
+  date** until then; the HR files keep working meanwhile.
+- A department's start page can be Scans.
+
 ## 0.12.27
 
 **Attendance report: sort the staff table**

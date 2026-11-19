@@ -20,7 +20,7 @@ import main  # noqa: E402
 from hr import gdrive  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fake_bridge import HR_DRIVE, RESTRICTED_DRIVE, FakeBridge  # noqa: E402
+from fake_bridge import HR_DRIVE, OTHER_DRIVE, RESTRICTED_DRIVE, FakeBridge  # noqa: E402
 
 
 @contextlib.asynccontextmanager
@@ -255,7 +255,12 @@ def test_damaged_google_settings_in_a_migration_are_dropped():
     good = {"hr_google_url": "https://script.google.com/macros/s/" + "A" * 40 + "/exec",
             "hr_google_secret": "s" * 43, "hr_google_drive": HR_DRIVE,
             "hr_google_restricted_drive": HR_DRIVE}
-    assert migrate._google_settings(good) == {**good, "hr_google_restricted_drive": ""}
+    assert migrate._google_settings(good) == {**good, "hr_google_restricted_drive": "", "scan_google_drive": ""}
+    # The drive for scans travels too, unless it's wrong or one of the HR drives.
+    assert migrate._google_settings({**good, "scan_google_drive": OTHER_DRIVE})["scan_google_drive"] == OTHER_DRIVE
+    for wrong in (HR_DRIVE, "../../", 7):
+        kept = migrate._google_settings({**good, "scan_google_drive": wrong})
+        assert kept["scan_google_drive"] == "" and kept["hr_google_drive"] == HR_DRIVE
     for bad in ({**good, "hr_google_url": "https://evil.example/exec"},
                 {**good, "hr_google_secret": 'x"; alert(1); "' + "x" * 40},
                 {**good, "hr_google_drive": "../../"}, {}):

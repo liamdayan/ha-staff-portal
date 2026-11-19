@@ -24,6 +24,7 @@
   <button role="tab" data-tab="wristbands">Wristbands</button>
   <button role="tab" data-tab="tasks">Tasks</button>
   <button role="tab" data-tab="reports">Reports</button>
+  <button role="tab" data-tab="scans">Scans</button>
   <button role="tab" data-tab="layout">Layout</button>
   <button role="tab" data-tab="activity">Activity</button>
   <button role="tab" data-tab="settings">Settings</button>
@@ -570,6 +571,19 @@
       report can also upload its files (such as a Gusto export) and change its settings. Connecteam
       is asked only when someone opens a report: <span id="reports-lane"></span></p>
     <div id="report-list" class="cards"></div>
+  </section>
+
+  <section id="tab-scans" class="tab" hidden>
+    <div class="section-head"><h2>Scans</h2></div>
+    <p class="hint">Scans appears in the staff app for people signed in with their own PIN, in the
+      departments you choose. They press one of the options below; the scanner takes everything in its
+      feeder (or the page on the glass) and the file is saved as a PDF in that option's folder in Google
+      Drive. You decide how files are named: staff never type or pick a name.</p>
+    <div id="scan-setup" class="cards"></div>
+    <div class="section-head"><h3>Scan options</h3></div>
+    <div id="scan-options" class="cards"></div>
+    <div class="section-head"><h3>Recent scans</h3></div>
+    <div id="scan-files"></div>
   </section>
 
   <section id="tab-hr" class="tab" hidden>

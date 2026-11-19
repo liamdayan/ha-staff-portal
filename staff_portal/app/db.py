@@ -246,6 +246,41 @@ CREATE TABLE IF NOT EXISTS reports (
     updated_at REAL,
     updated_by TEXT
 );
+-- Scans (scans.py): the staff app's "scan to" options, set up in the dashboard's Scans tab. Each
+-- is a folder in the Google shared drive for scans, a file name format and the departments that
+-- may use it. IDs are never used again (scan_files points at them). In backups.
+CREATE TABLE IF NOT EXISTS scan_options (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    prefix TEXT NOT NULL DEFAULT '',
+    format TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT 'color',
+    quality TEXT NOT NULL DEFAULT 'normal',
+    paper TEXT NOT NULL DEFAULT 'letter',
+    departments TEXT NOT NULL DEFAULT '[]',         -- JSON list of department IDs
+    enabled INTEGER NOT NULL DEFAULT 1,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+-- Every file scanned: what an option's names are counted from (the second "INV-Ana Lopez" is
+-- "INV-Ana Lopez-2"), and the dashboard's list of recent scans. base is the name before its
+-- number; saved is 0 while the file is on its way to Google (a row left like that is dropped
+-- when the add-on starts). Not in backups.
+CREATE TABLE IF NOT EXISTS scan_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    option_id INTEGER NOT NULL,
+    base TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    pages INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    staff_id INTEGER,
+    actor TEXT NOT NULL DEFAULT '',
+    ts REAL NOT NULL,
+    saved INTEGER NOT NULL DEFAULT 0,
+    link TEXT
+);
+CREATE INDEX IF NOT EXISTS scan_files_base ON scan_files (option_id, base);
 -- Tasks (tasks.py): each department's to-do list in the staff app. No foreign keys, like the
 -- wristband tables: people, roles and departments are deleted and re-added by a restore. The
 -- names are kept beside the IDs, so a task still says who made it after they've gone.
@@ -590,6 +625,11 @@ DEFAULT_SETTINGS = {
     "hr_google_drive": "",
     "hr_google_restricted_drive": "",
     "hr_google_status": "{}",
+    # Scans (the staff app's Scans tool): the scanner's address on the network ("http://host"),
+    # and the Google shared drive scans go to, through the same script as the HR files (private,
+    # like the HR drives).
+    "scan_address": "",
+    "scan_google_drive": "",
     # The HR portal's Connecteam reads today, in its own lane (internal: connecteam.hr_spend).
     # All the hr_ settings are private: never in Staff Access's own backups or /api/state.
     "hr_connecteam_usage": "{}",
@@ -612,7 +652,7 @@ PRIVATE_SETTINGS = ("connecteam_client_secret", "connecteam_usage", "tthotel_cli
                     "tthotel_callback_token", "hr_enabled", "hr_host", "hr_connecteam_usage",
                     "hr_google_url", "hr_google_secret", "hr_google_drive",
                     "hr_google_restricted_drive", "hr_google_status", "reports_connecteam_usage",
-                    "ct_tasks_usage")
+                    "ct_tasks_usage", "scan_google_drive")
 
 # Settings of older versions, removed when the add-on starts: the HR portal's own Connecteam app,
 # chat and certificate copies (0.10.0 to 0.10.3; it only reads, through the one connection, now).
@@ -1250,6 +1290,91 @@ class Database:
              json.dumps(current["manage"]), json.dumps(current["settings"]), time.time(),
              str(by)[:120]))
         self.conn.commit()
+
+    # Scans (scans.py has the rules; main.py talks to the scanner and to Google)
+
+    SCAN_OPTION_FIELDS = ("label", "prefix", "format", "folder", "color", "quality", "paper")
+
+    @staticmethod
+    def _scan_option(row) -> dict:
+        option = dict(row)
+        try:
+            ids = json.loads(option["departments"])
+        except (TypeError, ValueError):
+            ids = []
+        option["departments"] = [i for i in ids if isinstance(i, int) and not isinstance(i, bool)] if isinstance(
+            ids, list) else []
+        option["enabled"] = bool(option["enabled"])
+        return option
+
+    def scan_options(self) -> list[dict]:
+        """Every scan-to option, in the dashboard's order."""
+        return [self._scan_option(r) for r in self.conn.execute(
+            "SELECT * FROM scan_options ORDER BY position, id")]
+
+    def scan_option(self, option_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM scan_options WHERE id = ?", (option_id,)).fetchone()
+        return self._scan_option(row) if row else None
+
+    def save_scan_option(self, option_id: int | None, option: dict) -> int:
+        """Add an option (option_id None) or change one, from scans.clean_option(). Returns its ID."""
+        values = [option[k] for k in self.SCAN_OPTION_FIELDS] + [json.dumps(option["departments"]),
+                                                                 int(bool(option["enabled"]))]
+        if option_id is None:
+            last = self.conn.execute("SELECT COALESCE(MAX(position), 0) FROM scan_options").fetchone()[0]
+            cur = self.conn.execute(
+                f"""INSERT INTO scan_options ({', '.join(self.SCAN_OPTION_FIELDS)}, departments, enabled,
+                    position, created_at) VALUES ({', '.join('?' * 9)}, ?, ?)""",
+                (*values, last + 1, time.time()))
+            option_id = cur.lastrowid
+        else:
+            self.conn.execute(
+                f"""UPDATE scan_options SET {', '.join(f'{k} = ?' for k in self.SCAN_OPTION_FIELDS)},
+                    departments = ?, enabled = ? WHERE id = ?""", (*values, option_id))
+        self.conn.commit()
+        return option_id
+
+    def delete_scan_option(self, option_id: int) -> None:
+        """Remove an option. Its files stay in Google; the record of them here goes with it."""
+        self.conn.execute("DELETE FROM scan_options WHERE id = ?", (option_id,))
+        self.conn.execute("DELETE FROM scan_files WHERE option_id = ?", (option_id,))
+        self.conn.commit()
+
+    def reserve_scan_name(self, option_id: int, base: str, staff_id: int | None, actor: str) -> tuple[int, int]:
+        """Take the next name for a file with this base in this option: (the new scan_files ID,
+        how many files of this base came before it). Counted without regard to capitals, as
+        Google Drive and Windows compare names. Follow with finish_scan_file or drop_scan_file."""
+        earlier = self.conn.execute(
+            "SELECT COUNT(*) FROM scan_files WHERE option_id = ? AND base = ? COLLATE NOCASE",
+            (option_id, base)).fetchone()[0]
+        cur = self.conn.execute(
+            "INSERT INTO scan_files (option_id, base, staff_id, actor, ts) VALUES (?, ?, ?, ?, ?)",
+            (option_id, base, staff_id, str(actor)[:120], time.time()))
+        self.conn.commit()
+        return cur.lastrowid, earlier
+
+    def finish_scan_file(self, file_id: int, name: str, pages: int, size: int, link: str | None) -> None:
+        self.conn.execute(
+            "UPDATE scan_files SET name = ?, pages = ?, bytes = ?, link = ?, saved = 1 WHERE id = ?",
+            (name, pages, size, link, file_id))
+        self.conn.commit()
+
+    def drop_scan_file(self, file_id: int) -> None:
+        """The file didn't reach Google: its name is free again."""
+        self.conn.execute("DELETE FROM scan_files WHERE id = ? AND saved = 0", (file_id,))
+        self.conn.commit()
+
+    def drop_unsaved_scans(self) -> None:
+        """Names taken by uploads the add-on was stopped in the middle of."""
+        self.conn.execute("DELETE FROM scan_files WHERE saved = 0")
+        self.conn.commit()
+
+    def scan_files(self, limit: int = 30) -> list[dict]:
+        """The newest files scanned, with their option's name (None once it's removed)."""
+        return [dict(r) for r in self.conn.execute(
+            """SELECT f.id, f.option_id, f.name, f.pages, f.bytes, f.actor, f.ts, f.link,
+               o.label AS option_label FROM scan_files f LEFT JOIN scan_options o ON o.id = f.option_id
+               WHERE f.saved = 1 ORDER BY f.ts DESC, f.id DESC LIMIT ?""", (max(1, min(limit, 200)),))]
 
     # Tasks (tasks.py has the rules: who sees and edits what)
 
@@ -1896,6 +2021,16 @@ class Database:
                     [(r["key"], r["enabled"], json.dumps(r["view"]), json.dumps(r["manage"]),
                       json.dumps(r["settings"]), r["updated_at"], r["updated_by"])
                      for r in snap["reports"]])
+            # Scan-to options (a backup from before Scans has none: the ones here stay). The
+            # record of files scanned stays as it is, so names carry on counting.
+            if snap.get("scans") is not None:
+                c.execute("DELETE FROM scan_options")
+                c.executemany(
+                    f"""INSERT INTO scan_options (id, {', '.join(self.SCAN_OPTION_FIELDS)}, departments,
+                        enabled, position, created_at) VALUES ({', '.join('?' * 12)})""",
+                    [(o["id"], *(o[k] for k in self.SCAN_OPTION_FIELDS), json.dumps(o["departments"]),
+                      int(bool(o["enabled"])), position, time.time())
+                     for position, o in enumerate(snap["scans"], 1)])
             if migrate:
                 self._apply_migration(migrate, kept)
             # Card jobs stay with the people who made them, by the same rule: a job whose maker

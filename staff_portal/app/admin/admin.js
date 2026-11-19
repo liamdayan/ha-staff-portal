@@ -424,6 +424,7 @@
       if (name === "backup") loadSafetyBackups();
       if (name === "hr") openHr();
       if (name === "reports") openReports();
+    if (name === "scans") openScans();
     } catch (err) {
       reportError(`Couldn't open the ${name} tab: ${err.message}`, err, "");
     }
@@ -4633,7 +4634,7 @@
   }
 
   // A department's start page ("page:<id>" or "tool:<name>") as the owner knows it.
-  const START_TOOLS = { tasks: "Tasks", reports: "Reports", wristbands: "Wristbands" };
+  const START_TOOLS = { tasks: "Tasks", reports: "Reports", wristbands: "Wristbands", scans: "Scans" };
   function startPageName(value) {
     const [kind, id] = [value.slice(0, value.indexOf(":")), value.slice(value.indexOf(":") + 1)];
     if (kind === "tool") return START_TOOLS[id] || id;
@@ -7815,6 +7816,175 @@
             manage: chosen("manage") });
           await openReports();
         }, "Saved. Staff see the change within a few seconds.") }, "Save")));
+    return card;
+  }
+
+  // ---------------------------------------------------------------- scans
+  // The scanner's address, the Google shared drive scans go to, and the "scan to" options: each
+  // a folder, a file name format and the departments that may use it.
+  let scansData = null;
+
+  async function openScans() {
+    try {
+      scansData = await api("GET", "api/scans");
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    drawScans();
+  }
+
+  function drawScans() {
+    const d = scansData, g = d.google;
+    // The scanner.
+    const address = h("input", { type: "text", value: d.address, placeholder: "192.168.1.50", autocomplete: "off",
+      spellcheck: "false" });
+    const result = h("p", { class: "hint", "aria-live": "polite" });
+    const test = h("button", { class: "btn", type: "button" }, "Test scanner");
+    test.addEventListener("click", async () => {
+      test.disabled = true;
+      result.textContent = "Asking the scanner…";
+      try {
+        const t = await api("POST", "api/scans/test");
+        result.textContent = t.ok
+          ? `${t.model || "The scanner"} answered and is ${t.state === "Idle" ? "ready" : "busy"}. ` +
+            (t.feeder ? `It has a feeder${t.paper_in_feeder ? " (with paper in it now)" : ""}` : "It has no feeder") +
+            (t.glass ? " and a glass." : ".")
+          : t.problem;
+      } catch (err) {
+        result.textContent = err.message;
+      }
+      test.disabled = false;
+    });
+    const scanner = h("div", { class: "card scan-form" },
+      h("div", { class: "card-head" }, h("h3", null, "Scanner")),
+      h("p", { class: "hint" }, "The scanner's address on your network, such as 192.168.1.50. Staff Access asks " +
+        "it for pages over the network (AirPrint scanning, also called eSCL), so nothing is installed on it. " +
+        "Give it a fixed address in your router so it doesn't change."),
+      h("label", null, "Scanner address", address),
+      result,
+      h("div", { class: "card-actions" },
+        h("button", { class: "btn primary", type: "button", onclick: () => run(async () => {
+          scansData = await api("PUT", "api/scans/settings", { address: address.value });
+          drawScans();
+        }, "Saved.") }, "Save"), test));
+
+    // The drive.
+    const others = g.drives.filter((x) => !g.hr_drives.includes(x.id));
+    const drive = h("select", null, h("option", { value: "" }, "None picked"),
+      others.map((x) => h("option", { value: x.id, selected: x.id === g.drive }, x.name)),
+      g.drive && !others.some((x) => x.id === g.drive)
+        ? h("option", { value: g.drive, selected: true }, "The drive picked before (not listed now)") : null);
+    const note = !g.set_up
+      ? "Google Drive isn't connected yet. Connect it under Settings, Connections, Google Drive (the same " +
+        "connection the HR portal uses), then come back here."
+      : !g.script_ok
+        ? "The Google Drive script needs updating before it can take a drive for scans. Under Settings, " +
+          "Connections, Google Drive: click Copy the script, paste it over the old one in Google, deploy a " +
+          "new version, then come back here."
+        : "In Google Drive, make a shared drive for scans (such as “Scans”) and add the account that runs the " +
+          "script as a Manager. Then pick it here. Each option below gets its own folder in it. If the drive " +
+          "isn't listed, open Settings, Connections, Google Drive once so the list is read again.";
+    const google = h("div", { class: "card scan-form" },
+      h("div", { class: "card-head" }, h("h3", null, "Google Drive")),
+      h("p", { class: g.set_up && g.script_ok ? "hint" : "wb-warn" }, note),
+      h("label", null, "Shared drive for scans", drive),
+      h("div", { class: "card-actions" },
+        h("button", { class: "btn primary", type: "button", disabled: !(g.set_up && g.script_ok),
+          onclick: () => run(async () => {
+            scansData = await api("PUT", "api/scans/settings", { drive: drive.value });
+            drawScans();
+            if (scansData.problem) throw new Error(scansData.problem);
+          }, "Saved.") }, "Save")));
+    $("#scan-setup").replaceChildren(scanner, google);
+
+    $("#scan-options").replaceChildren(...d.options.map(scanOptionCard), scanOptionCard(null));
+    $("#scan-files").replaceChildren(d.files.length
+      ? h("ul", { class: "scan-files" }, d.files.map((f) => h("li", null,
+        f.link ? h("a", { href: f.link, target: "_blank", rel: "noopener noreferrer" }, f.name) : h("b", null, f.name),
+        h("span", { class: "hint" }, ` ${f.option || "an option removed since"} · ${f.pages} ` +
+          `${f.pages === 1 ? "page" : "pages"} · ${f.by || "someone"} · ${ago(f.ts).toLowerCase()}`))))
+      : h("div", { class: "empty" }, "Nothing has been scanned yet."));
+  }
+
+  // One option's form (o null: the form that adds one).
+  function scanOptionCard(o) {
+    const d = scansData;
+    const v = o || { label: "", prefix: "", format: d.default_format, folder: "", color: "color", quality: "normal",
+      paper: "letter", departments: [], enabled: true };
+    const text = (value, placeholder, max) => h("input", { type: "text", value, placeholder, maxlength: String(max),
+      autocomplete: "off", spellcheck: "false" });
+    const pick = (choices, chosen) => h("select", null, Object.entries(choices).map(([value, label]) =>
+      h("option", { value, selected: value === chosen }, label)));
+    const label = text(v.label, "Invoices", 40), prefix = text(v.prefix, "INV", 24);
+    const format = text(v.format, d.default_format, 120), folder = text(v.folder, "Same as the name", 80);
+    const color = pick(d.colors, v.color), quality = pick(d.quality, v.quality), paper = pick(d.papers, v.paper);
+    const enabled = h("input", { type: "checkbox", checked: v.enabled });
+    const example = h("p", { class: "hint scan-example", "aria-live": "polite" },
+      o ? `For ${d.example_for[0]}: ${o.example}` : "");
+    // The names this would give, asked a moment after typing stops.
+    let timer = null;
+    const preview = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const got = await api("POST", "api/scans/example", { label: label.value, prefix: prefix.value,
+            format: format.value });
+          example.textContent = `For ${d.example_for[0]}: ${got.names[0]}, then ${got.names[1]}, ${got.names[2]}…`;
+          example.classList.remove("bad");
+        } catch (err) {
+          example.textContent = err.message;
+          example.classList.add("bad");
+        }
+      }, 400);
+    };
+    [label, prefix, format].forEach((el) => el.addEventListener("input", preview));
+    let caret = null;
+    format.addEventListener("blur", () => { caret = [format.selectionStart, format.selectionEnd]; });
+    const pieces = h("div", { class: "scan-pieces" }, Object.entries(d.pieces).map(([piece, what]) =>
+      h("button", { class: "scan-piece", type: "button", title: `Add ${what}`, onclick: () => {
+        // Where the cursor last was in the format; at the end if it hasn't been clicked into yet.
+        const [from, to] = caret || [format.value.length, format.value.length];
+        format.value = `${format.value.slice(0, from)}{${piece}}${format.value.slice(to)}`;
+        format.focus();
+        const after = from + piece.length + 2;
+        format.setSelectionRange(after, after);
+        caret = [after, after];
+        preview();
+      } }, `{${piece}}`)));
+    const depts = shownDepartments();
+    const card = h("div", { class: "card scan-card scan-form" },
+      h("div", { class: "card-head" }, h("h3", null, o ? o.label : "Add a scan option")),
+      h("div", { class: "row" },
+        h("label", null, "Name on the button", label),
+        h("label", null, "Prefix", prefix)),
+      h("label", null, "File name format", format),
+      h("p", { class: "hint" }, "Click a piece to add it. A file with the same name as an earlier one in this option " +
+        "gets -2, -3 and so on at the end."),
+      pieces, example,
+      h("label", null, "Folder in the scans drive", folder),
+      h("div", { class: "row" },
+        h("label", null, "Colour", color), h("label", null, "Quality", quality), h("label", null, "Paper", paper)),
+      h("h4", null, "Who may use it"),
+      depts.length ? h("div", { class: "report-depts" }, depts.map((x) =>
+        h("label", { class: "check-row" }, h("input", { type: "checkbox", "data-kind": "dept", value: x.id,
+          checked: v.departments.includes(x.id) }), h("span", null, x.name))))
+        : h("p", { class: "hint" }, "Add departments on the Staff tab first."),
+      h("label", { class: "check-row" }, enabled, h("span", null, "Turn on")),
+      h("div", { class: "card-actions" },
+        h("button", { class: "btn primary", type: "button", onclick: () => run(async () => {
+          const body = { label: label.value, prefix: prefix.value, format: format.value, folder: folder.value,
+            color: color.value, quality: quality.value, paper: paper.value, enabled: enabled.checked,
+            departments: [...card.querySelectorAll('input[data-kind="dept"]:checked')].map((i) => Number(i.value)) };
+          scansData = o ? await api("PUT", `api/scans/options/${o.id}`, body) : await api("POST", "api/scans/options", body);
+          drawScans();
+        }, o ? "Saved. Staff see the change within a few seconds." : "Added.") }, o ? "Save" : "Add option"),
+        o ? h("button", { class: "btn subtle", type: "button", onclick: () => run(async () => {
+          if (!await askConfirm(`Remove the scan option “${o.label}”? Files already scanned stay in Google Drive.`,
+            "Remove")) return false;
+          scansData = await api("DELETE", `api/scans/options/${o.id}`);
+          drawScans();
+        }, "Removed.") }, "Remove") : null));
     return card;
   }
 

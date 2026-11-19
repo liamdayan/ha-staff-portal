@@ -342,6 +342,17 @@ def test_web_app_url_and_settings():
     assert gdrive.drive_ids({"hr_google_drive": HR_DRIVE,
                              "hr_google_restricted_drive": RESTRICTED_DRIVE}) == [HR_DRIVE, RESTRICTED_DRIVE]
     assert gdrive.drive_ids({}) == []
+    # The drive for scans counts only once the deployed script (as last checked) takes a third.
+    three = {"hr_google_drive": HR_DRIVE, "hr_google_restricted_drive": RESTRICTED_DRIVE,
+             "scan_google_drive": "0AScansDriveAAAAAAAAA"}
+    for status in ("{}", '{"version": 4}', "not json", '{"version": true}'):
+        assert gdrive.drive_ids({**three, "hr_google_status": status}) == [HR_DRIVE, RESTRICTED_DRIVE]
+        assert gdrive.scan_drive({**three, "hr_google_status": status}) == ""
+    new = {**three, "hr_google_status": '{"version": 5}'}
+    assert gdrive.drive_ids(new) == [HR_DRIVE, RESTRICTED_DRIVE, "0AScansDriveAAAAAAAAA"]
+    assert gdrive.scan_drive(new) == "0AScansDriveAAAAAAAAA"
+    assert gdrive.drive_ids({"scan_google_drive": HR_DRIVE, "hr_google_drive": HR_DRIVE,
+                             "hr_google_status": '{"version": 5}'}) == [HR_DRIVE]
     assert gdrive.clean_drive_id(HR_DRIVE) == HR_DRIVE and gdrive.clean_drive_id(" ") == ""
     with pytest.raises(ValueError):
         gdrive.clean_drive_id("x'; drop")

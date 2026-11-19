@@ -295,8 +295,10 @@ class FakeBridge:
 
     def op_setup(self, args):
         ids = args.get("drives")
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 2 or len(set(ids)) != len(ids):
-            raise Refused("bad_request", "Pick one or two different shared drives.")
+        # A script from before the Scans tool (version 4 or older) takes two at most.
+        most = 3 if self.version >= gdrive.SCANS_VERSION else 2
+        if not isinstance(ids, list) or not 1 <= len(ids) <= most or len(set(ids)) != len(ids):
+            raise Refused("bad_request", "Pick one to three different shared drives.")
         for drive_id in ids:
             if drive_id not in self.drives:
                 raise Refused("not_allowed", "Google Drive has no such file or folder in the HR drives.")
