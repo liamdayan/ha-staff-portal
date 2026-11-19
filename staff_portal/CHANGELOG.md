@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.12.27
+
+**Attendance report: sort the staff table**
+- **Sort** (next to the department list) orders the staff table by who needs action first (as
+  before), name, department, or the most late arrivals, early clock-outs, missed shifts, missed
+  forms or hours worked.
+- Print, the PDF file and the CSV follow the order chosen, and the PDF says which it is. Each
+  device remembers its choice.
+
+**Attendance report: the PDF file, laid out again**
+- **Upright pages** (US Letter, portrait) rather than sideways, and compact: the staff table is
+  one line a person, so the summary for 40 people is a single page with the forms under it.
+- **A person's days are a row of seven boxes for each week**, like the report on screen, with
+  their flags as coloured labels. A week they were off all week is left out, and their job is
+  said on each day only if they have more than one.
+- **Said once:** hours missed and leave left are in their own columns, so "Missed vs. leave" gives
+  only the verdict, and the balance isn't repeated under each person's days.
+- **Coloured totals and status labels**, so it reads like the report rather than plain text.
+- **Nothing overlaps or runs off the page:** every name, job and flag wraps inside its own column
+  or box, however long it is.
+
 ## 0.12.26
 
 **Attendance report: a real PDF file**

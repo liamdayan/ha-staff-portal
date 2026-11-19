@@ -21,6 +21,7 @@ const out = {
   forms: W.forms.map(f => ({ name: f.name, expected: f.expected, done: f.done, missed: f.missed, misses: f.misses,
     grid: f.grid ? f.grid.map(g => g.cells.map(c => c.st).join(",")) : null })),
   totals: W.totals, inProgress: W.inProgress,
+  sorts: view.SORTS.map(s => s[1]), sorted: Object.fromEntries(view.SORTS.map(([k]) => [k, view.sortRows(W.rows, k).map(r => r.p.name)])),
   departments: model.departments, fuzzy: model.fuzzy, noPunches: model.noPunches,
   anchors: (job.anchors || []).map(([start, end, from, to, today]) => view.switchAnchor({ start, end }, from, to, today)), balUnmatched: model.balUnmatched, noBal: model.noBal, gustoOk: model.gustoOk,
   csv: view.csvText(W), summary: view.summaryText(W, d.period, job.dept || ""), file: view.fileName(W, d.period, job.dept || "", "csv"),

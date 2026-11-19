@@ -651,6 +651,27 @@
     return { P, days, rows, forms, totals, inProgress: P.end >= TODAY };
   }
 
+  // ---------------------------------------------------------------- the order of the staff table
+  // The first is how computePeriod leaves the rows: who needs action, then who to watch, the
+  // most incidents first. The page, Print, the PDF file and the CSV all follow the one chosen.
+  const SORTS = [["status", "Needs action first"], ["name", "Name (A to Z)"], ["dept", "Department, then name"],
+    ["late", "Most late arrivals"], ["early", "Most early clock-outs"], ["missed", "Most missed shifts"],
+    ["forms", "Most forms missed"], ["worked", "Most hours worked"]];
+  function sortRows(rows, key) {
+    const name = (a, b) => a.p.name.localeCompare(b.p.name);
+    const most = (n, more) => (a, b) => n(b) - n(a) || (more ? more(b) - more(a) : 0) || name(a, b);
+    const by = {
+      name,
+      dept: (a, b) => deptOf(a.p).localeCompare(deptOf(b.p)) || name(a, b),
+      late: most(r => r.late.length, r => r.lateMin),
+      early: most(r => r.early.length, r => r.earlyMin),
+      missed: most(r => r.missed.length, r => r.missedHrs),
+      forms: most(r => r.formsMissed),
+      worked: most(r => r.workedMin),
+    }[key];
+    return by ? [...rows].sort(by) : rows;
+  }
+
   // ---------------------------------------------------------------- summary and CSV
   function summaryText(W, period, dept) {
     if (!W) return "";
@@ -693,10 +714,10 @@
   // Everything below draws the report with the staff app's h() builder (text is always set as
   // text, never as HTML) and talks to the server only through `api`.
   let h = null, ctx = null, model = null, modelFor = null, current = null, firstLoad = true;
-  const ui = { tab: "report", period: "week", dept: "", open: new Set(), openForms: new Set(), loading: false, draft: null, dirty: false, printing: null, formList: false };
+  const ui = { tab: "report", period: "week", dept: "", sort: "status", open: new Set(), openForms: new Set(), loading: false, draft: null, dirty: false, printing: null, formList: false };
   const PREFS = "staff-report.attendance";
-  try { const p = JSON.parse(localStorage.getItem(PREFS) || "{}"); ui.period = ["week", "pay", "month"].includes(p.period) ? p.period : "week"; ui.dept = typeof p.dept === "string" ? p.dept : ""; } catch { /* storage blocked */ }
-  const remember = () => { try { localStorage.setItem(PREFS, JSON.stringify({ period: ui.period, dept: ui.dept })); } catch { /* storage blocked */ } };
+  try { const p = JSON.parse(localStorage.getItem(PREFS) || "{}"); ui.period = ["week", "pay", "month"].includes(p.period) ? p.period : "week"; ui.dept = typeof p.dept === "string" ? p.dept : ""; ui.sort = SORTS.some(s => s[0] === p.sort) ? p.sort : "status"; } catch { /* storage blocked */ }
+  const remember = () => { try { localStorage.setItem(PREFS, JSON.stringify({ period: ui.period, dept: ui.dept, sort: ui.sort })); } catch { /* storage blocked */ } };
 
   const rules = () => ({ ...DEFAULT_RULES, ...((ctx.data.settings || {}).rules || {}) });
   const canManage = () => !!ctx.api.manage;
@@ -778,7 +799,8 @@
     const P = { start: d.start_day, end: d.end_day };
     const depts = [...new Set(model.people.flatMap(deptsOf))].sort();
     if (ui.dept && !depts.includes(ui.dept)) ui.dept = "";
-    const W = computePeriod(model, P, { R, dept: ui.dept, now: d.now, today: d.today }); current = W;
+    const W = computePeriod(model, P, { R, dept: ui.dept, now: d.now, today: d.today });
+    W.rows = sortRows(W.rows, ui.sort); current = W;
     const T = W.totals;
 
     const sub = [];
@@ -805,6 +827,9 @@
 
     const deptSel = depts.length < 2 ? null : h("select", { class: "att-btn att-select", "aria-label": "Department", onchange: e => { ui.dept = e.target.value; ui.open.clear(); remember(); draw(); } },
       h("option", { value: "" }, "All departments"), depts.map(x => h("option", { value: x, selected: x === ui.dept }, x)));
+    const sortSel = h("select", { class: "att-btn att-select", "aria-label": "Sort by", title: "The order of the staff table, here and in Print, the PDF file and the CSV",
+      onchange: e => { ui.sort = e.target.value; remember(); draw(); } },
+      SORTS.map(([key, label]) => h("option", { value: key, selected: key === ui.sort }, `Sort: ${label}`)));
     // A PDF file is made here (it works on a phone opened from its home-screen icon, which
     // can't print); Print uses the browser's own print screen.
     const choices = (label, primary, act) => h("details", { class: "att-menu" },
@@ -817,7 +842,7 @@
     // Connecteam data is kept for a day: say how old it is, and offer to read it again.
     const readAt = d.read_at ? new Date(d.read_at * 1000) : null;
     const age = readAt ? ` · Connecteam data from ${readAt.toDateString() === new Date().toDateString() ? "" : readAt.toLocaleDateString([], { month: "short", day: "numeric" }) + ", "}${readAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
-    const actions = h("div", { class: "att-actions att-noprint" }, deptSel,
+    const actions = h("div", { class: "att-actions att-noprint" }, deptSel, sortSel,
       h("button", { type: "button", class: "att-btn", title: `Read Connecteam again${age}`, onclick: () => load({}, true) }, "Refresh now"),
       age ? h("span", { class: "att-muted att-age" }, age.slice(3)) : null,
       h("button", { type: "button", class: "att-btn", onclick: () => copyText(summaryText(current, ui.period, ui.dept)) }, "Copy summary"),
@@ -1088,6 +1113,15 @@
       rect(x, y, w, h, fill, stroke) {
         ops.push(`${fill ? rgb(fill) + " rg " : ""}${stroke ? rgb(stroke) + " RG 0.5 w " : ""}${n(x)} ${n(H - y - h)} ${n(w)} ${n(h)} re ${fill && stroke ? "B" : fill ? "f" : "S"}`);
       },
+      // A box with rounded corners (r: how round).
+      rrect(x, y, w, h, r, fill, stroke) {
+        r = Math.min(r, w / 2, h / 2);
+        const k = r * 0.4477, X = x, Y = H - y - h, p = (...v) => v.map(n).join(" ");
+        ops.push(`${fill ? rgb(fill) + " rg " : ""}${stroke ? rgb(stroke) + " RG 0.5 w " : ""}${p(X + r, Y)} m ${p(X + w - r, Y)} l ` +
+          `${p(X + w - k, Y, X + w, Y + k, X + w, Y + r)} c ${p(X + w, Y + h - r)} l ${p(X + w, Y + h - k, X + w - k, Y + h, X + w - r, Y + h)} c ` +
+          `${p(X + r, Y + h)} l ${p(X + k, Y + h, X, Y + h - k, X, Y + h - r)} c ${p(X, Y + r)} l ${p(X, Y + k, X + k, Y, X + r, Y)} c h ` +
+          `${fill && stroke ? "B" : fill ? "f" : "S"}`);
+      },
       line(x1, y1, x2, y2, color) { ops.push(`${rgb(color || PDF_RULE)} RG 0.5 w ${n(x1)} ${n(H - y1)} m ${n(x2)} ${n(H - y2)} l S`); },
       // The text as lines no wider than max; a word too long for a line is cut.
       wrap(text, max, size, bold) {
@@ -1130,47 +1164,80 @@
   }
 
   const PDF_INK = [0.1, 0.1, 0.12], PDF_MUTED = [0.42, 0.45, 0.5], PDF_RULE = [0.82, 0.84, 0.87], PDF_SHADE = [0.95, 0.96, 0.97];
-  const PDF_TONE = { bad: [0.75, 0.16, 0.1], warn: [0.68, 0.4, 0], good: [0.08, 0.48, 0.25], info: [0.15, 0.35, 0.7] };
-  Object.assign(PDF_TONE, { action: PDF_TONE.bad, watch: PDF_TONE.warn, clear: PDF_TONE.good });
-  const PDF_SQUARE = { done: [0.82, 0.93, 0.85], missed: [0.97, 0.82, 0.8], light: [0.93, 0.94, 0.95], open: [1, 0.95, 0.8] };
+  const PDF_ACCENT = [0.18, 0.43, 0.31];
+  const PDF_TONE = { bad: [0.75, 0.16, 0.1], warn: [0.66, 0.38, 0], good: [0.08, 0.48, 0.25], info: [0.15, 0.35, 0.7] };
+  const PDF_TINT = { bad: [0.99, 0.91, 0.9], warn: [1, 0.94, 0.84], good: [0.89, 0.96, 0.91], info: [0.9, 0.94, 0.99] };
+  for (const set of [PDF_TONE, PDF_TINT]) Object.assign(set, { action: set.bad, watch: set.warn, clear: set.good });
+  const PDF_SQUARE = { done: PDF_TINT.good, missed: PDF_TINT.bad, light: [0.93, 0.94, 0.95], open: [1, 0.95, 0.8] };
 
-  // The report for one period as a PDF file's bytes (US Letter, on its side). o: period
-  // ("week", "pay" or "month"), dept, mode ("all": everyone's days, "open": the people in
-  // o.open, "summary": none), R (the rules), noPunches (names), hasSchedule, made (when, in words).
+  // The report for one period as a PDF file's bytes: US Letter, upright, laid out to use the
+  // page (a week of someone's days is one row of seven boxes). Every piece of text is wrapped
+  // inside its own column or box, so nothing runs into its neighbour or off the page.
+  // o: period ("week", "pay" or "month"), dept, mode ("all": everyone's days, "open": the
+  // people in o.open, "summary": none), R (the rules), noPunches (names), hasSchedule, made
+  // (when, in words).
   function reportPdf(W, o) {
     const R = o.R, T = W.totals, P = W.P;
-    const doc = pdfDoc(792, 612), M = 36, RIGHT = 792 - M, FULL = RIGHT - M, BOTTOM = 612 - M - 14;
+    const PW = 612, PH = 792, M = 24, RIGHT = PW - M, FULL = RIGHT - M, BOTTOM = PH - M - 12;
+    const doc = pdfDoc(PW, PH);
     let y = 0;
     const newPage = () => { doc.page(); y = M; };
     const need = hgt => { if (y + hgt > BOTTOM) { newPage(); return true; } return false; };
     const para = (text, x, max, opt = {}) => {
-      const size = opt.size || 9;
+      const size = opt.size || 8;
       for (const ln of doc.wrap(text, max, size, opt.bold)) { need(size * 1.3); doc.text(ln, x, y + size, opt); y += size * 1.3; }
     };
-    const heading = text => { need(60); doc.text(text, M, y + 11, { size: 12, bold: true }); y += 18; };
-    // A cell is its text, or {t: text, s: smaller text under it, c: colour, b: bold}.
+    const heading = text => { need(60); doc.rect(M, y + 1.5, 3, 10, PDF_ACCENT); doc.text(text, M + 8, y + 10, { size: 10, bold: true }); y += 15; };
+
+    // A cell is its text, or {t: text, s: smaller text under it, c: colour, b: bold, pill: tone}.
+    // The smaller text follows the main text on its line when there's room (so a row is one
+    // line high for nearly everyone), and goes under it when there isn't.
+    const MAIN = 7.5, SUB = 6;
     const cellLines = (cell, w) => {
       const c = typeof cell === "string" ? { t: cell } : cell || {};
-      return [...doc.wrap(c.t, w - 8, 8.5, c.b).map(t => ({ t, size: 8.5, bold: !!c.b, color: c.c || PDF_INK })),
-        ...doc.wrap(c.s, w - 8, 7, false).map(t => ({ t, size: 7, bold: false, color: PDF_MUTED }))];
+      const max = w - 6 - (c.pill ? 6 : 0);
+      const main = doc.wrap(c.t, max, MAIN, c.b).map(t => ({ t, size: MAIN, bold: !!c.b, color: c.c || PDF_INK, pill: c.pill }));
+      if (c.s && main.length === 1 && !c.pill && doc.widthOf(c.t, MAIN, c.b) + 3 + doc.widthOf(c.s, SUB) <= max) {
+        main[0].tail = c.s;
+        return main;
+      }
+      return [...main, ...doc.wrap(c.s, w - 6, SUB, false).map(t => ({ t, size: SUB, bold: false, color: PDF_MUTED }))];
     };
-    // A table: its header again at the top of each new page. after(i) draws under row i.
-    const table = (cols, rows, after) => {
+    // A table: its header again at the top of each new page. after(i) draws under row i, and
+    // keep(i) is how much room that needs to start with (so a name isn't left alone at the
+    // bottom of a page).
+    const table = (cols, rows, after, keep) => {
+      const labels = cols.map(c => doc.wrap(c.label, c.w - 6, 6.5, true));
+      const hh = Math.max(...labels.map(l => l.length)) * 7.5 + 5;
       const head = () => {
-        doc.rect(M, y, FULL, 16, PDF_SHADE);
+        doc.rect(M, y, FULL, hh, PDF_SHADE);
         let x = M;
-        for (const c of cols) { doc.text(c.label, c.a === "r" ? x + c.w - 4 : x + 4, y + 11, { size: 7.5, bold: true, color: PDF_MUTED, align: c.a }); x += c.w; }
-        y += 16;
+        cols.forEach((c, j) => {
+          labels[j].forEach((t, k) => doc.text(t, c.a === "r" ? x + c.w - 3 : x + 3, y + 8 + k * 7.5, { size: 6.5, bold: true, color: PDF_MUTED, align: c.a }));
+          x += c.w;
+        });
+        y += hh;
       };
-      need(56); head();
+      need(hh + 40); head();
       rows.forEach((cells, i) => {
         const lines = cells.map((c, j) => cellLines(c, cols[j].w));
-        const hgt = Math.max(10, ...lines.map(ls => ls.reduce((a, l) => a + l.size * 1.3, 0))) + 8;
-        if (need(hgt)) head();
+        const hgt = Math.max(MAIN, ...lines.map(ls => ls.reduce((a, l) => a + l.size * 1.2, 0))) + 4.5;
+        if (need(hgt + (keep ? keep(i) : 0))) head();
         let x = M;
         lines.forEach((ls, j) => {
-          let ty = y + 4;
-          for (const l of ls) { doc.text(l.t, cols[j].a === "r" ? x + cols[j].w - 4 : x + 4, ty + l.size, { size: l.size, bold: l.bold, color: l.color, align: cols[j].a }); ty += l.size * 1.3; }
+          let ty = y + 2;
+          for (const l of ls) {
+            const right = cols[j].a === "r";
+            if (l.pill) {
+              const w = doc.widthOf(l.t, l.size, l.bold) + 8;
+              doc.rrect(x + 2, ty - 0.25, w, l.size + 2.5, 3, PDF_TINT[l.pill]);
+              doc.text(l.t, x + 6, ty + l.size - 0.25, { size: l.size, bold: l.bold, color: PDF_TONE[l.pill] });
+            } else {
+              doc.text(l.t, right ? x + cols[j].w - 3 : x + 3, ty + l.size, { size: l.size, bold: l.bold, color: l.color, align: cols[j].a });
+              if (l.tail) doc.text(l.tail, x + 3 + doc.widthOf(l.t, l.size, l.bold) + 3, ty + l.size, { size: SUB, color: PDF_MUTED });
+            }
+            ty += l.size * 1.2;
+          }
           x += cols[j].w;
         });
         y += hgt; doc.line(M, y, RIGHT, y);
@@ -1180,71 +1247,92 @@
 
     // ---- the top of the first page
     newPage();
-    doc.text("Connecteam × Gusto", M, y + 8, { size: 7.5, bold: true, color: PDF_MUTED }); y += 13;
+    doc.rect(M, y, FULL, 2.5, PDF_ACCENT); y += 7;
+    doc.text("CONNECTEAM × GUSTO", M, y + 6.5, { size: 6, bold: true, color: PDF_MUTED }); y += 8.5;
     const title = `Attendance & Leave · ${o.period === "week" ? "Week of " : o.period === "pay" ? "Pay period " : ""}${periodLabel(P, o.period)}`;
-    para(title, M, FULL, { size: 16, bold: true }); y += 2;
-    para([o.dept || "All departments", fmtRange(P.start, P.end), `Made ${o.made}`].join("  ·  "), M, FULL, { color: PDF_MUTED });
+    para(title, M, FULL, { size: 13, bold: true });
+    para([o.dept || "All departments", fmtRange(P.start, P.end), o.sorted ? `Sorted: ${o.sorted}` : null, `Made ${o.made}`].filter(Boolean).join("  ·  "), M, FULL, { size: 7.5, color: PDF_MUTED });
     const notes = [];
     if (W.inProgress) notes.push("Period in progress: shifts that had not ended are not counted.");
     if (T.unchecked) notes.push(`${plural(T.unchecked, "shift")} had no timesheets and were not checked.`);
-    if (notes.length) para(notes.join("  "), M, FULL, { color: PDF_MUTED });
-    y += 8;
+    if (notes.length) para(notes.join("  "), M, FULL, { size: 6.5, color: PDF_MUTED });
+    y += 5;
 
     const kpis = [
-      ["Late arrivals", T.late, T.late ? `${fmtDur(T.lateMin)} total · ${plural(T.latePeople, "person", "people")}` : `over ${R.lateGrace} min grace`, T.late ? "warn" : ""],
-      ["Early clock-outs", T.early, T.early ? `${fmtDur(T.earlyMin)} short of schedule` : `over ${R.earlyGrace} min early`, T.early ? "warn" : ""],
-      ["Missed lunches", T.lunch, `shifts of ${fmtH(R.lunchAfter)} or more, lunch under ${fmtDur(R.lunchMin)}`, T.lunch ? "warn" : ""],
-      ["Missed shifts", T.missed, T.missed ? `${fmtH(T.missedHrs)} not covered by leave` : (o.hasSchedule ? "scheduled, no punch" : "needs Connecteam schedules"), T.missed ? "bad" : ""],
-      ["Forms missed", T.formsMissed, T.formsExpected ? `of ${T.formsExpected} expected` : "no required forms set", T.formsMissed ? "warn" : ""],
-      ["Need action", T.action, `${T.watch} more to watch`, T.action ? "bad" : ""]];
-    const kw = (FULL - 5 * 8) / 6, subs = kpis.map(k => doc.wrap(k[2], kw - 12, 7));
-    const kh = 38 + Math.max(...subs.map(s => s.length)) * 9;
+      ["LATE ARRIVALS", T.late, T.late ? `${fmtDur(T.lateMin)} total · ${plural(T.latePeople, "person", "people")}` : `over ${R.lateGrace} min grace`, T.late ? "warn" : ""],
+      ["EARLY CLOCK-OUTS", T.early, T.early ? `${fmtDur(T.earlyMin)} short of schedule` : `over ${R.earlyGrace} min early`, T.early ? "warn" : ""],
+      ["MISSED LUNCHES", T.lunch, `shifts of ${fmtH(R.lunchAfter)}+, lunch under ${fmtDur(R.lunchMin)}`, T.lunch ? "warn" : ""],
+      ["MISSED SHIFTS", T.missed, T.missed ? `${fmtH(T.missedHrs)} not covered by leave` : (o.hasSchedule ? "scheduled, no punch" : "needs Connecteam schedules"), T.missed ? "bad" : ""],
+      ["FORMS MISSED", T.formsMissed, T.formsExpected ? `of ${T.formsExpected} expected` : "no required forms set", T.formsMissed ? "warn" : ""],
+      ["NEED ACTION", T.action, `${T.watch} more to watch`, T.action ? "bad" : ""]];
+    // The number beside its name, the note under them.
+    const kw = (FULL - 5 * 5) / 6, subs = kpis.map(k => doc.wrap(k[2], kw - 8, 5.5));
+    const kh = 19 + Math.max(...subs.map(s => s.length)) * 6.5;
     kpis.forEach((k, i) => {
-      const x = M + i * (kw + 8);
-      doc.rect(x, y, kw, kh, null, PDF_RULE);
-      doc.text(k[0], x + 6, y + 12, { size: 7.5, bold: true, color: PDF_MUTED });
-      doc.text(String(k[1]), x + 6, y + 31, { size: 16, bold: true, color: k[3] ? PDF_TONE[k[3]] : PDF_INK });
-      subs[i].forEach((t, j) => doc.text(t, x + 6, y + 42 + j * 9, { size: 7, color: PDF_MUTED }));
+      const x = M + i * (kw + 5);
+      doc.rrect(x, y, kw, kh, 4, k[3] ? PDF_TINT[k[3]] : null, k[3] ? null : PDF_RULE);
+      doc.text(String(k[1]), x + 4, y + 13.5, { size: 12, bold: true, color: k[3] ? PDF_TONE[k[3]] : PDF_INK });
+      doc.text(k[0], x + 4 + doc.widthOf(String(k[1]), 12, true) + 4, y + 11.5, { size: 5.5, bold: true, color: PDF_MUTED });
+      subs[i].forEach((t, j) => doc.text(t, x + 4, y + 21.5 + j * 6.5, { size: 5.5, color: PDF_MUTED }));
     });
-    y += kh + 14;
+    y += kh + 8;
 
-    // ---- staff, with each person's days under their row when asked for
-    const DX = M + 14, DW = FULL - 28, LABEL = 62;
+    // ---- staff; under a person's row, their days: a row of seven boxes for each week
+    const GX = M + 6, GW = FULL - 12, BOX = GW / 7, PAD = 2.5, TW = BOX - 2 - PAD * 2;
+    const dayItems = (day, long) => {
+      const items = [], add = (text, size, opt = {}) => { const lines = doc.wrap(text, TW - (opt.chip ? 4 : 0), size, opt.bold || !!opt.chip); if (lines.length) items.push({ lines, size, ...opt }); };
+      const empty = !day.blocks.length && !day.off;
+      add(`${DOW[dow(day.d)]} ${long ? fmtShort(day.d) : dt(day.d).getUTCDate()}`, 6.5, { bold: true, color: empty ? PDF_MUTED : PDF_INK });
+      for (const b of day.blocks) {
+        if (b.shift) add(`Sched ${fmtClock(b.shift.start)}${b.shift.noEnd ? "" : "–" + fmtClock(b.shift.end)}`, 5.5, { color: PDF_MUTED });
+        if (b.job && r_jobs) add(b.job, 5.5, { color: PDF_MUTED });
+        if (b.firstIn != null) {
+          add(`${fmtClock(b.firstIn)}–${b.lastOut != null ? fmtClock(b.lastOut) : "?"}`, 6, { bold: true });
+          add(`${b.brk ? `Break ${fmtDur(b.brk)}` : "No break"}${b.segments > 1 ? `, ${b.segments} punches` : ""}`, 5.5, { color: PDF_MUTED });
+        } else if (b.upcoming) add("Upcoming", 5.5, { color: PDF_MUTED });
+        else if (b.unchecked) add("No timesheet for this date", 5.5, { color: PDF_MUTED });
+        for (const [tone, text] of b.flags) add(text, 5.5, { chip: tone });
+      }
+      if (day.off && !day.blocks.some(b => b.shift && !b.punches.length)) add(`${day.off.type} ${fmtH(day.off.hrs)}`, 5.5, { chip: "info" });
+      if (r_slot) for (const [k, hrs] of r_slot) {
+        const [fname, dd] = k.split("|");
+        if (+dd === day.d) { add(`${fname}: ${hrs.length} missed`, 5.5, { chip: "warn" }); add(hrs.join(", "), 5, { color: PDF_MUTED }); }
+      }
+      for (const name of (r_forms && r_forms.get(day.d)) || []) add(`${name} not done`, 5.5, { chip: "warn" });
+      const h = items.reduce((a, it) => a + it.lines.length * it.size * 1.15 + (it.chip ? 3 : 0.5), 0);
+      return { items, h, empty };
+    };
+    let r_slot = null, r_forms = null, r_jobs = false;   // the person whose days are being drawn
     const detail = r => {
-      y += 4;
-      for (const day of r.days) {
-        const empty = !day.blocks.length && !day.off;
-        if (empty && r.days.length > 7) continue;   // a month of "Off" lines says nothing
-        const bits = [], flags = [];
-        for (const b of day.blocks) {
-          const p = [];
-          if (b.shift) p.push(`Sched ${fmtClock(b.shift.start)}${b.shift.noEnd ? "" : "–" + fmtClock(b.shift.end)}`);
-          if (b.job) p.push(b.job);
-          if (b.firstIn != null) p.push(`${fmtClock(b.firstIn)} to ${b.lastOut != null ? fmtClock(b.lastOut) : "?"}`, `${b.brk ? `Break ${fmtDur(b.brk)}` : "No break"}${b.segments > 1 ? `, ${b.segments} punches` : ""}`);
-          else if (b.upcoming) p.push("Upcoming");
-          else if (b.unchecked) p.push("No timesheet for this date");
-          if (p.length) bits.push(p.join(" · "));
-          flags.push(...b.flags);
-        }
-        if (day.off && !day.blocks.some(b => b.shift && !b.punches.length)) flags.push(["info", `${day.off.type} ${fmtH(day.off.hrs)}`]);
-        if (r.slotMisses) for (const [k, hrs] of r.slotMisses) {
-          const [fname, dd] = k.split("|");
-          if (+dd === day.d) flags.push(["warn", `${fname}: ${hrs.length} missed (${hrs.join(", ")})`]);
-        }
-        for (const name of (r.dayFormMisses && r.dayFormMisses.get(day.d)) || []) flags.push(["warn", `${name} not done`]);
-        const lines = doc.wrap(empty ? "Off" : bits.join("   |   "), DW - LABEL, 8);
-        need(Math.max(1, lines.length) * 10.5 + (flags.length ? 10.5 : 0));
-        doc.text(`${DOW[dow(day.d)]} ${fmtShort(day.d)}`, DX, y + 8, { size: 8, bold: true });
-        for (const ln of lines) { doc.text(ln, DX + LABEL, y + 8, { size: 8, color: empty ? PDF_MUTED : PDF_INK }); y += 10.5; }
-        if (!lines.length && !flags.length) y += 10.5;
-        let fx = DX + LABEL, any = false;
-        for (const [tone, text] of flags) {
-          const w = doc.widthOf(text, 7.5, true);
-          if (any && fx + w > DX + DW) { y += 10.5; need(10.5); fx = DX + LABEL; }
-          doc.text(text, fx, y + 7.5, { size: 7.5, bold: true, color: PDF_TONE[tone] || PDF_INK }); fx += w + 12; any = true;
-        }
-        if (any) y += 10.5;
-        y += 1.5;
+      r_slot = r.slotMisses; r_forms = r.dayFormMisses;
+      // Their job is said on each day only when they have more than one (else it's by their name).
+      r_jobs = new Set(r.days.flatMap(day => day.blocks.map(b => b.job).filter(Boolean))).size > 1;
+      const long = r.days.length > 7, lead = (dow(P.start) - R.weekStart + 7) % 7;
+      const cells = [...Array.from({ length: lead }, () => null), ...r.days];
+      y += 2;
+      for (let i = 0; i < cells.length; i += 7) {
+        const built = cells.slice(i, i + 7).map(day => day && dayItems(day, long));
+        if (built.every(b => !b || b.empty)) continue;   // a week of days off: nothing to show
+        const hgt = Math.max(...built.map(b => b ? b.h : 0)) + PAD * 2;
+        need(hgt + 1.5);
+        built.forEach((b, k) => {
+          if (!b) return;
+          const x = GX + k * BOX + 1;
+          doc.rrect(x, y, BOX - 2, hgt, 3, b.empty ? PDF_SHADE : null, b.empty ? null : PDF_RULE);
+          let ty = y + PAD;
+          for (const it of b.items) {
+            if (it.chip) {
+              const w = Math.max(...it.lines.map(t => doc.widthOf(t, it.size, true))) + 4;
+              doc.rrect(x + PAD, ty + 0.5, w, it.lines.length * it.size * 1.15 + 1.5, 2, PDF_TINT[it.chip] || PDF_SHADE);
+              it.lines.forEach((t, n) => doc.text(t, x + PAD + 2, ty + 0.5 + it.size + n * it.size * 1.15, { size: it.size, bold: true, color: PDF_TONE[it.chip] || PDF_INK }));
+              ty += it.lines.length * it.size * 1.15 + 3;
+            } else {
+              it.lines.forEach((t, n) => doc.text(t, x + PAD, ty + it.size + n * it.size * 1.15, { size: it.size, bold: it.bold, color: it.color || PDF_INK }));
+              ty += it.lines.length * it.size * 1.15 + 0.5;
+            }
+          }
+        });
+        y += hgt + 1.5;
       }
       const foot = [];
       if (o.noPunches.includes(r.p.name)) foot.push("No punches at all in these dates. If they aren’t on a Connecteam time clock yet, their shifts show as no-shows.");
@@ -1252,13 +1340,12 @@
       if (r.offHrs) foot.push(`Leave recorded: ${fmtH(r.offHrs)}`);
       if (r.noOut) foot.push(`${plural(r.noOut, "shift")} without a clock-out`);
       const b = r.p.bal, hrs = v => v != null ? fmtH(v) : "—";
-      if (r.sick != null || r.pto != null) foot.push(`Gusto balance: ${hrs(r.sick)} sick, ${hrs(r.pto)} PTO`);
       if (b && (b.sickUsed != null || b.ptoUsed != null)) foot.push(`Used this year: ${hrs(b.sickUsed)} sick, ${hrs(b.ptoUsed)} PTO`);
       if (b && (b.sickAccrued != null || b.ptoAccrued != null)) foot.push(`Accrued this year: ${hrs(b.sickAccrued)} sick, ${hrs(b.ptoAccrued)} PTO`);
       const early = [r.sickEarly ? "sick" : null, r.ptoEarly ? "PTO" : null].filter(Boolean);
       if (early.length) foot.push(`Low ${early.join(" and ")} not flagged: not enough accrued yet to reach the threshold`);
-      if (foot.length) para(foot.join("   ·   "), DX, DW, { size: 7.5, color: PDF_MUTED });
-      y += 5; doc.line(M, y, RIGHT, y);
+      if (foot.length) para(foot.join("   ·   "), GX + 1, GW - 2, { size: 5.8, color: PDF_MUTED });
+      y += 2.5; doc.line(M, y, RIGHT, y);
     };
 
     heading(o.period === "week" ? "Staff this week" : "Staff this period");
@@ -1267,31 +1354,33 @@
     } else if (!W.rows.length) {
       para(`No shifts or punches fall in this period${o.dept ? ` for ${o.dept}` : ""}.`, M, FULL, { color: PDF_MUTED });
     } else {
-      const nil = "—", count = (k, s, tone) => k ? { t: `${k}×`, s, c: PDF_TONE[tone], b: true } : nil;
+      const nil = { t: "—", c: PDF_MUTED }, count = (k, s, tone) => k ? { t: `${k}×`, s, c: PDF_TONE[tone], b: true } : nil;
       const shown = o.mode === "all" ? () => true : o.mode === "open" ? r => o.open.has(r.p.key) : () => false;
-      table([{ label: "Employee", w: 128 }, { label: "Status", w: 44 }, { label: "Worked", w: 52, a: "r" }, { label: "Late", w: 60 },
-        { label: "Left early", w: 60 }, { label: "Missed lunch", w: 66 }, { label: "Missed shifts", w: 64 }, { label: "Forms missed", w: 58 },
-        { label: "Leave balance", w: 88 }, { label: "Missed time vs. leave", w: 100 }],
+      table([{ label: "Employee", w: 124 }, { label: "Status", w: 38 }, { label: "Worked", w: 40 }, { label: "Late", w: 46 },
+        { label: "Left early", w: 46 }, { label: "Missed lunch", w: 52 }, { label: "Missed shifts", w: 50 }, { label: "Forms", w: 34 },
+        { label: "Sick / PTO left", w: 70 }, { label: "Missed vs. leave", w: 64 }],
       W.rows.map(r => [
         { t: r.p.name, s: deptOf(r.p), b: true },
-        { t: r.status === "action" ? "Action" : r.status === "watch" ? "Watch" : "Clear", c: PDF_TONE[r.status], b: true },
+        { t: r.status === "action" ? "Action" : r.status === "watch" ? "Watch" : "Clear", b: true, pill: r.status },
         r.workedMin ? fmtDur(r.workedMin) : nil,
         count(r.late.length, fmtDur(r.lateMin), "warn"),
         count(r.early.length, fmtDur(r.earlyMin), "warn"),
         count(r.lunch.length, `of ${plural(r.worked.size, "shift")}`, "warn"),
         count(r.missed.length, fmtH(r.missedHrs), "bad"),
         r.formsExpected ? (r.formsMissed ? { t: String(r.formsMissed), s: `of ${r.formsExpected}`, c: PDF_TONE.warn, b: true } : { t: `0 of ${r.formsExpected}`, c: PDF_MUTED }) : nil,
-        r.sick == null && r.pto == null ? nil : { t: `Sick ${r.sick != null ? fmtH(r.sick) : nil}`, s: `PTO ${r.pto != null ? fmtH(r.pto) : nil}${r.ptoLow ? " (low)" : ""}`, c: r.sickLow ? PDF_TONE.bad : PDF_INK },
-        { t: r.cover.main, s: r.cover.sub, c: PDF_TONE[r.cover.cls] || PDF_INK, b: true }]),
-      i => { if (shown(W.rows[i])) detail(W.rows[i]); });
+        r.sick == null && r.pto == null ? nil : { t: `${r.sick != null ? fmtH(r.sick) : "—"} / ${r.pto != null ? fmtH(r.pto) : "—"}`, c: r.low ? PDF_TONE.bad : PDF_INK, b: r.low },
+        // Said only when there's something to say: missed time, or no Gusto match.
+        r.missedHrs || r.cover.cls ? { t: r.cover.main, c: PDF_TONE[r.cover.cls] || PDF_INK, b: true } : nil]),
+      i => { if (shown(W.rows[i])) detail(W.rows[i]); },
+      i => shown(W.rows[i]) ? 44 : 0);
     }
-    y += 16;
+    y += 10;
 
     // ---- required forms; an hourly form's grid when days are asked for
     heading("Required forms");
     if (!W.forms.length) para("No required forms yet.", M, FULL, { color: PDF_MUTED });
-    else table([{ label: "Form", w: 150 }, { label: "Required", w: 140 }, { label: "Expected", w: 54, a: "r" }, { label: "Submitted", w: 58, a: "r" },
-      { label: "Missed", w: 48, a: "r" }, { label: "Completion", w: 64, a: "r" }, { label: "Who missed", w: 206 }],
+    else table([{ label: "Form", w: 120 }, { label: "Required", w: 150 }, { label: "Expected", w: 40, a: "r" }, { label: "Submitted", w: 42, a: "r" },
+      { label: "Missed", w: 32, a: "r" }, { label: "Done", w: 34, a: "r" }, { label: "Who missed", w: 146 }],
     W.forms.map(f => [
       { t: f.name, s: f.hasFile ? "" : "Submissions didn't load", b: true },
       { t: f.frequency === "hour" ? freqText(f) : f.frequency === "week" ? "Once a week" : "Every shift",
@@ -1303,39 +1392,40 @@
     i => {
       const f = W.forms[i];
       if (o.mode === "summary" || f.frequency !== "hour" || !f.grid || !f.slots.length) return;
-      const cw = Math.min(24, (DW - LABEL - 44) / f.slots.length), gx = DX + LABEL, end = gx + f.slots.length * cw;
+      const LABEL = 50, cw = Math.min(20, (GW - LABEL - 32) / f.slots.length), gx = GX + LABEL, end = gx + f.slots.length * cw;
+      const size = cw < 14 ? 4.6 : 5.5;
       const top = () => {
         y += 4;
-        f.slots.forEach(([s0, s1], k) => doc.text(slotLabel(s0, s1), gx + k * cw + cw / 2, y + 6, { size: 5.5, color: PDF_MUTED, align: "c" }));
-        doc.text("Missed", end + 40, y + 6, { size: 6, color: PDF_MUTED, align: "r" });
+        f.slots.forEach(([s0, s1], k) => doc.text(slotLabel(s0, s1), gx + k * cw + cw / 2, y + 6, { size, color: PDF_MUTED, align: "c" }));
+        doc.text("Missed", end + 30, y + 6, { size: 5.5, color: PDF_MUTED, align: "r" });
         y += 9;
       };
       need(40); top();
       for (const g of f.grid) {
-        if (need(13)) top();
-        doc.text(fmtDay(g.d), DX, y + 9, { size: 7.5, bold: true });
+        if (need(12)) top();
+        doc.text(fmtDay(g.d), GX, y + 8.5, { size: 6.5, bold: true });
         g.cells.forEach((c, k) => {
-          doc.rect(gx + k * cw + 1, y + 1, cw - 2, 10, PDF_SQUARE[c.st] || null, PDF_RULE);
-          if (c.st === "done") doc.mark("tick", gx + k * cw + cw / 2, y + 9, 7.5, PDF_TONE.good);
-          if (c.st === "missed") doc.mark("cross", gx + k * cw + cw / 2, y + 9, 7.5, PDF_TONE.bad);
+          doc.rect(gx + k * cw + 0.75, y + 1, cw - 1.5, 9.5, PDF_SQUARE[c.st] || null, PDF_RULE);
+          if (c.st === "done") doc.mark("tick", gx + k * cw + cw / 2, y + 8.5, 6.5, PDF_TONE.good);
+          if (c.st === "missed") doc.mark("cross", gx + k * cw + cw / 2, y + 8.5, 6.5, PDF_TONE.bad);
         });
         const miss = g.cells.filter(c => c.st === "missed").length;
-        doc.text(String(miss), end + 40, y + 9, { size: 7.5, bold: !!miss, color: miss ? PDF_TONE.bad : PDF_MUTED, align: "r" });
-        y += 12;
+        doc.text(String(miss), end + 30, y + 8.5, { size: 7, bold: !!miss, color: miss ? PDF_TONE.bad : PDF_MUTED, align: "r" });
+        y += 11.5;
       }
       y += 2;
-      para("Tick: done.  Cross: missed.  Grey: on shift under 30 minutes.  Yellow: not over yet.  Empty: nobody on shift.", DX, DW, { size: 7, color: PDF_MUTED });
+      para("Tick: done.  Cross: missed.  Grey: on shift under 30 minutes.  Yellow: not over yet.  Empty: nobody on shift.", GX, GW, { size: 6, color: PDF_MUTED });
       const missed = f.grid.flatMap(g => g.cells.filter(c => c.st === "missed").map(c => `${fmtDay(g.d)} ${fmtClock(c.ss)} (on shift: ${(c.blamed && c.blamed.length ? c.blamed : c.on).join(", ") || "—"})`));
-      if (missed.length) para(`${plural(missed.length, "missed check")}: ${missed.join("; ")}`, DX, DW, { size: 7.5 });
-      y += 5; doc.line(M, y, RIGHT, y);
+      if (missed.length) para(`${plural(missed.length, "missed check")}: ${missed.join("; ")}`, GX, GW, { size: 6.5 });
+      y += 4; doc.line(M, y, RIGHT, y);
     });
 
     // ---- the bottom of every page
-    const foot = `Attendance & Leave · ${periodLabel(P, o.period)} · Grace ${R.lateGrace} min late / ${R.earlyGrace} min early · lunch ${fmtDur(R.lunchMin)} for shifts of ${fmtH(R.lunchAfter)}+`;
+    const foot = doc.wrap(`Attendance & Leave · ${periodLabel(P, o.period)} · Grace ${R.lateGrace} min late / ${R.earlyGrace} min early · lunch ${fmtDur(R.lunchMin)} for shifts of ${fmtH(R.lunchAfter)}+`, FULL - 70, 6.5)[0] || "";
     for (let i = 0; i < doc.count(); i++) {
       doc.select(i);
-      doc.text(foot, M, 612 - M + 2, { size: 7, color: PDF_MUTED });
-      doc.text(`Page ${i + 1} of ${doc.count()}`, RIGHT, 612 - M + 2, { size: 7, color: PDF_MUTED, align: "r" });
+      doc.text(foot, M, PH - M + 2, { size: 6.5, color: PDF_MUTED });
+      doc.text(`Page ${i + 1} of ${doc.count()}`, RIGHT, PH - M + 2, { size: 6.5, color: PDF_MUTED, align: "r" });
     }
     return doc.bytes();
   }
@@ -1348,7 +1438,8 @@
     const now = new Date();
     let bytes;
     try {
-      bytes = reportPdf(current, { period: ui.period, dept: ui.dept, mode, open: ui.open, R: rules(), noPunches: model.noPunches, hasSchedule: model.hasSchedule,
+      const sorted = ui.sort === "status" ? "" : (SORTS.find(s => s[0] === ui.sort) || [])[1];
+      bytes = reportPdf(current, { period: ui.period, dept: ui.dept, mode, open: ui.open, R: rules(), noPunches: model.noPunches, hasSchedule: model.hasSchedule, sorted,
         made: `${MONTHS[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} ${now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` });
     } catch { toast("The PDF couldn’t be made. Try Download CSV instead.", true); return; }
     const name = fileName(current, ui.period, ui.dept, "pdf");
@@ -1528,7 +1619,7 @@
 
   // ---------------------------------------------------------------- hook up
   const core = { parseCSV, parseHours, normKey, niceName, firstNamesAlike, NICKNAMES, gustoTable, buildModel, computePeriod, periodOf, periodLabel, blocksFor, daySlots, hoursSetting, freqText,
-    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, switchAnchor, DEFAULT_RULES, pdfDoc, pdfCodes, reportPdf, HELV, HELV_BOLD };
+    summaryText, csvText, fileName, fmtDur, fmtClock, ymd, switchAnchor, DEFAULT_RULES, pdfDoc, pdfCodes, reportPdf, HELV, HELV_BOLD, SORTS, sortRows };
   if (typeof module === "object" && module.exports) module.exports = core;
   if (typeof StaffReports !== "undefined") StaffReports.register("attendance", { render });
 })();

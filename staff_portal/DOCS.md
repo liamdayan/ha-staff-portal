@@ -1562,6 +1562,10 @@ missed. Turn it on and choose who sees it on the dashboard's **Reports** tab, li
 - **Reading it.** Six numbers at the top, then everyone who worked or was scheduled, worst first
   (**Action**, **Watch**, **Clear**). Tap a name for their day-by-day punches. Tap a form for its
   grid, hour by hour for timed checks; tap a square to see who was on and who submitted.
+- **Sorting it.** **Sort** changes the order of the staff table: needs action first (the usual
+  order), by name, by department, or with the most late arrivals, early clock-outs, missed shifts,
+  missed forms or hours worked at the top. Print, the PDF file and the CSV follow it, and each
+  device remembers its choice.
 - **Sharing it.** **Copy summary** copies a short text version. **Download CSV** saves the staff
   table. **PDF file** makes a PDF with everyone's days, only the rows you opened, or just the
   summary. On a phone or tablet it opens the share sheet (Save to Files, Print, Mail); on a

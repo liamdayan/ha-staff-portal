@@ -654,6 +654,26 @@ def test_view_a_timed_form_checks_only_its_own_hours(tmp_path):
     assert (got["expected"], got["missed"]) == (5, 1)
 
 
+@need_node
+def test_view_sorts_the_staff_table(tmp_path):
+    """0.12.27: Sort by. The first choice is the usual order (who needs action first)."""
+    _, ctx = sample()
+    out = view(tmp_path, run(ctx))
+    got = out["sorted"]
+    usual = [r["name"] for r in out["rows"]]
+    assert out["sorts"][0] == "Needs action first" and got["status"] == usual
+    assert all(sorted(names) == sorted(usual) for names in got.values())      # nobody lost or doubled
+    assert got["name"] == sorted(usual)
+    rows = by_name(out)
+    shown = lambda n: rows[n]["dept"] or rows[n]["title"] or "No department"   # as the table says it
+    assert got["dept"] == sorted(usual, key=lambda n: (shown(n), n))
+    assert got["late"][0] == "Maya Ortiz" and got["early"][0] == "Dev Patel" and got["missed"][0] == "Jonah Reyes"
+    assert got["forms"][0] == "Lena Brooks"
+    assert got["worked"] == sorted(usual, key=lambda n: (-rows[n]["workedMin"], n))
+    # Ties go by name.
+    assert got["late"][1:] == sorted(n for n in usual if n != "Maya Ortiz")
+
+
 # ---------------------------------------------------------------- the PDF file (made in view.js)
 
 def pdf_pages(path) -> list[str]:
@@ -685,16 +705,23 @@ def test_the_pdf_file_is_a_real_pdf_with_the_report_in_it(tmp_path):
         assert raw.startswith(b"%PDF-1.4") and raw.rstrip().endswith(b"%%EOF")
 
     summary = "\n".join(pdf_pages(tmp_path / "summary.pdf"))
-    for text in ("Attendance & Leave", "Week of", "All departments", "Made Oct 19, 2026 9:05 AM", "Late arrivals",
-                 "Staff this week", "Missed time vs. leave", "Required forms", "Tub temperature check",
+    for text in ("Attendance & Leave", "Week of", "All departments", "Made Oct 19, 2026 9:05 AM", "LATE ARRIVALS",
+                 "Staff this week", "Missed vs. leave", "Required forms", "Tub temperature check",
                  "Shift handoff log", "Lena Brooks", "Short 2h 30m", "Page 1 of"):
         assert text in summary, text
     assert all(name in summary for name in out["people"])
     assert "Sched " not in summary and "missed check" not in summary   # no days in the summary
+    assert "Sorted:" not in summary                                    # the usual order isn't remarked on
+
+    # Sorted by name: the PDF says so, and lists people in that order.
+    by_name_pdf = "\n".join(pdf_pages(tmp_path / "sorted.pdf"))
+    assert "Sorted: Name (A to Z)" in by_name_pdf
+    table = by_name_pdf[by_name_pdf.index("Staff this week"):by_name_pdf.index("Required forms")]
+    assert sorted(out["people"]) == sorted(out["people"], key=table.index)
 
     everyone = "\n".join(pdf_pages(tmp_path / "all.pdf"))
     assert everyone.count("Sched ") >= len(out["people"])
-    for text in ("No-show", "Short lunch 15 min", "Sick leave 7h 30m", "Gusto balance:", "1 missed check:", "on shift:"):
+    for text in ("No-show", "Short lunch 15 min", "Sick leave 7h 30m", "Used this year:", "1 missed check:", "on shift:"):
         assert text in everyone, text
 
     # Only the opened person's days (the first on the list), the hourly form's grid still there.
@@ -705,7 +732,25 @@ def test_the_pdf_file_is_a_real_pdf_with_the_report_in_it(tmp_path):
     pages = pdf_pages(tmp_path / "long.pdf")
     assert len(pages) > 3
     assert all(f"Page {i + 1} of {len(pages)}" in text for i, text in enumerate(pages))
-    assert sum("Missed time vs. leave" in text for text in pages) > 3
+    assert sum("Missed vs. leave" in text for text in pages) > 3
+
+    # Forty people: the summary's staff table is all on the first page (one line a person).
+    first = pdf_pages(tmp_path / "forty-summary.pdf")[0]
+    assert sum(first.count(name) for name in out["people"]) >= 40 and "Required forms" in first
+    assert len(pdf_pages(tmp_path / "forty-all.pdf")) <= 6
+
+    # Upright US Letter pages, and no text past the margins (very long names and jobs too).
+    import pypdfium2
+    for name in ("all", "long", "stress", "forty-all"):
+        pdf = pypdfium2.PdfDocument(str(tmp_path / f"{name}.pdf"))
+        for i in range(len(pdf)):
+            assert pdf[i].get_size() == (612, 792)
+            text = pdf[i].get_textpage()
+            for k in range(text.count_rects()):
+                left, bottom, right, top = text.get_rect(k)
+                assert left >= 23 and right <= 589 and bottom >= 14 and top <= 778, (name, i, text.get_text_bounded(left, bottom, right, top))
+        pdf.close()
+    assert "Featherstonehaugh" in "\n".join(pdf_pages(tmp_path / "stress.pdf"))
 
     # Letters it can't show: accents stay, an arrow and a minus are spelt, the rest are "?".
     assert pdf_pages(tmp_path / "letters.pdf")[0].strip() == "Zoë (Núñez) \\ ?? to 5 - 2 “ok” ?"
