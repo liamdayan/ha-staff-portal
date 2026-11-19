@@ -161,10 +161,18 @@ class Scanner:
         try:
             async with self.session.get(self.base + path, allow_redirects=False,
                                         timeout=aiohttp.ClientTimeout(total=seconds)) as resp:
-                body = await resp.content.read(limit + 1)
-                if len(body) > limit:
+                # read(n) gives only what has arrived so far, and a scanner sends its answer in
+                # pieces: keep reading to the end (or to just past the limit).
+                parts, size = [], 0
+                while size <= limit:
+                    piece = await resp.content.read(limit + 1 - size)
+                    if not piece:
+                        break
+                    parts.append(piece)
+                    size += len(piece)
+                if size > limit:
                     raise ScanError("The scanner sent more than expected. Try again.")
-                return resp.status, body
+                return resp.status, b"".join(parts)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             raise ScanError(NO_ANSWER, "offline") from None
 

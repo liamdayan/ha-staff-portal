@@ -128,6 +128,24 @@ def test_the_feeder_gives_every_page_and_the_glass_one():
     run(scenario())
 
 
+def test_an_answer_that_arrives_in_pieces_is_read_to_the_end():
+    # A real scanner's answer comes over the network a piece at a time (0.12.28 read only the
+    # first piece: "The scanner sent something that couldn't be read").
+    async def go():
+        async with FakeScanner(feeder=2) as fake:
+            fake.pieces = 300
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                assert (await scanner.capabilities())["model"] == "Brother MFC-J4345DW"
+                pages = await scanner.scan("Feeder", "color", 200, "letter")
+                assert pages == [page_jpeg(1), page_jpeg(2)]
+                fake.capabilities = "<a>" + "x" * escl.MAX_XML + "</a>"   # too much is still refused
+                fake.pieces = 100000
+                with pytest.raises(escl.ScanError, match="more than expected"):
+                    await scanner.capabilities()
+    asyncio.run(go())
+
+
 def test_problems_at_the_scanner_are_said_plainly():
     async def scenario():
         async with FakeScanner(feeder=0, glass=False) as fake:

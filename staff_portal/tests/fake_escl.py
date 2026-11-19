@@ -8,8 +8,11 @@ a small web server on this computer. Nothing here talks to a real scanner.
         scanner.not_ready   # how many times the next page answers 503 first
         scanner.busy        # True: starting a job answers 503
         scanner.jam_after   # a number: the feeder jams after that many pages of a job
+        scanner.pieces      # a number: answers are sent that many bytes at a time, with a pause
+                            # between (a real scanner's answer arrives over the network in pieces)
 """
 
+import asyncio
 import io
 
 from aiohttp import web
@@ -53,6 +56,7 @@ class FakeScanner:
         self.not_ready = 0
         self.busy = False
         self.jam_after: int | None = None
+        self.pieces = 0
         self.capabilities = CAPABILITIES
         self.page = None              # bytes to send as every page instead of a JPEG
         self._left: dict[str, int] = {}     # pages each job still has to give
@@ -78,8 +82,19 @@ class FakeScanner:
     async def __aexit__(self, *exc):
         await self._runner.cleanup()
 
+    async def _send(self, request, body: bytes, kind: str):
+        if not self.pieces:
+            return web.Response(body=body, content_type=kind)
+        resp = web.StreamResponse(headers={"Content-Type": kind})
+        await resp.prepare(request)
+        for at in range(0, len(body), self.pieces):
+            await resp.write(body[at:at + self.pieces])
+            await asyncio.sleep(0.01)
+        await resp.write_eof()
+        return resp
+
     async def _capabilities(self, request):
-        return web.Response(text=self.capabilities, content_type="text/xml")
+        return await self._send(request, self.capabilities.encode(), "text/xml")
 
     async def _status(self, request):
         adf = "ScannerAdfLoaded" if self.feeder else "ScannerAdfEmpty"
@@ -117,7 +132,7 @@ class FakeScanner:
         self._left[job] -= 1
         self._given[job] += 1
         body = self.page if self.page is not None else page_jpeg(self._given[job], self._gray[job])
-        return web.Response(body=body, content_type="image/jpeg")
+        return await self._send(request, body, "image/jpeg")
 
     async def _delete(self, request):
         self.deleted.append(request.match_info["job"])

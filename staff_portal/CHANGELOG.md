@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.29
+
+**Scans: fixed "The scanner sent something that couldn't be read"**
+- A real scanner sends its answer over the network in pieces, and the add-on read only the first
+  one. **Test scanner** and scanning now read the whole answer, and every page in full.
+
 ## 0.12.28
 
 **Scans: a new tool in the staff app**
