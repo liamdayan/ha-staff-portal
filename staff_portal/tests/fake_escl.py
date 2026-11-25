@@ -10,6 +10,8 @@ a small web server on this computer. Nothing here talks to a real scanner.
         scanner.jam_after   # a number: the feeder jams after that many pages of a job
         scanner.pieces      # a number: answers are sent that many bytes at a time, with a pause
                             # between (a real scanner's answer arrives over the network in pieces)
+        scanner.adf_state   # "say" (the default): the status says whether the feeder has paper;
+                            # None: it leaves the feeder out; any other text: it says that
 """
 
 import asyncio
@@ -57,6 +59,7 @@ class FakeScanner:
         self.busy = False
         self.jam_after: int | None = None
         self.pieces = 0
+        self.adf_state = "say"
         self.capabilities = CAPABILITIES
         self.page = None              # bytes to send as every page instead of a JPEG
         self._left: dict[str, int] = {}     # pages each job still has to give
@@ -97,11 +100,12 @@ class FakeScanner:
         return await self._send(request, self.capabilities.encode(), "text/xml")
 
     async def _status(self, request):
-        adf = "ScannerAdfLoaded" if self.feeder else "ScannerAdfEmpty"
+        adf = ("ScannerAdfLoaded" if self.feeder else "ScannerAdfEmpty") if self.adf_state == "say" else self.adf_state
+        adf = f"<scan:AdfState>{adf}</scan:AdfState>" if adf is not None else ""
         return web.Response(content_type="text/xml", text=f"""<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScannerStatus xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
 <pwg:Version>2.63</pwg:Version><pwg:State>{'Processing' if self.busy else 'Idle'}</pwg:State>
-<scan:AdfState>{adf}</scan:AdfState></scan:ScannerStatus>""")
+{adf}</scan:ScannerStatus>""")
 
     async def _start(self, request):
         if self.busy:

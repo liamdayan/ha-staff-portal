@@ -7848,7 +7848,9 @@
         const t = await api("POST", "api/scans/test");
         result.textContent = t.ok
           ? `${t.model || "The scanner"} answered and is ${t.state === "Idle" ? "ready" : "busy"}. ` +
-            (t.feeder ? `It has a feeder${t.paper_in_feeder ? " (with paper in it now)" : ""}` : "It has no feeder") +
+            (t.feeder ? `It has a feeder${t.paper_in_feeder === true ? " (with paper in it now)"
+              : t.paper_in_feeder === null ? ` (it doesn't say whether there's paper in it${t.feeder_says ? `: "${t.feeder_says}"` : ""}, so Scans tries the feeder first)`
+              : ""}` : "It has no feeder") +
             (t.glass ? " and a glass." : ".")
           : t.problem;
       } catch (err) {

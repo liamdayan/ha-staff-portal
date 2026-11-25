@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.30
+
+**Scans: fixed pages not being pulled from the feeder**
+- Scans used the feeder only when the scanner's status said, in exactly the expected words, that
+  paper was in it. A scanner that leaves that out (or says it its own way) had every scan taken
+  from the glass, with the pages left sitting in the feeder. Now, when the scanner doesn't say,
+  Scans tries the feeder first and goes to the glass only if the feeder gives nothing.
+- A jammed feeder is said plainly before anything is scanned.
+- **Test scanner** says when the scanner doesn't report whether its feeder has paper, and what it
+  did say. The add-on's log notes the same at each scan, to help with any scanner that still
+  doesn't work as expected.
+
 ## 0.12.29
 
 **Scans: fixed "The scanner sent something that couldn't be read"**

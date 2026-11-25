@@ -2416,14 +2416,23 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
     try:
         async with aiohttp.ClientSession() as session:
             scanner = escl.Scanner(address, session)
+            found = await scanner.capabilities()
             status = await scanner.status()
-            source = "Feeder" if status["feeder"] == "loaded" else "Platen"
-            # Legal paper only fits the feeder: on the glass it's scanned as Letter.
-            paper = "letter" if source == "Platen" and option["paper"] == "legal" else option["paper"]
-            job["source"] = source
+            # A scanner that doesn't say whether its feeder has paper is tried feeder first,
+            # then glass: before 0.12.30 that was taken as "empty" and the feeder never ran.
+            order = escl.source_order(found["sources"], status["feeder"])
+            log.info("Scanning: the scanner says its feeder is %r; trying %s",
+                     status["adf"] or "(not said)", " then ".join(order))
+            job["source"] = order[0]
+
+            def paper(source: str) -> str:
+                # Legal paper only fits the feeder: on the glass it's scanned as Letter.
+                job["source"] = source
+                return "letter" if source == "Platen" and option["paper"] == "legal" else option["paper"]
+
             room = escl.MAX_PAGES - len(job["pages"])
-            pages = await scanner.scan(source, option["color"], scans.QUALITY[option["quality"]], paper,
-                                       on_page=lambda n: job.update(arriving=n), limit=room)
+            _, pages = await scanner.scan_from(order, option["color"], scans.QUALITY[option["quality"]],
+                                               paper, on_page=lambda n: job.update(arriving=n), limit=room)
         job["pages"].extend(pages)
         job["message"] = ""
         if sum(len(p) for p in job["pages"]) > SCAN_MAX_BYTES:
@@ -7783,7 +7792,8 @@ async def admin_scan_test(request: web.Request):
                                                           "Staff Access needs (JPEG pages over eSCL)."})
     return web.json_response({"ok": True, "model": found["model"], "feeder": "Feeder" in found["sources"],
                               "glass": "Platen" in found["sources"], "state": status["state"],
-                              "paper_in_feeder": status["feeder"] == "loaded"})
+                              "paper_in_feeder": {"loaded": True, "empty": False}.get(status["feeder"]),
+                              "feeder_says": status["adf"]})
 
 
 def clean_scan_option(data) -> dict:

@@ -104,9 +104,64 @@ def test_what_the_scanner_can_do_and_how_it_is():
             assert caps == {"model": "Brother MFC-J4345DW", "sources": ["Platen", "Feeder"],
                             "colors": ["color", "gray", "bw"], "resolutions": [100, 200, 300, 600],
                             "jpeg": True, "feeder_sheets": 20}
-            assert await with_scanner(fake, lambda s: s.status()) == {"state": "Idle", "feeder": "loaded"}
+            assert await with_scanner(fake, lambda s: s.status()) == {
+                "state": "Idle", "feeder": "loaded", "adf": "ScannerAdfLoaded"}
             fake.feeder = 0
             assert (await with_scanner(fake, lambda s: s.status()))["feeder"] == "empty"
+            # A scanner that doesn't say: "don't know", not "empty".
+            fake.adf_state = None
+            assert await with_scanner(fake, lambda s: s.status()) == {"state": "Idle", "feeder": None, "adf": ""}
+            for said, feeder in (("ScannerAdfJam", "jam"), ("ScannerAdfHatchOpen", "other"),
+                                 ("ScannerAdfProcessing", "loaded")):
+                fake.adf_state = said
+                assert (await with_scanner(fake, lambda s: s.status()))["feeder"] == feeder
+    run(scenario())
+
+
+def test_the_feeder_state_found_wherever_the_scanner_puts_it():
+    # Deeper in, or without the eSCL namespace: still the feeder's state.
+    for xml in (b'<s:ScannerStatus xmlns:s="x"><s:Adf><s:AdfState>ScannerAdfLoaded</s:AdfState></s:Adf></s:ScannerStatus>',
+                b"<ScannerStatus><AdfState>ScannerAdfLoaded</AdfState></ScannerStatus>"):
+        assert escl.read_status(xml)["feeder"] == "loaded"
+
+
+def test_where_to_scan_from():
+    both = ["Platen", "Feeder"]
+    assert escl.source_order(both, "loaded") == ["Feeder"]
+    assert escl.source_order(both, "empty") == ["Platen"]
+    assert escl.source_order(both, None) == ["Feeder", "Platen"]       # not said: feeder first
+    assert escl.source_order(both, "other") == ["Feeder", "Platen"]
+    assert escl.source_order(["Feeder"], "empty") == ["Feeder"]        # a feeder-only scanner
+    assert escl.source_order(["Platen"], "loaded") == ["Platen"]
+    assert escl.source_order([], None) == ["Feeder", "Platen"]
+    with pytest.raises(escl.ScanError) as err:
+        escl.source_order(both, "jam")
+    assert err.value.code == "jam"
+
+
+def test_feeder_first_then_the_glass_when_the_scanner_does_not_say():
+    async def scenario():
+        async with FakeScanner(feeder=3) as fake:
+            fake.adf_state = None
+            seen = []
+            source, pages = await with_scanner(
+                fake, lambda s: s.scan_from(["Feeder", "Platen"], "color", 200, "letter", seen.append))
+            assert source == "Feeder" and len(pages) == 3 and seen == [1, 2, 3]
+            # The feeder turns out empty: the glass, in the same go.
+            source, pages = await with_scanner(
+                fake, lambda s: s.scan_from(["Feeder", "Platen"], "color", 200, lambda src: "letter"))
+            assert source == "Platen" and len(pages) == 1
+            assert ["Feeder" in j for j in fake.jobs[1:]] == [True, False]
+            # A jam part way isn't retried on the glass.
+            fake.feeder, fake.jam_after = 3, 1
+            with pytest.raises(escl.ScanError) as err:
+                await with_scanner(fake, lambda s: s.scan_from(["Feeder", "Platen"], "color", 200, "letter"))
+            assert err.value.code == "stopped" and len(fake.jobs) == 4
+            # Nothing anywhere: said plainly.
+            fake.feeder, fake.jam_after, fake.glass = 0, None, False
+            with pytest.raises(escl.ScanError) as err:
+                await with_scanner(fake, lambda s: s.scan_from(["Feeder", "Platen"], "color", 200, "letter"))
+            assert err.value.code == "empty"
     run(scenario())
 
 

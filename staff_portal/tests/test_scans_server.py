@@ -180,6 +180,29 @@ def test_the_feeder_is_scanned_and_saved_with_the_options_name(world):
     asyncio.run(scenario())
 
 
+def test_a_scanner_that_does_not_say_about_its_feeder_still_uses_it(world):
+    # 0.12.29 scanned the glass whenever the scanner's status didn't say "ScannerAdfLoaded", so
+    # a scanner that leaves the feeder out of its status never pulled paper from the feeder.
+    p = world
+    ids = option(p, "Guest IDs", "ID", paper="legal")
+
+    async def scenario():
+        async with Set(p, feeder=3) as s, p:
+            s.scanner.adf_state = None
+            ana = await p.sign_in(p.ana)
+            await p.call("POST", f"/api/scans/{ids}/scan", ana)
+            job = await until(p, ana, ready)
+            assert (job["pages"], job["source"], job["message"]) == (3, "Feeder", "")
+            assert "<pwg:Height>4200</pwg:Height>" in s.scanner.jobs[0]       # Legal in the feeder
+            # The feeder's empty now: the same button takes the page on the glass, as Letter.
+            await p.call("POST", "/api/scans/job/more", ana)
+            job = await until(p, ana, lambda j: ready(j) and j["pages"] == 4)
+            assert job["source"] == "Platen" and job["message"] == ""
+            assert "<pwg:InputSource>Platen</pwg:InputSource>" in s.scanner.jobs[-1]
+            assert "<pwg:Height>3300</pwg:Height>" in s.scanner.jobs[-1]
+    asyncio.run(scenario())
+
+
 def test_the_glass_takes_a_page_at_a_time_into_one_file(world):
     p = world
     ids = option(p, "Guest IDs", "ID", format="{prefix}-{date}-{first}", color="gray", quality="high", paper="legal")
@@ -292,7 +315,7 @@ def test_the_dashboard_sets_up_the_scanner_the_drive_and_the_options(world):
             assert status == 200 and view["address"] == s.scanner.address
             status, test = await p.admin_call("POST", "/api/scans/test")
             assert test == {"ok": True, "model": "Brother MFC-J4345DW", "feeder": True, "glass": True,
-                            "state": "Idle", "paper_in_feeder": True}
+                            "state": "Idle", "paper_in_feeder": True, "feeder_says": "ScannerAdfLoaded"}
             assert (await p.admin_call("POST", "/api/scans/test"))[0] == 429
             assert s.scanner.jobs == []          # a test scans nothing
 

@@ -113,13 +113,41 @@ def read_capabilities(raw: bytes) -> dict:
 
 def read_status(raw: bytes) -> dict:
     """{state: "Idle" | "Processing" | "Stopped" | ..., feeder: "loaded" | "empty" | "jam" |
-    "other" | None (no feeder said)}."""
+    "other" | None (no feeder said), adf: what the scanner said of its feeder, as it said it}.
+
+    Scanners don't all say it the same way: some leave the feeder out of their status, some put
+    it deeper in or under another namespace, so it's looked for anywhere and by its name alone.
+    None or "other" means "don't know", not "empty" (see source_order)."""
     root = _xml(raw)
     state = (_texts(root, "pwg:State") or ["Unknown"])[0][:40]
-    adf = (_texts(root, "scan:AdfState") or [""])[0]
-    feeder = (None if not adf else "loaded" if adf in ("ScannerAdfLoaded", "ScannerAdfProcessing")
-              else "empty" if adf == "ScannerAdfEmpty" else "jam" if "Jam" in adf else "other")
-    return {"state": state, "feeder": feeder}
+    adf = next(((e.text or "").strip()[:60] for e in root.iter()
+                if isinstance(e.tag, str) and e.tag.rsplit("}", 1)[-1] == "AdfState"
+                and (e.text or "").strip()), "")
+    word = adf.lower()
+    feeder = (None if not adf else "jam" if "jam" in word
+              else "empty" if "empty" in word
+              else "loaded" if "loaded" in word or "processing" in word else "other")
+    return {"state": state, "feeder": feeder, "adf": adf}
+
+
+def source_order(sources: list[str], feeder: str | None) -> list[str]:
+    """Where to scan from, in the order to try: the feeder when it has paper, the glass when the
+    feeder is empty, and, when the scanner doesn't say (or says something we don't know), the
+    feeder first and then the glass. `sources` is what the scanner has (read_capabilities);
+    when it lists neither, both are tried."""
+    has = [s for s in SOURCES if s in sources] or list(SOURCES)
+    if feeder == "jam":
+        raise ScanError("The scanner's feeder is jammed. Clear it, then try again.", "jam")
+    if feeder == "loaded":
+        order = ["Feeder", "Platen"]
+    elif feeder == "empty":
+        order = ["Platen", "Feeder"]
+    else:
+        order = ["Feeder", "Platen"]
+    order = [s for s in order if s in has]
+    # Told it's empty, or told it's loaded: trust that (and the other is only a last resort for
+    # a scanner that has just the one).
+    return order if feeder not in ("loaded", "empty") else order[:1]
 
 
 def settings_xml(source: str, color: str, dpi: int, paper: str) -> bytes:
@@ -262,6 +290,30 @@ class Scanner:
             raise ScanError("No pages came through. Put the pages in the feeder, or one on the "
                             "glass, then try again.", "empty")
         return pages
+
+    async def scan_from(self, order: list[str], color: str, dpi: int, paper, on_page=None,
+                        limit: int = MAX_PAGES) -> tuple[str, list[bytes]]:
+        """Scan from the first source in `order` (source_order) that gives pages: (source,
+        pages). The next is tried only when one gave nothing at all and said so (empty, refused,
+        or stopped before a page); a busy or silent scanner, or one that stopped part way, isn't
+        tried again. `paper` is a paper name, or a function of the source giving one."""
+        for at, source in enumerate(order):
+            arrived = [0]
+
+            def seen(count, source=source):
+                arrived[0] = count
+                if on_page:
+                    on_page(count)
+
+            size = paper(source) if callable(paper) else paper
+            try:
+                return source, await self.scan(source, color, dpi, size, seen, limit)
+            except ScanError as err:
+                last = at == len(order) - 1
+                if last or arrived[0] or err.code not in ("empty", "refused", "stopped"):
+                    raise
+        raise ScanError("No pages came through. Put the pages in the feeder, or one on the "
+                        "glass, then try again.", "empty")
 
 
 # ---------------------------------------------------------------- JPEG pages into one PDF
