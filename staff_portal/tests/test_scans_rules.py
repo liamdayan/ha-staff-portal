@@ -314,3 +314,36 @@ def test_a_page_preview_is_a_smaller_jpeg_of_the_page():
     assert escl.jpeg_size(escl.page_preview(page_jpeg(2, gray=True), side=400))[2] == 1
     with pytest.raises(escl.ScanError):
         escl.page_preview(b"<html>not a picture</html>")
+
+
+def test_a_brother_saying_no_more_pages_too_soon_is_asked_again():
+    async def scenario():
+        async with FakeScanner(feeder=3) as fake:
+            fake.early_404 = 2
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                pages = await scanner.scan("Feeder", "color", 200, "letter")
+            assert len(pages) == 3 and not scanner.feeder_left and fake.feeder == 0
+            assert "the scanner's record of the job: JobState=Completed, ImagesCompleted=3" in "\n".join(scanner.trail)
+    run(scenario())
+
+
+def test_a_scanner_that_leaves_the_paper_in_its_feeder_is_caught():
+    async def scenario():
+        async with FakeScanner(feeder=3) as fake:
+            fake.ignores_feeder = True      # scans the glass instead, as the Brother was seen to
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                pages = await scanner.scan("Feeder", "color", 200, "letter")
+            assert len(pages) == 1 and scanner.feeder_left and fake.feeder == 3
+            assert "didn't take it" in "\n".join(scanner.trail)
+    run(scenario())
+
+
+def test_a_jobs_record_in_the_scanners_status():
+    raw = (b'<s:ScannerStatus xmlns:s="x" xmlns:p="y"><s:Jobs><s:JobInfo><p:JobUri>/eSCL/ScanJobs/a1</p:JobUri>'
+           b'<p:JobState>Aborted</p:JobState><p:JobStateReasons><p:JobStateReason>AdfEmpty</p:JobStateReason>'
+           b'</p:JobStateReasons></s:JobInfo><s:JobInfo><p:JobUri>/eSCL/ScanJobs/b2</p:JobUri>'
+           b'<p:JobState>Completed</p:JobState></s:JobInfo></s:Jobs></s:ScannerStatus>')
+    assert escl.job_info(raw, "/eSCL/ScanJobs/a1") == "JobState=Aborted, JobStateReason=AdfEmpty"
+    assert escl.job_info(raw, "/eSCL/ScanJobs/zz") == "" and escl.job_info(b"nonsense", "/x") == ""

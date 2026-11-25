@@ -2432,10 +2432,13 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
                 return "letter" if source == "Platen" and option["paper"] == "legal" else option["paper"]
 
             room = escl.MAX_PAGES - len(job["pages"])
-            _, pages = await scanner.scan_from(order, option["color"], scans.QUALITY[option["quality"]],
-                                               paper, on_page=lambda n: job.update(arriving=n), limit=room)
+            source, pages = await scanner.scan_from(order, option["color"], scans.QUALITY[option["quality"]],
+                                                    paper, on_page=lambda n: job.update(arriving=n), limit=room)
         job["pages"].extend(pages)
         job["message"] = ""
+        if source == "Feeder" and scanner.feeder_left:
+            job["message"] = ("The scanner left the pages in its feeder, so these may not be them. "
+                              "Check the pages below. If they're blank, tell a manager.")
         if sum(len(p) for p in job["pages"]) > SCAN_MAX_BYTES:
             del job["pages"][-len(pages):]
             job["message"] = "That's too much for one file. Save what you have, then scan the rest."
@@ -2446,6 +2449,7 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
         job["message"] = "The scan didn't work. Try again."
     finally:
         if scanner is not None:
+            log_scanner_capabilities(scanner.raw.get("capabilities"))
             log.info("Scan to %s: %s from the %s%s\n  %s", job["label"],
                      plural_text(len(job["pages"]), "page", "pages") + " in hand",
                      {"Feeder": "feeder", "Platen": "glass"}.get(job["source"], "scanner"),
@@ -2453,6 +2457,23 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
         if scanner_user[0] == job["staff_id"]:
             scanner_user[0] = None
         job.update(state="ready" if job["pages"] else "failed", arriving=0, touched=time.time())
+
+
+scan_capabilities_logged: list[str | None] = [None]   # a hash of the last ones logged
+
+
+def log_scanner_capabilities(raw: bytes | None) -> None:
+    """What the scanner says it can do, as it said it, in the add-on's log: once each time the
+    add-on starts, and again if it changes. It's what's needed to look into a scanner that
+    doesn't scan the way it's asked to."""
+    if not raw:
+        return
+    digest = hashlib.sha256(raw).hexdigest()
+    if scan_capabilities_logged[0] == digest:
+        return
+    scan_capabilities_logged[0] = digest
+    log.info("The scanner's capabilities, as it sent them (logged once after each start):\n%s",
+             raw[:escl.MAX_XML].decode("utf-8", "replace").strip())
 
 
 def start_scan(job: dict, option: dict) -> None:

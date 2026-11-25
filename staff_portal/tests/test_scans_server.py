@@ -233,6 +233,30 @@ def test_the_pages_can_be_looked_over_before_saving(world, caplog):
     asyncio.run(scenario())
 
 
+def test_a_scanner_that_scans_its_glass_when_asked_for_the_feeder_is_said_plainly(world, caplog):
+    p = world
+    invoices = option(p)
+
+    async def scenario():
+        async with Set(p, feeder=3) as s, p:
+            s.scanner.ignores_feeder = True
+            main.scan_capabilities_logged[0] = None
+            caplog.set_level("INFO", logger=main.log.name)
+            ana = await p.sign_in(p.ana)
+            await p.call("POST", f"/api/scans/{invoices}/scan", ana)
+            job = await until(p, ana, ready)
+            assert job["pages"] == 1 and "left the pages in its feeder" in job["message"]
+            said = [r.getMessage() for r in caplog.records]
+            assert sum("The scanner's capabilities" in m for m in said) == 1
+            assert any("<pwg:MakeAndModel>Brother MFC-J4345DW</pwg:MakeAndModel>" in m for m in said)
+            assert any("didn't take it" in m and "record of the job" in m for m in said)
+            # The capabilities aren't logged again for the next scan.
+            await p.call("POST", "/api/scans/job/more", ana)
+            await until(p, ana, lambda j: ready(j) and j["pages"] == 2)
+            assert sum("The scanner's capabilities" in r.getMessage() for r in caplog.records) == 1
+    asyncio.run(scenario())
+
+
 def test_the_glass_takes_a_page_at_a_time_into_one_file(world):
     p = world
     ids = option(p, "Guest IDs", "ID", format="{prefix}-{date}-{first}", color="gray", quality="high", paper="legal")

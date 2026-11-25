@@ -40,6 +40,7 @@ MAX_SIDE = 12000                  # pixels: 14 inches at 600 dpi is 8400
 REQUEST_SECONDS = 20              # an ordinary answer
 PAGE_SECONDS = 120                # one page at 600 dpi can take a minute
 NOT_READY_TRIES = 40              # 503s before a page: about a minute
+FEEDER_RECHECKS = 3               # "no more pages" while the feeder still has paper: ask again
 VERSION_RE = re.compile(r"^\d\.\d{1,2}$")
 PREVIEW_SIDE = 1100               # pixels: the longest side of a page's preview
 ADDRESS_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.?$")
@@ -204,6 +205,10 @@ class Scanner:
         self.session = session
         self.version = "2.6"        # the scanner's own, once capabilities() has asked
         self.trail: list[str] = []
+        self.raw: dict[str, bytes] = {}   # its last capabilities and status, as it sent them
+        # After a feeder scan: True when the scanner still says its feeder has paper, which means
+        # it didn't take the pages (and may have scanned its glass instead).
+        self.feeder_left = False
 
     def _note(self, text: str) -> None:
         if len(self.trail) < 200:
@@ -238,6 +243,7 @@ class Scanner:
         if status != 200:
             raise ScanError("That address answered, but not as a scanner. Check the address, and "
                             "that scanning over the network (AirPrint or eSCL) is turned on.", "refused")
+        self.raw["capabilities"] = body
         found = read_capabilities(body)
         self.version = found["version"] or self.version
         return found
@@ -246,6 +252,7 @@ class Scanner:
         status, body = await self._get("/eSCL/ScannerStatus", MAX_XML)
         if status != 200:
             raise ScanError(NO_ANSWER, "offline")
+        self.raw["status"] = body
         found = read_status(body)
         self._note(f"  status {found['state']}, feeder {found['adf'] or '(not said)'}")
         return found
@@ -302,12 +309,17 @@ class Scanner:
     async def scan(self, source: str, color: str, dpi: int, paper: str, on_page=None,
                    limit: int = MAX_PAGES) -> list[bytes]:
         """Scan everything in the feeder, or the one page on the glass. on_page(count) is called
-        as each page arrives. Raises ScanError; a feeder that turns out empty is code "empty"."""
+        as each page arrives. Raises ScanError; a feeder that turns out empty is code "empty".
+        After a feeder scan, feeder_left says whether the scanner still has paper in its feeder."""
+        self.feeder_left = False
         job = await self.start(source, color, dpi, paper)
         pages: list[bytes] = []
         try:
             while True:
+                began = asyncio.get_running_loop().time()
                 page = await self.next_page(job)
+                if page is None and source == "Feeder":
+                    page = await self._feeder_page_after_no_more(job)
                 if page is None:
                     break
                 pages.append(page)
@@ -318,15 +330,49 @@ class Scanner:
                 if len(pages) >= limit:
                     raise ScanError(f"That's more than {limit} pages. Scan it in smaller "
                                     "batches.", "stopped")
+                # Brother scanners can say "no more pages" when the next page is asked for
+                # straight after one (sane-airscan waits likewise): a short pause first.
+                await asyncio.sleep(min((asyncio.get_running_loop().time() - began) * 0.5, 1.0))
         except BaseException:
             await self.cancel(job)
             raise
         if source == "Platen":
             await self.cancel(job)   # the one page is in hand: free the scanner now
+        await self._note_job(job)
         if not pages:
             raise ScanError("No pages came through. Put the pages in the feeder, or one on the "
                             "glass, then try again.", "empty")
         return pages
+
+    async def _feeder_page_after_no_more(self, job: str) -> bytes | None:
+        """The scanner said a feeder job has no more pages. If it also says its feeder still has
+        paper, it may have said so too soon (Brother's do): wait and ask again, a few times. If
+        the paper is still there after that, feeder_left is set."""
+        for _ in range(FEEDER_RECHECKS):
+            try:
+                loaded = (await self.status())["feeder"] == "loaded"
+            except ScanError:
+                return None
+            if not loaded:
+                return None
+            await asyncio.sleep(1.0)
+            page = await self.next_page(job)
+            if page is not None:
+                return page
+        self.feeder_left = True
+        self._note("  the feeder still has paper after the scan: the scanner didn't take it")
+        return None
+
+    async def _note_job(self, job: str) -> None:
+        """What the scanner's status says of this job now, for the log (nothing if it can't be
+        had: this is only to know more)."""
+        try:
+            status, body = await self._get("/eSCL/ScannerStatus", MAX_XML)
+            said = job_info(body, job) if status == 200 else ""
+        except ScanError:
+            return
+        if said:
+            self._note(f"  the scanner's record of the job: {said}")
 
     async def scan_from(self, order: list[str], color: str, dpi: int, paper, on_page=None,
                         limit: int = MAX_PAGES) -> tuple[str, list[bytes]]:
@@ -351,6 +397,25 @@ class Scanner:
                     raise
         raise ScanError("No pages came through. Put the pages in the feeder, or one on the "
                         "glass, then try again.", "empty")
+
+
+def job_info(raw: bytes, job: str) -> str:
+    """One job's entry in a ScannerStatus, as "JobState=Completed, ImagesCompleted=1, ...":
+    every named value in the JobInfo whose JobUri ends with the job's path. "" if not there."""
+    try:
+        root = _xml(raw)
+    except ScanError:
+        return ""
+    def local(tag) -> str:
+        return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+    for info in (e for e in root.iter() if local(e.tag) == "JobInfo"):
+        uri = next(((e.text or "").strip() for e in info.iter() if local(e.tag) == "JobUri"), "")
+        if uri and uri.rstrip("/").endswith(job):
+            parts = [f"{local(e.tag)}={(e.text or '').strip()[:60]}" for e in info.iter()
+                     if e is not info and local(e.tag) not in ("JobUri", "JobUuid")
+                     and (e.text or "").strip()]
+            return ", ".join(parts)[:400]
+    return ""
 
 
 def _said(body: bytes) -> str:

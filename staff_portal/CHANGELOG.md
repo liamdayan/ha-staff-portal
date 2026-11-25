@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.32
+
+**Scans: a scanner that leaves the pages in its feeder is caught**
+- The Brother MFC-J4345DW was seen to take a feeder scan, scan its (empty) glass instead and
+  leave the paper where it was. After a feeder scan, Scans now asks the scanner whether there's
+  still paper in its feeder. If there is, staff are told the pages may not be theirs and to check
+  the preview, instead of saving a blank page without knowing.
+- Brother scanners can say "no more pages" too soon when the next page is asked for straight
+  away. Scans now waits a moment between feeder pages and, while the feeder still has paper,
+  asks again.
+- More in the add-on's log, to find out why the feeder isn't used: the scanner's capabilities as
+  it sent them (once after each start), and its own record of each scan job.
+
 ## 0.12.31
 
 **Scans: look the pages over before saving**

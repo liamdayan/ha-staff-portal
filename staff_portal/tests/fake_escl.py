@@ -10,6 +10,10 @@ a small web server on this computer. Nothing here talks to a real scanner.
         scanner.jam_after   # a number: the feeder jams after that many pages of a job
         scanner.pieces      # a number: answers are sent that many bytes at a time, with a pause
                             # between (a real scanner's answer arrives over the network in pieces)
+        scanner.ignores_feeder  # True: a feeder job scans the glass and leaves the paper (as a
+                                # Brother MFC-J4345DW was seen to)
+        scanner.early_404   # a number: a feeder job says "no more pages" that many times after a
+                            # page, while paper is still waiting (Brother's do, asked too soon)
         scanner.adf_state   # "say" (the default): the status says whether the feeder has paper;
                             # None: it leaves the feeder out; any other text: it says that
 """
@@ -60,6 +64,10 @@ class FakeScanner:
         self.jam_after: int | None = None
         self.pieces = 0
         self.adf_state = "say"
+        self.ignores_feeder = False
+        self.early_404 = 0
+        self._early: dict[str, int] = {}
+        self._feeding: dict[str, bool] = {}   # jobs taking sheets off the feeder
         self.capabilities = CAPABILITIES
         self.page = None              # bytes to send as every page instead of a JPEG
         self._left: dict[str, int] = {}     # pages each job still has to give
@@ -102,6 +110,12 @@ class FakeScanner:
     async def _status(self, request):
         adf = ("ScannerAdfLoaded" if self.feeder else "ScannerAdfEmpty") if self.adf_state == "say" else self.adf_state
         adf = f"<scan:AdfState>{adf}</scan:AdfState>" if adf is not None else ""
+        jobs = "".join(f"<scan:JobInfo><pwg:JobUri>/eSCL/ScanJobs/{job}</pwg:JobUri><pwg:JobUuid>u</pwg:JobUuid>"
+                       f"<pwg:JobState>{'Processing' if left > 0 else 'Completed'}</pwg:JobState>"
+                       f"<pwg:ImagesCompleted>{self._given[job]}</pwg:ImagesCompleted>"
+                       f"<pwg:ImagesToTransfer>{max(left, 0)}</pwg:ImagesToTransfer></scan:JobInfo>"
+                       for job, left in self._left.items())
+        adf += f"<scan:Jobs>{jobs}</scan:Jobs>" if jobs else ""
         return web.Response(content_type="text/xml", text=f"""<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScannerStatus xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
 <pwg:Version>2.63</pwg:Version><pwg:State>{'Processing' if self.busy else 'Idle'}</pwg:State>
@@ -113,12 +127,11 @@ class FakeScanner:
         body = await request.text()
         self.jobs.append(body)
         job = f"job{len(self.jobs)}"
-        feeder = "<pwg:InputSource>Feeder</pwg:InputSource>" in body
+        feeder = "<pwg:InputSource>Feeder</pwg:InputSource>" in body and not self.ignores_feeder
         self._left[job] = self.feeder if feeder else (1 if self.glass else 0)
         self._given[job] = 0
         self._gray[job] = "Grayscale8" in body or "BlackAndWhite1" in body
-        if feeder:
-            self.feeder = 0
+        self._feeding[job] = feeder
         # A full address, as real scanners send: only its path should be used.
         return web.Response(status=201, headers={"Location": f"http://scanner.invalid/eSCL/ScanJobs/{job}"})
 
@@ -133,8 +146,13 @@ class FakeScanner:
             return web.Response(status=500)
         if self._left[job] <= 0:
             return web.Response(status=404)
+        if self._given[job] and self._early.get(job, 0) < self.early_404:
+            self._early[job] = self._early.get(job, 0) + 1
+            return web.Response(status=404)
         self._left[job] -= 1
         self._given[job] += 1
+        if self._feeding[job]:
+            self.feeder = max(self.feeder - 1, 0)   # a sheet comes off the feeder
         body = self.page if self.page is not None else page_jpeg(self._given[job], self._gray[job])
         return await self._send(request, body, "image/jpeg")
 
