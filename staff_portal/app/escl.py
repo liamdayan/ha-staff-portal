@@ -157,43 +157,32 @@ def source_order(sources: list[str], feeder: str | None) -> list[str]:
     return order if feeder not in ("loaded", "empty") else order[:1]
 
 
-def settings_xml(source: str, color: str, dpi: int, paper: str, version: str = "2.6") -> bytes:
-    """The scan request: one region the size of the paper, as JPEG pages. `version` is the eSCL
-    version the scanner said it speaks (read_capabilities).
+def settings_xml(source: str, color: str, dpi: int, paper: str) -> bytes:
+    """The scan request: one region the size of the paper, as JPEG pages.
 
-    The settings go in the order the eSCL specification lists them, which is the order Apple's
-    and Mopria's scanning send them in: some scanners read them in that order and pass over
-    what they didn't expect. The source is said twice, as pwg:InputSource (the specification's)
-    and as scan:InputSource (as Linux's scanning, SANE, also sends it): some scanners, Brother's
-    among them, have been seen to scan the glass when asked for the feeder the first way only.
-    A feeder scan says it's one-sided."""
+    Written exactly as sane-airscan (Linux's eSCL driver, which works with Brother's feeders)
+    writes it: the same elements in the same order, eSCL 2.0, no Intent, and all on one line
+    with no spaces between elements. A Brother MFC-J4345DW sent our earlier, indented request
+    took none of it: whatever the source, colour or resolution asked for, it scanned its glass
+    the same way every time."""
     if source not in SOURCES or color not in COLORS or paper not in PAPER or not 50 <= dpi <= 1200:
         raise ValueError("scan settings")
-    version = version if VERSION_RE.match(version or "") else "2.6"
     width, height = (round(side * 300) for side in PAPER[paper])
-    duplex = "\n  <scan:Duplex>false</scan:Duplex>" if source == "Feeder" else ""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<scan:ScanSettings xmlns:scan="{NS['scan']}" xmlns:pwg="{NS['pwg']}">
-  <pwg:Version>{version}</pwg:Version>
-  <scan:Intent>Document</scan:Intent>
-  <pwg:ScanRegions>
-    <pwg:ScanRegion>
-      <pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>
-      <pwg:XOffset>0</pwg:XOffset>
-      <pwg:YOffset>0</pwg:YOffset>
-      <pwg:Width>{width}</pwg:Width>
-      <pwg:Height>{height}</pwg:Height>
-    </pwg:ScanRegion>
-  </pwg:ScanRegions>
-  <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
-  <scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>
-  <pwg:InputSource>{source}</pwg:InputSource>
-  <scan:InputSource>{source}</scan:InputSource>
-  <scan:XResolution>{dpi}</scan:XResolution>
-  <scan:YResolution>{dpi}</scan:YResolution>
-  <scan:ColorMode>{COLORS[color]}</scan:ColorMode>{duplex}
-</scan:ScanSettings>
-""".encode()
+    duplex = "<scan:Duplex>false</scan:Duplex>" if source == "Feeder" else ""
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            f'<scan:ScanSettings xmlns:pwg="{NS["pwg"]}" xmlns:scan="{NS["scan"]}">'
+            "<pwg:Version>2.0</pwg:Version>"
+            "<pwg:ScanRegions><pwg:ScanRegion>"
+            "<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>"
+            "<pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset>"
+            f"<pwg:Width>{width}</pwg:Width><pwg:Height>{height}</pwg:Height>"
+            "</pwg:ScanRegion></pwg:ScanRegions>"
+            f"<pwg:InputSource>{source}</pwg:InputSource>"
+            f"<scan:ColorMode>{COLORS[color]}</scan:ColorMode>"
+            "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>"
+            "<scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>"
+            f"<scan:XResolution>{dpi}</scan:XResolution><scan:YResolution>{dpi}</scan:YResolution>"
+            f"{duplex}</scan:ScanSettings>").encode()
 
 
 class Scanner:
@@ -203,12 +192,14 @@ class Scanner:
     def __init__(self, address: str, session: aiohttp.ClientSession):
         self.base = address
         self.session = session
-        self.version = "2.6"        # the scanner's own, once capabilities() has asked
         self.trail: list[str] = []
         self.raw: dict[str, bytes] = {}   # its last capabilities and status, as it sent them
         # After a feeder scan: True when the scanner still says its feeder has paper, which means
         # it didn't take the pages (and may have scanned its glass instead).
         self.feeder_left = False
+        # After a scan: True when a page wasn't what was asked for (its colour, or its width for
+        # the paper and resolution), which means the scanner didn't use the request at all.
+        self.ignored = False
 
     def _note(self, text: str) -> None:
         if len(self.trail) < 200:
@@ -244,9 +235,7 @@ class Scanner:
             raise ScanError("That address answered, but not as a scanner. Check the address, and "
                             "that scanning over the network (AirPrint or eSCL) is turned on.", "refused")
         self.raw["capabilities"] = body
-        found = read_capabilities(body)
-        self.version = found["version"] or self.version
-        return found
+        return read_capabilities(body)
 
     async def status(self) -> dict:
         status, body = await self._get("/eSCL/ScannerStatus", MAX_XML)
@@ -261,7 +250,7 @@ class Scanner:
         """Start a scan. Returns the job's path on the scanner."""
         try:
             async with self.session.post(
-                    self.base + "/eSCL/ScanJobs", data=settings_xml(source, color, dpi, paper, self.version),
+                    self.base + "/eSCL/ScanJobs", data=settings_xml(source, color, dpi, paper),
                     headers={"Content-Type": "text/xml"}, allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=REQUEST_SECONDS)) as resp:
                 body = await resp.content.read(MAX_XML)
@@ -269,7 +258,7 @@ class Scanner:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             self._note(f"POST ScanJobs ({source}) -> no answer ({type(err).__name__})")
             raise ScanError(NO_ANSWER, "offline") from None
-        self._note(f"POST ScanJobs ({source}, {paper}, {dpi} dpi, {color}, eSCL {self.version}) -> {status}"
+        self._note(f"POST ScanJobs ({source}, {paper}, {dpi} dpi, {color}) -> {status}"
                    + (f" {_said(body)}" if status != 201 else ""))
         if status == 503:
             raise ScanError("The scanner is busy. Wait for it to finish, then try again.", "busy")
@@ -287,7 +276,10 @@ class Scanner:
         for _ in range(NOT_READY_TRIES):
             status, body = await self._get(job + "/NextDocument", MAX_PAGE_BYTES, PAGE_SECONDS)
             if status == 200:
-                jpeg_size(body)   # a JPEG of a sane size, or a ScanError
+                width, height, parts = jpeg_size(body)   # a JPEG of a sane size, or a ScanError
+                # Its size and colour say whether the scanner did as it was asked.
+                self._note(f"  that page is {width} x {height} pixels, "
+                           f"{ {1: 'grey or black and white', 3: 'colour', 4: 'colour (CMYK)'}[parts] }")
                 return body
             if status == 404:
                 return None
@@ -310,8 +302,9 @@ class Scanner:
                    limit: int = MAX_PAGES) -> list[bytes]:
         """Scan everything in the feeder, or the one page on the glass. on_page(count) is called
         as each page arrives. Raises ScanError; a feeder that turns out empty is code "empty".
-        After a feeder scan, feeder_left says whether the scanner still has paper in its feeder."""
-        self.feeder_left = False
+        After a feeder scan, feeder_left says whether the scanner still has paper in its feeder;
+        after any scan, ignored says whether its pages weren't what was asked for."""
+        self.feeder_left = self.ignored = False
         job = await self.start(source, color, dpi, paper)
         pages: list[bytes] = []
         try:
@@ -323,6 +316,7 @@ class Scanner:
                 if page is None:
                     break
                 pages.append(page)
+                self._check_page(page, color, dpi, paper)
                 if on_page:
                     on_page(len(pages))
                 if source == "Platen":
@@ -344,23 +338,46 @@ class Scanner:
                             "glass, then try again.", "empty")
         return pages
 
+    def _check_page(self, page: bytes, color: str, dpi: int, paper: str) -> None:
+        """Whether a page is what was asked for: grey (or black and white) or colour as asked,
+        and about as wide as the paper at that resolution (within a tenth). If not, the scanner
+        didn't use the request, and `ignored` is set."""
+        width, _, parts = jpeg_size(page)
+        wanted = round(PAPER[paper][0] * dpi)
+        if (parts == 1) != (color != "color") or abs(width - wanted) > wanted / 10:
+            if not self.ignored:
+                self._note(f"  that's not what was asked for (about {wanted} pixels wide, "
+                           f"{'colour' if color == 'color' else 'grey'}): the scanner didn't use "
+                           "these settings")
+            self.ignored = True
+
     async def _feeder_page_after_no_more(self, job: str) -> bytes | None:
-        """The scanner said a feeder job has no more pages. If it also says its feeder still has
-        paper, it may have said so too soon (Brother's do): wait and ask again, a few times. If
-        the paper is still there after that, feeder_left is set."""
+        """The scanner said a feeder job has no more pages. Brother's can say so too soon: while
+        its status says the feeder still has paper, or its record of the job says pages are
+        still waiting to be sent (ImagesToTransfer), wait and ask again, a few times. If paper is
+        still in the feeder after that, feeder_left is set."""
+        waiting = 0
         for _ in range(FEEDER_RECHECKS):
             try:
                 loaded = (await self.status())["feeder"] == "loaded"
             except ScanError:
                 return None
-            if not loaded:
+            record = job_record(self.raw.get("status", b""), job)
+            waiting = record.get("ImagesToTransfer", 0) if record.get("JobState") not in (
+                "Aborted", "Canceled") else 0
+            if not loaded and waiting <= 0:
                 return None
-            await asyncio.sleep(1.0)
+            if waiting > 0:
+                self._note(f"  the scanner says {waiting} more to send: asking again")
+            await asyncio.sleep(1.5)
             page = await self.next_page(job)
             if page is not None:
                 return page
-        self.feeder_left = True
-        self._note("  the feeder still has paper after the scan: the scanner didn't take it")
+        if loaded:
+            self.feeder_left = True
+            self._note("  the feeder still has paper after the scan: the scanner didn't take it")
+        if waiting > 0:
+            self._note(f"  the scanner still said {waiting} more to send, but didn't send it")
         return None
 
     async def _note_job(self, job: str) -> None:
@@ -399,23 +416,33 @@ class Scanner:
                         "glass, then try again.", "empty")
 
 
-def job_info(raw: bytes, job: str) -> str:
-    """One job's entry in a ScannerStatus, as "JobState=Completed, ImagesCompleted=1, ...":
-    every named value in the JobInfo whose JobUri ends with the job's path. "" if not there."""
+def job_record(raw: bytes, job: str) -> dict:
+    """One job's entry in a ScannerStatus: {name: value} for every named value in the JobInfo
+    whose JobUri ends with the job's path (numbers as ints), {} if it isn't there."""
     try:
         root = _xml(raw)
     except ScanError:
-        return ""
+        return {}
+
     def local(tag) -> str:
         return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
     for info in (e for e in root.iter() if local(e.tag) == "JobInfo"):
         uri = next(((e.text or "").strip() for e in info.iter() if local(e.tag) == "JobUri"), "")
         if uri and uri.rstrip("/").endswith(job):
-            parts = [f"{local(e.tag)}={(e.text or '').strip()[:60]}" for e in info.iter()
-                     if e is not info and local(e.tag) not in ("JobUri", "JobUuid")
-                     and (e.text or "").strip()]
-            return ", ".join(parts)[:400]
-    return ""
+            found = {}
+            for e in info.iter():
+                text = (e.text or "").strip()[:60]
+                if e is not info and text and local(e.tag) not in ("JobUri", "JobUuid"):
+                    found[local(e.tag)] = int(text) if text.isdigit() else text
+            return found
+    return {}
+
+
+def job_info(raw: bytes, job: str) -> str:
+    """One job's entry in a ScannerStatus, as "JobState=Completed, ImagesCompleted=1, ...", for
+    the log. "" if it isn't there."""
+    return ", ".join(f"{k}={v}" for k, v in job_record(raw, job).items())[:400]
 
 
 def _said(body: bytes) -> str:

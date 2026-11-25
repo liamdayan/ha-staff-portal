@@ -2436,7 +2436,14 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
                                                     paper, on_page=lambda n: job.update(arriving=n), limit=room)
         job["pages"].extend(pages)
         job["message"] = ""
-        if source == "Feeder" and scanner.feeder_left:
+        # The app says where pages came from only when the scanner did as it was asked.
+        if scanner.ignored:
+            job["source"] = None
+            job["message"] = ("The scanner didn't scan the way it was asked, so these may not be "
+                              "your pages (it may have scanned its glass instead of the feeder). "
+                              "Check the pages below. If they're blank, tell a manager.")
+        elif source == "Feeder" and scanner.feeder_left:
+            job["source"] = None
             job["message"] = ("The scanner left the pages in its feeder, so these may not be them. "
                               "Check the pages below. If they're blank, tell a manager.")
         if sum(len(p) for p in job["pages"]) > SCAN_MAX_BYTES:

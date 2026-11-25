@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.33
+
+**Scans: the scan request rewritten, and checked against what comes back**
+- The Brother MFC-J4345DW was ignoring the whole scan request, not just "use the feeder": a
+  colour scan and a grey one came back the same, from the glass, every time. The request is
+  now written exactly as Linux's scanner driver (sane-airscan) writes it, which works with
+  Brother feeders: the same settings in the same order, all on one line.
+- Each page is checked against what was asked for: colour or grey, and about the right width for
+  the paper and quality. When it doesn't match, staff are told the pages may not be theirs, and
+  the app no longer says they came from the feeder. Before, it said "from the feeder" whenever
+  the feeder was asked for, whatever the scanner did.
+- When the scanner says "no more pages" but its own record says pages are still waiting to be
+  sent, Scans waits and asks again.
+- The add-on's log notes each page's size in pixels and its colour.
+
 ## 0.12.32
 
 **Scans: a scanner that leaves the pages in its feeder is caught**

@@ -194,7 +194,7 @@ def test_an_answer_that_arrives_in_pieces_is_read_to_the_end():
                 scanner = escl.Scanner(fake.address, session)
                 assert (await scanner.capabilities())["model"] == "Brother MFC-J4345DW"
                 pages = await scanner.scan("Feeder", "color", 200, "letter")
-                assert pages == [page_jpeg(1), page_jpeg(2)]
+                assert pages == [page_jpeg(1, size=(1700, 2200)), page_jpeg(2, size=(1700, 2200))]
                 fake.capabilities = "<a>" + "x" * escl.MAX_XML + "</a>"   # too much is still refused
                 fake.pieces = 100000
                 with pytest.raises(escl.ScanError, match="more than expected"):
@@ -267,24 +267,26 @@ def test_pages_become_one_pdf_that_a_reader_opens():
         escl.pdf_from_jpegs([], 200)
 
 
-def test_the_scan_request_names_the_source_both_ways_in_the_specifications_order():
-    # Some Brother scanners scan the glass when asked for the feeder only as pwg:InputSource.
-    feeder = escl.settings_xml("Feeder", "gray", 200, "letter", "2.63").decode()
-    assert "<pwg:InputSource>Feeder</pwg:InputSource>" in feeder
-    assert "<scan:InputSource>Feeder</scan:InputSource>" in feeder
-    assert "<scan:Duplex>false</scan:Duplex>" in feeder and "<pwg:Version>2.63</pwg:Version>" in feeder
-    order = ["pwg:Version", "scan:Intent", "pwg:ScanRegions", "pwg:DocumentFormat>", "scan:DocumentFormatExt",
-             "pwg:InputSource", "scan:InputSource", "scan:XResolution", "scan:YResolution", "scan:ColorMode",
-             "scan:Duplex"]
+def test_the_scan_request_is_written_as_sane_airscan_writes_it():
+    # A Brother MFC-J4345DW ignored the whole of an indented request (source, colour and
+    # resolution alike): it's now one line, eSCL 2.0, in sane-airscan's order.
+    feeder = escl.settings_xml("Feeder", "gray", 200, "letter").decode()
+    assert "\n" not in feeder and "> <" not in feeder and "<pwg:Version>2.0</pwg:Version>" in feeder
+    order = ["pwg:Version", "pwg:ScanRegions", "pwg:ContentRegionUnits", "pwg:XOffset", "pwg:YOffset",
+             "pwg:Width", "pwg:Height", "pwg:InputSource", "scan:ColorMode", "pwg:DocumentFormat>",
+             "scan:DocumentFormatExt", "scan:XResolution", "scan:YResolution", "scan:Duplex"]
     assert [feeder.index("<" + tag) for tag in order] == sorted(feeder.index("<" + tag) for tag in order)
-    glass = escl.settings_xml("Platen", "color", 300, "a4", "nonsense").decode()
-    assert "<scan:InputSource>Platen</scan:InputSource>" in glass and "Duplex" not in glass
-    assert "<pwg:Version>2.6</pwg:Version>" in glass          # a version that isn't one: the default
-    ElementTree.fromstring(feeder.encode())
+    assert "<pwg:InputSource>Feeder</pwg:InputSource>" in feeder and "<scan:Duplex>false</scan:Duplex>" in feeder
+    assert "scan:InputSource" not in feeder and "Intent" not in feeder
+    glass = escl.settings_xml("Platen", "color", 300, "a4").decode()
+    assert "<pwg:InputSource>Platen</pwg:InputSource>" in glass and "Duplex" not in glass
+    root = ElementTree.fromstring(feeder.encode())
+    assert root.find("pwg:InputSource", escl.NS).text == "Feeder"
+    assert root.find("scan:ColorMode", escl.NS).text == "Grayscale8"
     ElementTree.fromstring(glass.encode())
 
 
-def test_the_scanner_is_asked_in_its_own_version_and_what_it_said_is_kept_for_the_log():
+def test_what_the_scanner_was_asked_and_said_is_kept_for_the_log():
     async def scenario():
         async with FakeScanner(feeder=2) as fake:
             async with aiohttp.ClientSession() as session:
@@ -292,10 +294,10 @@ def test_the_scanner_is_asked_in_its_own_version_and_what_it_said_is_kept_for_th
                 await scanner.capabilities()
                 await scanner.status()
                 await scanner.scan("Feeder", "color", 200, "letter")
-            assert "<pwg:Version>2.63</pwg:Version>" in fake.jobs[0]
             trail = "\n".join(scanner.trail)
-            assert "feeder ScannerAdfLoaded" in trail and "POST ScanJobs (Feeder, letter, 200 dpi" in trail
-            assert "-> 201" in trail and trail.count("NextDocument -> 200") == 2 and "NextDocument -> 404" in trail
+            assert "feeder ScannerAdfLoaded" in trail and "POST ScanJobs (Feeder, letter, 200 dpi, color) -> 201" in trail
+            assert trail.count("NextDocument -> 200") == 2 and "NextDocument -> 404" in trail
+            assert "that page is 1700 x 2200 pixels, colour" in trail and "not what was asked" not in trail
             fake.busy = True
             async with aiohttp.ClientSession() as session:
                 scanner = escl.Scanner(fake.address, session)
@@ -331,7 +333,7 @@ def test_a_brother_saying_no_more_pages_too_soon_is_asked_again():
 def test_a_scanner_that_leaves_the_paper_in_its_feeder_is_caught():
     async def scenario():
         async with FakeScanner(feeder=3) as fake:
-            fake.ignores_feeder = True      # scans the glass instead, as the Brother was seen to
+            fake.ignores_request = True      # scans the glass instead, as the Brother was seen to
             async with aiohttp.ClientSession() as session:
                 scanner = escl.Scanner(fake.address, session)
                 pages = await scanner.scan("Feeder", "color", 200, "letter")
@@ -346,4 +348,40 @@ def test_a_jobs_record_in_the_scanners_status():
            b'</p:JobStateReasons></s:JobInfo><s:JobInfo><p:JobUri>/eSCL/ScanJobs/b2</p:JobUri>'
            b'<p:JobState>Completed</p:JobState></s:JobInfo></s:Jobs></s:ScannerStatus>')
     assert escl.job_info(raw, "/eSCL/ScanJobs/a1") == "JobState=Aborted, JobStateReason=AdfEmpty"
+    assert escl.job_record(raw, "/eSCL/ScanJobs/b2") == {"JobState": "Completed"}
     assert escl.job_info(raw, "/eSCL/ScanJobs/zz") == "" and escl.job_info(b"nonsense", "/x") == ""
+
+
+def test_pages_the_scanner_still_has_to_send_are_asked_for_after_no_more():
+    # The Brother MFC-J4345DW: the feeder reads empty after a job (every sheet taken in), it says
+    # "no more pages" after the first, and its record of the job still has pages to send.
+    async def scenario():
+        async with FakeScanner(feeder=3) as fake:
+            fake.pulls_all, fake.early_404 = True, 2
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                pages = await scanner.scan("Feeder", "color", 200, "letter")
+            trail = "\n".join(scanner.trail)
+            assert len(pages) == 3 and not scanner.feeder_left
+            assert "the scanner says 2 more to send: asking again" in trail
+            assert "ImagesToTransfer=0" in trail and "didn't send it" not in trail
+    run(scenario())
+
+
+def test_a_scanner_that_ignores_the_request_is_caught_by_its_pages():
+    async def scenario():
+        async with FakeScanner(feeder=0) as fake:
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                await scanner.scan("Platen", "gray", 200, "letter")
+                assert not scanner.ignored
+                fake.ignores_request = True          # colour at 300 dpi, whatever's asked
+                await scanner.scan("Platen", "gray", 200, "letter")
+                assert scanner.ignored
+                assert "not what was asked for (about 1700 pixels wide, grey)" in "\n".join(scanner.trail)
+                await scanner.scan("Platen", "color", 300, "letter")   # what it does anyway
+                assert not scanner.ignored
+                fake.ignores_request, fake.page_size = False, (1650, 2150)   # a little off: fine
+                await scanner.scan("Platen", "color", 200, "letter")
+                assert not scanner.ignored
+    run(scenario())

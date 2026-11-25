@@ -239,17 +239,18 @@ def test_a_scanner_that_scans_its_glass_when_asked_for_the_feeder_is_said_plainl
 
     async def scenario():
         async with Set(p, feeder=3) as s, p:
-            s.scanner.ignores_feeder = True
+            s.scanner.ignores_request = True
             main.scan_capabilities_logged[0] = None
             caplog.set_level("INFO", logger=main.log.name)
             ana = await p.sign_in(p.ana)
             await p.call("POST", f"/api/scans/{invoices}/scan", ana)
             job = await until(p, ana, ready)
-            assert job["pages"] == 1 and "left the pages in its feeder" in job["message"]
+            assert job["pages"] == 1 and "didn't scan the way it was asked" in job["message"]
+            assert job["source"] is None        # the app doesn't say "from the feeder"
             said = [r.getMessage() for r in caplog.records]
             assert sum("The scanner's capabilities" in m for m in said) == 1
             assert any("<pwg:MakeAndModel>Brother MFC-J4345DW</pwg:MakeAndModel>" in m for m in said)
-            assert any("didn't take it" in m and "record of the job" in m for m in said)
+            assert any("not what was asked for" in m and "record of the job" in m for m in said)
             # The capabilities aren't logged again for the next scan.
             await p.call("POST", "/api/scans/job/more", ana)
             await until(p, ana, lambda j: ready(j) and j["pages"] == 2)

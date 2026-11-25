@@ -10,16 +10,21 @@ a small web server on this computer. Nothing here talks to a real scanner.
         scanner.jam_after   # a number: the feeder jams after that many pages of a job
         scanner.pieces      # a number: answers are sent that many bytes at a time, with a pause
                             # between (a real scanner's answer arrives over the network in pieces)
-        scanner.ignores_feeder  # True: a feeder job scans the glass and leaves the paper (as a
-                                # Brother MFC-J4345DW was seen to)
+        scanner.ignores_request  # True: the request is ignored, as a Brother MFC-J4345DW was seen
+                                 # to: a job scans the glass, in colour at 300 dpi, whatever it asked
+        scanner.page_size   # pages are the size asked for (paper width x resolution) unless this
+                            # is set to (width, height) in pixels
         scanner.early_404   # a number: a feeder job says "no more pages" that many times after a
                             # page, while paper is still waiting (Brother's do, asked too soon)
+        scanner.pulls_all   # True: a feeder job takes every sheet in at once (the feeder reads
+                            # empty straight away), and its record counts what's still to send
         scanner.adf_state   # "say" (the default): the status says whether the feeder has paper;
                             # None: it leaves the feeder out; any other text: it says that
 """
 
 import asyncio
 import io
+import re
 
 from aiohttp import web
 from PIL import Image
@@ -64,7 +69,10 @@ class FakeScanner:
         self.jam_after: int | None = None
         self.pieces = 0
         self.adf_state = "say"
-        self.ignores_feeder = False
+        self.ignores_request = False
+        self.page_size = None
+        self._size: dict[str, tuple[int, int]] = {}
+        self.pulls_all = False
         self.early_404 = 0
         self._early: dict[str, int] = {}
         self._feeding: dict[str, bool] = {}   # jobs taking sheets off the feeder
@@ -127,11 +135,17 @@ class FakeScanner:
         body = await request.text()
         self.jobs.append(body)
         job = f"job{len(self.jobs)}"
-        feeder = "<pwg:InputSource>Feeder</pwg:InputSource>" in body and not self.ignores_feeder
+        feeder = "<pwg:InputSource>Feeder</pwg:InputSource>" in body and not self.ignores_request
         self._left[job] = self.feeder if feeder else (1 if self.glass else 0)
         self._given[job] = 0
-        self._gray[job] = "Grayscale8" in body or "BlackAndWhite1" in body
+        self._gray[job] = ("Grayscale8" in body or "BlackAndWhite1" in body) and not self.ignores_request
+        number = lambda tag: int(re.search(f"<{tag}>(\\d+)</{tag}>", body).group(1))
+        dpi = 300 if self.ignores_request else number("scan:XResolution")
+        width, height = (2550, 3300) if self.ignores_request else (number("pwg:Width"), number("pwg:Height"))
+        self._size[job] = (width * dpi // 300, height * dpi // 300)
         self._feeding[job] = feeder
+        if feeder and self.pulls_all:
+            self.feeder = 0
         # A full address, as real scanners send: only its path should be used.
         return web.Response(status=201, headers={"Location": f"http://scanner.invalid/eSCL/ScanJobs/{job}"})
 
@@ -153,7 +167,8 @@ class FakeScanner:
         self._given[job] += 1
         if self._feeding[job]:
             self.feeder = max(self.feeder - 1, 0)   # a sheet comes off the feeder
-        body = self.page if self.page is not None else page_jpeg(self._given[job], self._gray[job])
+        body = self.page if self.page is not None else page_jpeg(self._given[job], self._gray[job],
+                                                                   self.page_size or self._size[job])
         return await self._send(request, body, "image/jpeg")
 
     async def _delete(self, request):
