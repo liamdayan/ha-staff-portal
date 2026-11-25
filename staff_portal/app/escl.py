@@ -9,6 +9,7 @@ speak, Mopria-certified ones included): plain HTTP on the scanner itself.
 
 Pages are asked for as JPEG, one a request, and put into one PDF here (pdf_from_jpegs) without
 re-compressing them, so it doesn't matter how the scanner itself would have made a PDF.
+page_preview makes the smaller copy of a page that staff look over before saving.
 
 The scanner is a device on the owner's own network, at the address they typed. Still, nothing it
 sends is trusted: answers are size-limited, its XML is refused if it defines entities, redirects
@@ -39,6 +40,8 @@ MAX_SIDE = 12000                  # pixels: 14 inches at 600 dpi is 8400
 REQUEST_SECONDS = 20              # an ordinary answer
 PAGE_SECONDS = 120                # one page at 600 dpi can take a minute
 NOT_READY_TRIES = 40              # 503s before a page: about a minute
+VERSION_RE = re.compile(r"^\d\.\d{1,2}$")
+PREVIEW_SIDE = 1100               # pixels: the longest side of a page's preview
 ADDRESS_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.?$")
 
 NO_ANSWER = "The scanner isn't answering. Check that it's turned on and on the network."
@@ -91,8 +94,9 @@ def _texts(node, path: str) -> list[str]:
 
 
 def read_capabilities(raw: bytes) -> dict:
-    """What a scanner says it can do: {model, sources: ["Feeder", "Platen"], colors: ["color",
-    "gray", "bw"], resolutions: [100, 200, ...], jpeg: bool, feeder_sheets}."""
+    """What a scanner says it can do: {model, version (of eSCL, "2.63"; "" when not said or odd),
+    sources: ["Feeder", "Platen"], colors: ["color", "gray", "bw"], resolutions: [100, 200, ...],
+    jpeg: bool, feeder_sheets}."""
     root = _xml(raw)
     sources = []
     if root.find("scan:Platen", NS) is not None:
@@ -103,7 +107,9 @@ def read_capabilities(raw: bytes) -> dict:
     resolutions = sorted({int(v) for v in _texts(root, ".//scan:XResolution") if v.isdigit()
                           and 50 <= int(v) <= 1200})
     sheets = _texts(root, ".//scan:FeederCapacity")
+    version = (_texts(root, "pwg:Version") or [""])[0]
     return {"model": (_texts(root, "pwg:MakeAndModel") or [""])[0][:80],
+            "version": version if VERSION_RE.match(version) else "",
             "sources": sources,
             "colors": [name for name, mode in COLORS.items() if mode in modes],
             "resolutions": resolutions,
@@ -150,14 +156,24 @@ def source_order(sources: list[str], feeder: str | None) -> list[str]:
     return order if feeder not in ("loaded", "empty") else order[:1]
 
 
-def settings_xml(source: str, color: str, dpi: int, paper: str) -> bytes:
-    """The scan request: one region the size of the paper, as JPEG pages."""
+def settings_xml(source: str, color: str, dpi: int, paper: str, version: str = "2.6") -> bytes:
+    """The scan request: one region the size of the paper, as JPEG pages. `version` is the eSCL
+    version the scanner said it speaks (read_capabilities).
+
+    The settings go in the order the eSCL specification lists them, which is the order Apple's
+    and Mopria's scanning send them in: some scanners read them in that order and pass over
+    what they didn't expect. The source is said twice, as pwg:InputSource (the specification's)
+    and as scan:InputSource (as Linux's scanning, SANE, also sends it): some scanners, Brother's
+    among them, have been seen to scan the glass when asked for the feeder the first way only.
+    A feeder scan says it's one-sided."""
     if source not in SOURCES or color not in COLORS or paper not in PAPER or not 50 <= dpi <= 1200:
         raise ValueError("scan settings")
+    version = version if VERSION_RE.match(version or "") else "2.6"
     width, height = (round(side * 300) for side in PAPER[paper])
+    duplex = "\n  <scan:Duplex>false</scan:Duplex>" if source == "Feeder" else ""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScanSettings xmlns:scan="{NS['scan']}" xmlns:pwg="{NS['pwg']}">
-  <pwg:Version>2.6</pwg:Version>
+  <pwg:Version>{version}</pwg:Version>
   <scan:Intent>Document</scan:Intent>
   <pwg:ScanRegions>
     <pwg:ScanRegion>
@@ -168,22 +184,30 @@ def settings_xml(source: str, color: str, dpi: int, paper: str) -> bytes:
       <pwg:Height>{height}</pwg:Height>
     </pwg:ScanRegion>
   </pwg:ScanRegions>
-  <pwg:InputSource>{source}</pwg:InputSource>
-  <scan:ColorMode>{COLORS[color]}</scan:ColorMode>
-  <scan:XResolution>{dpi}</scan:XResolution>
-  <scan:YResolution>{dpi}</scan:YResolution>
   <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
   <scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>
+  <pwg:InputSource>{source}</pwg:InputSource>
+  <scan:InputSource>{source}</scan:InputSource>
+  <scan:XResolution>{dpi}</scan:XResolution>
+  <scan:YResolution>{dpi}</scan:YResolution>
+  <scan:ColorMode>{COLORS[color]}</scan:ColorMode>{duplex}
 </scan:ScanSettings>
 """.encode()
 
 
 class Scanner:
-    """One scanner at an address from clean_address()."""
+    """One scanner at an address from clean_address(). `trail` is what was asked of it and how
+    it answered, for the add-on's log when a scan doesn't do what was expected."""
 
     def __init__(self, address: str, session: aiohttp.ClientSession):
         self.base = address
         self.session = session
+        self.version = "2.6"        # the scanner's own, once capabilities() has asked
+        self.trail: list[str] = []
+
+    def _note(self, text: str) -> None:
+        if len(self.trail) < 200:
+            self.trail.append(text)
 
     async def _get(self, path: str, limit: int, seconds: float = REQUEST_SECONDS) -> tuple[int, bytes]:
         try:
@@ -198,10 +222,15 @@ class Scanner:
                         break
                     parts.append(piece)
                     size += len(piece)
+                body = b"".join(parts)
+                if not (path.endswith("/NextDocument") and resp.status == 503):   # "not yet": many
+                    said = f"({size} bytes)" if resp.status == 200 else _said(body)
+                    self._note(f"GET {path.rsplit('/', 1)[-1]} -> {resp.status} {said}")
                 if size > limit:
                     raise ScanError("The scanner sent more than expected. Try again.")
-                return resp.status, b"".join(parts)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                return resp.status, body
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            self._note(f"GET {path.rsplit('/', 1)[-1]} -> no answer ({type(err).__name__})")
             raise ScanError(NO_ANSWER, "offline") from None
 
     async def capabilities(self) -> dict:
@@ -209,25 +238,32 @@ class Scanner:
         if status != 200:
             raise ScanError("That address answered, but not as a scanner. Check the address, and "
                             "that scanning over the network (AirPrint or eSCL) is turned on.", "refused")
-        return read_capabilities(body)
+        found = read_capabilities(body)
+        self.version = found["version"] or self.version
+        return found
 
     async def status(self) -> dict:
         status, body = await self._get("/eSCL/ScannerStatus", MAX_XML)
         if status != 200:
             raise ScanError(NO_ANSWER, "offline")
-        return read_status(body)
+        found = read_status(body)
+        self._note(f"  status {found['state']}, feeder {found['adf'] or '(not said)'}")
+        return found
 
     async def start(self, source: str, color: str, dpi: int, paper: str) -> str:
         """Start a scan. Returns the job's path on the scanner."""
         try:
             async with self.session.post(
-                    self.base + "/eSCL/ScanJobs", data=settings_xml(source, color, dpi, paper),
+                    self.base + "/eSCL/ScanJobs", data=settings_xml(source, color, dpi, paper, self.version),
                     headers={"Content-Type": "text/xml"}, allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=REQUEST_SECONDS)) as resp:
-                await resp.content.read(MAX_XML)
+                body = await resp.content.read(MAX_XML)
                 status, where = resp.status, resp.headers.get("Location", "")
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            self._note(f"POST ScanJobs ({source}) -> no answer ({type(err).__name__})")
             raise ScanError(NO_ANSWER, "offline") from None
+        self._note(f"POST ScanJobs ({source}, {paper}, {dpi} dpi, {color}, eSCL {self.version}) -> {status}"
+                   + (f" {_said(body)}" if status != 201 else ""))
         if status == 503:
             raise ScanError("The scanner is busy. Wait for it to finish, then try again.", "busy")
         if status == 409:
@@ -249,6 +285,7 @@ class Scanner:
             if status == 404:
                 return None
             if status != 503:
+                self._note(f"  that's {status} for a page: stopped")
                 raise ScanError("The scan stopped part way. Check the scanner for a paper jam, "
                                 "then try again.", "stopped")
             await asyncio.sleep(1.5)
@@ -314,6 +351,12 @@ class Scanner:
                     raise
         raise ScanError("No pages came through. Put the pages in the feeder, or one on the "
                         "glass, then try again.", "empty")
+
+
+def _said(body: bytes) -> str:
+    """The start of a scanner's answer, as text fit for a log line."""
+    text = " ".join(body[:300].decode("utf-8", "replace").split())
+    return repr(text[:160]) if text else "(empty)"
 
 
 # ---------------------------------------------------------------- JPEG pages into one PDF
@@ -386,4 +429,19 @@ def pdf_from_jpegs(pages: list[bytes], dpi: int) -> bytes:
     for offset in offsets:
         out.write(f"{offset:010d} 00000 n \n".encode())
     out.write(f"trailer\n<< /Size {len(offsets) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return out.getvalue()
+
+
+def page_preview(jpeg: bytes, side: int = PREVIEW_SIDE) -> bytes:
+    """A smaller copy of a scanned page (a JPEG, its longest side at most `side` pixels), for
+    looking it over before it's saved. The page itself is never changed."""
+    from PIL import Image   # only here: the rest of this file needs nothing outside aiohttp
+
+    jpeg_size(jpeg)          # a scanned page, of a sane size, or a ScanError
+    with Image.open(io.BytesIO(jpeg)) as image:
+        image.draft("RGB", (side, side))     # decode at a fraction of the size: much quicker
+        small = image.convert("L" if image.mode in ("L", "1") else "RGB")
+    small.thumbnail((side, side))
+    out = io.BytesIO()
+    small.save(out, "JPEG", quality=72, optimize=True)
     return out.getvalue()

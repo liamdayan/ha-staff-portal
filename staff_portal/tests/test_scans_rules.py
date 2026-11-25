@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
+from xml.etree import ElementTree
 
 import aiohttp
 import pytest
@@ -101,7 +102,7 @@ def test_what_the_scanner_can_do_and_how_it_is():
     async def scenario():
         async with FakeScanner(feeder=2) as fake:
             caps = await with_scanner(fake, lambda s: s.capabilities())
-            assert caps == {"model": "Brother MFC-J4345DW", "sources": ["Platen", "Feeder"],
+            assert caps == {"model": "Brother MFC-J4345DW", "version": "2.63", "sources": ["Platen", "Feeder"],
                             "colors": ["color", "gray", "bw"], "resolutions": [100, 200, 300, 600],
                             "jpeg": True, "feeder_sheets": 20}
             assert await with_scanner(fake, lambda s: s.status()) == {
@@ -264,3 +265,52 @@ def test_pages_become_one_pdf_that_a_reader_opens():
             escl.jpeg_size(bad)
     with pytest.raises(ValueError):
         escl.pdf_from_jpegs([], 200)
+
+
+def test_the_scan_request_names_the_source_both_ways_in_the_specifications_order():
+    # Some Brother scanners scan the glass when asked for the feeder only as pwg:InputSource.
+    feeder = escl.settings_xml("Feeder", "gray", 200, "letter", "2.63").decode()
+    assert "<pwg:InputSource>Feeder</pwg:InputSource>" in feeder
+    assert "<scan:InputSource>Feeder</scan:InputSource>" in feeder
+    assert "<scan:Duplex>false</scan:Duplex>" in feeder and "<pwg:Version>2.63</pwg:Version>" in feeder
+    order = ["pwg:Version", "scan:Intent", "pwg:ScanRegions", "pwg:DocumentFormat>", "scan:DocumentFormatExt",
+             "pwg:InputSource", "scan:InputSource", "scan:XResolution", "scan:YResolution", "scan:ColorMode",
+             "scan:Duplex"]
+    assert [feeder.index("<" + tag) for tag in order] == sorted(feeder.index("<" + tag) for tag in order)
+    glass = escl.settings_xml("Platen", "color", 300, "a4", "nonsense").decode()
+    assert "<scan:InputSource>Platen</scan:InputSource>" in glass and "Duplex" not in glass
+    assert "<pwg:Version>2.6</pwg:Version>" in glass          # a version that isn't one: the default
+    ElementTree.fromstring(feeder.encode())
+    ElementTree.fromstring(glass.encode())
+
+
+def test_the_scanner_is_asked_in_its_own_version_and_what_it_said_is_kept_for_the_log():
+    async def scenario():
+        async with FakeScanner(feeder=2) as fake:
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                await scanner.capabilities()
+                await scanner.status()
+                await scanner.scan("Feeder", "color", 200, "letter")
+            assert "<pwg:Version>2.63</pwg:Version>" in fake.jobs[0]
+            trail = "\n".join(scanner.trail)
+            assert "feeder ScannerAdfLoaded" in trail and "POST ScanJobs (Feeder, letter, 200 dpi" in trail
+            assert "-> 201" in trail and trail.count("NextDocument -> 200") == 2 and "NextDocument -> 404" in trail
+            fake.busy = True
+            async with aiohttp.ClientSession() as session:
+                scanner = escl.Scanner(fake.address, session)
+                with pytest.raises(escl.ScanError):
+                    await scanner.scan("Feeder", "color", 200, "letter")
+            assert scanner.trail[-1].endswith("-> 503 (empty)")
+    run(scenario())
+
+
+def test_a_page_preview_is_a_smaller_jpeg_of_the_page():
+    page = page_jpeg(1, size=(1700, 2200))
+    small = escl.page_preview(page, side=400)
+    assert small[:2] == b"\xff\xd8" and len(small) < len(page)
+    width, height, parts = escl.jpeg_size(small)
+    assert max(width, height) <= 400 and parts == 3 and abs(width / height - 1700 / 2200) < 0.02
+    assert escl.jpeg_size(escl.page_preview(page_jpeg(2, gray=True), side=400))[2] == 1
+    with pytest.raises(escl.ScanError):
+        escl.page_preview(b"<html>not a picture</html>")

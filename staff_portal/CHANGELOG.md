@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.31
+
+**Scans: look the pages over before saving**
+- Once pages are scanned, each one is shown small in the Scans tool, in order. Tap one to see it
+  full screen. Save, **Scan more pages** or **Start over** as before.
+- It also says whether the last pages came from the feeder or the glass.
+
+**Scans: another fix for the feeder**
+- 0.12.30 didn't fix the Brother MFC-J4345DW, which does say when its feeder has paper. The add-on
+  was already asking it for the feeder, and it scanned the glass anyway. The scan request now
+  names the feeder the way Linux's scanning software (SANE) also names it, says it's one-sided,
+  lists its settings in the eSCL specification's order, and uses the scanner's own eSCL version.
+  Some Brother scanners have been seen to scan the glass without this.
+- Each scan writes what was asked of the scanner, and how it answered, to the add-on's log
+  (lines starting "Scan to …"), so a scanner that still misbehaves can be looked into.
+
 ## 0.12.30
 
 **Scans: fixed pages not being pulled from the feeder**

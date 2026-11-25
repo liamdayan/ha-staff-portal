@@ -15,6 +15,7 @@ through the staff app open on the computer the encoder is plugged into.
 """
 
 import asyncio
+import base64
 import collections
 import dataclasses
 import functools
@@ -2412,7 +2413,9 @@ def scan_job_view(job: dict | None) -> dict | None:
 
 
 async def run_scan(job: dict, option: dict, address: str) -> None:
-    """Scan into a job: everything in the feeder when it has paper, otherwise the glass."""
+    """Scan into a job: everything in the feeder when it has paper, otherwise the glass. What was
+    asked of the scanner and how it answered goes in the add-on's log, a line each."""
+    scanner = None
     try:
         async with aiohttp.ClientSession() as session:
             scanner = escl.Scanner(address, session)
@@ -2421,8 +2424,6 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
             # A scanner that doesn't say whether its feeder has paper is tried feeder first,
             # then glass: before 0.12.30 that was taken as "empty" and the feeder never ran.
             order = escl.source_order(found["sources"], status["feeder"])
-            log.info("Scanning: the scanner says its feeder is %r; trying %s",
-                     status["adf"] or "(not said)", " then ".join(order))
             job["source"] = order[0]
 
             def paper(source: str) -> str:
@@ -2444,6 +2445,11 @@ async def run_scan(job: dict, option: dict, address: str) -> None:
         log.exception("Scan failed")
         job["message"] = "The scan didn't work. Try again."
     finally:
+        if scanner is not None:
+            log.info("Scan to %s: %s from the %s%s\n  %s", job["label"],
+                     plural_text(len(job["pages"]), "page", "pages") + " in hand",
+                     {"Feeder": "feeder", "Platen": "glass"}.get(job["source"], "scanner"),
+                     f" ({job['message']})" if job["message"] else "", "\n  ".join(scanner.trail))
         if scanner_user[0] == job["staff_id"]:
             scanner_user[0] = None
         job.update(state="ready" if job["pages"] else "failed", arriving=0, touched=time.time())
@@ -2479,7 +2485,7 @@ async def save_scan(job: dict, option: dict, member: dict, actor: str, role: str
         file_id = None
         db.log(actor, f"Scanned {name}"[:120], role=role, ip=ip,
                detail=f"{option['label']}: {plural_text(len(job['pages']), 'page', 'pages')}")
-        job.update(state="done", name=name, saved_pages=len(job["pages"]), pages=[], message="")
+        job.update(state="done", name=name, saved_pages=len(job["pages"]), pages=[], previews={}, message="")
     except (BridgeError, ValueError) as err:
         message = err.message if isinstance(err, BridgeError) else "The file couldn't be made. Scan it again."
         db.log(actor, "Scan not saved", role=role, ip=ip, ok=False, detail=f"{option['label']}: {message}"[:300])
@@ -2518,6 +2524,30 @@ def scanner_free_or_refuse(member: dict) -> None:
         raise json_error(web.HTTPConflict, problem)
     if scanner_user[0] not in (None, member["id"]):
         raise json_error(web.HTTPConflict, SCANNER_IN_USE)
+
+
+async def api_scan_page(request: web.Request):
+    """A smaller copy of one page of the scan in hand (numbered from 1), to look over before it's
+    saved: {"image": a data: address of a JPEG}. Made once a page and kept with the scan."""
+    device, member = await scan_caller(request)
+    job = scan_job(member["id"])
+    number = int(request.match_info["n"])
+    if not job or job["state"] != "ready" or not 1 <= number <= len(job["pages"]):
+        return bad_request("That page isn't here any more.", 404)
+    previews = job.setdefault("previews", {})
+    page = job["pages"][number - 1]
+    preview = previews.get(number)
+    if preview is None or preview[0] is not page:
+        try:
+            preview = (page, await asyncio.to_thread(escl.page_preview, page))
+        except Exception:  # noqa: BLE001 - a page Pillow can't read still saves as it is
+            log.warning("No preview for page %d of a scan", number, exc_info=True)
+            return bad_request("That page can't be shown, but it will still be saved.", 422)
+        previews[number] = preview
+    job["touched"] = time.time()
+    return web.json_response(
+        {"image": "data:image/jpeg;base64," + base64.b64encode(preview[1]).decode("ascii")},
+        headers={"Cache-Control": "no-store"})
 
 
 async def api_scan_start(request: web.Request):
@@ -3764,6 +3794,7 @@ def staff_app() -> web.Application:
     app.router.add_get(r"/reports/{key:[a-z][a-z0-9_]{0,39}}/{file:view\.js|view\.css}", report_file)
     app.router.add_get("/api/scans", api_scans)
     app.router.add_get("/api/scans/job", api_scan_job)
+    app.router.add_get(r"/api/scans/job/page/{n:\d{1,3}}", api_scan_page)
     app.router.add_post(r"/api/scans/job/{action:more|save|cancel}", api_scan_job_action)
     app.router.add_post(r"/api/scans/{id:\d{1,9}}/scan", api_scan_start)
     app.router.add_get("/api/tasks", api_tasks)

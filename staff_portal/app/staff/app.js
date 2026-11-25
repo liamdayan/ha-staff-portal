@@ -1320,6 +1320,7 @@
 
   function scReset() {
     if (sc) clearTimeout(sc.timer);
+    if (sc?.previews) tkPhotoClose?.();    // a page left open big isn't left for the next person
     sc = null;
   }
 
@@ -1428,9 +1429,13 @@
       body = card(h("h2", null, "Nothing was scanned"), h("p", { class: "sc-problem" }, job.message || "Try again."),
         h("div", { class: "sc-actions" }, button("Try again", `/api/scans/${job.option_id}/scan`, true),
           button("Back", "/api/scans/job/cancel")));
-    } else {   // ready: pages in hand
-      body = card(h("h2", null, `${count(job.pages)} scanned`), h("p", null, `Going to ${job.option}.`),
+    } else {   // ready: pages in hand, shown small to look over before saving
+      const from = job.source === "Feeder" ? " The last pages came from the feeder."
+        : job.source === "Platen" ? " The last page came from the glass." : "";
+      body = card(h("h2", null, `${count(job.pages)} scanned`), h("p", null, `Going to ${job.option}.${from}`),
         job.message ? h("p", { class: "sc-problem" }, job.message) : null,
+        scPages(job),
+        h("p", { class: "sc-small" }, "Check the pages look right before saving. Tap one to see it bigger."),
         h("div", { class: "sc-actions" }, button(`Save to ${job.option}`, "/api/scans/job/save", true),
           button("Scan more pages", "/api/scans/job/more"), button("Start over", "/api/scans/job/cancel")),
         h("p", { class: "sc-small" }, "Scan more pages adds what's in the feeder, or the next page on the glass, " +
@@ -1438,6 +1443,45 @@
     }
     fill(state.root, h("h1", { class: "page-title" }, "Scans"), body);
     if (scWorking(job)) state.timer = setTimeout(scPoll, SC_POLL_MS);
+  }
+
+  // The pages of the scan in hand, small, in order: each one's picture is asked for once (one at
+  // a time, so a long scan doesn't flood the server) and kept until the scan changes or sign-out.
+  function scPages(job) {
+    const state = sc;
+    return h("div", { class: "sc-pages", role: "list", "aria-label": "Scanned pages" },
+      Array.from({ length: job.pages }, (_, i) => {
+        const n = i + 1;
+        const label = `Page ${n} of ${job.pages}`;
+        const box = h("button", { class: "sc-page", type: "button", role: "listitem", "aria-label": `${label}: see it bigger`,
+          disabled: true }, h("span", { class: "sc-page-num", "aria-hidden": "true" }, String(n)));
+        scPreview(state, job.id, n).then((src) => {
+          if (sc !== state) return;
+          if (!src) { box.classList.add("sc-page-none"); box.title = "This page can't be shown, but it will be saved."; return; }
+          box.prepend(h("img", { src, alt: "" }));
+          box.disabled = false;
+          box.addEventListener("click", () => tkPhotoBig(src, label));
+        });
+        return box;
+      }));
+  }
+
+  function scPreview(state, jobId, n) {
+    if (state.previewJob !== jobId) Object.assign(state, { previewJob: jobId, previews: new Map(), previewChain: Promise.resolve() });
+    let wait = state.previews.get(n);
+    if (!wait) {
+      wait = state.previewChain = state.previewChain.then(async () => {
+        if (sc !== state || state.previewJob !== jobId) return null;
+        const res = await api("GET", `/api/scans/job/page/${n}`);
+        if (sc !== state || scAuthError(res)) return null;
+        const src = res.status === 200 ? res.data.image : null;
+        if (typeof src === "string" && src.startsWith("data:image/jpeg;base64,")) return src;
+        if (res.status === 0 && state.previews.get(n) === wait) state.previews.delete(n);   // ask again next time
+        return null;
+      });
+      state.previews.set(n, wait);
+    }
+    return wait;
   }
 
   // ---------------------------------------------------------------- reports

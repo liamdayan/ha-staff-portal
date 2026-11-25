@@ -4,6 +4,7 @@ second), problems said plainly, and the dashboard's settings. The scanner is fak
 Google is fake_bridge.py: nothing here talks to a real scanner or to Google."""
 
 import asyncio
+import base64
 import json
 import time
 
@@ -200,6 +201,35 @@ def test_a_scanner_that_does_not_say_about_its_feeder_still_uses_it(world):
             assert job["source"] == "Platen" and job["message"] == ""
             assert "<pwg:InputSource>Platen</pwg:InputSource>" in s.scanner.jobs[-1]
             assert "<pwg:Height>3300</pwg:Height>" in s.scanner.jobs[-1]
+    asyncio.run(scenario())
+
+
+def test_the_pages_can_be_looked_over_before_saving(world, caplog):
+    p = world
+    invoices = option(p)
+
+    async def scenario():
+        async with Set(p, feeder=2) as s, p:
+            ana, dee = await p.sign_in(p.ana), await p.sign_in(p.dee)
+            caplog.set_level("INFO", logger=main.log.name)
+            await p.call("POST", f"/api/scans/{invoices}/scan", ana)
+            await until(p, ana, ready)
+            # What was asked of the scanner and how it answered is in the log.
+            said = "\n".join(r.getMessage() for r in caplog.records if r.getMessage().startswith("Scan to Invoices"))
+            assert "2 pages in hand from the feeder" in said and "POST ScanJobs (Feeder" in said
+            # Each page, small, to look over.
+            for n in (1, 2):
+                status, reply = await p.call("GET", f"/api/scans/job/page/{n}", ana)
+                assert status == 200 and reply["image"].startswith("data:image/jpeg;base64,")
+                assert base64.b64decode(reply["image"].split(",", 1)[1])[:2] == b"\xff\xd8"
+            assert (await p.call("GET", "/api/scans/job/page/3", ana))[0] == 404
+            assert (await p.call("GET", "/api/scans/job/page/0", ana))[0] == 404
+            assert (await p.call("GET", "/api/scans/job/page/1", dee))[0] == 404      # not Dee's
+            # Once it's saved, the pages are gone from here.
+            await p.call("POST", "/api/scans/job/save", ana)
+            await until(p, ana, done)
+            assert (await p.call("GET", "/api/scans/job/page/1", ana))[0] == 404
+            assert main.scan_jobs[p.ana]["previews"] == {}
     asyncio.run(scenario())
 
 
