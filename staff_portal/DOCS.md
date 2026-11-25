@@ -157,6 +157,11 @@ Reorder pages, page groups, page items and the devices in a group card by draggi
 grip (with a mouse or a finger), or click the grip and use the arrow keys. Then click
 **Save layout**.
 
+**Move to…** on an item (a group card, device, area or heading) moves it to another page, in the
+same page group or another one: pick the page and the item goes to the end of it, with
+everything it has (a group card keeps its devices, dividers and access). Then click
+**Save layout**.
+
 **Which devices show which pages.** Every phone and computer shows every page by default,
 including pages you add later. To change that for one device, open **Phones & computers → Edit**
 and use **Pages on this phone** (or computer): untick **All pages** and pick the pages and page
@@ -1763,9 +1768,12 @@ number goes on the end: `INV-Ana Lopez.pdf`, then `INV-Ana Lopez-2.pdf`, `INV-An
 Put `{date}` in the format to start again each day. Staff Access counts from its own record of
 what it scanned, so a file renamed or deleted in Google Drive doesn't free its number.
 
-**In the staff app.** After a scan it says how many pages came through, with **Save to** (the
-option), **Scan more pages** (adds what's in the feeder, or the next page on the glass, to the same
-file) and **Start over**. Nothing is in Google Drive until **Save** is pressed. Pages not saved
+**In the staff app.** After a scan it shows the pages, small, with **Save to** (the option),
+**Scan more pages** (adds what's in the feeder, or the next page on the glass, to the same file)
+and **Start over**. Tap a page to see it bigger, or its **×** to take it out of the file (taking
+out the only page starts over). It says whether the pages came from the feeder or the glass, and
+warns when a page isn't what was asked for (the wrong colour or size), which means the scanner
+didn't scan the way it was asked. Nothing is in Google Drive until **Save** is pressed. Pages not saved
 are forgotten after 15 minutes, at sign-out they stay with the person who scanned them, and they
 are never written to the Home Assistant machine's disk. One person scans at a time: anyone else
 is told the scanner is in use.

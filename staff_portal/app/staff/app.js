@@ -1435,7 +1435,8 @@
       body = card(h("h2", null, `${count(job.pages)} scanned`), h("p", null, `Going to ${job.option}.${from}`),
         job.message ? h("p", { class: "sc-problem" }, job.message) : null,
         scPages(job),
-        h("p", { class: "sc-small" }, "Check the pages look right before saving. Tap one to see it bigger."),
+        h("p", { class: "sc-small" }, "Check the pages look right before saving. Tap one to see it bigger, " +
+          "or \u00d7 to take it out."),
         h("div", { class: "sc-actions" }, button(`Save to ${job.option}`, "/api/scans/job/save", true),
           button("Scan more pages", "/api/scans/job/more"), button("Start over", "/api/scans/job/cancel")),
         h("p", { class: "sc-small" }, "Scan more pages adds what's in the feeder, or the next page on the glass, " +
@@ -1447,41 +1448,80 @@
 
   // The pages of the scan in hand, small, in order: each one's picture is asked for once (one at
   // a time, so a long scan doesn't flood the server) and kept until the scan changes or sign-out.
+  // Tap a page to see it bigger; its × takes it out of the scan.
   function scPages(job) {
     const state = sc;
     return h("div", { class: "sc-pages", role: "list", "aria-label": "Scanned pages" },
       Array.from({ length: job.pages }, (_, i) => {
         const n = i + 1;
         const label = `Page ${n} of ${job.pages}`;
-        const box = h("button", { class: "sc-page", type: "button", role: "listitem", "aria-label": `${label}: see it bigger`,
+        const view = h("button", { class: "sc-page-view", type: "button", "aria-label": `${label}: see it bigger`,
           disabled: true }, h("span", { class: "sc-page-num", "aria-hidden": "true" }, String(n)));
+        const box = h("div", { class: "sc-page", role: "listitem" }, view,
+          h("button", { class: "sc-page-remove", type: "button", "aria-label": `Remove page ${n}`,
+            title: "Remove this page", disabled: state.busy, onclick: () => scRemovePage(job, n) }, "\u00d7"));
         scPreview(state, job.id, n).then((src) => {
           if (sc !== state) return;
           if (!src) { box.classList.add("sc-page-none"); box.title = "This page can't be shown, but it will be saved."; return; }
-          box.prepend(h("img", { src, alt: "" }));
-          box.disabled = false;
-          box.addEventListener("click", () => tkPhotoBig(src, label));
+          view.prepend(h("img", { src, alt: "" }));
+          view.disabled = false;
+          view.addEventListener("click", () => tkPhotoBig(src, label));
         });
         return box;
       }));
   }
 
   function scPreview(state, jobId, n) {
-    if (state.previewJob !== jobId) Object.assign(state, { previewJob: jobId, previews: new Map(), previewChain: Promise.resolve() });
+    if (state.previewJob !== jobId) {
+      Object.assign(state, { previewJob: jobId, previews: new Map(), shown: new Map(), previewGen: 0,
+        previewChain: Promise.resolve() });
+    }
     let wait = state.previews.get(n);
     if (!wait) {
+      const gen = state.previewGen;
       wait = state.previewChain = state.previewChain.then(async () => {
-        if (sc !== state || state.previewJob !== jobId) return null;
+        if (sc !== state || state.previewJob !== jobId || state.previewGen !== gen) return null;
         const res = await api("GET", `/api/scans/job/page/${n}`);
-        if (sc !== state || scAuthError(res)) return null;
+        // A page taken out meanwhile renumbers the rest: this answer may be for another page.
+        if (sc !== state || scAuthError(res) || state.previewGen !== gen) return null;
         const src = res.status === 200 ? res.data.image : null;
-        if (typeof src === "string" && src.startsWith("data:image/jpeg;base64,")) return src;
+        if (typeof src === "string" && src.startsWith("data:image/jpeg;base64,")) {
+          state.shown.set(n, src);
+          return src;
+        }
         if (res.status === 0 && state.previews.get(n) === wait) state.previews.delete(n);   // ask again next time
         return null;
       });
       state.previews.set(n, wait);
     }
     return wait;
+  }
+
+  async function scRemovePage(job, n) {
+    const state = sc;
+    if (!state || state.busy) return;
+    if (job.pages === 1 && !window.confirm("Remove the only page? That starts this scan over.")) return;
+    state.busy = true;
+    scDraw();
+    const res = await api("POST", `/api/scans/job/page/${n}/remove`, { pages: job.pages });
+    if (sc !== state) return;
+    state.busy = false;
+    if (scAuthError(res)) return;
+    if (res.status !== 200) {
+      toast(res.status === 0 ? "Couldn't reach the server. Try again." : res.data.error || "That didn't work. Try again.", true);
+      if (res.status === 404 || res.status === 409) return scLoad();   // the scan changed: show it as it is
+      return scDraw();
+    }
+    if (state.previewJob === job.id) {
+      // The pictures already here move up with their pages; any still on their way are asked again.
+      const kept = new Map();
+      for (const [k, src] of state.shown) if (k !== n) kept.set(k < n ? k : k - 1, src);
+      Object.assign(state, { shown: kept, previewGen: state.previewGen + 1,
+        previews: new Map([...kept].map(([k, src]) => [k, Promise.resolve(src)])) });
+    }
+    state.job = res.data.job;
+    toast(state.job ? `Page ${n} removed.` : "Page removed. Choose where the next scan goes.");
+    scDraw();
   }
 
   // ---------------------------------------------------------------- reports

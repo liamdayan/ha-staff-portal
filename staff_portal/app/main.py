@@ -2578,6 +2578,32 @@ async def api_scan_page(request: web.Request):
         headers={"Cache-Control": "no-store"})
 
 
+async def api_scan_page_remove(request: web.Request):
+    """Take one page (numbered from 1) out of the scan in hand, before it's saved. The app says
+    how many pages it's showing ({"pages": n}), so a second tap, or a screen behind the scan,
+    can't take out a different page. Taking out the only page drops the scan, as Start over does."""
+    device, member = await scan_caller(request, change=True)
+    job = scan_job(member["id"])
+    number = int(request.match_info["n"])
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not job or job["state"] != "ready" or not 1 <= number <= len(job["pages"]):
+        return bad_request("That page isn't here any more.", 404)
+    if not isinstance(body, dict) or body.get("pages") != len(job["pages"]):
+        return bad_request("The pages changed. Look them over again.", 409)
+    if len(job["pages"]) == 1:
+        del scan_jobs[member["id"]]
+        return web.json_response({"job": None})
+    del job["pages"][number - 1]
+    # Each preview is kept with its page, so the ones after it move up a number with it.
+    previews = job.get("previews", {})
+    job["previews"] = {(k if k < number else k - 1): v for k, v in previews.items() if k != number}
+    job["touched"] = time.time()
+    return web.json_response({"job": scan_job_view(job)})
+
+
 async def api_scan_start(request: web.Request):
     """Scan to an option: a new scan (anything this person hadn't saved is dropped)."""
     device, member = await scan_caller(request, change=True)
@@ -3823,6 +3849,7 @@ def staff_app() -> web.Application:
     app.router.add_get("/api/scans", api_scans)
     app.router.add_get("/api/scans/job", api_scan_job)
     app.router.add_get(r"/api/scans/job/page/{n:\d{1,3}}", api_scan_page)
+    app.router.add_post(r"/api/scans/job/page/{n:\d{1,3}}/remove", api_scan_page_remove)
     app.router.add_post(r"/api/scans/job/{action:more|save|cancel}", api_scan_job_action)
     app.router.add_post(r"/api/scans/{id:\d{1,9}}/scan", api_scan_start)
     app.router.add_get("/api/tasks", api_tasks)

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.34
+
+**Layout: move a group card to another page**
+- Each item in a page (group cards, devices, areas and headings) has **Move to…**, listing every
+  other page under its group. The item goes to the end of the page you pick, with everything it
+  has: a group card keeps its devices, dividers and access. Then **Save layout**.
+
+**Scans: take a page out before saving**
+- Each page in the preview has an **×** that takes it out of the file. The rest move up, and
+  taking out the only page starts over.
+
 ## 0.12.33
 
 **Scans: the scan request rewritten, and checked against what comes back**

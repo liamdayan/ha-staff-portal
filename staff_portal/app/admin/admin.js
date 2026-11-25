@@ -6429,6 +6429,7 @@
   let pageSel = null;   // the open page's ID...
   let groupSel = null;  // ...or the open page group's ID
   const MAX_PAGES = 20;
+  const MAX_ITEMS = 200;    // on one page (layout.py)
   const MAX_PAGE_GROUPS = 12;
   const newId = () => Math.random().toString(36).slice(2, 10);
   const entityById = (id) => entities?.find((e) => e.entity_id === id);
@@ -6790,6 +6791,7 @@
           h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
           h("button", { class: "btn", "aria-label": `Duplicate ${title}`, onclick: () => duplicateItem(page, i) },
             "Duplicate"),
+          movePicker(page, i, title),
           h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
             page.items.splice(i, 1);
             markLayoutDirty();
@@ -6802,6 +6804,39 @@
       renderLayoutEditor();
     });
     return list;
+  }
+
+  // "Move to…": every other page, under its group (as the page list shows them). The item goes
+  // to the end of that page with everything it has (a group card's devices, dividers and
+  // access); its ID goes with it, so phones keep whether it was folded.
+  function movePicker(page, index, title) {
+    const d = draft();
+    const blocks = pageBlocks(d).map((b) => (b.page ? { pages: [b.page] } : b))
+      .map((b) => ({ ...b, pages: b.pages.filter((p) => p !== page) })).filter((b) => b.pages.length);
+    if (!blocks.length) return null;
+    const option = (p) => h("option", { value: p.id }, p.name);
+    return h("span", { class: "inline-select" }, h("select", {
+      "aria-label": `Move ${title} to another page`,
+      onchange: (e) => moveItemTo(page, index, d.pages.find((p) => p.id === e.target.value)),
+    }, h("option", { value: "" }, "Move to\u2026"),
+    ...blocks.map((b) => (b.group ? h("optgroup", { label: b.group.name }, b.pages.map(option)) : option(b.pages[0])))));
+  }
+
+  function moveItemTo(page, index, target) {
+    if (!target) return;
+    const item = page.items[index];
+    const title = itemSummary(item)[1];
+    if (target.items.length >= MAX_ITEMS) {
+      toast(`${target.name} already has ${MAX_ITEMS} items, the most a page can have.`, true);
+      renderLayoutEditor();
+      return;
+    }
+    page.items.splice(index, 1);
+    target.items.push(item);
+    markLayoutDirty();
+    renderLayoutEditor();
+    const group = groupOf(target);
+    toast(`Moved ${title} to the end of ${target.name}${group ? ` (in ${group.name})` : ""}. Save layout to keep it.`);
   }
 
   // Devices given a page (its ID) or a page group ("group:<id>"), or every page.

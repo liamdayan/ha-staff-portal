@@ -258,6 +258,43 @@ def test_a_scanner_that_scans_its_glass_when_asked_for_the_feeder_is_said_plainl
     asyncio.run(scenario())
 
 
+def test_a_page_can_be_taken_out_before_saving(world):
+    p = world
+    invoices = option(p)
+
+    async def scenario():
+        async with Set(p, feeder=3) as s, p:
+            ana, dee = await p.sign_in(p.ana), await p.sign_in(p.dee)
+            await p.call("POST", f"/api/scans/{invoices}/scan", ana)
+            await until(p, ana, ready)
+            originals = list(main.scan_jobs[p.ana]["pages"])
+            third = (await p.call("GET", "/api/scans/job/page/3", ana))[1]["image"]
+            # The app says how many pages it shows: a stale count, or someone else, is refused.
+            assert (await p.call("POST", "/api/scans/job/page/2/remove", ana, {"pages": 2}))[0] == 409
+            assert (await p.call("POST", "/api/scans/job/page/2/remove", ana))[0] == 409
+            assert (await p.call("POST", "/api/scans/job/page/2/remove", dee, {"pages": 3}))[0] == 404
+            assert (await p.call("POST", "/api/scans/job/page/4/remove", ana, {"pages": 3}))[0] == 404
+            status, reply = await p.call("POST", "/api/scans/job/page/2/remove", ana, {"pages": 3})
+            assert status == 200 and reply["job"]["pages"] == 2 and reply["job"]["state"] == "ready"
+            assert main.scan_jobs[p.ana]["pages"] == [originals[0], originals[2]]
+            # The old third page is page 2 now, preview and all.
+            assert (await p.call("GET", "/api/scans/job/page/2", ana))[1]["image"] == third
+            assert (await p.call("GET", "/api/scans/job/page/3", ana))[0] == 404
+            # What's saved is what's left.
+            await p.call("POST", "/api/scans/job/save", ana)
+            job = await until(p, ana, done)
+            assert job["pages"] == 2
+            saved = next(f for f in s.google.files.values() if f["name"] == job["name"])
+            assert saved["data"].count(b"/Type /Page ") == 2
+            # Taking out the only page drops the scan, as Start over does.
+            s.scanner.feeder = 1
+            await p.call("POST", f"/api/scans/{invoices}/scan", ana)
+            await until(p, ana, ready)
+            assert await p.call("POST", "/api/scans/job/page/1/remove", ana, {"pages": 1}) == (200, {"job": None})
+            assert p.ana not in main.scan_jobs
+    asyncio.run(scenario())
+
+
 def test_the_glass_takes_a_page_at_a_time_into_one_file(world):
     p = world
     ids = option(p, "Guest IDs", "ID", format="{prefix}-{date}-{first}", color="gray", quality="high", paper="legal")
