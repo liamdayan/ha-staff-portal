@@ -157,6 +157,11 @@ Reorder pages, page groups, page items and the devices in a group card by draggi
 grip (with a mouse or a finger), or click the grip and use the arrow keys. Then click
 **Save layout**.
 
+To move a page into another page group, drag its **≡** grip onto that group in the **Pages**
+list (for a page outside any group, onto the group's name): the group lights up, and letting go
+puts the page at the end of it. A page group's own editor also has **Move a page here…** and
+**Take out**.
+
 To move an item (a group card, device, area or heading) to another page, in the same page group
 or another one, drag its **≡** grip onto that page in the **Pages** list: the page lights up, and
 letting go there puts the item at the end of it, with everything it has (a group card keeps its

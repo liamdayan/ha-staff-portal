@@ -85,8 +85,8 @@
   // touch or pen) or by focusing the grip and pressing the arrow keys. onMove(from, to) updates
   // the data and redraws; it may return a promise.
   //
-  // With `drop`, a row can also be dragged out of its list onto something else: drop.targets()
-  // gives the elements it can be let go on (a page in the page list, say). While the pointer is
+  // With `drop`, a row can also be dragged out of its list onto something else: drop.targets(row)
+  // gives the elements that row can be let go on (a page in the page list, say). While the pointer is
   // over one, it's marked .drop-target and the row goes back to its place; letting go there calls
   // drop.onDrop(from, target) instead of reordering.
   let activeDrag = false; // only one reorder at a time, across all lists
@@ -124,7 +124,7 @@
       let pointerY = ev.clientY;
       let pointerX = ev.clientX;
       let target = null;                         // the drop target under the pointer
-      const targets = drop ? drop.targets() : [];
+      const targets = drop ? drop.targets(row) : [];
       const over = () => targets.find((el) => {
         const r = el.getBoundingClientRect();
         return pointerX >= r.left && pointerX <= r.right && pointerY >= r.top && pointerY <= r.bottom;
@@ -6517,8 +6517,13 @@
       d.pages = d.pages.map((p) => (p.page_group === group.id ? inGroup[next++] : p));
       markLayoutDirty();
       renderLayoutEditor();
+    }, {
+      // A page dragged onto another group goes into it.
+      targets: () => [...document.querySelectorAll("#page-list li.page-group")]
+        .filter((el) => el.dataset.groupId !== group.id),
+      onDrop: (from, el) => movePageToGroup(pages[from], el.dataset.groupId),
     });
-    return h("li", { class: "sort-row page-group" },
+    return h("li", { class: "sort-row page-group", "data-group-id": group.id },
       dragHandle(`Reorder group ${group.name}`),
       h("div", { class: "page-group-box" },
         h("button", { class: groupSel === group.id ? "role-item group-item active" : "role-item group-item",
@@ -6564,7 +6569,26 @@
     setBlocks(d, blocks);
     markLayoutDirty();
     renderLayoutEditor();
+  }, {
+    // A page outside any group, dragged onto a group's name, goes into that group. (Only the
+    // name: the rest of a group's row is where a page passes it when reordering.)
+    targets: (row) => (row.dataset.pageId
+      ? [...document.querySelectorAll("#page-list li.page-group > .page-group-box > .group-item")] : []),
+    onDrop: (from, el) => movePageToGroup(pageBlocks(draft())[from].page, el.closest("li.page-group").dataset.groupId),
   });
+
+  // A page into another page group, at the end of it.
+  function movePageToGroup(page, groupId) {
+    const d = draft();
+    const group = d.page_groups.find((g) => g.id === groupId);
+    if (!page || !group) return;
+    page.page_group = group.id;
+    d.pages = [...d.pages.filter((p) => p !== page), page];   // last of its new group's pages
+    setBlocks(d, pageBlocks(d));
+    markLayoutDirty();
+    renderLayoutEditor();
+    toast(`Moved ${page.name} into ${group.name}. Save layout to keep it.`);
+  }
 
   const ACCESS_TEXT = { none: "Hidden", view: "View only", control: "Control" };
 

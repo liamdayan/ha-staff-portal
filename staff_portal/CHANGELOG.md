@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.36
+
+**Layout: drag pages from one group to another**
+- In the **Pages** list, drag a page's **≡** grip onto another group to move it there (it goes at
+  the end). A page outside any group goes into one when it's dropped on the group's name.
+  Reordering pages within a group, and groups themselves, works as before.
+
 ## 0.12.35
 
 **Layout: drag a group card onto another page**
