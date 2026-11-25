@@ -157,10 +157,10 @@ Reorder pages, page groups, page items and the devices in a group card by draggi
 grip (with a mouse or a finger), or click the grip and use the arrow keys. Then click
 **Save layout**.
 
-**Move to…** on an item (a group card, device, area or heading) moves it to another page, in the
-same page group or another one: pick the page and the item goes to the end of it, with
-everything it has (a group card keeps its devices, dividers and access). Then click
-**Save layout**.
+To move an item (a group card, device, area or heading) to another page, in the same page group
+or another one, drag its **≡** grip onto that page in the **Pages** list: the page lights up, and
+letting go there puts the item at the end of it, with everything it has (a group card keeps its
+devices, dividers and access). Then click **Save layout**.
 
 **Which devices show which pages.** Every phone and computer shows every page by default,
 including pages you add later. To change that for one device, open **Phones & computers → Edit**

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.35
+
+**Layout: drag a group card onto another page**
+- Instead of 0.12.34's **Move to…** menu: drag an item's **≡** grip onto a page in the **Pages**
+  list. The page lights up, and letting go puts the item at the end of it, with everything it
+  has. Dragging within the page still reorders, and dragging back off the list changes nothing.
+
 ## 0.12.34
 
 **Layout: move a group card to another page**

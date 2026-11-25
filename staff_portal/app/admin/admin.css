@@ -447,6 +447,8 @@ dialog.ask input { width: 100%; }
 }
 body.sorting, body.sorting * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
 #page-list li.sort-row { display: flex; align-items: center; gap: 4px; }
+#page-list li.drop-target .role-item { outline: 2px dashed var(--accent); outline-offset: 2px; background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+.sort-row.dragging.leaving { opacity: 0.55; }
 #page-list li.sort-row .role-item { flex: 1; min-width: 0; }
 .member-row .drag-handle, .item-row .drag-handle, .area-row .drag-handle { margin-left: -6px; }
 .order-reset { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;

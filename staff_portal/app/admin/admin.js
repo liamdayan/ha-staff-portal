@@ -84,9 +84,14 @@
   // Makes the .sort-row children of `container` reorderable by dragging their grip (mouse,
   // touch or pen) or by focusing the grip and pressing the arrow keys. onMove(from, to) updates
   // the data and redraws; it may return a promise.
+  //
+  // With `drop`, a row can also be dragged out of its list onto something else: drop.targets()
+  // gives the elements it can be let go on (a page in the page list, say). While the pointer is
+  // over one, it's marked .drop-target and the row goes back to its place; letting go there calls
+  // drop.onDrop(from, target) instead of reordering.
   let activeDrag = false; // only one reorder at a time, across all lists
 
-  function sortable(container, key, onMove) {
+  function sortable(container, key, onMove, drop = null) {
     container.dataset.sortable = key;
     const rows = () => [...container.children].filter((el) => el.classList.contains("sort-row"));
     const refocus = (index) => {
@@ -113,9 +118,17 @@
       ev.preventDefault();
       activeDrag = true;
       const from = rows().indexOf(row);
+      const homeNext = row.nextElementSibling;   // where the row goes back to, over a drop target
       const grabOffset = ev.clientY - row.getBoundingClientRect().top;
       const scroller = scrollParent(container);
       let pointerY = ev.clientY;
+      let pointerX = ev.clientX;
+      let target = null;                         // the drop target under the pointer
+      const targets = drop ? drop.targets() : [];
+      const over = () => targets.find((el) => {
+        const r = el.getBoundingClientRect();
+        return pointerX >= r.left && pointerX <= r.right && pointerY >= r.top && pointerY <= r.bottom;
+      }) || null;
       // Nothing moves until the pointer has travelled a few pixels, so a click or tap on a grip
       // (even one near the edge of the window, where auto-scroll would kick in) changes nothing.
       let dragging = false;
@@ -125,6 +138,20 @@
 
       const middle = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
       const place = () => {
+        const now = over();
+        if (now !== target) {
+          target?.classList.remove("drop-target");
+          now?.classList.add("drop-target");
+          row.classList.toggle("leaving", !!now);
+          target = now;
+        }
+        if (target) {
+          // Over somewhere else: the row waits in its own place, under the pointer.
+          if (row.nextElementSibling !== homeNext) container.insertBefore(row, homeNext);
+          row.style.transform = "";
+          row.style.transform = `translateY(${pointerY - grabOffset - row.getBoundingClientRect().top}px)`;
+          return;
+        }
         // Move past any neighbour whose middle the pointer has crossed...
         let prev = row.previousElementSibling;
         while (prev?.classList.contains("sort-row") && pointerY < middle(prev)) {
@@ -159,8 +186,9 @@
       const move = (e) => {
         if (e.pointerId !== ev.pointerId) return;
         pointerY = e.clientY;
+        pointerX = e.clientX;
         if (!dragging) {
-          if (Math.abs(pointerY - ev.clientY) < 5) return;
+          if (Math.abs(pointerY - ev.clientY) < 5 && Math.abs(pointerX - ev.clientX) < 5) return;
           dragging = true;
           row.classList.add("dragging");
           document.body.classList.add("sorting");
@@ -175,9 +203,12 @@
         cancelAnimationFrame(frame);
         for (const [type, fn] of listeners) container.removeEventListener(type, fn);
         if (container.hasPointerCapture(ev.pointerId)) container.releasePointerCapture(ev.pointerId);
-        row.classList.remove("dragging");
+        row.classList.remove("dragging", "leaving");
         row.style.transform = "";
         document.body.classList.remove("sorting");
+        target?.classList.remove("drop-target");
+        if (dragging && target && e?.type === "pointerup") return drop.onDrop(from, target);
+        if (target) return;   // cancelled over a target: nothing moves
         const to = rows().indexOf(row);
         if (dragging && to !== from && to >= 0) onMove(from, to);
       };
@@ -6466,7 +6497,7 @@
   }
 
   function pageRow(p) {
-    return h("li", { class: "sort-row" },
+    return h("li", { class: "sort-row", "data-page-id": p.id },
       dragHandle(`Reorder page ${p.name}`),
       h("button", { class: !groupSel && p.id === pageSel ? "role-item active" : "role-item",
         onclick: () => { pageSel = p.id; groupSel = null; renderLayoutEditor(); } },
@@ -6791,7 +6822,6 @@
           h("button", { class: "btn", onclick: () => editItem(page, i, item.type) }, "Edit"),
           h("button", { class: "btn", "aria-label": `Duplicate ${title}`, onclick: () => duplicateItem(page, i) },
             "Duplicate"),
-          movePicker(page, i, title),
           h("button", { class: "btn danger", "aria-label": `Remove ${title}`, onclick: () => {
             page.items.splice(i, 1);
             markLayoutDirty();
@@ -6802,26 +6832,17 @@
       moveItem(page.items, from, to);
       markLayoutDirty();
       renderLayoutEditor();
+    }, {
+      targets: () => [...document.querySelectorAll("#page-list li[data-page-id]")]
+        .filter((el) => el.dataset.pageId !== page.id),
+      onDrop: (from, el) => moveItemTo(page, from, draft().pages.find((p) => p.id === el.dataset.pageId)),
     });
     return list;
   }
 
-  // "Move to…": every other page, under its group (as the page list shows them). The item goes
-  // to the end of that page with everything it has (a group card's devices, dividers and
-  // access); its ID goes with it, so phones keep whether it was folded.
-  function movePicker(page, index, title) {
-    const d = draft();
-    const blocks = pageBlocks(d).map((b) => (b.page ? { pages: [b.page] } : b))
-      .map((b) => ({ ...b, pages: b.pages.filter((p) => p !== page) })).filter((b) => b.pages.length);
-    if (!blocks.length) return null;
-    const option = (p) => h("option", { value: p.id }, p.name);
-    return h("span", { class: "inline-select" }, h("select", {
-      "aria-label": `Move ${title} to another page`,
-      onchange: (e) => moveItemTo(page, index, d.pages.find((p) => p.id === e.target.value)),
-    }, h("option", { value: "" }, "Move to\u2026"),
-    ...blocks.map((b) => (b.group ? h("optgroup", { label: b.group.name }, b.pages.map(option)) : option(b.pages[0])))));
-  }
-
+  // Dragging an item onto another page in the page list moves it to the end of that page, with
+  // everything it has (a group card's devices, dividers and access); its ID goes with it, so
+  // phones keep whether it was folded.
   function moveItemTo(page, index, target) {
     if (!target) return;
     const item = page.items[index];
